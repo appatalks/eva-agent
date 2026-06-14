@@ -5669,6 +5669,18 @@ async function renderEvaResponse(content, txtOutput) {
   }
 
   appendArtifactLinks();
+
+  // Auto-open artifact files so the user doesn't have to click.
+  if (artifactNames.length) {
+    var bridgeUrl = getSafeBridgeBaseUrl();
+    artifactNames.forEach(function(filename) {
+      var openUrl = bridgeUrl + '/v1/files/' + encodeURIComponent(filename) + '?open=1';
+      fetch(openUrl).then(function(res) {
+        if (res.ok) console.log('[Artifact] Auto-opened:', filename);
+      }).catch(function() {});
+    });
+  }
+
   txtOutput.scrollTop = txtOutput.scrollHeight;
 
   // In voice/visual mode the chat is hidden behind the orb overlay, so surface
