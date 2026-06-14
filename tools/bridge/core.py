@@ -2058,10 +2058,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
         skip_acp = False
         _acp_route = "default"
 
-        if internal:
+        # retrieve_data: cognition draft calls set this to opt in to data
+        # retrieval even though they are internal. Without it the draft model
+        # never sees [Data Retrieved] and fabricates everything.
+        force_retrieve = bool(data.get("retrieve_data"))
+        if internal and not force_retrieve:
             skip_acp = True
             _acp_route = "internal-cognition"
-        elif not _st.acp_client:
+        elif not _st.acp_client and not _st.local_mode:
             skip_acp = True
             _acp_route = "acp-unavailable"
         elif len(msg_words) <= 4 and _re.match(

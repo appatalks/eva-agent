@@ -11,12 +11,15 @@ function lmsSend() {
             "content": ((typeof getSystemPrompt === 'function') ? getSystemPrompt() : '') + " Images can be shown with this tag: [Image of <Description>]. " + dateContents +
               "\n\nCRITICAL DATA ACCURACY RULES:\n" +
               "- NEVER fabricate news headlines, stock prices, weather forecasts, locations, or current events.\n" +
-              "- If a [Data Retrieved] section exists in your context, use it as your authoritative source.\n" +
-              "- If NO [Data Retrieved] section exists, honestly say you don't have that live data right now.\n" +
-              "- Do NOT make up the user's location. Only state their location if it appears in [User Profile] or [Memory].\n" +
-              "- Do NOT generate fake source citations (AP, Reuters, etc.) unless they appear in [Data Retrieved].\n" +
-              "- When creating files or reports, only include facts you can verify from the context provided to you.\n" +
-              "- If asked for a briefing and you have no real data, say so and offer to help with what you do know."
+              "- If a [Data Retrieved] section exists in your SYSTEM PROMPT context, use it as your source.\n" +
+              "- If NO [Data Retrieved] section exists in context, honestly say you could not retrieve that data.\n" +
+              "- Do NOT write '[Data Retrieved]' in your response. That marker only appears in the system prompt.\n" +
+              "- Do NOT make up the user's location. Only state their location if it appears in [User Profile] or [Memory]. If unknown, ASK the user.\n" +
+              "- Do NOT take screenshots or use the desktop agent to determine the user's location. Just ask them.\n" +
+              "- Do NOT generate fake source citations unless they appear in [Data Retrieved] in your system prompt.\n" +
+              "- When creating files or reports, only include facts from [Data Retrieved] or [Memory]. Use placeholders for missing data.\n" +
+              "- If asked for a briefing and you have no real data, tell the user you need their location and that live data is being fetched.\n" +
+              "- Always close action blocks: [[EVA_ACTION]]{...}[[/EVA_ACTION]]. Never leave them unclosed."
         },
         {
             "role": "assistant",

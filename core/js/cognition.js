@@ -220,7 +220,9 @@
   //   [[/EVA_ACTION]]
   // The browser parses each block, runs the matching capability, and replaces
   // the block with the capability's HTML output (or an inline error).
-  var ACTION_BLOCK_RE = /\[\[EVA_ACTION\]\]([\s\S]*?)\[\[\/EVA_ACTION\]\]/g;
+  // Match both properly closed blocks and unclosed ones (local models often
+  // forget the closing tag). The second alternation grabs to end-of-string.
+  var ACTION_BLOCK_RE = /\[\[EVA_ACTION\]\]([\s\S]*?)\[\[\/EVA_ACTION\]\]|\[\[EVA_ACTION\]\]([\s\S]+)$/g;
 
   async function executeActions(text) {
     if (!text) return { content: '', actions: [] };
@@ -230,7 +232,8 @@
     var replacements = [];
     ACTION_BLOCK_RE.lastIndex = 0;
     while ((match = ACTION_BLOCK_RE.exec(text)) !== null) {
-      replacements.push({ full: match[0], body: match[1], index: match.index });
+      // Group 1 = closed block body, group 2 = unclosed block body
+      replacements.push({ full: match[0], body: match[1] || match[2], index: match.index });
     }
     for (var i = 0; i < replacements.length; i++) {
       var r = replacements[i];
@@ -264,7 +267,10 @@
           String(msg).replace(/</g,'&lt;') + ']</div>');
       }
     }
-    return { content: out, actions: actions };
+    // Strip fake [Data Retrieved] sections that local models hallucinate.
+    // Real data is injected into the system prompt, never the response.
+    out = out.replace(/\[Data Retrieved\][^\[]*(?=\n\n|\n$|$)/gs, '');
+    return { content: out.trim(), actions: actions };
   }
 
   // ---------------------------------------------------------------------------
@@ -610,7 +616,7 @@
     ].join('\n');
     var draft = await callAgent(
       'eva', cfg.evaModel, cfg.evaPrompt, convo, draftTask,
-      { inject_memory: true, recall_query: userMsg }
+      { inject_memory: true, recall_query: userMsg, retrieve_data: true }
     );
 
     // Eva's silent self-review signal decides whether a second opinion runs.
