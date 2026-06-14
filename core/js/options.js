@@ -5328,7 +5328,7 @@ async function renderEvaResponse(content, txtOutput) {
   // Detect Eva browser-agent launch marker:
   // [[EVA_BROWSER]]{"goal":"...","start_url":"..."}[[/EVA_BROWSER]]
   var browserLaunch = null;
-  text = text.replace(/\[\[EVA_BROWSER\]\]\s*(\{[\s\S]*?\})\s*\[\[\/EVA_BROWSER\]\]/, function (full, json) {
+  text = text.replace(/\[\[EVA_BROWSER\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_BROWSER\]\])?/g, function (full, json) {
     if (!browserLaunch) {
       try {
         var parsed = JSON.parse(json);
@@ -5344,7 +5344,7 @@ async function renderEvaResponse(content, txtOutput) {
   // Detect Eva desktop-agent launch marker:
   // [[EVA_DESKTOP]]{"goal":"..."}[[/EVA_DESKTOP]]
   var desktopLaunch = null;
-  text = text.replace(/\[\[EVA_DESKTOP\]\]\s*(\{[\s\S]*?\})\s*\[\[\/EVA_DESKTOP\]\]/, function (full, json) {
+  text = text.replace(/\[\[EVA_DESKTOP\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_DESKTOP\]\])?/g, function (full, json) {
     if (!desktopLaunch) {
       try {
         var parsed = JSON.parse(json);
@@ -5360,7 +5360,7 @@ async function renderEvaResponse(content, txtOutput) {
   // Detect Eva camera "look" marker:
   // [[EVA_LOOK]]{"question":"..."}[[/EVA_LOOK]]  (question optional)
   var cameraLook = null;
-  text = text.replace(/\[\[EVA_LOOK\]\]\s*(\{[\s\S]*?\})?\s*\[\[\/EVA_LOOK\]\]/, function (full, json) {
+  text = text.replace(/\[\[EVA_LOOK\]\]\s*(\{[\s\S]*?\})?\s*(?:\[\[\/EVA_LOOK\]\])?/g, function (full, json) {
     if (!cameraLook) {
       cameraLook = { question: '' };
       if (json) {
