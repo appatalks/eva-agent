@@ -264,7 +264,7 @@ def _classify_request_type(msg_lower):
     if re.search(r'\b(weather|forecast|temperature|raining|snowing|humidity|wind speed)\b', m):
         return "weather-search"
 
-    if re.search(r'\b(news|headlines?|breaking news|current events?)\b', m) or \
+    if re.search(r'\b(news|headlines?|breaking news|current events?|morning briefing|daily briefing|briefing)\b', m) or \
        re.search(r'\blatest\b.*\b(update|report|story|stories|happening|developments?)\b', m):
         return "news-search"
 
