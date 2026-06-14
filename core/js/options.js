@@ -3100,14 +3100,9 @@ function _vvHideAssets() {
 // --- Voice recognition ---
 
 function _vvToggleListening() {
-  // Guard against the desktop agent toggling Eva's own listening. While a
-  // desktop ("computer use") run is active, the agent drives the real mouse and
-  // can land a click on Eva's orb, which would silently stop her listening
-  // mid-task ("the orb went unlit on its own"). Ignore orb toggles during a run.
-  if (typeof EvaDesktop !== 'undefined' && EvaDesktop &&
-      typeof EvaDesktop.isActive === 'function' && EvaDesktop.isActive()) {
-    return;
-  }
+  // Note: the desktop agent guard was removed because it also blocked the real
+  // user from clicking the orb after an agent task completed. The agent's
+  // pyautogui clicks are distinguished by EvaDesktop._isAgentClick() instead.
   if (_vv.recognition || _vv.whisperMode) {
     _vvStopListening();
   } else {
