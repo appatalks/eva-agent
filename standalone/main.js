@@ -373,8 +373,16 @@ function createWindow(acpBaseUrl) {
   // navigating the Electron window away from Eva's UI.
   mainWindow.webContents.on('will-navigate', function(event, url) {
     if (url.startsWith('http://') || url.startsWith('https://')) {
-      // Allow localhost navigation (bridge API calls)
-      if (url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost')) return;
+      // Block localhost /v1/files/ navigation — these are artifact downloads,
+      // not page navigations. Without this, Electron replaces Eva's UI with
+      // raw file content, making the app appear frozen.
+      if (url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost')) {
+        if (url.indexOf('/v1/files/') !== -1) {
+          event.preventDefault();
+          return;
+        }
+        return;
+      }
       event.preventDefault();
       shell.openExternal(url);
     }

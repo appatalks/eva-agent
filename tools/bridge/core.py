@@ -358,7 +358,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._prefs_get()
         elif parsed_path.startswith("/v1/files/"):
             requested_name = urllib.parse.unquote(parsed_path.split("/v1/files/", 1)[1])
-            self._serve_artifact(requested_name)
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            if qs.get("open"):
+                self._open_artifact(requested_name)
+            else:
+                self._serve_artifact(requested_name)
         else:
             self.send_error(404, "Not Found")
 
@@ -1187,6 +1191,26 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(500, {"error": {"message": "Skill write failed"}})
             return
         self._json_response(200, {"skill": row, "status": "deleted"})
+
+    def _open_artifact(self, requested_name):
+        """Open an artifact file with the system's default application."""
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "only available on localhost"}})
+            return
+        if not _valid_artifact_name(requested_name):
+            self._json_response(400, {"error": {"message": "invalid filename"}})
+            return
+        base = os.path.realpath(_ARTIFACTS_DIR)
+        target = os.path.realpath(os.path.join(_ARTIFACTS_DIR, requested_name))
+        if not target.startswith(base + os.sep) or not os.path.isfile(target):
+            self._json_response(404, {"error": {"message": "file not found"}})
+            return
+        import subprocess
+        try:
+            subprocess.Popen(["xdg-open", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._json_response(200, {"opened": True, "file": requested_name})
+        except Exception as e:
+            self._json_response(500, {"error": {"message": f"Could not open file: {e}"}})
 
     def _serve_artifact(self, requested_name):
         if not _is_loopback_bind():

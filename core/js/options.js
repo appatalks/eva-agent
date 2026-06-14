@@ -5479,10 +5479,58 @@ async function renderEvaResponse(content, txtOutput) {
     artifactNames.forEach(function(filename) {
       var link = document.createElement('a');
       link.className = 'eva-artifact-link';
-      link.href = bridgeUrl + '/v1/files/' + encodeURIComponent(filename);
-      link.download = filename;
-      link.textContent = 'Download ' + filename;
+      link.textContent = '\u2B07 Download ' + filename;
+      link.style.cursor = 'pointer';
+      link.style.textDecoration = 'underline';
+      link.style.color = '#4fc3f7';
+      link.style.display = 'inline-block';
+      link.style.marginTop = '8px';
+      // Use fetch + blob to download instead of navigating (Electron ignores
+      // the download attribute and navigates the window, freezing the UI).
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        var fileUrl = bridgeUrl + '/v1/files/' + encodeURIComponent(filename);
+        fetch(fileUrl).then(function(res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.blob();
+        }).then(function(blob) {
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
+        }).catch(function(err) {
+          console.warn('[Artifact] Download failed:', err);
+          alert('Could not download ' + filename + ': ' + err.message);
+        });
+      });
+
+      var openBtn = document.createElement('a');
+      openBtn.className = 'eva-artifact-link';
+      openBtn.textContent = '\u{1F4C2} Open';
+      openBtn.style.cursor = 'pointer';
+      openBtn.style.textDecoration = 'underline';
+      openBtn.style.color = '#81c784';
+      openBtn.style.display = 'inline-block';
+      openBtn.style.marginTop = '8px';
+      openBtn.style.marginLeft = '12px';
+      openBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        var openUrl = bridgeUrl + '/v1/files/' + encodeURIComponent(filename) + '?open=1';
+        fetch(openUrl).then(function(res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        }).then(function(data) {
+          if (data.opened) console.log('[Artifact] Opened:', filename);
+        }).catch(function(err) {
+          console.warn('[Artifact] Open failed:', err);
+        });
+      });
+
       bubble.appendChild(link);
+      bubble.appendChild(openBtn);
     });
   }
 
