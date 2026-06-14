@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, session } = require('electron');
+const { app, BrowserWindow, dialog, session, shell } = require('electron');
 const http = require('http');
 const net = require('net');
 const path = require('path');
@@ -367,6 +367,23 @@ function createWindow(acpBaseUrl) {
   });
   mainWindow.on('closed', function() {
     stopBridge();
+  });
+
+  // Open external links (http/https) in the system browser instead of
+  // navigating the Electron window away from Eva's UI.
+  mainWindow.webContents.on('will-navigate', function(event, url) {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      // Allow localhost navigation (bridge API calls)
+      if (url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost')) return;
+      event.preventDefault();
+      shell.openExternal(url);
+    }
+  });
+  mainWindow.webContents.setWindowOpenHandler(function(details) {
+    if (details.url.startsWith('http://') || details.url.startsWith('https://')) {
+      shell.openExternal(details.url);
+    }
+    return { action: 'deny' };
   });
 
   mainWindow.loadFile(path.join(appRoot, 'index.html'));

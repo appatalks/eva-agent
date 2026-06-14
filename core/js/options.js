@@ -5400,13 +5400,18 @@ async function renderEvaResponse(content, txtOutput) {
     });
   }
 
-  // Detect image placeholders — multiple patterns models use
+  // Detect image placeholders — only the explicit [Image of ...] form.
+  // Broad patterns (empty markdown images, emoji brackets) are removed to avoid
+  // false positives on regular response content like video titles or links.
   var imagePatterns = [
     /\[Image of ([^\]]+)\]/gi,           // [Image of description]
     /\[image:\s*([^\]]+)\]/gi,           // [image: description]
-    /\[🖼️?\s*([^\]]+)\]/gi,             // [🖼️ description] or [🖼 description]
+  ];
+  // Stricter patterns only used when we know user asked for images
+  var imageExtraPatterns = [
+    /\[🖼️?\s*([^\]]+)\]/gi,             // [🖼️ description]
     /!\[([^\]]*)\]\(\s*\)/g,             // ![alt]() — empty URL markdown images
-    /\(Image:\s*([^)]+)\)/gi             // (Image: description) — some models use parens
+    /\(Image:\s*([^)]+)\)/gi             // (Image: description)
   ];
 
   var imagePlaceholders = [];
@@ -5414,7 +5419,8 @@ async function renderEvaResponse(content, txtOutput) {
   // Only resolve image placeholders when the user actually asked for an image.
   // When the model drops [Image of ...] unprompted, strip the placeholder quietly.
   if (_lastUserAskedImage) {
-    imagePatterns.forEach(function(rx) {
+    var allPatterns = imagePatterns.concat(imageExtraPatterns);
+    allPatterns.forEach(function(rx) {
       var match;
       while ((match = rx.exec(text)) !== null) {
         if (!seen[match[0]]) {
@@ -5425,9 +5431,10 @@ async function renderEvaResponse(content, txtOutput) {
       }
     });
   } else {
-    // Strip unrequested image placeholders from the response
+    // Strip only the explicit [Image of ...] placeholders, not general brackets
     imagePatterns.forEach(function(rx) {
       text = text.replace(rx, '');
+    });
     });
     text = text.replace(/\n{3,}/g, '\n\n');
   }
