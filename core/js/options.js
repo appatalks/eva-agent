@@ -1189,6 +1189,24 @@ function _evaAgentProgress(subgoal) {
 function _evaAgentConfirmAsk(question, needsText) {
   _agentConfirm.pending = true;
   _agentConfirm.needsText = !!needsText;
+  // Auto-cancel after 60s so a stale confirm doesn't block voice forever.
+  if (_agentConfirm._timeout) clearTimeout(_agentConfirm._timeout);
+  _agentConfirm._timeout = setTimeout(function() {
+    if (_agentConfirm.pending) {
+      console.warn('[AgentConfirm] Auto-cancelling after 60s timeout');
+      _agentConfirm.pending = false;
+      _agentConfirm.needsText = false;
+      // Auto-decline the parked agent
+      if (typeof EvaBrowser !== 'undefined' && EvaBrowser &&
+          typeof EvaBrowser.isAwaitingConfirm === 'function' && EvaBrowser.isAwaitingConfirm()) {
+        EvaBrowser.answerConfirm(false, '');
+      }
+      if (typeof EvaDesktop !== 'undefined' && EvaDesktop &&
+          typeof EvaDesktop.isAwaitingConfirm === 'function' && EvaDesktop.isAwaitingConfirm()) {
+        EvaDesktop.answerConfirm(false, '');
+      }
+    }
+  }, 60000);
   var q = String(question || 'Should I continue?').trim();
   var txtOutput = document.getElementById('txtOutput');
   if (txtOutput) {
@@ -3590,7 +3608,7 @@ function _vvHandleTranscript(transcript) {
   if (evaIdx >= 0) {
     var command = transcript.substring(evaIdx + 3).trim().replace(/^[,.\s]+/, '').trim();
     if (command.length > 1) {
-      _vvSendCommand(command);
+      _vvSendCommand(command, true);
     } else {
       // Wake word only: open the conversation window and wait for the command.
       _vvEnterAwake(_vv.convoMode ? _vv.convoTimeoutMs : 10000);
@@ -3644,10 +3662,11 @@ function _vvSpeakAck() {
   }
 }
 
-function _vvSendCommand(command) {
+function _vvSendCommand(command, fromWakeWord) {
   // Natural agent confirmation via voice: if an agent is parked on a yes/no,
   // interpret this utterance as the answer instead of a new command.
-  if (typeof _agentConfirm !== 'undefined' && _agentConfirm.pending) {
+  // But NOT if the user used the wake word "Eva" — that signals a new intent.
+  if (!fromWakeWord && typeof _agentConfirm !== 'undefined' && _agentConfirm.pending) {
     if (_maybeAnswerAgentConfirm(command)) {
       var transcriptElC = document.getElementById('vvTranscript');
       if (transcriptElC) transcriptElC.textContent = '\u25B8 ' + command;
