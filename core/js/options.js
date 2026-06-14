@@ -694,6 +694,63 @@ function renderBackgroundAll() {
 }
 
 // ---------------------------------------------------------------------------
+// Data retrieval mode switching (cloud vs local)
+// ---------------------------------------------------------------------------
+function switchDataMode(mode) {
+  var bUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
+  bUrl = bUrl.replace(/\/+$/, '');
+  var statusEl = document.getElementById('dataModeStatus');
+  if (statusEl) statusEl.textContent = 'Switching to ' + mode + '...';
+
+  fetch(bUrl + '/v1/mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: mode }),
+    signal: AbortSignal.timeout(30000)
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    if (d.error) {
+      if (statusEl) statusEl.textContent = 'Error: ' + (d.error.message || d.error);
+      return;
+    }
+    var sel = document.getElementById('selDataMode');
+    if (sel) sel.value = d.mode;
+    if (statusEl) {
+      if (d.mode === 'local') {
+        statusEl.textContent = 'Local mode active (' + (d.local_tools || 0) + ' MCP tools available)';
+      } else {
+        statusEl.textContent = 'Cloud mode active (Copilot CLI)';
+      }
+    }
+  })
+  .catch(function(e) {
+    if (statusEl) statusEl.textContent = 'Error: ' + e.message;
+  });
+}
+
+function loadDataMode() {
+  var bUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
+  bUrl = bUrl.replace(/\/+$/, '');
+  fetch(bUrl + '/v1/mode', { signal: AbortSignal.timeout(3000) })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    var sel = document.getElementById('selDataMode');
+    if (sel) sel.value = d.mode || 'cloud';
+    var statusEl = document.getElementById('dataModeStatus');
+    if (statusEl) {
+      var parts = [];
+      if (d.cloud_available) parts.push('Cloud: available');
+      else parts.push('Cloud: unavailable');
+      if (d.local_available) parts.push('Local: ' + d.local_tools + ' tools');
+      else parts.push('Local: not started');
+      statusEl.textContent = parts.join(' | ');
+    }
+  })
+  .catch(function() {});
+}
+
+// ---------------------------------------------------------------------------
 // Doctor diagnostics
 // ---------------------------------------------------------------------------
 async function runDoctor() {
@@ -2007,6 +2064,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (overlay) overlay.classList.add('open');
       populateAuthFields();
       if (typeof loadBackgroundData === 'function') loadBackgroundData(true);
+      if (typeof loadDataMode === 'function') loadDataMode();
     }
   }
 

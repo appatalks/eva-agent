@@ -314,6 +314,19 @@
         </div>
 
         <hr style="margin:14px 0;border:none;border-top:1px solid rgba(127,127,127,0.25)">
+
+        <label for="selDataMode">Data retrieval mode:</label>
+        <select id="selDataMode" onchange="switchDataMode(this.value)">
+          <option value="cloud">Cloud (Copilot CLI + premium models)</option>
+          <option value="local">Local (LM Studio + MCP tools, no cloud AI)</option>
+        </select>
+        <div class="auth-note" id="dataModeNote" style="margin:4px 0 0;font-size:11px;opacity:0.75">
+          Cloud: uses Copilot CLI for web search, Kusto, GitHub tools (uses Copilot tokens).<br>
+          Local: spawns MCP servers directly and uses LM Studio for tool-calling (fully offline AI, zero cloud tokens).
+        </div>
+        <div id="dataModeStatus" style="margin:4px 0;font-size:11px;opacity:0.7"></div>
+
+        <hr style="margin:14px 0;border:none;border-top:1px solid rgba(127,127,127,0.25)">
         <div class="auth-note" style="margin:0">
           <strong>About</strong><br>
           Eva AI Assistant <span id="evaAppVersion">v5.3.0</span><br>

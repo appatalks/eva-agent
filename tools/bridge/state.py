@@ -84,3 +84,8 @@ log_seq = 0
 alerts_lock = threading.RLock()
 notify_lock = threading.Lock()
 notify_ring = []
+
+# ── Local MCP (no-cloud mode) ──────────────────────────────────────
+local_mcp_manager = None    # LocalMCPManager instance (lazy)
+local_mode = False          # True = use local tool-calling, False = use ACP/Copilot CLI
+

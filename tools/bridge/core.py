@@ -358,6 +358,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._camera_frame()
         elif parsed_path == "/v1/prefs":
             self._prefs_get()
+        elif parsed_path == "/v1/mode":
+            self._get_mode()
         elif parsed_path.startswith("/v1/files/"):
             requested_name = urllib.parse.unquote(parsed_path.split("/v1/files/", 1)[1])
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -402,6 +404,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._camera_stop()
         elif parsed_path == "/v1/prefs":
             self._prefs_set()
+        elif parsed_path == "/v1/mode":
+            self._set_mode()
         elif parsed_path == "/v1/vision/look":
             self._vision_look()
         elif parsed_path == "/v1/browser/confirm":
@@ -2624,9 +2628,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
     @staticmethod
     def _retrieve_acp_data_for(user_message):
-        """Run ACP data retrieval for a user message and return (data_text, model_used).
+        """Run data retrieval for a user message and return (data_text, model_used).
 
-        Returns ("", "") when ACP is unavailable or the message is trivial.
+        Routes to ACP (Copilot CLI) or the local MCP agent depending on
+        _st.local_mode. Returns ("", "") when unavailable or trivial.
         """
         import re as _re
         msg_lower = user_message.lower()
@@ -2645,6 +2650,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         ):
             return "", ""
 
+        # --- Local mode: use local MCP + LM Studio for tool-calling ---
+        if _st.local_mode:
+            return BridgeHandler._retrieve_local_data(user_message)
+
+        # --- Cloud mode: use ACP (Copilot CLI) ---
         if not _st.acp_client:
             return "", ""
 
@@ -2698,20 +2708,44 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return data, model
         return "", ""
 
+    @staticmethod
+    def _retrieve_local_data(user_message):
+        """Run data retrieval via local MCP servers + LM Studio tool-calling."""
+        if not _st.local_mcp_manager or not _st.local_mcp_manager.alive:
+            print("[DataRetrieve] Local mode: no MCP servers running")
+            return "", ""
+        try:
+            from bridge.local_mcp import local_agent_query
+        except ImportError as e:
+            print(f"[DataRetrieve] Local mode import error: {e}")
+            return "", ""
+        # Get LM Studio URL/model from client prefs or defaults
+        prefs = _load_client_prefs()
+        lms_base = prefs.get("lmstudio_base_url", "http://localhost:1234/v1")
+        lms_model = prefs.get("lmstudio_model", "")
+        print(f"[DataRetrieve] Local mode query: {user_message[:80]}")
+        data, model = local_agent_query(
+            user_message, _st.local_mcp_manager,
+            lms_base_url=lms_base, lms_model=lms_model,
+            max_iterations=5, timeout=90,
+        )
+        return data, model or "local"
+
     def _data_retrieve(self):
-        """GET /v1/data/retrieve?message=... — return ACP-fetched live data for any model path."""
+        """GET /v1/data/retrieve?message=... — return live data for any model path."""
         from urllib.parse import urlparse, parse_qs
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         user_message = params.get("message", [""])[0]
         if not user_message:
-            self._json_response(200, {"data": "", "model": "", "retrieved": False})
+            self._json_response(200, {"data": "", "model": "", "retrieved": False, "mode": "local" if _st.local_mode else "cloud"})
             return
         data, model = self._retrieve_acp_data_for(user_message)
         self._json_response(200, {
             "data": data,
             "model": model,
-            "retrieved": bool(data)
+            "retrieved": bool(data),
+            "mode": "local" if _st.local_mode else "cloud",
         })
 
     def _memory_context(self):
@@ -3395,6 +3429,70 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": {"message": "expected an object"}})
             return
         self._json_response(200, _save_client_prefs(data))
+
+    # ── Mode switching (cloud vs local) ─────────────────────────────
+
+    def _get_mode(self):
+        """GET /v1/mode — return current data retrieval mode."""
+        local_tools = 0
+        local_servers = []
+        if _st.local_mcp_manager:
+            local_tools = _st.local_mcp_manager.tool_count
+            local_servers = [n for n, s in _st.local_mcp_manager.servers.items() if s.alive]
+        self._json_response(200, {
+            "mode": "local" if _st.local_mode else "cloud",
+            "cloud_available": bool(_st.acp_client and _st.acp_client.alive),
+            "local_available": bool(_st.local_mcp_manager and _st.local_mcp_manager.alive),
+            "local_tools": local_tools,
+            "local_servers": local_servers,
+        })
+
+    def _set_mode(self):
+        """POST /v1/mode — switch between cloud and local data retrieval.
+
+        Body: {"mode": "local"|"cloud"}
+        When switching to local for the first time, MCP servers from the
+        current config are spawned and the tool catalog is built.
+        """
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "only available on localhost"}})
+            return
+        data, err = self._read_json_body()
+        if err:
+            self._json_response(400, {"error": {"message": err}})
+            return
+        requested = (data.get("mode") or "").strip().lower()
+        if requested not in ("local", "cloud"):
+            self._json_response(400, {"error": {"message": "mode must be 'local' or 'cloud'"}})
+            return
+
+        if requested == "local":
+            # Start local MCP servers if not already running
+            if not _st.local_mcp_manager or not _st.local_mcp_manager.alive:
+                try:
+                    from bridge.local_mcp import LocalMCPManager
+                    mcp_config = {}
+                    # Reuse the same MCP config that ACP uses (minus cloud-only servers)
+                    if _st.acp_client and _st.acp_client.mcp_config:
+                        mcp_config = dict(_st.acp_client.mcp_config)
+                    if not mcp_config:
+                        mcp_config = _load_persisted_mcp_config()
+                    _st.local_mcp_manager = LocalMCPManager()
+                    _st.local_mcp_manager.start_servers(mcp_config)
+                    print(f"[Mode] Local MCP started: {_st.local_mcp_manager.tool_count} tools")
+                except Exception as e:
+                    self._json_response(500, {"error": {"message": f"Failed to start local MCP: {e}"}})
+                    return
+            _st.local_mode = True
+            print("[Mode] Switched to LOCAL (no cloud AI)")
+        else:
+            _st.local_mode = False
+            print("[Mode] Switched to CLOUD (Copilot CLI)")
+
+        self._json_response(200, {
+            "mode": "local" if _st.local_mode else "cloud",
+            "local_tools": _st.local_mcp_manager.tool_count if _st.local_mcp_manager else 0,
+        })
 
     def _json_response(self, status, data):
         body = json.dumps(data).encode("utf-8")
