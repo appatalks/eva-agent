@@ -357,6 +357,27 @@ _SEED = {
          ),
          "Tools": "camera-vision", "Tags": "camera,webcam,look,see,vision,picture",
          "Source": "seed", "Status": "active"},
+        {"SkillId": "skill-file-creation", "Name": "File Creation (PDF, CSV, etc.)",
+         "Description": "Create downloadable files like PDFs, CSVs, or reports",
+         "Instructions": (
+             "1. When asked to create a file, the system writes it to EVA_ARTIFACTS_DIR.\n"
+             "2. After the file is written, end your message with: [[EVA_FILE]] <filename.ext>\n"
+             "3. The frontend converts this marker into a working download link.\n"
+             "4. Do NOT produce blob: URLs or markdown download links with blob: hrefs.\n"
+             "5. Do NOT claim a file was produced unless it was actually written."
+         ),
+         "Tools": "data-retrieval", "Tags": "pdf,csv,file,report,download,create,generate",
+         "Source": "seed", "Status": "active"},
+        {"SkillId": "skill-open-file", "Name": "Open File on Desktop",
+         "Description": "Open a file using the system's default application",
+         "Instructions": (
+             "1. When asked to open a file, use [[EVA_DESKTOP]] with a goal like 'open the file <path> with the default application'.\n"
+             "2. Do NOT re-create the file. Do NOT just provide a download link.\n"
+             "3. The desktop agent will use xdg-open or the system file handler to open it.\n"
+             "4. If the file was just created as an artifact, the path is ~/.config/eva-standalone/artifacts/<filename>."
+         ),
+         "Tools": "desktop-control", "Tags": "open,file,launch,view,pdf,csv",
+         "Source": "seed", "Status": "active"},
     ],
 }
 

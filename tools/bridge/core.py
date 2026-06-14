@@ -1997,7 +1997,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 acp_prompt = (
                     "You are an assistant with access to web search, Kusto databases, GitHub, and Azure tools. "
                     "Answer the user's question using your available tools if they would help. "
-                    "If no tools are needed, answer directly. Be factual and concise.\n\n"
+                    "If no tools are needed, answer directly. Be factual and concise.\n"
+                    f"If asked to create a file (PDF, CSV, etc.), write it to {_ARTIFACTS_DIR}/ using a short descriptive filename. "
+                    "Return ONLY the filename (no path, no blob URLs) so the system can serve it.\n\n"
                     f"{user_message}"
                 )
             # Continuous learning: while MCP tools are active, persist durable user facts.
@@ -2098,6 +2100,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             eva_system += memory_context
 
         if acp_data:
+            # Strip blob URLs from ACP data so the model doesn't parrot them.
+            # ACP sandbox blob: URLs are not accessible in Electron.
+            acp_data = _re.sub(r'blob:file:///[a-f0-9-]+', '', acp_data)
             eva_system += f"\n[Data Retrieved]\n{acp_data}\n\n"
             eva_system += (
                 "Use the data above as authoritative live results. "
@@ -2148,6 +2153,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
             print(f"[AIG] LM Studio response: {len(response_text)} chars from {lms_model}")
             # Log the first 500 chars of the response for debugging
             print(f"[AIG] LM Studio content: {response_text[:500]}")
+
+            # Post-process: convert blob/download links to [[EVA_FILE]] markers.
+            # ACP or the model may produce blob:file:/// URLs or markdown download links
+            # referencing sandbox files. These are not accessible in Electron, so we
+            # extract the filename and emit the proper marker instead.
+            response_text = _re.sub(
+                r'\[(?:Download|Open)\s+([A-Za-z0-9._-]{1,128})\]\(blob:[^)]+\)'
+                r'(?:\s*\[(?:Download|Open)\s+[A-Za-z0-9._-]{1,128}\]\(blob:[^)]+\))*'
+                r'(?:\s*\([^)]*\))?',
+                lambda m: '\n[[EVA_FILE]] ' + m.group(1),
+                response_text
+            )
 
             if response_text and _st.cognition_enabled and not internal:
                 threading.Thread(target=_post_response_reflection,
