@@ -5435,7 +5435,6 @@ async function renderEvaResponse(content, txtOutput) {
     imagePatterns.forEach(function(rx) {
       text = text.replace(rx, '');
     });
-    });
     text = text.replace(/\n{3,}/g, '\n\n');
   }
 
