@@ -269,6 +269,95 @@ _SEED = {
          "RelatedTopics": "style,preferences",
          "CreatedAt": "2026-01-01T00:00:00Z", "UpdatedAt": "2026-01-01T00:00:00Z"},
     ],
+    "Skills": [
+        {"SkillId": "skill-morning-briefing", "Name": "Morning Briefing",
+         "Description": "Deliver a personalized morning briefing with weather, news, and schedule",
+         "Instructions": (
+             "1. Check [User Profile] for user_location. If found, use it.\n"
+             "2. If no location stored, use web search to look up the user's approximate location via IP geolocation.\n"
+             "3. Use [Data Retrieved] for weather forecast and current conditions at that location.\n"
+             "4. Use [Data Retrieved] for top news headlines.\n"
+             "5. Combine into a concise briefing: weather summary, top 3-5 headlines, and any known schedule items.\n"
+             "6. Do NOT take screenshots to gather information. Do NOT ask the user for their location if it is in memory.\n"
+             "7. Present naturally in first person as Eva."
+         ),
+         "Tools": "web-search,weather-news,data-retrieval", "Tags": "briefing,weather,news,morning",
+         "Source": "seed", "Status": "active"},
+        {"SkillId": "skill-web-lookup", "Name": "Web Information Lookup",
+         "Description": "Search the web for current information, facts, or answers",
+         "Instructions": (
+             "1. The data pipeline retrieves web results automatically. Check [Data Retrieved] first.\n"
+             "2. If [Data Retrieved] has relevant results, synthesize them into a natural answer.\n"
+             "3. If no data was retrieved, say so honestly. Do NOT fabricate results.\n"
+             "4. Always cite sources when available.\n"
+             "5. Do NOT say you cannot search the web. The pipeline handles it."
+         ),
+         "Tools": "web-search,data-retrieval", "Tags": "search,web,lookup,find,research",
+         "Source": "seed", "Status": "active"},
+        {"SkillId": "skill-weather", "Name": "Weather Report",
+         "Description": "Provide current weather and forecast for a location",
+         "Instructions": (
+             "1. Determine location: check [User Profile] for user_location, or use the location specified in the request.\n"
+             "2. Weather data is in [Data Retrieved]. Use it as the authoritative source.\n"
+             "3. Present: current conditions, temperature, forecast summary.\n"
+             "4. Do NOT take screenshots. Do NOT fabricate weather data."
+         ),
+         "Tools": "weather-news,data-retrieval", "Tags": "weather,forecast,temperature,conditions",
+         "Source": "seed", "Status": "active"},
+        {"SkillId": "skill-news", "Name": "News Headlines",
+         "Description": "Provide current news headlines and summaries",
+         "Instructions": (
+             "1. News data is in [Data Retrieved]. Use it as the authoritative source.\n"
+             "2. Present top headlines with brief summaries.\n"
+             "3. Do NOT fabricate headlines, sources, or events.\n"
+             "4. Cite the source (AP, Reuters, etc.) only if it appears in the data."
+         ),
+         "Tools": "web-search,data-retrieval", "Tags": "news,headlines,current events",
+         "Source": "seed", "Status": "active"},
+        {"SkillId": "skill-location-deduction", "Name": "Location Deduction",
+         "Description": "Determine the user's location from available data",
+         "Instructions": (
+             "1. Check [User Profile] for stored user_location. If found, use it directly.\n"
+             "2. If not stored, use web search to perform IP-based geolocation lookup.\n"
+             "3. Once determined, state the location and use it for follow-up tasks (weather, news).\n"
+             "4. Do NOT take desktop screenshots to determine location.\n"
+             "5. Do NOT repeatedly ask the user for their location if you have tools to look it up."
+         ),
+         "Tools": "web-search,data-retrieval", "Tags": "location,geolocation,where,city",
+         "Source": "seed", "Status": "active"},
+        {"SkillId": "skill-desktop-control", "Name": "Desktop Application Control",
+         "Description": "Launch and operate desktop applications by sight",
+         "Instructions": (
+             "1. Emit [[EVA_DESKTOP]]{\"goal\":\"<plain-language task>\"}[[/EVA_DESKTOP]] marker.\n"
+             "2. The vision agent opens apps, clicks, and types via the real mouse/keyboard.\n"
+             "3. Write ONE short sentence about what you are about to do, then emit the marker.\n"
+             "4. Do NOT list manual steps. Do NOT say you cannot control desktop apps."
+         ),
+         "Tools": "desktop-control", "Tags": "desktop,app,launch,gimp,editor,file manager",
+         "Source": "seed", "Status": "active"},
+        {"SkillId": "skill-browser-agent", "Name": "Browser Task Automation",
+         "Description": "Control a real web browser to complete tasks",
+         "Instructions": (
+             "1. Emit [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<url>\"}[[/EVA_BROWSER]] marker.\n"
+             "2. The browser agent navigates, clicks, types, and reads pages.\n"
+             "3. Uses a persistent Chrome profile (stays logged in across runs).\n"
+             "4. Pauses at purchase/irreversible actions for user confirmation.\n"
+             "5. Write ONE short sentence about what you are about to do, then emit the marker.\n"
+             "6. Do NOT say you cannot open websites."
+         ),
+         "Tools": "browser-control", "Tags": "browser,website,shopping,navigate,form",
+         "Source": "seed", "Status": "active"},
+        {"SkillId": "skill-camera-vision", "Name": "Camera / Webcam Vision",
+         "Description": "See through the user's webcam to describe the physical world",
+         "Instructions": (
+             "1. Emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] marker.\n"
+             "2. A frame is captured from the webcam and you describe what you see.\n"
+             "3. Use for: 'what am I holding', 'look at me', 'what do you see'.\n"
+             "4. Do NOT confuse with screenshots. Camera = physical world. Screenshot = monitor."
+         ),
+         "Tools": "camera-vision", "Tags": "camera,webcam,look,see,vision,picture",
+         "Source": "seed", "Status": "active"},
+    ],
 }
 
 
@@ -336,6 +425,7 @@ class SqliteMemory:
         # personality rows. Runs on every startup but the INSERT OR IGNORE
         # is a no-op when the row already exists (matched by Entity+Relation).
         self._backfill_identity(conn)
+        self._backfill_skills(conn)
 
     def _backfill_identity(self, conn):
         """Insert or update Eva identity Knowledge rows from seed data."""
@@ -361,6 +451,39 @@ class SqliteMemory:
                 vals = [row[c] for c in present]
                 conn.execute(
                     f"INSERT INTO Knowledge ({', '.join(present)}) VALUES ({placeholders})", vals,
+                )
+        conn.commit()
+
+    def _backfill_skills(self, conn):
+        """Insert or update seed skills so core operational knowledge is always present."""
+        skill_rows = _SEED.get("Skills", [])
+        if not skill_rows:
+            return
+        col_names = [c[0] for c in _SCHEMA["Skills"]["columns"]]
+        for row in skill_rows:
+            sid = row.get("SkillId", "")
+            if not sid:
+                continue
+            existing = conn.execute(
+                "SELECT Instructions FROM Skills WHERE SkillId = ? AND Source = 'seed' LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if existing and existing[0] == row.get("Instructions", ""):
+                continue  # already up to date
+            if existing:
+                conn.execute(
+                    "UPDATE Skills SET Name=?, Description=?, Instructions=?, Tools=?, Tags=?, Status=?, "
+                    "UpdatedAt=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
+                    "WHERE SkillId=? AND Source='seed'",
+                    (row.get("Name",""), row.get("Description",""), row.get("Instructions",""),
+                     row.get("Tools",""), row.get("Tags",""), row.get("Status","active"), sid),
+                )
+            else:
+                present = [c for c in col_names if c in row]
+                placeholders = ", ".join("?" for _ in present)
+                vals = [row[c] for c in present]
+                conn.execute(
+                    f"INSERT INTO Skills ({', '.join(present)}) VALUES ({placeholders})", vals,
                 )
         conn.commit()
 
