@@ -37,22 +37,42 @@ function lmsSend() {
         return;
     }
 
-    // --- Cognition: Fetch memory context from bridge ---
+    // --- Cognition: Fetch memory context + live data from bridge ---
+    var _bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
+    var _bUrl = _bridgeUrl.replace(/\/+$/, '');
     var _lmsMemoryPromise = Promise.resolve('');
+    var _lmsDataPromise = Promise.resolve('');
     try {
-      var _bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
-      _lmsMemoryPromise = fetch(_bridgeUrl.replace(/\/+$/, '') + '/v1/memory/context?message=' + encodeURIComponent(sQuestion), {
+      _lmsMemoryPromise = fetch(_bUrl + '/v1/memory/context?message=' + encodeURIComponent(sQuestion), {
         signal: AbortSignal.timeout(3000)
       }).then(function(r) { return r.ok ? r.json() : { context: '' }; })
         .then(function(d) { return (d.context && d.cognition_enabled) ? d.context : ''; })
         .catch(function() { return ''; });
     } catch (e) {}
+    try {
+      _lmsDataPromise = fetch(_bUrl + '/v1/data/retrieve?message=' + encodeURIComponent(sQuestion), {
+        signal: AbortSignal.timeout(95000)
+      }).then(function(r) { return r.ok ? r.json() : { data: '' }; })
+        .then(function(d) { return (d && d.retrieved) ? d.data : ''; })
+        .catch(function() { return ''; });
+    } catch (e) {}
 
-    _lmsMemoryPromise.then(function(_memCtx) {
+    Promise.all([_lmsMemoryPromise, _lmsDataPromise]).then(function(results) {
+      var _memCtx = results[0];
+      var _acpData = results[1];
+
       // Build ephemeral messages for this request (don't mutate persistent openLLMessages)
       var _lmsRequestMsgs = openLLMessages.slice();
-      if (_memCtx && _lmsRequestMsgs.length > 0 && _lmsRequestMsgs[0].role === 'system') {
-        _lmsRequestMsgs[0] = { role: 'system', content: _memCtx + '\n\n' + _lmsRequestMsgs[0].content };
+      var _extraCtx = '';
+      if (_memCtx) _extraCtx += _memCtx + '\n\n';
+      if (_acpData) {
+        _extraCtx += '[Data Retrieved]\n' + _acpData + '\n\n' +
+          'Use the data above as authoritative live results. ' +
+          'Do not claim the data is missing or unavailable when [Data Retrieved] is present. ' +
+          'Answer directly from [Data Retrieved].\n';
+      }
+      if (_extraCtx && _lmsRequestMsgs.length > 0 && _lmsRequestMsgs[0].role === 'system') {
+        _lmsRequestMsgs[0] = { role: 'system', content: _extraCtx + _lmsRequestMsgs[0].content };
       }
 
                 // Document the user's message (match chat-bubble UI and sanitize)
@@ -146,5 +166,5 @@ function lmsSend() {
             console.error("Error:", error);
             document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + error.message + "<br>\n";
         });
-    }); // end _lmsMemoryPromise.then
+    }); // end Promise.all
 }

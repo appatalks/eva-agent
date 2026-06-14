@@ -342,6 +342,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._notifications_list()
         elif parsed_path == "/v1/memory/context":
             self._memory_context()
+        elif parsed_path == "/v1/data/retrieve":
+            self._data_retrieve()
         elif parsed_path == "/v1/browser/status":
             self._browser_status()
         elif parsed_path == "/v1/browser/screenshot":
@@ -2616,6 +2618,101 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"backend": backend, "status": "ok"})
         else:
             self._json_response(500, {"error": {"message": "Failed to set backend"}})
+
+    # ------------------------------------------------------------------
+    # Shared ACP data retrieval — used by AIG pipeline and /v1/data/retrieve
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _retrieve_acp_data_for(user_message):
+        """Run ACP data retrieval for a user message and return (data_text, model_used).
+
+        Returns ("", "") when ACP is unavailable or the message is trivial.
+        """
+        import re as _re
+        msg_lower = user_message.lower()
+        msg_stripped = _re.sub(r'[^\w\s]', '', msg_lower).strip()
+        msg_words = msg_stripped.split()
+
+        # Skip trivial messages
+        if len(msg_words) <= 4 and _re.match(
+            r'^(hi|hey|hello|howdy|yo|sup|good morning|good evening|good afternoon|thanks|thank you|ok|okay|bye|goodbye|see you|great|cool|nice|sure|yes|no|nah|yep|nope)\b',
+            msg_stripped
+        ):
+            return "", ""
+        if len(msg_words) <= 6 and _re.match(
+            r'^(how are you|how do you feel|what is your name|who are you|what can you do|tell me about yourself)\b',
+            msg_stripped
+        ):
+            return "", ""
+
+        if not _st.acp_client:
+            return "", ""
+
+        # Ensure ACP is alive
+        if not _st.acp_client.alive:
+            ok, _ = _ensure_acp_model(_st.acp_client.model or "")
+            if not ok:
+                print("[DataRetrieve] ACP restart failed")
+                return "", ""
+
+        _request_type = _classify_request_type(msg_lower)
+        print(f"[DataRetrieve] ACP query ({_request_type}): {user_message[:80]}")
+
+        if _request_type in ("news-search", "weather-search", "financial-data", "web-search"):
+            acp_prompt = (
+                "You are a research assistant with web search tools. "
+                "Use your available tools to search the web and find REAL, CURRENT information for the user's request. "
+                "Return factual results with sources. Do NOT invent or guess information. "
+                "If no tools return results, say 'No results found' — do NOT fabricate data.\n\n"
+                f"{user_message}"
+            )
+        elif _request_type in ("kusto-query", "kusto-operator"):
+            acp_prompt = (
+                "You are a data retrieval assistant. Execute the appropriate Kusto MCP tool to answer this request. "
+                "Return ONLY the raw data results, no commentary:\n\n"
+                f"{user_message}"
+            )
+        else:
+            acp_prompt = (
+                "You are an assistant with access to web search, Kusto databases, GitHub, and Azure tools. "
+                "Answer the user's question using your available tools if they would help. "
+                "If no tools are needed, answer directly. Be factual and concise.\n"
+                f"If asked to create a file (PDF, CSV, etc.), write it to {_ARTIFACTS_DIR}/ using a short descriptive filename. "
+                "Return ONLY the filename (no path, no blob URLs) so the system can serve it.\n\n"
+                f"{user_message}"
+            )
+        acp_prompt += _MEMORY_CAPTURE_DIRECTIVE
+
+        try:
+            acp_result = _st.acp_client.prompt(acp_prompt, timeout=90)
+        except Exception as e:
+            print(f"[DataRetrieve] ACP error: {e}")
+            return "", ""
+
+        if acp_result and "text" in acp_result and acp_result["text"]:
+            data = acp_result["text"]
+            # Strip blob URLs
+            data = _re.sub(r'blob:file:///[a-f0-9-]+', '', data)
+            model = _st.acp_client.model or "copilot-acp"
+            print(f"[DataRetrieve] ACP returned {len(data)} chars")
+            return data, model
+        return "", ""
+
+    def _data_retrieve(self):
+        """GET /v1/data/retrieve?message=... — return ACP-fetched live data for any model path."""
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        user_message = params.get("message", [""])[0]
+        if not user_message:
+            self._json_response(200, {"data": "", "model": "", "retrieved": False})
+            return
+        data, model = self._retrieve_acp_data_for(user_message)
+        self._json_response(200, {
+            "data": data,
+            "model": model,
+            "retrieved": bool(data)
+        })
 
     def _memory_context(self):
         """Return Eva's memory context as text for injection into any model's system prompt."""
