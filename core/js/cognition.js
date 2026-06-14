@@ -692,10 +692,17 @@
         'If requesting changes, follow with concrete bullet points naming each defect.'
       ].join('\n');
       var _revStart = Date.now();
-      var review = await callAgent(
-        'reviewer', cfg.reviewerModel, cfg.reviewerPrompt, convo, reviewTask,
-        { no_tools: true }
-      );
+      var review;
+      try {
+        review = await callAgent(
+          'reviewer', cfg.reviewerModel, cfg.reviewerPrompt, convo, reviewTask,
+          { no_tools: true }
+        );
+      } catch (reviewErr) {
+        // Review failed (timeout, network). Skip review and use the draft as-is.
+        console.warn('[Cognition] Review failed, using draft:', reviewErr.message);
+        break;
+      }
       _reviewMs += Date.now() - _revStart;
       var verdict = parseVerdict(review.content);
       lastVerdict = verdict;
@@ -725,10 +732,19 @@
         'Do not mention the review process or any internal pipeline.'
       ].join('\n');
       var _reviseStart = Date.now();
-      var revised = await callAgent(
-        'eva', cfg.evaModel, cfg.evaPrompt, convo, reviseTask,
-        { inject_memory: true, recall_query: userMsg }
-      );
+      var revised;
+      try {
+        revised = await callAgent(
+          'eva', cfg.evaModel, cfg.evaPrompt, convo, reviseTask,
+          { inject_memory: true, recall_query: userMsg }
+        );
+      } catch (reviseErr) {
+        // Revise failed (timeout, network error). Fall back to the draft
+        // rather than surfacing a raw error message to the user.
+        console.warn('[Cognition] Revise failed, using draft:', reviseErr.message);
+        trace.push({ role: 'eva', model: cfg.evaModel, content: '[revise failed: ' + reviseErr.message + ']', cycle: cycle, revised: true });
+        break;
+      }
       _reviseMs += Date.now() - _reviseStart;
       // Strip any sentinel the revision may have re-emitted.
       var revisedClean = parseReviewSentinel(revised.content).cleaned;

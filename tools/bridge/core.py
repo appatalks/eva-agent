@@ -2161,18 +2161,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 lms_resp = _req.post(
                     lms_base + "/chat/completions",
                     json={"model": lms_model, "messages": lms_messages, "temperature": 0.7},
-                    timeout=120,
+                    timeout=180,
                 )
                 if lms_resp.status_code == 200:
                     lms_body = lms_resp.json()
                     response_text = (lms_body.get("choices") or [{}])[0].get("message", {}).get("content", "")
                     model_used = "aig:lmstudio:" + lms_model
                 else:
-                    response_text = f"LM Studio returned HTTP {lms_resp.status_code}"
-                    model_used = "aig:lmstudio:error"
+                    print(f"[AIG] LM Studio HTTP error: {lms_resp.status_code}")
+                    self._json_response(502, {"error": {"message": f"LM Studio returned HTTP {lms_resp.status_code}"}})
+                    return
             except Exception as _lms_err:
-                response_text = f"LM Studio request failed: {_lms_err}"
-                model_used = "aig:lmstudio:unavailable"
+                print(f"[AIG] LM Studio request failed: {_lms_err}")
+                self._json_response(504, {"error": {"message": f"LM Studio request failed: {_lms_err}"}})
+                return
 
             print(f"[AIG] LM Studio response: {len(response_text)} chars from {lms_model}")
             # Log the first 500 chars of the response for debugging
