@@ -1830,6 +1830,18 @@ function onModelSettingsChange() {
   if (acpOpt) {
     acpOpt.style.display = (model === 'copilot-acp') ? 'block' : 'none';
   }
+
+  // Auto-switch data retrieval mode based on selected model.
+  // lm-studio (or aig with lmstudio backend) -> local mode
+  // Cloud models -> cloud mode
+  var needsLocal = (model === 'lm-studio') ||
+    (model === 'aig' && (localStorage.getItem('aigBackend') || '') === 'lmstudio');
+  var currentMode = (document.getElementById('selDataMode') || {}).value || 'cloud';
+  if (needsLocal && currentMode !== 'local') {
+    switchDataMode('local');
+  } else if (!needsLocal && currentMode === 'local') {
+    switchDataMode('cloud');
+  }
 }
 
 function getACPModel() {
@@ -1961,6 +1973,8 @@ document.addEventListener('DOMContentLoaded', () => {
       localStorage.setItem('aigBackend', aigBackendSel.value);
       // Keep cognition model selectors in sync with the live catalog.
       if (typeof cogInit === 'function') cogInit();
+      // Re-evaluate data mode when AIG backend changes
+      if (typeof onModelSettingsChange === 'function') onModelSettingsChange();
     });
 
     // Auto-detect LM Studio: if the user has never explicitly picked a backend,

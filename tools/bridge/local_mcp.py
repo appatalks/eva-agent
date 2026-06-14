@@ -182,8 +182,7 @@ class MCPServer:
                 line = self.process.stderr.readline()
                 if not line:
                     break
-                # Debug: uncomment to see MCP server stderr
-                # print(f"[MCP:{self.name}] {line.decode(errors='replace').rstrip()}")
+                print(f"[MCP:{self.name}] {line.decode(errors='replace').rstrip()}")
         except Exception:
             pass
 

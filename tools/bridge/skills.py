@@ -286,20 +286,64 @@ def _normalize_skill_draft(obj):
 
 
 def _evarise_skill(raw_text):
-    """Run the normalization ('Eva'rise') step through the ACP agent. Returns
-    (draft_dict, error). The agent call is internal (treats source as data)."""
-    if _st.acp_client is None or not getattr(_st.acp_client, "alive", False):
-        return None, "agent unavailable (ACP not connected)"
+    """Run the normalization ('Eva'rise') step through ACP or LM Studio.
+    Returns (draft_dict, error). Tries ACP first; falls back to LM Studio
+    when ACP is unavailable (e.g. local-only mode)."""
     prompt = _SKILL_EVARISE_PROMPT + raw_text[:_SKILL_SOURCE_MAX_BYTES]
+
+    # --- Try ACP first ---
+    if _st.acp_client and getattr(_st.acp_client, "alive", False):
+        try:
+            result = _st.acp_client.prompt(prompt, timeout=120)
+        except Exception as exc:
+            return None, "agent error: " + str(exc)[:160]
+        if not isinstance(result, dict):
+            return None, "agent returned no result"
+        if result.get("error"):
+            return None, "agent error: " + str(result.get("error"))[:160]
+        obj, err = _parse_evarise_json(str(result.get("text", "") or ""))
+        if err:
+            return None, err
+        return _normalize_skill_draft(obj), ""
+
+    # --- Fallback: LM Studio (local model) ---
     try:
-        result = _st.acp_client.prompt(prompt, timeout=120)
+        from bridge.utils import _load_client_prefs, _validate_lmstudio_base_url
+    except ImportError:
+        return None, "agent unavailable (ACP not connected, LM Studio utils missing)"
+
+    prefs = _load_client_prefs()
+    lms_base = (prefs.get("lmstudio_base_url") or "http://localhost:1234/v1").rstrip("/")
+    lms_model = prefs.get("lmstudio_model") or ""
+
+    lms_base, lms_error = _validate_lmstudio_base_url(lms_base)
+    if lms_error:
+        return None, f"agent unavailable (ACP not connected, LM Studio: {lms_error})"
+
+    import urllib.request
+    payload = json.dumps({
+        "model": lms_model or "default",
+        "messages": [
+            {"role": "system", "content": "You are a skill normalizer. Reply with ONLY valid JSON, no code fences, no prose."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.3,
+    }).encode()
+
+    try:
+        req = urllib.request.Request(
+            lms_base + "/chat/completions",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = json.loads(resp.read())
+        text = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
     except Exception as exc:
-        return None, "agent error: " + str(exc)[:160]
-    if not isinstance(result, dict):
-        return None, "agent returned no result"
-    if result.get("error"):
-        return None, "agent error: " + str(result.get("error"))[:160]
-    obj, err = _parse_evarise_json(str(result.get("text", "") or ""))
+        return None, f"LM Studio evarise failed: {str(exc)[:160]}"
+
+    obj, err = _parse_evarise_json(text)
     if err:
         return None, err
     return _normalize_skill_draft(obj), ""

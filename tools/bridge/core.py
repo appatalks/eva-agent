@@ -3484,20 +3484,30 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     # Always include the web search MCP server for local mode
                     # (replaces Copilot CLI's built-in Bing search)
                     if "eva-web-search" not in mcp_config:
-                        _ws_path = os.path.join(
-                            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "web_search_mcp.py",
-                        )
-                        if os.path.isfile(_ws_path):
-                            mcp_config["eva-web-search"] = {
-                                "command": sys.executable,
-                                "args": [_ws_path],
-                            }
-                            print("[Mode] Auto-added eva-web-search MCP (DuckDuckGo, no API key)")
+                        # Try multiple paths: bridge/../../web_search_mcp.py (source layout)
+                        # and $HOME/.eva/tools/web_search_mcp.py (installed copy)
+                        _ws_candidates = [
+                            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web_search_mcp.py"),
+                            os.path.expanduser("~/.eva/tools/web_search_mcp.py"),
+                        ]
+                        for _ws_path in _ws_candidates:
+                            if os.path.isfile(_ws_path):
+                                mcp_config["eva-web-search"] = {
+                                    "command": sys.executable,
+                                    "args": [_ws_path],
+                                }
+                                print(f"[Mode] Auto-added eva-web-search MCP from {_ws_path}")
+                                break
+                        else:
+                            print(f"[Mode] web_search_mcp.py not found at: {_ws_candidates}")
+                    if not mcp_config:
+                        print("[Mode] Warning: no MCP servers configured for local mode")
                     _st.local_mcp_manager = LocalMCPManager()
                     _st.local_mcp_manager.start_servers(mcp_config)
-                    print(f"[Mode] Local MCP started: {_st.local_mcp_manager.tool_count} tools")
+                    print(f"[Mode] Local MCP started: {_st.local_mcp_manager.tool_count} tools from {list(mcp_config.keys())}")
                 except Exception as e:
+                    import traceback
+                    traceback.print_exc()
                     self._json_response(500, {"error": {"message": f"Failed to start local MCP: {e}"}})
                     return
             _st.local_mode = True
