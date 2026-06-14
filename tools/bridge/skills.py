@@ -232,25 +232,50 @@ _SKILL_EVARISE_PROMPT = (
 
 
 def _parse_evarise_json(text):
-    """Extract the JSON skill object from the agent's reply. Tolerates code fences
-    and surrounding prose. Returns (dict, error)."""
+    """Extract the JSON skill object from the agent's reply. Tolerates code fences,
+    <think> blocks, and surrounding prose. Returns (dict, error)."""
     if not text:
         return None, "empty response"
     s = text.strip()
+    # Strip <think>...</think> reasoning blocks (Qwen, DeepSeek, etc.)
+    s = re.sub(r'<think>[\s\S]*?</think>', '', s, flags=re.IGNORECASE).strip()
+    # Strip code fences
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", s, re.IGNORECASE)
     if fence:
         s = fence.group(1).strip()
+    # Try to find a balanced JSON object
     if not s.startswith("{"):
         brace = re.search(r"\{[\s\S]*\}", s)
         if brace:
             s = brace.group(0)
+    # Try parsing as-is first
     try:
         obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj, ""
     except (json.JSONDecodeError, ValueError):
-        return None, "agent did not return valid JSON"
-    if not isinstance(obj, dict):
-        return None, "agent JSON was not an object"
-    return obj, ""
+        pass
+    # Fallback: find the outermost balanced braces
+    start = s.find('{')
+    if start >= 0:
+        depth, end = 0, -1
+        for i in range(start, len(s)):
+            if s[i] == '{':
+                depth += 1
+            elif s[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end > start:
+            try:
+                obj = json.loads(s[start:end])
+                if isinstance(obj, dict):
+                    return obj, ""
+            except (json.JSONDecodeError, ValueError):
+                pass
+    print(f"[Skills] evarise JSON parse failed, first 500 chars: {text[:500]}")
+    return None, "agent did not return valid JSON"
 
 
 

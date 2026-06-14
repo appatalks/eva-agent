@@ -1068,14 +1068,23 @@ class BridgeHandler(BaseHTTPRequestHandler):
         return fields, ""
 
     def _skills_list(self):
-        cluster, db, ok = self._kusto_context()
+        backend, handle, ok = self._memory_context_required()
         if not ok:
             return
-        if not _get_table_columns(cluster, db, "Skills"):
-            self._json_response(200, {"skills": [], "warning": "Skills table may not exist yet; run /v1/kusto/seed to create it"})
-            return
-        rows = _kusto_query_direct(cluster, db, _SKILLS_LATEST_QUERY + " | where Status != 'deleted' | order by UpdatedAt desc")
-        self._json_response(200, {"skills": rows or []})
+        if backend == "sqlite":
+            mem = handle
+            if not mem.table_exists("Skills"):
+                self._json_response(200, {"skills": []})
+                return
+            rows = mem.query("SELECT * FROM Skills WHERE Status != 'deleted' ORDER BY UpdatedAt DESC")
+            self._json_response(200, {"skills": rows or []})
+        else:
+            cluster, db = handle
+            if not _get_table_columns(cluster, db, "Skills"):
+                self._json_response(200, {"skills": [], "warning": "Skills table may not exist yet; run /v1/kusto/seed to create it"})
+                return
+            rows = _kusto_query_direct(cluster, db, _SKILLS_LATEST_QUERY + " | where Status != 'deleted' | order by UpdatedAt desc")
+            self._json_response(200, {"skills": rows or []})
 
     def _skills_evarise(self):
         if not _is_loopback_bind():
@@ -1101,9 +1110,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "skill mutations are restricted to loopback bind"}})
             return
-        cluster, db, ok = self._kusto_context()
+        backend, handle, ok = self._memory_context_required()
         if not ok:
             return
+        cluster, db = handle if backend == "kusto" else (None, None)
         data, error = self._read_json_body()
         if error:
             self._json_response(400, {"error": {"message": error}})
@@ -1134,9 +1144,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "skill mutations are restricted to loopback bind"}})
             return
-        cluster, db, ok = self._kusto_context()
+        backend, handle, ok = self._memory_context_required()
         if not ok:
             return
+        cluster, db = handle if backend == "kusto" else (None, None)
         skill_id, error = self._validate_skill_id(raw_skill_id)
         if error:
             self._json_response(400, {"error": {"message": error}})
@@ -1174,9 +1185,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "skill mutations are restricted to loopback bind"}})
             return
-        cluster, db, ok = self._kusto_context()
+        backend, handle, ok = self._memory_context_required()
         if not ok:
             return
+        cluster, db = handle if backend == "kusto" else (None, None)
         skill_id, error = self._validate_skill_id(raw_skill_id)
         if error:
             self._json_response(400, {"error": {"message": error}})
@@ -1680,28 +1692,55 @@ class BridgeHandler(BaseHTTPRequestHandler):
             f"Interaction:\n{digest}"
         )
 
-        # Use ACP to generate the skill
-        if not _st.acp_client or not _st.acp_client.alive:
-            self._json_response(503, {"error": {"message": "ACP not available for skill extraction"}})
-            return
+        # Use ACP or LM Studio to generate the skill
+        result_text = ""
+        if _st.acp_client and _st.acp_client.alive:
+            try:
+                result = _st.acp_client.send_prompt([
+                    {"role": "system", "content": "You extract reusable skills from successful interactions. Output only valid JSON."},
+                    {"role": "user", "content": extract_prompt}
+                ])
+                result_text = str(result or "").strip()
+            except Exception as e:
+                self._json_response(502, {"error": {"message": f"skill extraction failed: {e}"}})
+                return
+        else:
+            # Fall back to LM Studio
+            try:
+                from bridge.utils import _load_client_prefs, _validate_lmstudio_base_url
+                import urllib.request
+                prefs = _load_client_prefs()
+                lms_base = (prefs.get("lmstudio_base_url") or "http://localhost:1234/v1").rstrip("/")
+                lms_model = prefs.get("lmstudio_model") or ""
+                lms_base, lms_error = _validate_lmstudio_base_url(lms_base)
+                if lms_error:
+                    self._json_response(503, {"error": {"message": f"No agent available: {lms_error}"}})
+                    return
+                payload = json.dumps({
+                    "model": lms_model or "default",
+                    "messages": [
+                        {"role": "system", "content": "You extract reusable skills from successful interactions. Output only valid JSON, no code fences, no prose."},
+                        {"role": "user", "content": extract_prompt},
+                    ],
+                    "temperature": 0.3,
+                }).encode()
+                req = urllib.request.Request(lms_base + "/chat/completions", data=payload,
+                                            headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    body = json.loads(resp.read())
+                result_text = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            except Exception as e:
+                self._json_response(502, {"error": {"message": f"skill extraction failed: {e}"}})
+                return
 
         try:
-            result = _st.acp_client.send_prompt([
-                {"role": "system", "content": "You extract reusable skills from successful interactions. Output only valid JSON."},
-                {"role": "user", "content": extract_prompt}
-            ])
-            # Parse the result as JSON
-            result_text = str(result or "").strip()
-            # Strip markdown fencing if present
-            if result_text.startswith("```"):
-                result_text = re.sub(r"^```(?:json)?\s*", "", result_text)
-                result_text = re.sub(r"\s*```$", "", result_text)
-            draft = json.loads(result_text)
+            draft, err = _parse_evarise_json(result_text)
+            if err:
+                self._json_response(200, {"draft": None, "raw": result_text[:1000], "error": err})
+                return
             draft["Source"] = "auto-learned"
             draft["Status"] = "draft"
             self._json_response(200, {"draft": draft})
-        except json.JSONDecodeError:
-            self._json_response(200, {"draft": None, "raw": result_text[:1000], "error": "model output was not valid JSON"})
         except Exception as e:
             self._json_response(502, {"error": {"message": f"skill extraction failed: {e}"}})
 

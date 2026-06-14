@@ -582,6 +582,25 @@ def _build_memory_context_sqlite(user_message):
         "Your capabilities scale through learned skills — the more you do, the more you can do."
     )
 
+    # Inject live MCP server status so Eva knows what's connected
+    if _st.local_mcp_manager and _st.local_mcp_manager.alive:
+        _mcp_lines = []
+        for name, srv in _st.local_mcp_manager.servers.items():
+            if srv.alive:
+                tool_names = [t.get("name", "?") for t in srv.tools]
+                _mcp_lines.append(f"  - {name}: {len(srv.tools)} tools ({', '.join(tool_names[:6])})")
+        if _mcp_lines:
+            context_parts.append(
+                "[Active MCP Servers]\n"
+                "These MCP servers are running and provide your data retrieval tools:\n"
+                + "\n".join(_mcp_lines)
+            )
+    elif _st.acp_client and getattr(_st.acp_client, "alive", False):
+        context_parts.append(
+            "[Active MCP Servers]\n"
+            "Copilot CLI (ACP) is connected and provides web search, GitHub, and data tools."
+        )
+
     # Day lifecycle
     today = datetime.date.today().isoformat()
     if _st.last_interaction_date != today:
@@ -1098,6 +1117,25 @@ def _build_memory_context(user_message):
         "5. After succeeding at something new, the system auto-learns it as a skill for next time\n"
         "Your capabilities scale through learned skills — the more you do, the more you can do."
     )
+
+    # Inject live MCP server status so Eva knows what's connected
+    if _st.local_mcp_manager and _st.local_mcp_manager.alive:
+        _mcp_lines = []
+        for name, srv in _st.local_mcp_manager.servers.items():
+            if srv.alive:
+                tool_names = [t.get("name", "?") for t in srv.tools]
+                _mcp_lines.append(f"  - {name}: {len(srv.tools)} tools ({', '.join(tool_names[:6])})")
+        if _mcp_lines:
+            context_parts.append(
+                "[Active MCP Servers]\n"
+                "These MCP servers are running and provide your data retrieval tools:\n"
+                + "\n".join(_mcp_lines)
+            )
+    elif _st.acp_client and getattr(_st.acp_client, "alive", False):
+        context_parts.append(
+            "[Active MCP Servers]\n"
+            "Copilot CLI (ACP) is connected and provides web search, GitHub, and data tools."
+        )
 
     # ── 2. Day lifecycle (first message of the day) ────────────────────
     today = datetime.date.today().isoformat()
