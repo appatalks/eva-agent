@@ -403,57 +403,32 @@
                        .replace(/[^A-Za-z0-9._\-]+/g, '_').slice(0, 120) || 'eva-artifact.txt';
       var content = String(args.content == null ? '' : args.content);
       var mime = String(args.mime || 'text/plain');
-      // PDF requested by mime or extension: generate a real PDF instead of
-      // labeling raw text as application/pdf (which produced a corrupt file).
       var isPdf = /application\/pdf/i.test(mime) || /\.pdf$/i.test(safeName);
       if (isPdf) {
         mime = 'application/pdf';
         if (!/\.pdf$/i.test(safeName)) safeName += '.pdf';
       }
-      var sid = _shortSessionId();
-      var virtualPath = 'tmp/' + sid + '/' + safeName;
-      // Browsers replace path separators in the download attribute, so encode
-      // the namespace into the filename itself.
-      var downloadName = 'tmp__' + sid + '__' + safeName;
-      var blob, size;
-      if (isPdf) {
-        var pdfStr = _textToPdf(content, {});
-        var bytes = _latin1Bytes(pdfStr);
-        blob = new Blob([bytes], { type: mime });
-        size = bytes.length;
-      } else {
-        blob = new Blob([content], { type: mime });
-        size = content.length;
+
+      // Write the file through the bridge so it lands in ARTIFACTS_DIR and is
+      // served via /v1/files/<name>. This replaces the old blob URL approach
+      // which broke under Electron's file:// origin.
+      var bUrl = bridgeUrl().replace(/\/+$/, '');
+      try {
+        var writeResp = await fetch(bUrl + '/v1/files/write', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: safeName, content: content, is_pdf: isPdf })
+        });
+        if (!writeResp.ok) throw new Error('HTTP ' + writeResp.status);
+      } catch (e) {
+        return { html: '<div class="cog-action-err">[file write failed: ' + String(e.message || e) + ']</div>' };
       }
-      var href = URL.createObjectURL(blob);
-      var esc = function (s) {
-        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-                        .replace(/"/g,'&quot;');
-      };
-      // A PDF opens in a viewer; a plain text/markdown artifact opens as text.
-      // The link doubles as a download (download attr) and an opener.
-      var openHint = isPdf
-        ? ' <a href="' + href + '" target="_blank" rel="noopener" class="cog-dl-link">Open</a>'
-        : '';
-      var html = '<div class="cog-action-file">' +
-                 '<a href="' + href + '" download="' + esc(downloadName) +
-                 '" class="cog-dl-link">Download ' + esc(safeName) + '</a>' + openHint + ' ' +
-                 '<span class="cog-dl-meta">(' + esc(mime) + ', ' + size +
-                 ' bytes &middot; ' + esc(virtualPath) + ')</span>' +
-                 '</div>';
-      // Auto-open PDFs so "open it" just works without a second click. Opened in
-      // a new tab/window; if the popup is blocked, the Open/Download links remain.
-      if (isPdf) {
-        try { window.open(href, '_blank', 'noopener'); } catch (_) {}
-      }
+
+      // Emit [[EVA_FILE]] marker so renderEvaResponse appends proper download/open links.
       return {
-        html: html,
+        html: '\n[[EVA_FILE]] ' + safeName,
         filename: safeName,
-        downloadName: downloadName,
-        virtualPath: virtualPath,
-        sessionId: sid,
-        mime: mime,
-        size: size
+        mime: mime
       };
     }
   });

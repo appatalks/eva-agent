@@ -426,6 +426,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._background_review(parsed_path)
         elif parsed_path == "/v1/files/purge":
             self._purge_artifacts()
+        elif parsed_path == "/v1/files/write":
+            self._write_artifact()
         else:
             self.send_error(404, "Not Found")
 
@@ -1211,6 +1213,116 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"opened": True, "file": requested_name})
         except Exception as e:
             self._json_response(500, {"error": {"message": f"Could not open file: {e}"}})
+
+    def _write_artifact(self):
+        """Accept file content from the frontend and write to ARTIFACTS_DIR.
+
+        POST /v1/files/write  {filename: str, content: str, is_pdf: bool}
+        The frontend's file.download capability calls this instead of using
+        blob URLs (which break under Electron's file:// origin).
+        """
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "only available on localhost"}})
+            return
+        data, err = self._read_json_body()
+        if err:
+            self._json_response(400, {"error": {"message": err}})
+            return
+        filename = (data.get("filename") or "").strip()
+        if not filename or not _valid_artifact_name(filename):
+            self._json_response(400, {"error": {"message": "invalid filename"}})
+            return
+        content = data.get("content", "")
+        is_pdf = bool(data.get("is_pdf", False))
+        os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
+        target = os.path.join(_ARTIFACTS_DIR, filename)
+        base = os.path.realpath(_ARTIFACTS_DIR)
+        if not os.path.realpath(target).startswith(base + os.sep):
+            self._json_response(400, {"error": {"message": "path traversal"}})
+            return
+        try:
+            if is_pdf:
+                self._write_text_pdf(target, content)
+            else:
+                with open(target, "w", encoding="utf-8") as f:
+                    f.write(content)
+            size = os.path.getsize(target)
+            print(f"[Artifact] Wrote {filename} ({size} bytes, pdf={is_pdf})")
+            self._json_response(200, {"ok": True, "filename": filename, "size": size})
+        except Exception as e:
+            self._json_response(500, {"error": {"message": f"write failed: {e}"}})
+
+    @staticmethod
+    def _write_text_pdf(path, text):
+        """Generate a minimal valid PDF from plain text and write to path."""
+        text = str(text or "")
+        font_size = 11
+        leading = round(font_size * 1.35)
+        margin_x, margin_top = 50, 50
+        page_w, page_h = 612, 792
+        lines_per_page = max(1, (page_h - margin_top * 2) // leading)
+        max_chars = 95
+
+        def to_latin1(s):
+            return "".join(c if ord(c) <= 255 else "?" for c in s)
+
+        def esc(s):
+            return s.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+        raw = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        lines = []
+        for ln in raw:
+            ln = ln.replace("\t", "    ")
+            if not ln:
+                lines.append("")
+                continue
+            cur = ""
+            for tok in re.split(r"(\s+)", ln):
+                if cur and len(cur + tok) > max_chars:
+                    lines.append(cur)
+                    cur = "" if tok.strip() == "" else tok
+                else:
+                    cur += tok
+                while len(cur) > max_chars:
+                    lines.append(cur[:max_chars])
+                    cur = cur[max_chars:]
+            lines.append(cur)
+        if not lines:
+            lines = [""]
+
+        pages = [lines[i:i + lines_per_page] for i in range(0, len(lines), lines_per_page)]
+        objs = {}
+        objs[1] = "<< /Type /Catalog /Pages 2 0 R >>"
+        objs[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+        page_nums = []
+        num = 4
+        for pl in pages:
+            pn, cn = num, num + 1
+            num += 2
+            page_nums.append(pn)
+            start_y = page_h - margin_top
+            stream = f"BT /F1 {font_size} Tf {leading} TL {margin_x} {start_y} Td\n"
+            for l in pl:
+                stream += f"({esc(to_latin1(l))}) Tj T*\n"
+            stream += "ET"
+            objs[cn] = f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream"
+            objs[pn] = (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w} {page_h}] "
+                        f"/Resources << /Font << /F1 3 0 R >> >> /Contents {cn} 0 R >>")
+        kids = " ".join(f"{n} 0 R" for n in page_nums)
+        objs[2] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_nums)} >>"
+        max_num = num - 1
+        out = "%PDF-1.4\n"
+        offsets = {}
+        for n in range(1, max_num + 1):
+            offsets[n] = len(out)
+            out += f"{n} 0 obj\n{objs[n]}\nendobj\n"
+        xref_pos = len(out)
+        out += f"xref\n0 {max_num + 1}\n0000000000 65535 f \n"
+        for m in range(1, max_num + 1):
+            out += f"{offsets[m]:010d} 00000 n \n"
+        out += f"trailer\n<< /Size {max_num + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF"
+        with open(path, "wb") as f:
+            f.write(bytes(ord(c) & 0xFF for c in out))
 
     def _serve_artifact(self, requested_name):
         if not _is_loopback_bind():
