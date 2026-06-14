@@ -1196,15 +1196,19 @@ function _evaAgentConfirmAsk(question, needsText) {
       console.warn('[AgentConfirm] Auto-cancelling after 60s timeout');
       _agentConfirm.pending = false;
       _agentConfirm.needsText = false;
-      // Auto-decline the parked agent
-      if (typeof EvaBrowser !== 'undefined' && EvaBrowser &&
-          typeof EvaBrowser.isAwaitingConfirm === 'function' && EvaBrowser.isAwaitingConfirm()) {
-        EvaBrowser.answerConfirm(false, '');
-      }
-      if (typeof EvaDesktop !== 'undefined' && EvaDesktop &&
-          typeof EvaDesktop.isAwaitingConfirm === 'function' && EvaDesktop.isAwaitingConfirm()) {
-        EvaDesktop.answerConfirm(false, '');
-      }
+      // Best-effort decline the parked agent. Ignore errors (run may be stale).
+      try {
+        if (typeof EvaBrowser !== 'undefined' && EvaBrowser &&
+            typeof EvaBrowser.isAwaitingConfirm === 'function' && EvaBrowser.isAwaitingConfirm()) {
+          EvaBrowser.answerConfirm(false, '');
+        }
+      } catch (_) {}
+      try {
+        if (typeof EvaDesktop !== 'undefined' && EvaDesktop &&
+            typeof EvaDesktop.isAwaitingConfirm === 'function' && EvaDesktop.isAwaitingConfirm()) {
+          EvaDesktop.answerConfirm(false, '');
+        }
+      } catch (_) {}
     }
   }, 60000);
   var q = String(question || 'Should I continue?').trim();

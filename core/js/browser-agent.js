@@ -479,7 +479,18 @@
     try {
       var resp = await fetch(bridgeBase() + _state.endpoint + '/status?run_id=' +
         encodeURIComponent(_state.runId), { signal: AbortSignal.timeout(8000) });
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        // Track consecutive failures. After 3 404s the run_id is stale
+        // (bridge restarted or run expired). Stop spamming the console.
+        _state._pollFails = (_state._pollFails || 0) + 1;
+        if (resp.status === 404 && _state._pollFails >= 3) {
+          console.warn('[Agent] Run ' + _state.runId + ' no longer exists, stopping poll');
+          stopPolling();
+          _state.runId = null;
+        }
+        return;
+      }
+      _state._pollFails = 0;
       var status = await resp.json();
       render(status);
       if (status.status === 'done' || status.status === 'cancelled' || status.status === 'error') {
