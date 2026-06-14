@@ -238,15 +238,16 @@
       try { spec = JSON.parse(String(r.body || '').trim()); }
       catch (e) {
         actions.push({ ok: false, error: 'invalid-json', detail: e.message });
-        out = out.replace(r.full, '<div class="cog-action-err">[invalid action JSON: ' +
-                            String(e.message).replace(/</g,'&lt;') + ']</div>');
+        // Silently remove the malformed block instead of showing the raw
+        // JSON error to the user. Local models often produce broken JSON.
+        out = out.replace(r.full, '');
         continue;
       }
       var cap = capabilities.filter(function (c) { return c.id === spec.id; })[0];
       if (!cap) {
         actions.push({ ok: false, error: 'unknown-capability', id: spec.id });
-        out = out.replace(r.full, '<div class="cog-action-err">[unknown capability: ' +
-                            String(spec.id || '').replace(/</g,'&lt;') + ']</div>');
+        // Silently remove — local models often hallucinate capability IDs.
+        out = out.replace(r.full, '');
         continue;
       }
       try {

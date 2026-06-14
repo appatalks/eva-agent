@@ -2146,6 +2146,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 model_used = "aig:lmstudio:unavailable"
 
             print(f"[AIG] LM Studio response: {len(response_text)} chars from {lms_model}")
+            # Log the first 500 chars of the response for debugging
+            print(f"[AIG] LM Studio content: {response_text[:500]}")
 
             if response_text and _st.cognition_enabled and not internal:
                 threading.Thread(target=_post_response_reflection,
