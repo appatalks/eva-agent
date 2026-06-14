@@ -3477,6 +3477,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         mcp_config = dict(_st.acp_client.mcp_config)
                     if not mcp_config:
                         mcp_config = _load_persisted_mcp_config()
+                    # Always include the web search MCP server for local mode
+                    # (replaces Copilot CLI's built-in Bing search)
+                    if "eva-web-search" not in mcp_config:
+                        _ws_path = os.path.join(
+                            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "web_search_mcp.py",
+                        )
+                        if os.path.isfile(_ws_path):
+                            mcp_config["eva-web-search"] = {
+                                "command": sys.executable,
+                                "args": [_ws_path],
+                            }
+                            print("[Mode] Auto-added eva-web-search MCP (DuckDuckGo, no API key)")
                     _st.local_mcp_manager = LocalMCPManager()
                     _st.local_mcp_manager.start_servers(mcp_config)
                     print(f"[Mode] Local MCP started: {_st.local_mcp_manager.tool_count} tools")
