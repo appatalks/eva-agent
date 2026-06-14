@@ -8,7 +8,15 @@ function lmsSend() {
     let openLLMessages = [
         {
             "role": "system",
-            "content": ((typeof getSystemPrompt === 'function') ? getSystemPrompt() : '') + " Images can be shown with this tag: [Image of <Description>]. " + dateContents
+            "content": ((typeof getSystemPrompt === 'function') ? getSystemPrompt() : '') + " Images can be shown with this tag: [Image of <Description>]. " + dateContents +
+              "\n\nCRITICAL DATA ACCURACY RULES:\n" +
+              "- NEVER fabricate news headlines, stock prices, weather forecasts, locations, or current events.\n" +
+              "- If a [Data Retrieved] section exists in your context, use it as your authoritative source.\n" +
+              "- If NO [Data Retrieved] section exists, honestly say you don't have that live data right now.\n" +
+              "- Do NOT make up the user's location. Only state their location if it appears in [User Profile] or [Memory].\n" +
+              "- Do NOT generate fake source citations (AP, Reuters, etc.) unless they appear in [Data Retrieved].\n" +
+              "- When creating files or reports, only include facts you can verify from the context provided to you.\n" +
+              "- If asked for a briefing and you have no real data, say so and offer to help with what you do know."
         },
         {
             "role": "assistant",
@@ -85,7 +93,16 @@ function lmsSend() {
         fetch(openAIUrl, requestOptions)
                 .then(response => response.ok ? response.json() : Promise.reject(new Error(`Error: ${response.status}`)))
                 .then(async (result) => {
-                        const candidate = (result && result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content) || '';
+                        var candidate = (result && result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content) || '';
+
+                        // Process [[EVA_ACTION]] blocks (file.download, etc.)
+                        // so local models get the same capability execution as AIG.
+                        if (typeof Cognition !== 'undefined' && Cognition.executeActions) {
+                          try {
+                            var execRes = await Cognition.executeActions(candidate);
+                            candidate = execRes.content;
+                          } catch (_) {}
+                        }
 
                         // Render via unified renderer
                         const out = document.getElementById("txtOutput");
