@@ -3219,6 +3219,8 @@ function _vvStopListening() {
   if (_vv.silenceTimer) { clearTimeout(_vv.silenceTimer); _vv.silenceTimer = null; }
   if (_vv.recordingCap) { clearTimeout(_vv.recordingCap); _vv.recordingCap = null; }
   if (_vv._watchdog) { clearInterval(_vv._watchdog); _vv._watchdog = null; }
+  if (_vv._whisperWatchdog) { clearInterval(_vv._whisperWatchdog); _vv._whisperWatchdog = null; }
+  if (_vv._energyMonitor) { clearInterval(_vv._energyMonitor); _vv._energyMonitor = null; }
   if (_vv.recognition) {
     var rec = _vv.recognition;
     _vv.recognition = null;
@@ -3229,6 +3231,7 @@ function _vvStopListening() {
     _vv.mediaRecorder = null;
   }
   _vv.whisperMode = false;
+  _vv._whisperInflight = false;
   _vv.audioChunks = [];
   _vv.speechDetected = false;
   _vvStopMicAnalyser();
@@ -3242,10 +3245,27 @@ function _vvStartWhisperListening() {
   if (typeof stopVoiceListener === 'function') stopVoiceListener();
 
   _vv.whisperMode = true;
+  _vv._whisperInflight = false;
   _vvSetStatus('listening');
   _vvStartMicAnalyser().then(function() {
     if (_vv.open && _vv.whisperMode) _vvWhisperRecord();
   });
+
+  // Whisper recording loop watchdog: if the loop has stalled (no active
+  // recorder and no API call in flight) while we should be listening, restart.
+  if (_vv._whisperWatchdog) clearInterval(_vv._whisperWatchdog);
+  _vv._whisperWatchdog = setInterval(function() {
+    if (!_vv.open || !_vv.whisperMode) {
+      clearInterval(_vv._whisperWatchdog); _vv._whisperWatchdog = null;
+      return;
+    }
+    if (_vv.phase === 'thinking' || _vv.phase === 'speaking') return;
+    var recActive = _vv.mediaRecorder && _vv.mediaRecorder.state === 'recording';
+    if (!recActive && !_vv._whisperInflight) {
+      console.warn('[VoiceView] Whisper watchdog: recording loop stalled, restarting');
+      _vvWhisperRecord();
+    }
+  }, 10000);
 }
 
 function _vvWhisperRecord() {
@@ -3300,8 +3320,13 @@ function _vvWhisperMonitor() {
   var threshold = 25;
   var silenceDelay = 1500;
 
-  function check() {
-    if (!_vv.open || !_vv.whisperMode || !_vv.analyser || !_vv.dataArray) return;
+  // Use setInterval instead of requestAnimationFrame so that Electron does not
+  // throttle the energy monitor to 0 fps when the window is unfocused.
+  if (_vv._energyMonitor) clearInterval(_vv._energyMonitor);
+  _vv._energyMonitor = setInterval(function() {
+    if (!_vv.open || !_vv.whisperMode || !_vv.analyser || !_vv.dataArray) {
+      clearInterval(_vv._energyMonitor); _vv._energyMonitor = null; return;
+    }
     if (_vv.phase === 'thinking' || _vv.phase === 'speaking') return;
     if (!_vv.mediaRecorder || _vv.mediaRecorder.state !== 'recording') return;
 
@@ -3321,11 +3346,7 @@ function _vvWhisperMonitor() {
         }
       }, silenceDelay);
     }
-
-    requestAnimationFrame(check);
-  }
-
-  requestAnimationFrame(check);
+  }, 100);
 }
 
 function _vvWhisperTranscribe(blob) {
@@ -3335,19 +3356,29 @@ function _vvWhisperTranscribe(blob) {
     return;
   }
 
+  _vv._whisperInflight = true;
+
   var formData = new FormData();
   formData.append('file', blob, 'audio.webm');
   formData.append('model', 'whisper-1');
   formData.append('language', 'en');
 
+  // Abort controller with 20s timeout so a hanging network call does not
+  // permanently kill the recording loop.
+  var controller = new AbortController();
+  var fetchTimeout = setTimeout(function() { controller.abort(); }, 20000);
+
   fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + apiKey },
-    body: formData
+    body: formData,
+    signal: controller.signal
   }).then(function(res) {
     if (!res.ok) throw new Error('Whisper API returned ' + res.status);
     return res.json();
   }).then(function(data) {
+    _vv._whisperInflight = false;
+    clearTimeout(fetchTimeout);
     if (data.text && data.text.trim()) {
       _vvHandleTranscript(data.text.trim());
     }
@@ -3355,6 +3386,8 @@ function _vvWhisperTranscribe(blob) {
       _vvWhisperRecord();
     }
   }).catch(function(err) {
+    _vv._whisperInflight = false;
+    clearTimeout(fetchTimeout);
     console.warn('[VoiceView] Whisper transcription error:', err.message);
     if (_vv.open && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 1000);
   });
@@ -3417,6 +3450,7 @@ function _vvEnterAwake(timeoutMs) {
 // Called when a turn completes. In conversation mode Eva stays awake for a
 // follow-up; otherwise she returns to standby and waits for the wake word.
 function _vvAfterTurn() {
+  _vv._thinkingStart = null;
   if (!_vv.open) return;
   if (!(_vv.recognition || _vv.whisperMode)) { _vvSetStatus('idle'); return; }
   if (_vv.convoMode) {
@@ -3523,8 +3557,20 @@ function _vvStopBargeMonitor() {
 }
 
 function _vvHandleTranscript(transcript) {
-  // A response is mid-flight: ignore.
-  if (_vv.phase === 'thinking') return;
+  // A response is mid-flight: if stuck too long, recover instead of ignoring forever.
+  if (_vv.phase === 'thinking') {
+    // Allow up to 90s of thinking, then force recovery
+    if (!_vv._thinkingStart) _vv._thinkingStart = Date.now();
+    if (Date.now() - _vv._thinkingStart > 90000) {
+      console.warn('[VoiceView] Stuck in thinking for 90s, forcing recovery');
+      _vv._thinkingStart = null;
+      _vv.phase = 'listening';
+      _vvSetStatus('listening');
+      // Fall through to process the transcript instead of returning
+    } else {
+      return;
+    }
+  }
   // Spoken interruption while Eva is talking: barge in, then process the phrase
   // as the redirect. (Whisper mode does not record during speaking, so this
   // branch is reached only by the Web Speech recognizer; the energy monitor
@@ -3612,6 +3658,7 @@ function _vvSendCommand(command) {
   }
   _vv.lastTranscript = command;
   _vv.cmdStart = performance.now();
+  _vv._thinkingStart = Date.now();
   if (_vv.awakeTimer) { clearTimeout(_vv.awakeTimer); _vv.awakeTimer = null; }
   _vvSetStatus('thinking');
   _vvHideAssets();
