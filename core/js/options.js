@@ -3136,6 +3136,7 @@ function _vvStartListening() {
   };
 
   _vv.recognition.onresult = function(event) {
+    _vv._lastResultTime = Date.now();
     for (var i = event.resultIndex; i < event.results.length; i++) {
       if (!event.results[i].isFinal) continue;
       _vvHandleTranscript(event.results[i][0].transcript.trim());
@@ -3159,27 +3160,65 @@ function _vvStartListening() {
 
   _vv.recognition.onend = function() {
     if (_vv.recognition && _vv.open) {
-      try { _vv.recognition.start(); }
-      catch(e) {
-        setTimeout(function() {
-          if (_vv.recognition && _vv.open) {
-            try { _vv.recognition.start(); } catch(e2) {
+      // Browser stopped recognition (normal after silence/timeout). Restart.
+      _vv._restartAttempts = (_vv._restartAttempts || 0) + 1;
+      var delay = Math.min(300 * _vv._restartAttempts, 2000);
+      setTimeout(function() {
+        if (!_vv.recognition || !_vv.open) return;
+        try {
+          _vv.recognition.start();
+          _vv._restartAttempts = 0; // reset on success
+        } catch(e) {
+          console.warn('[VoiceView] Recognition restart failed (attempt ' + _vv._restartAttempts + '):', e);
+          if (_vv._restartAttempts >= 5) {
+            // Too many failures, fall back to Whisper if available
+            console.warn('[VoiceView] Falling back to Whisper after repeated restart failures');
+            _vv.recognition = null;
+            _vv._restartAttempts = 0;
+            if (typeof _vvStartWhisperListening === 'function') {
+              _vvStartWhisperListening();
+            } else {
               _vvSetStatus('error');
-              _vv.recognition = null;
             }
           }
-        }, 300);
-      }
+        }
+      }, delay);
     }
   };
 
   _vv.recognition.start();
+  _vv._lastResultTime = Date.now();
+  _vv._restartAttempts = 0;
+
+  // Watchdog: if no recognition results for 60s while the view is open and
+  // not in speaking/thinking phase, force-restart recognition. The browser
+  // sometimes silently stops delivering results without firing onend.
+  if (_vv._watchdog) clearInterval(_vv._watchdog);
+  _vv._watchdog = setInterval(function() {
+    if (!_vv.open || !_vv.recognition) {
+      clearInterval(_vv._watchdog);
+      _vv._watchdog = null;
+      return;
+    }
+    if (_vv.phase === 'speaking' || _vv.phase === 'thinking') return;
+    var elapsed = Date.now() - (_vv._lastResultTime || Date.now());
+    if (elapsed > 60000) {
+      console.warn('[VoiceView] Watchdog: no results for 60s, restarting recognition');
+      try { _vv.recognition.stop(); } catch(_) {}
+      setTimeout(function() {
+        if (_vv.recognition && _vv.open) {
+          try { _vv.recognition.start(); _vv._lastResultTime = Date.now(); } catch(_) {}
+        }
+      }, 500);
+    }
+  }, 15000);
 }
 
 function _vvStopListening() {
   if (_vv.awakeTimer) { clearTimeout(_vv.awakeTimer); _vv.awakeTimer = null; }
   if (_vv.silenceTimer) { clearTimeout(_vv.silenceTimer); _vv.silenceTimer = null; }
   if (_vv.recordingCap) { clearTimeout(_vv.recordingCap); _vv.recordingCap = null; }
+  if (_vv._watchdog) { clearInterval(_vv._watchdog); _vv._watchdog = null; }
   if (_vv.recognition) {
     var rec = _vv.recognition;
     _vv.recognition = null;
