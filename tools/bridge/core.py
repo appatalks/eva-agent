@@ -2355,6 +2355,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]. "
                     "Do NOT say you cannot see or access the camera."
                 )})
+            # Signal messaging reminder for local models
+            _signal_keywords = {'signal', 'text me', 'text message', 'send me a message', 'send a message', 'notify me', 'message me'}
+            if any(kw in user_message.lower() for kw in _signal_keywords):
+                lms_messages.append({"role": "system", "content": (
+                    "REMINDER: You CAN send Signal text messages. To send one, "
+                    "emit [[EVA_SIGNAL]]{\"message\":\"<text to send>\"}[[/EVA_SIGNAL]]. "
+                    "Do NOT say you cannot send messages. Just emit the marker."
+                )})
             lms_messages.append({"role": "user", "content": user_message})
 
             try:
@@ -2391,6 +2399,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 response_text = response_text.rstrip()
                 response_text += f'\n\n[[EVA_LOOK]]{{"question":"{_look_q}"}}[[/EVA_LOOK]]'
                 print("[AIG] Camera fallback: injected [[EVA_LOOK]] for local model")
+
+            # Signal fallback: if the user asked for a Signal/text message and
+            # the model didn't emit the marker, inject it so the message sends.
+            if any(kw in user_message.lower() for kw in _signal_keywords) and '[[EVA_SIGNAL]]' not in response_text:
+                # Try to extract the message content from the user request
+                _sig_body = user_message.strip()
+                # Look for quoted text the user wants sent
+                _quoted = _re.search(r'["\u201c](.+?)["\u201d]', _sig_body)
+                if _quoted:
+                    _sig_body = _quoted.group(1)
+                response_text = response_text.rstrip()
+                response_text += f'\n\n[[EVA_SIGNAL]]{{"message":"{_sig_body}"}}[[/EVA_SIGNAL]]'
+                print("[AIG] Signal fallback: injected [[EVA_SIGNAL]] for local model")
 
             # Signal: parse [[EVA_SIGNAL]]{"message":"..."}[[/EVA_SIGNAL]] and
             # dispatch via signal-cli before the response reaches the frontend.
