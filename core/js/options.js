@@ -1888,14 +1888,12 @@ function onModelSettingsChange() {
 
   // Auto-switch data retrieval mode based on selected model.
   // lm-studio (or aig with lmstudio backend) -> local mode
-  // Cloud models -> cloud mode
+  // Cloud models: leave the user's persisted mode choice alone.
   var needsLocal = (model === 'lm-studio') ||
     (model === 'aig' && (localStorage.getItem('aigBackend') || '') === 'lmstudio');
   var currentMode = (document.getElementById('selDataMode') || {}).value || 'cloud';
   if (needsLocal && currentMode !== 'local') {
     switchDataMode('local');
-  } else if (!needsLocal && currentMode === 'local') {
-    switchDataMode('cloud');
   }
 }
 
