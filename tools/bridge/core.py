@@ -2374,6 +2374,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # Log the first 500 chars of the response for debugging
             print(f"[AIG] LM Studio content: {response_text[:500]}")
 
+            # Camera fallback: local models often ignore the [[EVA_LOOK]]
+            # instruction.  If the user clearly asked about the camera/webcam
+            # and the model didn't emit the marker, append it so the frontend
+            # triggers the capture automatically.
+            if any(kw in user_message.lower() for kw in _camera_keywords) and '[[EVA_LOOK]]' not in response_text:
+                # Extract a question from the user message for the vision model
+                _look_q = user_message.strip()
+                response_text = response_text.rstrip()
+                response_text += f'\n\n[[EVA_LOOK]]{{"question":"{_look_q}"}}[[/EVA_LOOK]]'
+                print("[AIG] Camera fallback: injected [[EVA_LOOK]] for local model")
+
             # Post-process: convert blob/download links to [[EVA_FILE]] markers.
             # ACP or the model may produce blob:file:/// URLs or markdown download links
             # referencing sandbox files. These are not accessible in Electron, so we
