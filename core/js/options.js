@@ -2119,18 +2119,19 @@ document.addEventListener('DOMContentLoaded', () => {
     applyTheme(savedTheme);
   // Ensure model options reflect the saved theme on load
   updateModelOptionsForTheme(savedTheme);
+    var _isEvaInit = (savedTheme === 'eva' || (savedTheme && savedTheme.indexOf('eva-') === 0));
     // Apply collapsed state if saved (LCARS or Eva use the sidebar)
-    if ((savedTheme === 'lcars' || savedTheme === 'eva') && savedCollapsed) {
+    if ((savedTheme === 'lcars' || _isEvaInit) && savedCollapsed) {
       document.body.classList.add('lcars-collapsed');
     }
     // Move Speak button into sidebar if active (LCARS or Eva)
-    if ((savedTheme === 'lcars' || savedTheme === 'eva') && lcarsChipSand && speakBtn && !lcarsChipSand.contains(speakBtn)) {
+    if ((savedTheme === 'lcars' || _isEvaInit) && lcarsChipSand && speakBtn && !lcarsChipSand.contains(speakBtn)) {
       lcarsChipSand.appendChild(speakBtn);
       speakBtn.title = 'Speak';
       speakBtn.textContent = 'Speak';
     }
     // Move Print button under Speak (LCARS or Eva)
-    if ((savedTheme === 'lcars' || savedTheme === 'eva') && lcarsChipPrint && printBtn && !lcarsChipPrint.contains(printBtn)) {
+    if ((savedTheme === 'lcars' || _isEvaInit) && lcarsChipPrint && printBtn && !lcarsChipPrint.contains(printBtn)) {
       lcarsChipPrint.appendChild(printBtn);
       printBtn.title = 'Print Output';
     }
@@ -4030,20 +4031,22 @@ function populateEvaSidebarSessions() {
   }).catch(function() {});
 }
 
-// Apply UI theme (default | lcars)
+// Apply UI theme (default | lcars | eva | eva-*)
 function applyTheme(theme) {
   const body = document.body;
   if (!body) return;
 
-  // Remove known theme classes first
-  body.classList.remove('theme-lcars', 'theme-eva');
+  // Remove all theme-* classes (covers variants like theme-eva-rose, etc.)
+  body.className = body.className.replace(/\btheme-\S+/g, '').trim();
   // Unload any theme stylesheets we previously loaded
   unloadThemeStylesheet('lcars');
   unloadThemeStylesheet('eva');
 
   // Add selected theme class
-  if (theme === 'eva') {
+  var isEva = (theme === 'eva' || theme.indexOf('eva-') === 0);
+  if (isEva) {
     body.classList.add('theme-eva');
+    if (theme !== 'eva') body.classList.add('theme-' + theme);
     ensureThemeStylesheet('eva', 'core/themes/eva.css');
     // Move speak button into sidebar (same layout as LCARS)
     const lcarsChipSand = document.getElementById('lcarsChipSand');
@@ -4106,14 +4109,14 @@ function applyTheme(theme) {
 
   // Toggle Eva sidebar visibility
   var evaSidebar = document.getElementById('evaSidebar');
-  if (evaSidebar) evaSidebar.style.display = (theme === 'eva') ? 'flex' : 'none';
+  if (evaSidebar) evaSidebar.style.display = isEva ? 'flex' : 'none';
 
   // Toggle Eva disclaimer
   var evaDisclaimer = document.getElementById('evaDisclaimer');
-  if (evaDisclaimer) evaDisclaimer.style.display = (theme === 'eva') ? 'block' : 'none';
+  if (evaDisclaimer) evaDisclaimer.style.display = isEva ? 'block' : 'none';
 
   // Populate Eva sidebar sessions
-  if (theme === 'eva') populateEvaSidebarSessions();
+  if (isEva) populateEvaSidebarSessions();
 }
 
 // Modular theme stylesheet loader (extensible for future themes)

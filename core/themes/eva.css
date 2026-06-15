@@ -1039,6 +1039,7 @@ body.theme-lcars .vv-log-stream { color: rgba(255,170,90,0.09); }
 body.theme-lcars .vv-vision-frame { border-color: rgba(255,170,90,0.18); box-shadow: 0 0 26px rgba(255,150,70,0.10); }
 body.theme-lcars .vv-vision-text { color: rgba(255,180,110,0.30); }
 
+.voice-view-close {
   position: absolute;
   top: 20px;
   right: 28px;
@@ -1282,4 +1283,78 @@ body.theme-lcars .vv-vision-text { color: rgba(255,180,110,0.30); }
   .vv-hud-bottom { padding: 0 12px 16px; }
   .vv-wave-bar { height: 36px; }
   .vv-assets { right: 12px; left: 12px; width: auto; max-height: 50vh; }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ *  Eva Color Variants
+ *  Each variant overrides the base Eva CSS variables.
+ *  The base theme-eva class must also be present on body.
+ * ══════════════════════════════════════════════════════════════ */
+
+/* ── Eva Rose ──────────────────────────────────────────────── */
+body.theme-eva-rose {
+  --eva-bg:          #100a0e;
+  --eva-sidebar:     #1c1020;
+  --eva-sidebar-item:#2a1830;
+  --eva-surface:     #1a1220;
+  --eva-surface-2:   #281c30;
+  --eva-chat-bg:     #120c14;
+  --eva-border-hl:   rgba(236,72,153,0.35);
+  --eva-accent:      #ec4899;
+  --eva-accent-hover:#f472b6;
+  --eva-purple:      #db2777;
+  --eva-purple-light:#f472b6;
+  --eva-purple-glow: rgba(236,72,153,0.25);
+  --eva-blue-glow:   rgba(236,72,153,0.15);
+}
+
+/* ── Eva Emerald ───────────────────────────────────────────── */
+body.theme-eva-emerald {
+  --eva-bg:          #080f0c;
+  --eva-sidebar:     #0e1c16;
+  --eva-sidebar-item:#163028;
+  --eva-surface:     #0f1a15;
+  --eva-surface-2:   #182a22;
+  --eva-chat-bg:     #0a120e;
+  --eva-border-hl:   rgba(16,185,129,0.35);
+  --eva-accent:      #10b981;
+  --eva-accent-hover:#34d399;
+  --eva-purple:      #059669;
+  --eva-purple-light:#6ee7b7;
+  --eva-purple-glow: rgba(16,185,129,0.25);
+  --eva-blue-glow:   rgba(16,185,129,0.15);
+}
+
+/* ── Eva Ocean ─────────────────────────────────────────────── */
+body.theme-eva-ocean {
+  --eva-bg:          #070f14;
+  --eva-sidebar:     #0c1a24;
+  --eva-sidebar-item:#14283a;
+  --eva-surface:     #0e1820;
+  --eva-surface-2:   #162838;
+  --eva-chat-bg:     #091218;
+  --eva-border-hl:   rgba(6,182,212,0.35);
+  --eva-accent:      #06b6d4;
+  --eva-accent-hover:#22d3ee;
+  --eva-purple:      #0891b2;
+  --eva-purple-light:#67e8f9;
+  --eva-purple-glow: rgba(6,182,212,0.25);
+  --eva-blue-glow:   rgba(6,182,212,0.15);
+}
+
+/* ── Eva Sunset ────────────────────────────────────────────── */
+body.theme-eva-sunset {
+  --eva-bg:          #100c06;
+  --eva-sidebar:     #1c1608;
+  --eva-sidebar-item:#2a2010;
+  --eva-surface:     #1a1508;
+  --eva-surface-2:   #28200e;
+  --eva-chat-bg:     #120e08;
+  --eva-border-hl:   rgba(245,158,11,0.35);
+  --eva-accent:      #f59e0b;
+  --eva-accent-hover:#fbbf24;
+  --eva-purple:      #d97706;
+  --eva-purple-light:#fcd34d;
+  --eva-purple-glow: rgba(245,158,11,0.25);
+  --eva-blue-glow:   rgba(245,158,11,0.15);
 }

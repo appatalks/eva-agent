@@ -6,22 +6,23 @@ html {
 }
 body {
   font-family: Arial, sans-serif;
-  margin: 0; /* Remove default margins */
+  margin: 0;
   border-radius: 12px;
-  overflow: hidden;
   padding: 0;
   color: #fff;
-  display: flex; /* Enable flexbox layout */
-  align-items: center; /* Center elements vertically */
-  justify-content: center; /* Center elements horizontally */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
   background-image: url(img/background.jpg);
   background-color: rgba(68, 70, 84, 0.9);
-  background-repeat: no-repeat; /* Prevent image repetition */
-  background-position: center center; /* Center the image */
-  background-size: 90% auto; /* Set width and height of image */
-  height: 800px; /* Fixed height for desktop */
+  background-repeat: no-repeat;
+  background-position: center center;
+  background-size: cover;
+  height: 100vh;
   overflow: hidden;
   text-align: center;
+  box-sizing: border-box;
 }
 body.eva-standalone {
   padding-top: 32px;
@@ -375,17 +376,23 @@ body.eva-standalone {
   opacity: 100%;
   max-width: 800px;
   width: 90%;
-  margin: 30px auto;
+  margin: 16px auto;
   padding: 20px;
   border-radius: 8px;
   box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
 #txtOutput {
   position: relative;
   margin-top: 2px;
-  width: 750px;
-  height: 300px;
+  width: 100%;
+  max-width: 750px;
+  flex: 1 1 auto;
+  min-height: 200px;
   padding: 10px;
   border: 1px solid #ccc;
   border-radius: 4px;
@@ -397,6 +404,7 @@ body.eva-standalone {
   line-height: 1.5;
   color: #333;
   white-space: pre-wrap;
+  box-sizing: border-box;
 }
 
 .message {
@@ -448,12 +456,14 @@ body.eva-standalone {
 .chat-input-container {
   display: flex;
   align-items: center;
+  width: 100%;
   max-width: 760px;
   border: 1px solid #ccc;
   border-radius: 4px;
   background-color: #fff;
   margin-top: 1px;
-  padding: inherit;    
+  padding: inherit;
+  box-sizing: border-box;
 }
 
 /* Let #txtMsg expand or shrink and fill available space */
@@ -1235,6 +1245,9 @@ body.theme-lcars {
   max-height: 100vh;
   overflow: hidden;
   background-size: cover;
+}
+body.theme-lcars.eva-standalone {
+  padding-top: 32px;
 }
 /* Place sidebar in col 1 and main content in col 2; let main fill available space */
 body.theme-lcars #lcarsSidebar { grid-column: 1; grid-row: 1; }
