@@ -1755,12 +1755,32 @@ function applyPersonalityPreset() {
   // 'custom' leaves textarea as-is for user editing
 }
 
+// Old presets that should be auto-migrated to current versions.
+// If a user's saved prompt matches one of these stale strings, replace it
+// with the corresponding current preset so new capabilities (camera, etc.)
+// are picked up without manual intervention.
+var _STALE_PRESETS = {
+  'default': "You are Eva, an AI assistant with persistent memory and real-time data access. You can look up live stock prices, weather, news, space weather, and market data. You can search the web, generate and find images, and query your Kusto database for stored knowledge and conversation history. You remember user preferences and past interactions across sessions. Always try to fulfill requests using your available tools and data before saying you cannot. Be accurate, helpful, and straightforward.",
+  'concise': "You are Eva. Capabilities: persistent memory, real-time data (stocks, weather, news, markets), web search, image generation, Kusto database queries. Answer factual questions concisely. Use your tools to fetch live data when asked.",
+  'advanced': "You are Eva, an intelligent AI assistant with full tool access. You can: retrieve live stock quotes and financial data, fetch weather/news/market/space weather feeds, search the web and retrieve information, generate and find images, query your Kusto persistent memory database (tables: Knowledge, Conversations, EmotionState, MemorySummaries, SelfState, HeuristicsIndex, Reflections, EmotionBaseline). You remember the user across sessions. Provide detailed, well-structured responses with lists where applicable. Always attempt to use your tools before claiming inability."
+};
+
 function initSystemPrompt() {
   var txt = document.getElementById('txtSystemPrompt');
   if (!txt) return;
   // Load from localStorage or use default preset
   var saved = localStorage.getItem('systemPrompt');
   if (saved) {
+    // Auto-migrate stale presets to current versions
+    var trimmed = saved.trim();
+    var migrated = false;
+    Object.keys(_STALE_PRESETS).forEach(function(k) {
+      if (!migrated && trimmed === _STALE_PRESETS[k]) {
+        saved = PERSONALITY_PRESETS[k];
+        localStorage.setItem('systemPrompt', saved);
+        migrated = true;
+      }
+    });
     txt.value = saved;
     // Sync preset selector
     var sel = document.getElementById('selPers');
