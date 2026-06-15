@@ -3,7 +3,7 @@
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
-> Eva experience — persistent memory, emotion tracking, proactive data retrieval, and
+> Eva experience: persistent memory, emotion tracking, proactive data retrieval, and
 > intelligent cross-model orchestration. All other models work standalone, but AIG is the
 > way Eva was designed to be used.
 
@@ -16,186 +16,222 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 | GitHub Copilot (PAT) | GPT-4.1, GPT-5, o4-mini, GPT-4o, DeepSeek-R1 |
 | GitHub Copilot (ACP) | Claude, Gemini 3 Pro, GPT-5.x via Copilot CLI |
 | Google Gemini | Gemini 2.0 Flash Thinking |
-| LM Studio | Any local OpenAI-compatible model |
+| LM Studio | Any local OpenAI-compatible model (fully offline) |
 | DALL-E 3 | Image generation |
 
 ## Highlights
 
-- Multi-agent AIG with eva and reviewer
-- MCP tool access (Kusto, GitHub, Azure) hot-reloadable at runtime
-- Persistent memory and emotion tracking via Azure Data Explorer
-- Inline image search (Wikimedia) and generation (DALL-E 3)
+- Multi-agent AIG with eva and reviewer cognitive pipeline
+- Dual-mode data retrieval: cloud (Copilot CLI + MCP) or local (LM Studio + direct MCP)
+- MCP tool access (Kusto, GitHub, Azure, web search) hot-reloadable at runtime
+- Persistent memory via Azure Data Explorer (Kusto) or local SQLite
+- Autonomous browser control (Playwright + CDP) and desktop control (pyautogui)
+- Webcam presence detection (OpenCV face + motion)
+- Inline image search (Wikimedia) and generation (DALL-E 3, gpt-image-1)
+- Downloadable artifact creation (PDF, text, CSV, markdown) with auto-open
+- Skill import/normalization from paste, URL, GitHub, or file upload
+- Background memory consolidation with human-in-the-loop proposals
+- Cron scheduler for recurring tasks (briefings, checks, reminders)
+- Alert system (SEC filings, weather, space weather, keyword watch)
 - TTS: OpenAI (default), browser, Bark, Amazon Polly
 - LCARS and Eva themes
 - Standalone Electron AppImage with bundled bridge
+- Full behavioral eval harness with mock and live modes
 
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                        Browser                           │
-│  index.html + core/js/*.js + core/style.css              │
-│                                                          │
-│  ┌─────────┐ ┌──────────┐ ┌────────┐ ┌───────────────┐  │
-│  │ OpenAI  │ │ Copilot  │ │ Gemini │ │ Copilot (ACP) │  │
-│  │ Direct  │ │ PAT API  │ │ Direct │ │ via Bridge    │  │
-│  └────┬────┘ └────┬─────┘ └───┬────┘ └───────┬───────┘  │
-└───────┼──────────┼─────────┼──────────────┼──────────────┘
-        │          │         │              │
-        ▼          ▼         ▼              ▼
-   api.openai  models.     google     ┌────────────┐
-     .com     github.ai  generative   │ ACP Bridge │
-                          .google    │ (Python)   │
-                          apis.com   │ port 8888  │
-                                      └─────┬──────┘
-                                            │ stdio (NDJSON)
-                                            ▼
-                                      ┌────────────┐
-                                      │ copilot    │
-                                      │ --acp      │
-                                      │ --stdio    │
-                                      └─────┬──────┘
-                                            │ spawns
-                                            ▼
-                                      ┌────────────┐
-                                      │ MCP Servers│
-                                      │ kusto, gh  │
-                                      │ azure      │
-                                      └────────────┘
++---------------------------------------------------------------------------+
+|                           Browser / Electron                              |
+|  index.html + core/js/*.js + core/style.css                               |
+|                                                                           |
+|  +---------+ +----------+ +--------+ +-----------+ +-------------+       |
+|  | OpenAI  | | Copilot  | | Gemini | | Copilot   | |  LM Studio  |       |
+|  | Direct  | | PAT API  | | Direct | | ACP/AIG   | |  Direct     |       |
+|  +----+----+ +----+-----+ +---+----+ +-----+-----+ +------+------+       |
++-------|---------|-----------|-----------|--------------|-----------------+
+        |         |           |           |              |
+        v         v           v           v              v
+   api.openai  models.    google    +------------+   localhost
+     .com     github.ai  generative | ACP Bridge |     :1234
+                          apis.com  | (Python)   |  (LM Studio)
+                                    | port 8888  |
+                                    +--+-----+---+
+                             +---------+     +----------+
+                             v                          v
+                    +--------------+          +--------------+
+                    | Copilot CLI  |          | Local MCP    |
+                    | (ACP/stdio)  |          | Servers      |
+                    |              |          | (subprocess) |
+                    +------+-------+          +------+-------+
+                           | spawns                  | JSON-RPC
+                           v                         v
+                    +--------------+          +--------------+
+                    | MCP Servers  |          | eva-web-     |
+                    | kusto, gh,   |          | search       |
+                    | azure        |          | (DDG/Google) |
+                    +--------------+          +--------------+
 ```
+
+### Two Operating Modes
+
+Eva operates in two data retrieval modes, selected automatically based on the
+model or manually via Settings > General.
+
+**Cloud mode** (default for Copilot/OpenAI models):
+- Copilot CLI (ACP) provides chat, tool execution, web search
+- MCP servers spawned by Copilot subprocess
+- Requires GitHub Copilot license, consumes tokens
+
+**Local mode** (automatic for LM Studio):
+- LM Studio provides chat completions and tool-calling reasoning
+- MCP servers spawned directly by the bridge as subprocesses
+- Web search via `web_search_mcp.py` (DuckDuckGo HTML scraping, no API key)
+- Zero cloud AI, zero tokens, fully offline-capable
 
 ### Request Flow
 
 **Direct models (OpenAI, Copilot PAT, Gemini):**
-Browser → XHR/fetch → Provider API → JSON response → `renderEvaResponse()`
+Browser -> XHR/fetch -> Provider API -> JSON response -> `renderEvaResponse()`
 
 **ACP models (Copilot CLI):**
-1. Browser → `POST /v1/chat/completions` → ACP Bridge (HTTP)
-2. Bridge → `session/prompt` → Copilot CLI (JSON-RPC over NDJSON/stdio)
+1. Browser -> `POST /v1/chat/completions` -> ACP Bridge (HTTP)
+2. Bridge -> `session/prompt` -> Copilot CLI (JSON-RPC over NDJSON/stdio)
 3. Copilot may invoke MCP tools (bridge auto-grants permissions)
 4. Copilot streams `session/update` notifications with text chunks
-5. Bridge accumulates chunks → returns OpenAI-compatible JSON response
+5. Bridge accumulates chunks -> returns OpenAI-compatible JSON response
+
+**LM Studio (local):**
+1. Browser fetches `/v1/memory/context` + `/v1/data/retrieve` in parallel from bridge
+2. Bridge injects memory context from SQLite/Kusto
+3. Bridge runs data retrieval via local MCP tool-calling loop (see below)
+4. Browser prepends memory + data to system prompt
+5. Browser sends directly to `http://localhost:1234/v1/chat/completions`
+6. Response processed by `Cognition.executeActions()` for any action blocks
+7. Rendered via `renderEvaResponse()`
+
+**Eva (AIG) with cognition layer:**
+1. Browser calls `Cognition.run()` which drives the draft/review/revise pipeline
+2. Each agent call goes to `POST /v1/aig/chat` on the bridge
+3. Bridge runs Step 1 (memory), Step 2 (data retrieval), Step 3 (persona), Step 4 (LLM call)
+4. LLM call routes to GitHub Models API (PAT), ACP (Copilot CLI), or LM Studio based on model
+5. Step 5: background reflection thread logs conversation, extracts entities, computes emotion
 
 **Image handling:**
 1. `_detectGenerationIntent()` captures user's intent + subject before send
 2. AI responds with `[Image of ...]` placeholder
 3. `renderEvaResponse()` detects placeholder, routes to:
-   - **DALL-E 3** if user said "generate/create/draw" (uses user's simple subject)
-   - **Wikimedia Commons** otherwise (progressive query: full → 2 words → 1 word)
+   - **DALL-E 3** / **gpt-image-1** if user said "generate/create/draw" (uses user's simple subject)
+   - **Wikimedia Commons** otherwise (progressive query: full -> 2 words -> 1 word)
 4. Image inserted inline with lightbox click-to-expand
 
 ## Project Structure
 
 ```
-index.html                 Main UI — chat output, settings modal, LCARS sidebar,
+index.html                 Main UI: chat, settings modal, LCARS sidebar,
                            monitors dock, input area, lightbox
 config.json                API keys (not committed, gitignored)
 config.example.json        Template for config.json
 config.local.example.js    Template for file:// usage (inlined config)
+mcp.json                   MCP server configuration (gitignored)
 
 core/
-  style.css                All styling — base theme, LCARS theme, settings panel,
-                           monitors, chat bubbles, buttons, lightbox, responsive
-  themes/lcars.css         Modular LCARS overrides (minimal — most in style.css)
+  style.css                All styling: base theme, settings panel,
+                           monitors, chat bubbles, responsive
+  themes/
+    eva.css                Eva dark theme overrides
+    lcars.css              LCARS (Star Trek) theme overrides
   js/
-    options.js             Core application logic:
+    options.js             Core application logic (5000+ lines):
                            - Config loading (auth(), applyConfig())
-                           - Auth key management (getAuthKey, saveAuthKeys, loadAuthOverrides)
+                           - Auth key management (getAuthKey, saveAuthKeys)
                            - System prompt management (getSystemPrompt, applyPersonalityPreset)
                            - Model routing (updateButton, sendData)
+                           - Data mode switching (switchDataMode, loadDataMode)
                            - Theme management (applyTheme)
                            - Token/network/session monitors
                            - Image handling (renderEvaResponse, _searchImage, _generateImage)
                            - Markdown renderer (renderMarkdown)
+                           - Artifact download/open links (appendArtifactLinks)
+                           - Auto-open artifacts via bridge /v1/files/<name>?open=1
                            - AWS Polly TTS (speakText)
                            - Speech recognition, print, clear memory
     gpt-core.js            OpenAI Chat Completions API (trboSend)
                            - XHR-based (legacy, not fetch)
-                           - Error handling with exponential backoff
                            - Model-specific params (o3-mini reasoning, gpt-5 top_p)
                            - External data augmentation (weather, news, markets, solar)
     gl-google.js           Google Gemini API (geminiSend)
                            - Thinking mode (extracts thoughts vs non-thoughts)
-                           - Uses generativelanguage.googleapis.com v1alpha
-    lm-studio.js           Local LLM via lm-studio (lmsSend)
+    lm-studio.js           Local LLM via LM Studio (lmsSend)
                            - OpenAI-compatible endpoint on localhost:1234
-                           - Hardcoded model name (granite-3.1-8b-instruct)
+                           - Parallel memory context + data retrieval from bridge
+                           - Action block execution (Cognition.executeActions)
+                           - File capability documentation in system prompt
+                           - Post-response reflection via bridge
     copilot.js             GitHub Copilot integration (copilotSend)
                            - Dual mode: GitHub Models API (PAT) + ACP Bridge
-                           - GitHub Models endpoint: models.github.ai/inference
-                           - Model name mapping (publisher/model format)
-                           - Auto-detects bridge URL (same-host, localhost, configured)
                            - MCP configuration (applyMCPConfig, refreshMCPStatus)
     aig.js                 Eva AIG orchestration (aigSend)
                            - Routes through bridge /v1/aig/chat
-                           - External data augmentation (weather, news, stocks, solar)
-                           - localStorage-based message history (aigMessages)
-                           - Optional client-side cognitive layer (see core/js/cognition.js)
-                           - Phrase triggers ("trigger the chain", "use cognition", ...)
-                             force the layer for a single turn even when the toggle is off
-                           - Authoritative ground-truth note injected into the single-shot
-                             system prompt so the model does not fabricate pipeline runs
-    cognition.js           Browser-side multi-agent cognitive layer (Cognition.run)
-                           - Two role-specific agents: eva, reviewer
-                           - Each agent calls /v1/aig/chat independently with its own
-                             model and editable system prompt
-                           - Bounded review loop (cogMaxCycles, default 1, range 0-3)
-                           - Verdict-first reviewer protocol (APPROVE | REQUEST_CHANGES)
-                           - Capability registry: Cognition.registerCapability({id,
-                             description, run})
-                           - Action protocol: eva can emit
-                             [[EVA_ACTION]]{"id":"...","args":{...}}[[/EVA_ACTION]]
-                             blocks; the browser executes them and replaces each block
-                             with the rendered HTML
-                           - Built-in capability: file.download (delivers a downloadable
-                             text artifact via a Blob URL, namespaced under a virtual
-                             tmp/<session_id>/<filename> path)
+                           - Optional browser-side cognitive layer
+                           - Phrase triggers force cognition for single turn
+    cognition.js           Browser-side multi-agent cognitive layer:
+                           - Two role-specific agents: eva (planner), reviewer (critic)
+                           - Bounded review loop (cogMaxCycles, default 1)
+                           - Capability registry (file.download, file.open)
+                           - Action protocol: [[EVA_ACTION]]{...}[[/EVA_ACTION]]
+                           - Built-in PDF generator (Helvetica, Latin-1, multi-page)
+                           - Marker protocol: [[EVA_BROWSER]], [[EVA_DESKTOP]],
+                             [[EVA_LOOK]], [[EVA_FILE]]
     dalle3.js              DALL-E 3 image generation (dalle3Send)
-                           - Standalone mode (model selector = dall-e-3)
-    idb-store.js           IndexedDB storage backend (idbSaveSession, idbLoadSession)
-                           - Replaces localStorage for session snapshots
-                           - Binary blob store for images/audio per session
-                           - Auto-migration from localStorage on first load
-                           - Requests navigator.storage.persist() to prevent eviction
-    sessions.js            Session persistence (initSessions, saveCurrentSession)
-                           - Auto-save/restore across page refresh
-                           - Session index in localStorage, snapshots in IndexedDB
-    voice.js               Voice activation (startVoiceListener)
-                           - Wake-word "Eva" via Web Speech API
-                           - Continuous listening with status indicators
+    idb-store.js           IndexedDB storage backend (sessions + blobs)
+    sessions.js            Session persistence and management
+    voice.js               Wake-word "Eva" via Web Speech API
+    camera.js              Webcam capture for [[EVA_LOOK]] vision
+    browser-agent.js       Frontend integration for browser agent runs
+    pandora.js             Pandora box / Easter egg system
+    skills.js              Skill import UI (paste/URL/GitHub/file upload)
     external.js            External data fetching at page load
-                           - date.data, weather.data, news.data, market.data, solar.data
 
 tools/
-  acp_bridge.py            ACP ↔ HTTP bridge server
-                           - ACPClient: manages copilot subprocess, JSON-RPC protocol
-                           - BridgeHandler: HTTP endpoints for browser
-                           - AIG orchestrator with cognition layer
-                           - Memory injection + post-response reflection
-                           - SelfState capability tracking on startup
-                           - Kusto inline ingest (direct, bypasses MCP for speed)
-                           - Terminal capability for MCP tool execution
-                           - Token caching across model switches
-                           - MCP server configuration and hot-reload
-  kusto_mcp.py             Custom MCP server for Azure Data Explorer
-                           - 9 tools: list_databases, query, show_tables, show_schema,
-                             sample_data, ingest_inline, eva_recall_knowledge,
-                             eva_get_emotion_state, eva_get_recent_reflections
-                           - DeviceCodeCredential with persistent token cache
-                           - Accepts pre-fetched token via KUSTO_ACCESS_TOKEN env
-  eva_seed.kql             Sanitized database seed (public-safe)
-                           - Creates all 10 Eva tables with sample data
-                           - Includes background proposal and activity tables
-                           - Run in Kusto Web Explorer to bootstrap a new instance
-  test_static.py           CI-safe static tests (no bridge needed)
-                           - File integrity, secret scanning, CSV logic, config safety
-  test_eva.py              Integration tests (requires live bridge)
-                           - 64 checks across 13 sections
-  eval/                    Behavioral eval harness for Eva
-                           - JSON fixtures, mock replay, live AIG checks, result snapshots
-  acp_bridge.service       Systemd unit file for headless server deployment
-  acp_setup.sh             One-command installer (arch check, copilot install, service setup)
+  acp_bridge.py            Entry point (imports bridge/ package)
+  bridge/
+    __init__.py
+    __main__.py            Allows `python -m bridge`
+    core.py                Main HTTP server, AIG pipeline, all endpoints (~3800 lines)
+    acp_client.py          ACPClient: Copilot CLI subprocess, JSON-RPC, model pool
+    cognition.py           Memory context builder, entity extraction, emotion computation
+    memory.py              Backend switching (Kusto/SQLite), embeddings, synonyms
+    skills.py              Skill import, evarise normalization, SSRF-safe URL fetching
+    kusto.py               Azure Data Explorer queries, ingest, token management
+    config.py              All constants, paths, thresholds, table schemas
+    state.py               Mutable runtime state (thread-safe)
+    local_mcp.py           Local MCP client, tool-calling agent loop
+    background.py          Background job system (12 job types, proposals)
+    cron.py                Cron scheduler (5-field expressions)
+    alerts.py              Alert/notification system (SEC, weather, space weather)
+    telemetry.py           Structured event logging (latency, routing decisions)
+    utils.py               URL validation, LM Studio validation, config persistence
+  web_search_mcp.py        MCP server: DuckDuckGo + Google fallback (no API key)
+  sqlite_memory.py         SQLite memory backend (SqliteMemory class)
+  kusto_mcp.py             MCP server for Azure Data Explorer (10 tools)
+  browser_agent.py         Autonomous web browsing (Playwright + CDP)
+  desktop_agent.py         Autonomous desktop control (pyautogui + vision)
+  camera_sense.py          Webcam presence detection (OpenCV face + motion)
   barkTTS_server.py        Suno Bark TTS engine server (GPU)
+  eva_seed.kql             Sanitized database seed (public-safe)
+  acp_bridge.service       Systemd unit file
+  acp_setup.sh             One-command installer
+  test_static.py           CI-safe static tests
+  test_eva.py              Integration tests (64 checks)
+  test_latency.py          Latency benchmarks
+  test_skills_e2e.py       Skill import end-to-end tests
+  eval/                    Behavioral eval harness
+
+standalone/
+  main.js                  Electron shell: port allocation, bridge spawn, health polling
+  preload.js               Context bridge (exposes evaStandalone API to renderer)
+  package.json             Electron + electron-builder config (v5.3.0)
 ```
 
 ## Dependencies
@@ -211,66 +247,71 @@ tools/
 | Node.js 24+ | Copilot CLI | `nvm install 24` or system package |
 | `@github/copilot` | Copilot CLI | `npm install -g @github/copilot` |
 | `azure-identity` | Kusto MCP auth | `pip install azure-identity` |
-| `requests` | Kusto MCP HTTP calls | `pip install requests` |
+| `requests` | AIG HTTP calls | `pip install requests` |
 | Docker | GitHub MCP server | [docker.com](https://docker.com) |
-| `@azure/mcp` | Azure MCP server | Auto-installed via `npx` |
+| Playwright | Browser agent | `pip install playwright && playwright install` |
+| pyautogui | Desktop agent | `pip install pyautogui` |
+| opencv-python | Camera presence | `pip install opencv-python` |
 
 ### API Keys
 | Key | Used by | Get it from |
 |---|---|---|
-| `OPENAI_API_KEY` | OpenAI models, DALL-E 3 | [platform.openai.com](https://platform.openai.com/api-keys) |
+| `OPENAI_API_KEY` | OpenAI models, DALL-E 3, embeddings | [platform.openai.com](https://platform.openai.com/api-keys) |
 | `GITHUB_PAT` | Copilot Models API | [github.com/settings/tokens](https://github.com/settings/tokens) (needs "Models" permission) |
 | `GOOGLE_GL_KEY` | Google Gemini | [aistudio.google.com](https://aistudio.google.com/apikey) |
 | `GOOGLE_VISION_KEY` | Google Vision (image analysis) | [console.cloud.google.com](https://console.cloud.google.com/apis/credentials) |
 | AWS credentials | Amazon Polly TTS | [AWS IAM Console](https://console.aws.amazon.com/iam/) |
+| None | LM Studio (local mode) | Free, runs locally |
 
 ## ACP Bridge
 
 ### Protocol
 
-The bridge implements the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/overview/introduction) — a JSON-RPC 2.0 protocol over NDJSON (newline-delimited JSON) on stdio.
+The bridge implements the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/overview/introduction), GitHub's JSON-RPC 2.0 protocol over NDJSON (newline-delimited JSON) on stdio. The `copilot` CLI speaks this protocol natively; the bridge translates it to HTTP for the browser frontend.
 
 **ACP methods handled:**
 
 | Method | Direction | Purpose |
 |---|---|---|
-| `initialize` | Client → Agent | Negotiate version, exchange capabilities |
-| `session/new` | Client → Agent | Create conversation session |
-| `session/prompt` | Client → Agent | Send user message |
-| `session/update` | Agent → Client | Stream response chunks, tool calls, plans |
-| `session/request_permission` | Agent → Client | Request tool execution permission (auto-granted) |
-| `session/cancel` | Client → Agent | Cancel ongoing operation |
-| `terminal/create` | Agent → Client | Execute shell command |
-| `terminal/output` | Agent → Client | Get command output |
-| `terminal/release` | Agent → Client | Release terminal |
+| `initialize` | Client -> Agent | Negotiate version, exchange capabilities |
+| `session/new` | Client -> Agent | Create conversation session |
+| `session/prompt` | Client -> Agent | Send user message |
+| `session/update` | Agent -> Client | Stream response chunks, tool calls, plans |
+| `session/request_permission` | Agent -> Client | Request tool execution permission (auto-granted) |
+| `session/cancel` | Client -> Agent | Cancel ongoing operation |
+| `terminal/create` | Agent -> Client | Execute shell command |
+| `terminal/output` | Agent -> Client | Get command output |
+| `terminal/release` | Agent -> Client | Release terminal |
+
+### ACP Client Pool
+
+The bridge maintains a pool of up to 4 `ACPClient` instances (one per model). Each client is a separate `copilot` subprocess with its own conversation session.
+
+```python
+acp_pool: dict[model_key -> ACPClient]   # keyed by model name
+acp_pool_order: list[model_key]          # LRU eviction order
+acp_pool_lock: threading.RLock()         # thread-safe access
+ACP_POOL_MAX = 4
+```
+
+When a request arrives for a model not in the pool, the bridge spawns a new Copilot CLI process (`copilot --acp --stdio`), runs the ACP `initialize` + `session/new` handshake, and registers it in the pool. If the pool is full, the least-recently-used client is evicted and its subprocess terminated.
 
 ### Available ACP Models
 
 Models available through the Copilot CLI (requires a GitHub Copilot license). The
-catalog evolves; this list reflects the live `copilot --list-models` output at the
-time of writing. The browser model selector is grouped to mirror provider boundaries.
+catalog evolves; this list reflects a recent `copilot --list-models` output.
 
 | Provider | Model ID | Notes |
 |---|---|---|
-| **Anthropic** | `claude-opus-4.7` | Most capable Claude. Variants: `-high`, `-xhigh` (reasoning effort) |
+| **Anthropic** | `claude-opus-4.7` | Most capable Claude. Variants: `-high`, `-xhigh` |
 | | `claude-opus-4.6` | Variant: `-1m` (1M context) |
-| | `claude-opus-4.5` | |
 | | `claude-sonnet-4.6` | Default sonnet tier |
-| | `claude-sonnet-4.5` | |
-| | `claude-sonnet-4` | |
 | | `claude-haiku-4.5` | Fastest Claude |
 | **OpenAI** | `gpt-5.5` | |
-| | `gpt-5.4` | |
-| | `gpt-5.4-mini` | |
-| | `gpt-5.3-codex` | |
-| | `gpt-5.2-codex` | |
-| | `gpt-5.2` | |
-| | `gpt-5-mini` | |
+| | `gpt-5.4`, `gpt-5.4-mini` | |
+| | `gpt-5.3-codex`, `gpt-5.2-codex` | |
+| | `gpt-5.2`, `gpt-5-mini` | |
 | | `gpt-4.1` | Default AIG backend |
-
-> Model availability depends on your Copilot license tier and may change.
-> The default model (when none is specified) is determined by the Copilot CLI
-> via `copilot config set model`.
 
 ### CLI Flags
 
@@ -279,6 +320,7 @@ python3 tools/acp_bridge.py [options]
 
 Options:
   --port PORT              HTTP port (default: 8888)
+  --bind ADDRESS           Bind address (default: 127.0.0.1)
   --copilot-path PATH      Path to copilot binary (default: copilot)
   --model MODEL            Default AI model (e.g. claude-sonnet-4.6, gpt-5.2)
   --cwd DIR                Working directory for ACP session
@@ -292,68 +334,592 @@ Options:
 
 ### HTTP Endpoints
 
-| Endpoint | Method | Request | Response |
-|---|---|---|---|
-| `/v1/chat/completions` | POST | `{"messages":[...], "model":"copilot-acp", "acp_model":"claude-sonnet-4.6"}` | OpenAI-compatible completion JSON |
-| `/v1/aig/chat` | POST | `{"messages":[...], "user_message":"..."}` | OpenAI-compatible JSON with memory + orchestration |
-| `/v1/memory/context` | GET | `?message=...` | `{"context":"...", "cognition_enabled":true}` |
-| `/v1/memory/reflect` | POST | `{"user_message":"...", "assistant_message":"...", "model":"..."}` | `{"status":"ok"}` |
-| `/v1/models` | GET | — | Available models list |
-| `/v1/mcp` | GET | — | Active MCP servers and presets (secrets redacted) |
-| `/v1/mcp/configure` | POST | `{"mcp_servers":{...}}` | Restarts copilot with new MCP config |
-| `/v1/goals` | GET | none | List Kusto-backed goals, any status |
-| `/v1/goals` | POST | `{"title":"...", "description":"...", "category":"relational", "priority":50, "relatedTopics":"..."}` | Create an active goal |
-| `/v1/goals/<goal_id>` | PATCH | Any subset of goal fields | Update a goal by appending a latest Kusto row |
-| `/v1/goals/<goal_id>` | DELETE | none | Soft-delete a goal by setting status to `dropped` |
-| `/v1/background/status` | GET | none | Background loop status, interval, last tick, last error |
-| `/v1/background/proposals` | GET | `?status=pending` | Latest memory-consolidation proposals (loopback bind only) |
-| `/v1/background/activity` | GET | none | Latest 50 background tick activity rows (loopback bind only) |
-| `/v1/background/control` | POST | `{"enabled":true, "intervalSeconds":7200, "runNow":false}` | Update loop controls or queue a manual run |
-| `/v1/background/proposals/<proposal_id>/approve` | POST | none | Apply a pending MemorySummaries proposal |
-| `/v1/background/proposals/<proposal_id>/reject` | POST | none | Reject a pending proposal |
-| `/health` | GET | — | Status, session ID, model, MCP servers |
+**Core:**
 
-Goals mutations, Kusto seed, file purge, background mutation endpoints, and background proposal/activity reads require loopback bind. Background status remains readable on any bind.
-
-### Background Memory Consolidation
-
-When cognition and Kusto are configured, the ACP bridge starts an internal background loop. It wakes every two hours by default, pauses if user activity happened in the last 120 seconds, and records each tick in `BackgroundActivity`.
-
-The first shipping job is memory consolidation. It reads recent `Conversations`, builds a deterministic summary without calling an external model, and writes a pending row to `BackgroundProposals`. The loop never writes `MemorySummaries` directly. A human reviews proposals in Settings -> Background. Approval first appends an `applying` proposal row, writes the proposed payload to `MemorySummaries`, then appends `applied`; if the canonical write fails, the proposal stays `applying` so approve can be retried safely. Rejection appends a `rejected` proposal row. Control, approve, reject, proposals, and activity endpoints are loopback-only.
-
-### Security
-
-- Binds to `127.0.0.1` by default (localhost only)
-- `--allow-all-tools` bypasses ACP permission prompts (required for non-interactive MCP)
-- Terminal commands execute with the bridge process's user permissions
-- MCP env vars (tokens) are passed to the copilot subprocess environment
-
-## Kusto MCP Server
-
-Custom MCP server implementing the [Model Context Protocol](https://modelcontextprotocol.io/) for Azure Data Explorer.
-
-### Tools
-
-| Tool | Parameters | Description |
+| Endpoint | Method | Purpose |
 |---|---|---|
-| `kusto_list_databases` | `cluster_url?` | List all databases in the cluster |
-| `kusto_query` | `query`, `database?`, `cluster_url?` | Execute a KQL query |
-| `kusto_show_tables` | `database?`, `cluster_url?` | Show all tables |
-| `kusto_show_schema` | `table`, `database?`, `cluster_url?` | Show table schema |
-| `kusto_sample_data` | `table`, `count?`, `database?`, `cluster_url?` | Sample rows from a table |
-| `kusto_ingest_inline` | `table`, `data[]`, `database?`, `cluster_url?` | Write rows into a table |
-| `eva_recall_knowledge` | `entity`, `limit?` | Recall facts about an entity |
-| `eva_get_emotion_state` | — | Get Eva's current emotion + baseline |
-| `eva_get_recent_reflections` | `limit?` | Get Eva's self-reflections |
-| `eva_get_active_goals` | `category?`, `limit?` | Get active long-term goals |
+| `/v1/chat/completions` | POST | OpenAI-compatible chat (routes to ACP) |
+| `/v1/aig/chat` | POST | AIG pipeline: memory + data + persona + LLM |
+| `/v1/models` | GET | Available models list |
+| `/health` | GET | Status, session ID, model, MCP servers |
 
-### Authentication
+**Memory:**
 
-1. Checks `KUSTO_ACCESS_TOKEN` env (pre-fetched by bridge at startup)
-2. Tries `DeviceCodeCredential` with persistent token cache
-3. Prompts for device code auth on stderr if no cached token
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/memory/context` | GET | Build and return memory context for injection |
+| `/v1/memory/reflect` | POST | Trigger post-response reflection (entities, emotion) |
+| `/v1/memory/backend` | GET/POST | Get or switch memory backend (kusto/sqlite) |
+| `/v1/memory/seed` | POST | Seed database tables |
 
-Token cache: `~/.azure/msal_token_cache.json` (persists across restarts, ~90 day refresh token lifetime).
+**Data Retrieval:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/data/retrieve` | GET | Retrieve live data for any model path |
+| `/v1/mode` | GET/POST | Get or switch data retrieval mode (cloud/local) |
+
+**Skills:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/skills` | GET | List all active skills |
+| `/v1/skills` | POST | Create a new skill |
+| `/v1/skills/evarise` | POST | Normalize raw skill text into Eva schema |
+| `/v1/skills/auto-learn` | POST | Extract skill from conversation context |
+| `/v1/skills/<id>` | PATCH | Update a skill (enable/disable/edit) |
+| `/v1/skills/<id>` | DELETE | Soft-delete a skill |
+
+**Goals:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/goals` | GET/POST | List or create goals |
+| `/v1/goals/<id>` | PATCH/DELETE | Update or soft-delete a goal |
+
+**Files (Artifacts):**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/files/write` | POST | Write artifact to ARTIFACTS_DIR |
+| `/v1/files/<name>` | GET | Serve artifact (download or auto-open with `?open=1`) |
+
+**Background:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/background/status` | GET | Loop status, interval, last tick |
+| `/v1/background/control` | POST | Enable/disable, change interval, run now |
+| `/v1/background/proposals` | GET | Pending memory consolidation proposals |
+| `/v1/background/proposals/<id>/approve` | POST | Apply a proposal |
+| `/v1/background/proposals/<id>/reject` | POST | Reject a proposal |
+| `/v1/background/activity` | GET | Recent background tick activity |
+
+**Cron:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/cron` | GET/POST | List or create cron tasks |
+| `/v1/cron/<id>` | PATCH/DELETE | Update or delete a cron task |
+
+**Alerts:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/alerts` | GET/POST | List or create alert rules |
+| `/v1/alerts/<id>` | PATCH/DELETE | Update or delete an alert rule |
+| `/v1/notifications` | GET | Unseen notifications |
+
+**MCP:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/mcp` | GET | Active MCP servers (secrets redacted) |
+| `/v1/mcp/configure` | POST | Restart copilot with new MCP config |
+
+**Browser/Desktop Agents:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/browser/launch` | POST | Start autonomous browser task |
+| `/v1/browser/<id>/status` | GET | Run status + latest screenshot |
+| `/v1/browser/<id>/confirm` | POST | Answer confirmation prompt |
+| `/v1/desktop/launch` | POST | Start autonomous desktop task |
+| `/v1/desktop/<id>/status` | GET | Run status + latest screenshot |
+
+**Camera:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/camera/start` | POST | Start webcam presence detection |
+| `/v1/camera/stop` | POST | Stop webcam |
+| `/v1/camera/status` | GET | Presence state (faces, motion) |
+| `/v1/camera/frame` | GET | Latest captured frame (JPEG) |
+
+**Diagnostics:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/doctor` | GET | System diagnostics (runtimes, tools, auth) |
+| `/v1/telemetry` | GET | Recent telemetry events |
+| `/v1/logs` | GET | Recent bridge log lines |
+| `/v1/prefs` | GET/POST | Client preferences (non-secret toggles) |
+
+## Local MCP System
+
+When data retrieval mode is "local", the bridge spawns MCP servers as direct
+subprocesses and manages them through `LocalMCPManager`.
+
+### MCPServer Class
+
+Each MCP server is a subprocess communicating via JSON-RPC over stdio:
+
+```python
+class MCPServer:
+    name: str                    # server identifier
+    command: str                 # executable (e.g. python3)
+    args: list[str]              # command-line args
+    process: subprocess.Popen    # running subprocess
+    tools: list[dict]            # discovered via tools/list
+    alive: bool                  # health state
+```
+
+**Lifecycle:**
+1. `start()`: Spawn process, send `initialize` handshake (protocol 2024-11-05), send `notifications/initialized`, discover tools via `tools/list`
+2. `call_tool(name, arguments, timeout)`: Send `tools/call` JSON-RPC, parse content response
+3. `stop()`: Terminate process
+
+**Threading:** Background reader thread per server matches JSON-RPC responses by ID. Stderr is logged to bridge debug log.
+
+### LocalMCPManager
+
+Manages multiple MCP servers with a unified tool catalog:
+
+```python
+class LocalMCPManager:
+    servers: dict[name -> MCPServer]
+    _tool_map: dict[tool_name -> server_name]  # routes calls
+```
+
+### Tool-Calling Agent Loop
+
+`local_agent_query()` implements an iterative tool-calling agent using LM Studio:
+
+1. Send user message + full tool schemas to LM Studio `/chat/completions`
+2. If model returns `tool_calls` in the response, execute each via `mcp_manager.call_tool()`
+3. Inject tool results back as assistant messages
+4. Repeat until model produces a text answer (max 5 iterations, 90s timeout)
+5. Return `(data_text, model_used)` matching the ACP retrieval signature
+
+### Web Search MCP Server
+
+`tools/web_search_mcp.py` provides web search without any API key:
+
+| Tool | Args | Description |
+|---|---|---|
+| `web_search` | query, max_results (8) | DuckDuckGo HTML scraping + Google fallback |
+| `web_search_news` | query, max_results (8) | DDG with news-biased queries |
+| `web_fetch` | url, max_length (6000) | Extract readable text from URL |
+
+**Search cascade:** DuckDuckGo HTML -> DuckDuckGo Lite -> Google HTML scraping. User-Agent spoofs Chrome 131.
+
+### Auto-Configuration
+
+When switching to local mode, the bridge:
+1. Checks for ACP's MCP config (if ACP is connected)
+2. Falls back to persisted config (`~/.config/eva-standalone/mcp_config.json`)
+3. Always auto-adds `eva-web-search` MCP if not already present
+4. Searches multiple paths for `web_search_mcp.py` (bridge directory, `~/.eva/tools/`)
+
+## Memory System
+
+Eva supports two memory backends, switchable at runtime via Settings or the
+`/v1/memory/backend` endpoint.
+
+### Backends
+
+**Azure Data Explorer (Kusto):**
+- Full KQL query language
+- Managed cloud service with auto-scaling
+- Device code authentication with token caching
+- Best for multi-device or production deployments
+
+**SQLite (local):**
+- Zero-dependency local file (`~/.eva/memory.db`)
+- Automatic table creation and migration
+- Best for local-only or offline deployments
+
+### Memory Tables
+
+| Table | Columns | Purpose |
+|---|---|---|
+| `Knowledge` | Entity, Relation, Value, Confidence, Source, Decay, Timestamp | Facts about user and world |
+| `Conversations` | SessionId, Role, Content, Timestamp | Chat history |
+| `EmotionState` | Joy, Curiosity, Concern, Excitement, Calm, Empathy, Trigger, Timestamp | Emotional readings |
+| `MemorySummaries` | Period, Summary, Timestamp | Compressed session summaries |
+| `Reflections` | Trigger, Observation, ActionTaken, Effectiveness, Timestamp | Self-reflections |
+| `Goals` | GoalId, Title, Description, Category, Status, Priority, RelatedTopics, CreatedAt, UpdatedAt | Persistent intentions |
+| `SelfState` | Capability, Status, Timestamp | Active capabilities |
+| `HeuristicsIndex` | Entity, Category, Frequency, Timestamp | Pattern tracking |
+| `EmotionBaseline` | Dimension, Value, Timestamp | Emotional defaults |
+| `BackgroundProposals` | ProposalId, JobType, TargetTable, Payload, Status, ... | Human-reviewed memory proposals |
+| `BackgroundActivity` | TickId, Status, ProposalCount, Timestamp | Background loop ticks |
+| `Skills` | SkillId, Name, Description, Instructions, Tools, Tags, Source, Status, CreatedAt, UpdatedAt | Imported reusable skills |
+
+### Memory Context Injection
+
+`_build_memory_context(user_message)` builds a structured system prompt section
+injected into every AIG request. Both SQLite and Kusto paths produce the same
+output structure:
+
+| Section | When | Source |
+|---|---|---|
+| `[Current Date & Time]` | Always | System clock |
+| `[Skills]` | Always | Hardcoded capability catalog (13 built-in capabilities) |
+| `[Active MCP Servers]` | When servers running | Live server state + tool names |
+| `[Workflow: ...]` | Always | 6 workflow instruction sections |
+| `[User Profile]` | Always | Knowledge where Entity="User", Confidence >= 0.5 |
+| `[Morning Reflection]` | First msg of day | MemorySummaries (latest 3) |
+| `[Memory: Core Facts]` | Always | Knowledge where Confidence >= 0.6 (top 15) |
+| `[Active Goals]` | When present | Goals where Status="active" (top 10) |
+| `[Active Skill: ...]` | On semantic match | Skills matched by embedding similarity or keyword |
+| `[Init: First Conversation]` | Empty Knowledge | Introduction prompts |
+| `[Emotion State]` | Always | Latest EmotionState row |
+| `[Memory: Relevant]` | On keyword match | Lexical + semantic recall against user message |
+
+**Skills manifest (always injected):**
+- data-retrieval, weather-news, web-search
+- browser-control ([[EVA_BROWSER]]), desktop-control ([[EVA_DESKTOP]]), camera-vision ([[EVA_LOOK]])
+- file-creation ([[EVA_ACTION]] file.download)
+- image-search, image-generation
+- persistent-memory (table list)
+- cron-scheduling, skill-learning
+
+**Skill matching:** When a user message arrives, all active skills are compared by
+embedding cosine similarity (threshold 0.30, OpenAI `text-embedding-3-small`).
+Up to 2 matching skills have their instructions injected (capped at 1500 chars each).
+Falls back to lexical keyword matching if embeddings are unavailable.
+
+### Entity Extraction
+
+Post-response reflection extracts facts using strict regex patterns:
+
+| Pattern | Relation | Confidence |
+|---|---|---|
+| "my kids/children are [Name]" | user_children | 0.85 |
+| "my motto/mantra is [text]" | user_motto | 0.85 |
+| "my wife/husband is [Name]" | user_partner_name | 0.85 |
+| "my dog/cat is [Name]" | user_pet_* | 0.85 |
+| "i work at/for [text]" | user_employment | 0.80 |
+| "i live in [Location]" | user_location | 0.80 |
+| "my hobby is [text]" | user_interest | 0.70 |
+| "my favorite [thing] is [text]" | user_favorite_* | 0.65 |
+| "i love/enjoy [text]" | user_preference | 0.65 |
+| "i am a [role]" | user_role_self_described | 0.65 |
+
+All facts stored with `Source: "explicit_user_fact"`, `Decay: 0.005` (confidence
+decays per day via log-decay model).
+
+### Synonym Expansion
+
+Memory recall expands query terms via synonyms to catch differently-worded facts:
+
+```
+"playlist" -> playlist, playlists, song, songs, music, track, tracks, tunes
+"trip"     -> trip, travel, vacation, holiday, journey
+"job"      -> job, work, employer, company, occupation, career
+"home"     -> home, location, address, city, based
+```
+
+14 synonym groups cover common recall topics.
+
+## Eva (AIG) Pipeline
+
+### How AIG Works
+
+```
+Browser -> POST /v1/aig/chat -> ACP Bridge
+  |
+  +-- Step 1: Build memory context (Kusto/SQLite queries)
+  |   +-- User Profile (Knowledge where Entity="User")
+  |   +-- Skills manifest + workflow instructions
+  |   +-- Active MCP servers
+  |   +-- Day lifecycle / morning reflection
+  |   +-- Core knowledge + message-relevant recall
+  |   +-- Active goals, emotion state
+  |   +-- Semantic skill matching
+  |
+  +-- Step 2: Data retrieval (skipped for trivial/meta messages)
+  |   +-- Cloud: ACP tool call (MCP web search, Kusto, GitHub)
+  |   +-- Local: Tool-calling agent loop (LM Studio + direct MCP)
+  |   +-- Request classification: news, weather, financial, kusto, web, general
+  |
+  +-- Step 3: Build Eva persona prompt
+  |   +-- Base system prompt + memory context + [Data Retrieved]
+  |
+  +-- Step 4: Generate response
+  |   +-- Route: GitHub Models API (PAT) | ACP (Copilot CLI) | LM Studio
+  |
+  +-- Step 5: Background reflection (async thread)
+      +-- Log to Conversations table
+      +-- Extract entities -> Knowledge table
+      +-- Update HeuristicsIndex
+      +-- Compute emotion vector -> EmotionState table
+```
+
+### AIG Request Classification
+
+The bridge classifies each user message to determine routing and prompt tuning:
+
+| Classification | Pattern | Action |
+|---|---|---|
+| greeting/trivial | "hi", "thanks", etc. (<=4 words) | Skip data retrieval |
+| meta-question | "what can you do", "who are you" (<=6 words) | Skip data retrieval |
+| news-search | "news", "headlines", "breaking" | Web search prompt |
+| weather-search | "weather", "forecast", "temperature" | Web search prompt |
+| financial-data | "stock", "price", "$TICKER" | Web search prompt |
+| kusto-query | KQL keywords, table names | Kusto tool prompt |
+| web-search | "search", "look up", "find" | Web search prompt |
+| general | Everything else | General-purpose prompt |
+
+### AIG vs Copilot ACP
+
+| Feature | Copilot ACP | Eva (AIG) |
+|---|---|---|
+| Chat | yes | yes |
+| MCP Tools | yes | yes |
+| Persistent memory injection | no | yes |
+| Emotion tracking | no | yes |
+| Entity extraction | no | yes |
+| Morning reflection | no | yes |
+| Proactive data retrieval | no | yes |
+| Persona consistency | Basic | Full Eva system prompt |
+| Background consolidation | no | yes |
+
+## Cognition Layer
+
+Eva has two complementary cognitive systems. The **bridge cognition layer** runs
+server-side and adds persistent intelligence (memory injection, emotion tracking,
+post-response reflection). The **browser cognitive layer** runs in the page and
+adds an optional multi-agent draft/review loop.
+
+### Browser Cognitive Layer (`core/js/cognition.js`)
+
+Opt-in via Settings > Models > **Enable Cognitive Layer**. When active, every Eva
+(AIG) turn is routed through two role-specific agents:
+
+```
+User turn
+  -> Eva (plans, drafts answer, may emit action blocks)
+     -> Reviewer (verdict: APPROVE | REQUEST_CHANGES)
+        -> Eva (revises against feedback) ... up to cogMaxCycles
+  -> executeActions(): runs any [[EVA_ACTION]] blocks
+  -> renderEvaResponse(): renders the final approved draft
+```
+
+Each agent calls `/v1/aig/chat` independently with its own model and editable
+system prompt, so users can mix providers (Claude for planning, GPT for drafting,
+a smaller model for review).
+
+**Activation:**
+
+| Trigger | Behavior |
+|---|---|
+| Settings toggle on | Layer runs for every AIG turn |
+| Phrase in user message | Force-enabled for that single turn |
+| Neither | Single-shot AIG path; system note prevents fabricated phase narration |
+
+Trigger phrases: `trigger the chain`, `use cognition`, `use the cognitive layer`,
+`run eva`, `run the reviewer`, `engage cognition`, `cognition: on`.
+
+**Configuration (localStorage):**
+- `cogEnabled`: "0" or "1"
+- `cogEvaModel`: model name for draft agent
+- `cogReviewerModel`: model name for review agent
+- `cogMaxCycles`: review iterations (0-3, default 1)
+- `cogEvaPrompt` / `cogReviewerPrompt`: editable system prompts
+- `cogShowTrace`: show draft/review trace in output
+
+### Capability Registry
+
+Capabilities are registered functions that Eva can invoke via action blocks:
+
+```js
+Cognition.registerCapability({
+  id: 'my.capability',
+  description: 'What it does and when to use it.',
+  run: async function (args) {
+    // Return { html: '...' } to replace the action block
+  }
+});
+```
+
+**Built-in capabilities:**
+
+| Capability | Args | Description |
+|---|---|---|
+| `file.download` | filename, content, mime? | Create downloadable artifact. Genuine PDF for `.pdf` or `application/pdf`. Writes to bridge ARTIFACTS_DIR via `/v1/files/write`. |
+| `file.open` | filename | Open existing artifact with system viewer via `/v1/files/<name>?open=1` (xdg-open). |
+
+**Action protocol:**
+```
+[[EVA_ACTION]]{"id":"file.download","args":{"filename":"report.pdf","content":"..."}}[[/EVA_ACTION]]
+```
+
+The regex also handles unclosed blocks (local models often forget `[[/EVA_ACTION]]`):
+```javascript
+/\[\[EVA_ACTION\]\]([\s\S]*?)\[\[\/EVA_ACTION\]\]|\[\[EVA_ACTION\]\]([\s\S]+)$/g
+```
+
+**File behavior defaults:**
+- Inline answers by default. Eva only creates file artifacts when the user
+  explicitly asks for a file format ("create a PDF", "download as markdown").
+- "Give me a briefing" = inline text. "Create a PDF report" = file.download.
+- Asking to open an already-created file uses file.open (not re-create).
+
+### Marker Protocol
+
+Eva uses marker blocks for agent capabilities:
+
+| Marker | Purpose | Example |
+|---|---|---|
+| `[[EVA_BROWSER]]` | Launch Playwright browser agent | `[[EVA_BROWSER]]{"goal":"search for cats","start_url":"https://example.com"}[[/EVA_BROWSER]]` |
+| `[[EVA_DESKTOP]]` | Launch desktop vision agent | `[[EVA_DESKTOP]]{"goal":"open GIMP and create canvas"}[[/EVA_DESKTOP]]` |
+| `[[EVA_LOOK]]` | Capture webcam frame | `[[EVA_LOOK]]{"question":"what am I holding?"}[[/EVA_LOOK]]` |
+| `[[EVA_FILE]]` | Artifact download/open links | `[[EVA_FILE]] report.pdf` (rendered by `renderEvaResponse`) |
+
+## Autonomous Agents
+
+### Browser Agent (`tools/browser_agent.py`)
+
+Autonomous web browsing via Playwright with a persistent Chrome profile.
+
+**Architecture:**
+- Director agent (Claude via ACP): text-only, high-level planning
+- Executor agent (GPT-4o via OpenAI): vision-based, concrete actions
+- Re-consult director every 4 executor steps
+- Long-lived Chrome via CDP on port 9333, persistent profile at `~/.config/eva-standalone/browser_profile`
+
+**Action types:** click, double_click, click_ref, type, type_ref, press, scroll, navigate, wait, done, ask
+
+**Safety:** Sensitive actions (buy, purchase, payment, checkout) require user confirmation before execution. The run parks and waits for approval via `/v1/browser/<id>/confirm`.
+
+**Trajectories:** Each step logged as JSONL + PNG screenshot to `~/.config/eva-standalone/browser_trajectories/` for fine-tuning.
+
+### Desktop Agent (`tools/desktop_agent.py`)
+
+Autonomous desktop control via pyautogui screenshot-and-act loop.
+
+**Architecture:** Same director/executor pattern as browser agent. `pyautogui.FAILSAFE = True` (mouse to corner = emergency stop).
+
+**Safety:** Broader sensitive action set includes delete, sudo, rm, shutdown, reboot, transfer money, send email/message. All require user confirmation.
+
+### Camera Presence (`tools/camera_sense.py`)
+
+Local webcam face and motion detection.
+
+**Architecture:** Subprocess worker (avoids V4L2 GIL wedge). State exposed via JSON file (`~/.config/eva-standalone/camera/state.json`).
+
+**Detection:** OpenCV Haar cascade for faces, frame-difference for motion. Hysteresis: 2 frames to detect presence, 8 to lose it.
+
+**Privacy:** Camera off by default. Only activates on explicit `POST /v1/camera/start`.
+
+## Skills System
+
+Skills are reusable instruction sets that Eva matches to user requests via
+semantic similarity and injects into context.
+
+### Skill Schema
+
+```json
+{
+  "SkillId": "sk-a1b2c3d4e5f6",
+  "Name": "Deploy to Kubernetes",
+  "Description": "When the user asks to deploy an app to a Kubernetes cluster",
+  "Instructions": "## Steps\n1. Check the deployment manifest...",
+  "Tools": "browser, kusto",
+  "Tags": "kubernetes, deploy, devops",
+  "Source": "github:owner/repo",
+  "Status": "active",
+  "CreatedAt": "2026-06-14T12:00:00Z",
+  "UpdatedAt": "2026-06-14T12:00:00Z"
+}
+```
+
+### Import Sources
+
+| Source | Input | Processing |
+|---|---|---|
+| Paste | Raw text | Direct to evarise |
+| URL | HTTP(S) URL | SSRF-safe fetch (IP pinning, public-only) |
+| GitHub | owner/repo or full URL | Try SKILL.md, skill.md, README.md |
+| File | Upload (<= 200 KB) | Client-side FileReader |
+
+### Evarise Normalization
+
+Raw skill text is sent to an LLM with a strict prompt that treats the source as
+untrusted data (prevents prompt injection). The model extracts name, description,
+instructions, tools, and tags as a JSON object. Parsing handles `<think>` blocks
+(Qwen, DeepSeek), code fences, and balanced-brace extraction. Falls back to
+LM Studio when ACP is unavailable.
+
+### Auto-Learn
+
+After complex tasks, Eva can auto-extract a skill from the conversation
+context via `/v1/skills/auto-learn`. The extracted skill is stored as a draft for
+user review.
+
+## Background System
+
+### Memory Consolidation
+
+When cognition and a memory backend are configured, the bridge starts an internal
+background loop (default: every 2 hours, pauses within 120s of user activity).
+
+**Job types (12 total):**
+
+| Job | Description |
+|---|---|
+| `memory_consolidation` | Summarize recent conversations -> MemorySummaries |
+| `goal_checkin` | Review active goals, update status (max 2/tick) |
+| `daily_digest` | Compile day's activity summary |
+| `knowledge_hygiene` | Revalidate old facts, trim Confidence < 0.3 |
+| `reflection_synthesis` | Combine 3+ related reflections into new insights |
+| `emotion_drift` | Detect significant mood changes (threshold 0.15) |
+| `token_telemetry` | Aggregate token usage stats |
+| `proactive_briefing` | Suggest upcoming relevant content |
+| `market_snapshot` | Stock/crypto updates for watched symbols |
+| `space_weather` | Space weather alerts (Kp, G, R, S indices) |
+| `research_deepdive` | Deep-dive on research topics |
+| `alert_watch` | Check alert rules for triggers |
+
+**Human-in-the-loop:** The loop never writes directly to memory tables. It creates
+proposals in `BackgroundProposals` with status `pending`. A human reviews them in
+Settings > Background. Approval writes the payload; rejection marks it rejected.
+
+### Cron Scheduler
+
+5-field cron expressions (minute, hour, day-of-month, month, day-of-week). Supports ranges (`1-5`), steps (`*/15`), and lists (`1,3,5`).
+
+```json
+{
+  "id": "cron-abc12345",
+  "enabled": true,
+  "label": "Morning briefing",
+  "prompt": "Prepare my morning briefing with weather and news",
+  "schedule": "0 7 * * 1-5",
+  "last_run": "2026-06-14T07:00:00Z",
+  "next_run": "2026-06-15T07:00:00Z"
+}
+```
+
+Tasks execute by sending the prompt through ACP and delivering results as notifications.
+
+### Alert System
+
+Alert rules trigger on conditions and deliver notifications:
+
+| Type | Params | Description |
+|---|---|---|
+| `sec_filing` | symbols (max 12) | SEC filing watch |
+| `weather` | location, condition | Weather alerts |
+| `space_weather` | threshold | Kp, G, R, S index alerts |
+| `keyword_watch` | topic | Topic monitoring |
+| `research_question` | question | Recurring research probes |
+
+Cooldown: 1-20160 minutes (default 1440/24 hours). Rate limit: 8 per hour.
+Quiet hours configurable. Channels: `chat` or `voice`.
+
+## Telemetry
+
+Structured, privacy-safe event logging. Records durations, model names, and
+routing decisions only. Never records message content, tokens, keys, or MCP env values.
+
+**Events:** `acp_pool` (hit/warm/evict/miss), `acp_prompt` (model, ms, chars), `error` (category, message), `cognition_turn` (draft/review/revise timing)
+
+**Storage:** JSONL file at `~/.config/eva-standalone/telemetry.jsonl` (rotates at 5 MB). In-memory ring buffer (300 events) for `/v1/telemetry`.
+
+**Debug log:** `~/.config/eva-standalone/bridge_debug.log` (rotates at 10 MB). In-memory ring buffer (200 lines) for `/v1/logs`.
 
 ## Settings Panel
 
@@ -361,44 +927,13 @@ Seven tabs in a modal overlay:
 
 | Tab | Contents |
 |---|---|
-| **General** | Theme (Default/LCARS/Eva), TTS engine/voice, auto-speak toggle |
-| **Models** | Model selector (grouped by provider), temperature, max tokens, reasoning effort, AIG backend selector, ACP model selector, and the **Cognitive Layer** controls (toggle, two role-specific model selectors, max review cycles, editable per-agent system prompts, debug trace) |
-| **Auth** | API key inputs with show/hide toggles, ACP bridge URL. Keys stored in localStorage, override config.json |
+| **General** | Theme, TTS engine/voice, auto-speak, data retrieval mode (cloud/local) with status |
+| **Models** | Model selector (grouped by provider), temperature, max tokens, reasoning effort, AIG backend selector, ACP model selector, cognitive layer controls (toggle, per-agent model selectors, max cycles, editable prompts, debug trace) |
+| **Auth** | API key inputs with show/hide toggles, ACP bridge URL, LM Studio base URL and model name |
 | **Prompts** | Personality presets (Default/Concise/Advanced/Terminal/Custom), editable system prompt textarea |
-| **Goals** | Kusto-backed goals list, create form, edit controls, and soft-delete action through bridge endpoints |
-| **Background** | Bridge background loop status, enable and interval controls, run-once action, proposal approval/rejection, recent activity |
+| **Goals/Skills** | Goals list with create/edit/delete. Skills list with import (paste/URL/GitHub/file), evarise preview, enable/disable |
+| **Background** | Background loop status, enable/interval controls, run-once, proposal approval/rejection, recent activity |
 | **MCP** | Azure MCP, GitHub MCP, Kusto MCP toggles with config fields. Apply/refresh buttons |
-
-## Image Handling
-
-```
-User types "show me a cat"
-  → _detectGenerationIntent() saves subject="cat", generate=false
-  → Model responds with [Image of a cute domestic cat...]
-  → renderEvaResponse() detects placeholder
-  → Uses "cat" (user's words) as search query
-  → _searchImage("cat") → Wikimedia Commons → cat photo
-  → Inserted inline with lightbox
-
-User types "generate an image of a dragon"
-  → _detectGenerationIntent() saves subject="dragon", generate=true
-  → Model responds with [Image of a dragon...]
-  → renderEvaResponse() detects placeholder + generation flag
-  → _generateImage("dragon") → DALL-E 3 → generated image
-  → Inserted inline with "AI Generated" badge + lightbox
-```
-
-## LCARS Theme
-
-Star Trek-inspired interface using the Lower Decks color palette:
-
-- **Barlow Condensed** font (Google Fonts)
-- Proper LCARS elbows (top/bottom curved connectors via CSS pseudo-elements)
-- Flat colored sidebar chips with black gaps
-- Accent-border chat bubbles (cyan=Eva, blue=User)
-- Stacked button grid (Upload/Mic/Send)
-- Dark background with subtle borders
-- Monitor dock with 4 tabs (Tokens, Network, Session, System)
 
 ## Deployment
 
@@ -409,17 +944,9 @@ cp config.example.json config.json   # add your API keys
 xdg-open index.html                  # or open in any browser
 ```
 
-For `file://` usage without a JSON loader, copy `config.local.example.js` to `config.local.js` instead.
+For `file://` usage without a JSON loader, copy `config.local.example.js` to `config.local.js`.
 
-### Local (file://)
-Just open `index.html`. Use `config.local.js` for API keys.
-
-### Hosted (nginx/Apache)
-Serve the directory over HTTP(S). Use `config.json` for API keys.
-
-### Manual ACP bridge launch
-
-For the full Eva experience without the AppImage, run the bridge alongside the UI to unlock persistent memory, knowledge graph, and emotion tracking through Azure Data Explorer.
+### Manual ACP bridge
 
 ```bash
 python3 tools/acp_bridge.py --port 8888 \
@@ -428,335 +955,115 @@ python3 tools/acp_bridge.py --port 8888 \
   --kusto-database Eva
 ```
 
-Then select **Eva (AIG)** in the dropdown. Kusto authentication uses `azure-identity` device code or interactive sign-in on first use; no keys are stored.
-
-### With ACP Bridge (current — split setup)
-- Web server: any machine (even i386)
-- ACP Bridge: 64-bit machine with Copilot CLI
-- Browser connects to both
-
-### With ACP Bridge (future — single server)
-```bash
-sudo ./tools/acp_setup.sh
-```
-- Installs Copilot CLI, verifies auth
-- Deploys systemd service (`acp-bridge`)
-- Auto-starts on boot, restarts on failure
-- Bridge auto-detected by browser on same host
-
 ### Standalone (Electron AppImage)
 
-A bundled desktop build that ships the web UI and the ACP bridge together. The Electron shell allocates a free localhost port, starts the bridge, and injects the URL into the renderer via `window.evaStandalone`.
+A bundled desktop build that ships the web UI and ACP bridge together. The
+Electron shell allocates a free localhost port, starts the bridge, and injects
+the URL into the renderer via `window.evaStandalone`.
 
 ```bash
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.2.3.AppImage'
+./dist/'Eva Standalone-5.3.0.AppImage'
 ```
 
-Host prerequisites: Node.js 24+, Python 3.12+, Copilot CLI authenticated. The AppImage hides Bark and the AWS Polly engines from the Settings panel and locks the Kusto database to the value configured in first-run setup. Build details and runtime notes are in [standalone/README.md](standalone/README.md).
+**Electron lifecycle:**
+1. `getFreeLocalPort()`: OS-allocated free port
+2. `startBridge(port)`: Spawn `python3 tools/acp_bridge.py --bind 127.0.0.1 --port <port>`
+3. `waitForBridge(url, process, timeout)`: Poll `/health` every 500ms
+4. On `EADDRINUSE`: retry with new port (max 3 attempts)
+5. On bridge crash: show error dialog and quit
+
+Host prerequisites: Node.js 24+, Python 3.12+, Copilot CLI authenticated (for cloud mode). LM Studio for local-only mode.
 
 ### ACP Infrastructure Roadmap (tracking)
 
-Current state (2026-04-05):
+Current state (2026-06-14):
 - Static web tier can run on legacy 32-bit hosts.
 - ACP Bridge currently runs on a separate compatible machine.
 - Single-host deployment is blocked until new hardware is available.
+- Local mode (LM Studio + direct MCP) works on any x86_64 machine without Copilot CLI.
 
 | Milestone | Status | Notes |
 |---|---|---|
-| Provision new bridge-capable server (`x86_64` or `arm64`) | planned | Recommended baseline: 2+ vCPU, 4+ GB RAM |
-| Install runtime baseline (`node >= 24`, `python >= 3.12`) | planned | Copilot CLI currently requires Node.js 24+ |
-| Authenticate Copilot CLI service account | planned | `copilot auth login` on target host |
-| Deploy bridge as systemd service | planned | Use `tools/acp_setup.sh` and `tools/acp_bridge.service` |
-| Move from split setup to single-host ACP | planned | Keep localhost fallback until this is complete |
-| Post-migration validation gate | planned | `/health` ok + AIG raw-query smoke + `tools/test_eva.py` |
-| macOS standalone build (signed + notarized) | planned | Build config exists (`npm run dist:mac` produces unsigned dmg/zip for x64+arm64). Distribution requires Apple Developer ID, hardened runtime, entitlements (likely `com.apple.security.cs.disable-library-validation` for spawning system `python3`), and `@electron/notarize` afterSign hook. Local-dev builds work today; signed distribution deferred. |
-| Windows standalone build | planned | Add `win` target (nsis or portable) to electron-builder config; same Python/Node/Copilot CLI prereqs apply. |
+| Provision bridge-capable server | planned | 2+ vCPU, 4+ GB RAM |
+| Install runtime baseline | planned | Node.js 24+, Python 3.12+ |
+| Authenticate Copilot CLI | planned | `copilot auth login` on target |
+| Deploy bridge as systemd service | planned | `tools/acp_setup.sh` |
+| Single-host ACP deployment | planned | Keep localhost fallback until complete |
+| Post-migration validation | planned | `/health` ok + AIG smoke + `test_eva.py` |
+| macOS standalone build | planned | Needs Apple Developer ID + notarization |
+| Windows standalone build | planned | Add `win` target to electron-builder |
 
-## Eva (AIG) — Recommended Model
+## Security
 
-The **Eva (AIG)** model is the recommended way to use Eva. Selecting it in the model
-dropdown activates the full stack: intelligent orchestration, persistent memory,
-emotion tracking, and proactive data retrieval. An optional browser-side cognitive
-layer (eva / reviewer) can be enabled on top; see
-[Cognition Layer](#cognition-layer).
-
-### How AIG Works
-
-```
-Browser → POST /v1/aig/chat → ACP Bridge
-  ├── Step 1: Build memory context (Kusto queries)
-  │   ├── Skills manifest (always)
-  │   ├── Core knowledge (Confidence ≥ 0.6)
-  │   ├── Emotion state
-  │   ├── Day lifecycle / morning reflection
-  │   ├── Message-relevant recall
-  │   └── Proactive data (databases, tables, conversations, emotions)
-  │
-  ├── Step 2: Detect data needs (KQL keywords → ACP tool call)
-  │   └── MCP tools: kusto_query, kusto_ingest, web_search, etc.
-  │
-  ├── Step 3: Build Eva persona prompt (system + memory + retrieved data)
-  │
-  ├── Step 4: Generate response
-  │   ├── Primary: GitHub Models API (PAT) → gpt-4.1
-  │   └── Fallback: ACP (Copilot CLI) → whatever model is configured
-  │
-  └── Step 5: Background reflection (async thread)
-      ├── Log to Conversations table
-      ├── Extract entities → Knowledge table
-      ├── Update HeuristicsIndex
-      └── Compute emotion vector → EmotionState table
-```
-
-### AIG vs Copilot ACP
-
-| Feature | Copilot ACP | Eva (AIG) |
-|---------|------------|-----------|
-| Chat | ✓ | ✓ |
-| MCP Tools | ✓ | ✓ |
-| Persistent memory injection | — | ✓ |
-| Emotion tracking | — | ✓ |
-| Entity extraction | — | ✓ |
-| Morning reflection | — | ✓ |
-| Proactive data retrieval | — | ✓ |
-| Persona consistency | Basic | Full Eva system prompt |
-
-## Cognition Layer
-
-Eva has two complementary cognitive systems. The **bridge cognition layer** runs
-server-side inside `acp_bridge.py` and adds persistent intelligence (memory injection,
-emotion tracking, post-response reflection) to every AIG interaction. The **browser
-cognitive layer** runs entirely in the page and adds an optional multi-agent
-plan/draft/review loop on top of any AIG turn.
-
-### Browser Cognitive Layer (`core/js/cognition.js`)
-
-Opt-in via Settings > Models > **Enable Cognitive Layer**. When active, every Eva
-(AIG) turn is routed through two role-specific agents before the user sees a
-response:
-
-```
-User turn
-  -> Eva (plans, drafts the user-facing answer, may emit action blocks)
-     -> Reviewer (verdict: APPROVE | REQUEST_CHANGES)
-        -> Eva (revises against feedback) ... up to cogMaxCycles
-  -> executeActions(): runs any [[EVA_ACTION]] blocks Eva emitted
-  -> renderEvaResponse(): renders the final approved draft
-```
-
-Each agent calls the existing bridge endpoint `/v1/aig/chat` independently with its
-own model and editable system prompt, so users can mix providers (for example,
-Claude for planning, GPT for drafting, a smaller model for review). Per-stage progress
-is surfaced in the footer status line and a small `Cognition: on` pill.
-
-**Activation:**
-
-| Trigger | Behavior |
-|---|---|
-| Settings toggle on | Layer runs for every AIG turn |
-| Phrase in user message | Layer is force-enabled for that single turn even when the toggle is off |
-| Neither | Single-shot AIG path; an authoritative system note tells the model the layer is OFF for this turn so it cannot fabricate phase narration |
-
-Recognized trigger phrases include `trigger the chain`, `use cognition`,
-`use the cognitive layer`, `run eva`, `run the reviewer`,
-`engage cognition`, and `cognition: on`.
-
-**Capability registry and action protocol:**
-
-The eva agent can invoke registered capabilities by emitting an action block on
-its own line:
-
-```
-[[EVA_ACTION]]
-{"id":"file.download","args":{"filename":"report.md","content":"# ...","mime":"text/markdown"}}
-[[/EVA_ACTION]]
-```
-
-`Cognition.executeActions(text)` parses each block, runs the matching capability,
-and replaces the block with the capability's rendered HTML. New capabilities are
-registered with the same shape:
-
-```js
-Cognition.registerCapability({
-  id: 'web.search',
-  description: 'Search the public web. args: {query, max_results}.',
-  run: async function (args) { /* call your search backend */ }
-});
-```
-
-Built-in: `file.download` (text artifact -> Blob URL -> inline `<a download>` link,
-namespaced under a virtual `tmp/<session_id>/<filename>` path; the repo `.gitignore`
-excludes `tmp/`).
-
-**Status tag format:**
-
-```
-Eva (AIG, cognition) - <eva-model>  [cog:<e>+<r>/c<N>[/forced][/act<K>]]
-```
-
-`/forced` indicates a phrase-triggered run; `/act<K>` indicates K capability
-invocations executed during the turn.
-
-### Bridge Cognition Layer (`tools/acp_bridge.py`)
-
-The cognition layer that runs inside the bridge and adds persistent intelligence to
-every AIG interaction.
-
-### Memory Context (`_build_memory_context`)
-
-Injected into every AIG request as a structured system prompt section:
-
-| Section | When | Source |
-|---------|------|--------|
-| `[Skills]` | Always | Hardcoded capability catalog |
-| `[Workflow: Data Requests]` | Always | Instructions for tool use |
-| `[Workflow: Memory]` | Always | Instructions for recall |
-| `[Morning Reflection]` | First msg of day | `MemorySummaries` (latest 3) |
-| `[Memory — Core Facts]` | Always | `Knowledge` where Confidence ≥ 0.6 (top 10) |
-| `[Active Goals]` | Always when present | `Goals` where Status is `active` (top 10) |
-| `[Emotion State]` | Always | Latest `EmotionState` row |
-| `[Memory — Relevant]` | On keyword match | `Knowledge` matching user words |
-| `[Live Data]` | On intent detection | Various tables, queried on-demand |
-
-### Goals
-
-Goals are persistent intentions stored in the Kusto `Goals` table. The bridge injects active goals into `_build_memory_context` after core facts so they influence prompting across sessions. Add or edit them from Settings > Goals, which calls the bridge `/v1/goals` endpoints; writes stay outside MCP so the user approves each change.
-
-### Post-Response Reflection (`_post_response_reflection`)
-
-Runs in a background thread after each AIG response:
-
-1. **Conversation logging** — both user and assistant messages → `Conversations`
-2. **Entity extraction** — regex for proper nouns → `Knowledge` (Confidence: 0.5)
-3. **Heuristics update** — entity frequency tracking → `HeuristicsIndex`
-4. **Emotion computation** — sentiment word counting → `EmotionState`
-
-### SelfState
-
-On bridge startup, Eva writes 8 capability rows to `SelfState`:
-
-- `kusto_access`, `acp_bridge`, `cognition`, `data_retrieval`
-- `weather_news`, `image_skills`, `persistent_memory`, `mcp_*` (per MCP server)
-
-### Kusto Inline Ingest Format
-
-The bridge uses `.ingest inline into table <T> <|` with strict CSV:
-- Delimiter: `,` (no space after comma)
-- Strings with commas or quotes: wrapped in `"..."` with `""` escaping
-- JSON/dynamic: `json.dumps()` → CSV-quoted
-- Booleans: `true`/`false`
-- Newlines: escaped as `\n`
-
-## Session Explorer
-
-`core/js/sessions.js` + `core/js/idb-store.js` provide persistent session management:
-
-- **Storage backend** — IndexedDB (`eva_sessions_db`) with two object stores:
-  - `sessions` — full DOM snapshots keyed by session ID
-  - `blobs` — binary attachments (images, audio) indexed by `sessionId`
-- **Auto-save** — after every response via `saveCurrentSession()` → `idbSaveSession()`
-- **Auto-restore** — on page load (`initSessions()` → `idbLoadSession()`)
-- **Session index** — lightweight list in `localStorage` key `eva_sessions` (id, title, timestamp)
-- **Migration** — `idbMigrateFromLocalStorage()` runs once on first load, moves existing `session_<id>` entries from localStorage to IndexedDB, then cleans up
-- **Persistent storage** — requests `navigator.storage.persist()` so the browser won't evict session data under storage pressure
-- **Blob helpers** — `idbSaveBlob()`, `idbGetBlob()`, `dataUrlToBlob()`, `blobToDataUrl()` for handling inline images and audio
-- **UI** — expandable panel in footer, chip in LCARS sidebar, session list in Eva sidebar
-
-## Voice Activation
-
-`core/js/voice.js` implements continuous wake-word listening:
-
-- **Wake word**: "Eva" (detected via Web Speech API)
-- **States**: Listening (green) → Awake (amber pulse) → Sending (blue) → Idle
-- **Flow**: Continuous recognition → wake word detected → capture next phrase → auto-send
-- **Fallback**: Click mic button for manual speech-to-text
-
-## Workspace Agent Profiles
-
-`.github/agents/` ships two VS Code Copilot workspace agents tuned for this
-project's conventions. These are editor-time review tooling, not runtime components
-of Eva, and they do not run automatically when the browser cognitive layer is
-active.
-
-| File | Role | When to use |
-|---|---|---|
-| `eva.agent.md` | Eva (lead agent) | Planning, writing, refactoring, fixing, testing, or shipping code. Eva knows her own architecture, runtime, and capabilities. |
-| `reviewer.agent.md` | Comprehensive reviewer | Reviewing Eva's work, approving changes, designing tests, running checks, or rubber-ducking plans |
-
-The optional `.github/agents/local/` folder is gitignored and reserved for
-maintainer-only notes (dev topology, recurring commands, internal hosts, agent
-playbooks). Nothing under `local/` is published.
-
-## Database Seed
-
-For public cloning, a sanitized seed file is provided:
-
-```bash
-# 1. Create an Azure Data Explorer free cluster
-# 2. Create a database named "Eva"
-# 3. Run the seed file:
-#    Copy contents of tools/eva_seed.kql into the Kusto Web Explorer and execute
-```
-
-The seed creates all 8 tables with sample data:
-
-| Table | Seed Rows | Purpose |
-|-------|-----------|---------|
-| `SelfState` | 8 | Capability registry |
-| `Knowledge` | 4 | Starter facts |
-| `Conversations` | 2 | Example exchange |
-| `EmotionState` | 1 | Initial emotion baseline |
-| `EmotionBaseline` | 6 | Resting-state dimensions |
-| `MemorySummaries` | 1 | First day summary |
-| `Reflections` | 1 | Initial self-reflection |
-| `HeuristicsIndex` | 1 | Pattern tracking starter |
-
-See [tools/eva_seed.kql](tools/eva_seed.kql) for the full file.
+- Bridge binds to `127.0.0.1` by default (localhost only)
+- `--allow-all-tools` bypasses ACP permission prompts (required for non-interactive MCP)
+- Terminal commands execute with bridge process's user permissions
+- MCP env vars (tokens) are redacted from `/v1/mcp` responses and persisted configs
+- URL fetching uses SSRF protection: DNS resolution validated, all IPs must be public, IP pinning prevents DNS rebinding, redirect hops re-validated
+- Skill import treats source text as untrusted data (explicit anti-injection prompt)
+- LM Studio base URL restricted to localhost/private IPs on whitelisted ports (1234, 8000, 8080, 11434)
+- Camera off by default, subprocess-isolated, state read-only from bridge
+- Sensitive browser/desktop actions require user confirmation
+- `pyautogui.FAILSAFE = True` (mouse to corner = emergency stop)
+- Background proposals require human approval before writing to memory
 
 ## CI / Testing
 
 ### GitHub Actions (`eva-ci.yml`)
 
-Runs on every PR to `main` or `notAIG`:
+Runs on every PR to `main`:
 
 | Job | Checks |
-|-----|--------|
+|---|---|
 | **static-checks** | Secret scanning, HTML structure, JS syntax, Python syntax, model routing, config templates, .gitignore |
-| **python-tests** | `tools/test_static.py` — file integrity, config safety, CSV quoting logic, model selector, seed validation |
+| **python-tests** | `tools/test_static.py`: file integrity, config safety, CSV logic, model selector, seed validation |
 
 ### Test Files
 
-| File | When to Run | Needs Bridge? |
-|------|-------------|---------------|
-| `tools/test_static.py` | CI + local | No |
-| `tools/test_eva.py` | Local only | Yes (live bridge on port 8888) |
-| `tools/eval/run.py --mode mock` | CI + local | No |
-| `tools/eval/run.py --mode live` | Local behavioral regression check | Yes |
+| File | Needs Bridge? | Description |
+|---|---|---|
+| `tools/test_static.py` | No | CI-safe static tests |
+| `tools/test_eva.py` | Yes | 64-check integration suite |
+| `tools/test_latency.py` | Yes | Latency benchmarks |
+| `tools/test_skills_e2e.py` | Yes | Skill import end-to-end |
+| `tools/eval/run.py --mode mock` | No | Behavioral eval with synthetic responses |
+| `tools/eval/run.py --mode live` | Yes | Behavioral eval against live bridge |
 
 ```bash
-# CI-safe tests (no bridge needed)
-python3 tools/test_static.py
-
-# Full integration tests (requires running bridge)
-python3 tools/test_eva.py --verbose
-
-# Behavioral eval with synthetic ideal responses
-python3 tools/eval/run.py --mode mock
-
-# Behavioral eval against a running bridge
-python3 tools/eval/run.py --mode live --bridge http://localhost:8888
+python3 tools/test_static.py                          # CI-safe
+python3 tools/test_eva.py --verbose                   # full integration
+python3 tools/eval/run.py --mode mock                 # synthetic eval
+python3 tools/eval/run.py --mode live --bridge http://localhost:8888  # live eval
 ```
 
 ### Behavioral Evaluation
 
-The behavioral eval harness lives in `tools/eval/`. It checks Eva-specific behavior such as identity, style adherence, refusal boundaries, seeded-memory recall, routing hints, capability markers, and prompt-injection resistance. This is separate from `tools/test_eva.py`, which remains the live endpoint smoke suite.
+Fixtures in `tools/eval/fixtures/` (one JSON per category): identity, style,
+refusal, recall, routing, capability, injection_resistance. Mock mode reads
+`tools/eval/mock_responses.json`. Results to `tools/eval/results/<timestamp>.json`.
 
-Fixtures are stored as one JSON file per category in `tools/eval/fixtures/`, and the framework contract is documented in `.github/eva-eval.skill.md`. Mock mode reads `tools/eval/mock_responses.json` so CI can run without a bridge. Live mode posts to `/v1/aig/chat` on the configured bridge. Results are written to `tools/eval/results/<timestamp>.json` and `<timestamp>.md`.
+## Session Explorer
 
-Add new fixtures when changing Eva's prompts, memory behavior, refusals, routing rules, or capability markers. Prefer deterministic regex and literal checkers before using an LLM judge, and keep recall fixtures tied to sanitized rows in `tools/eva_seed.kql`.
+`core/js/sessions.js` + `core/js/idb-store.js`:
+
+- **Storage:** IndexedDB (`eva_sessions_db`) with `sessions` + `blobs` object stores
+- **Auto-save** after every response, auto-restore on page load
+- **Session index** in localStorage (lightweight), full snapshots in IndexedDB
+- **Migration** from localStorage on first load
+- **Persistent storage** via `navigator.storage.persist()`
+
+## LCARS Theme
+
+Star Trek-inspired interface (Lower Decks palette):
+
+- Barlow Condensed font (Google Fonts)
+- LCARS elbows (curved connectors via CSS pseudo-elements)
+- Flat colored sidebar chips with black gaps
+- Accent-border chat bubbles (cyan=Eva, blue=User)
+- Monitor dock with 4 tabs (Tokens, Network, Session, System)
 
 ---
 Based on [CodeProject](https://www.codeproject.com/Articles/5350454/Chat-GPT-in-JavaScript). Heavily extended.
