@@ -1284,6 +1284,7 @@ body.theme-lcars #idContainer {
 body.theme-lcars footer { grid-column: 2; display: none; } /* footer hidden in LCARS — controls in sidebar */
 body.theme-lcars #txtOutput {
   width: 100%;
+  max-width: none;
   flex: 1 1 auto;
   min-height: 0;
   height: auto;

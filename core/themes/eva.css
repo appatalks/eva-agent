@@ -263,6 +263,7 @@ body.theme-eva #txtOutput {
 /* ── Chat Output ────────────────────────────────────────────── */
 body.theme-eva #txtOutput {
   width: 100%;
+  max-width: none;
   flex: 1 1 auto;
   min-height: 0;
   height: auto;
