@@ -1359,3 +1359,51 @@ body.theme-eva-sunset {
   --eva-purple-glow: rgba(245,158,11,0.25);
   --eva-blue-glow:   rgba(245,158,11,0.15);
 }
+
+/* ── Eva Steampunk ─────────────────────────────────────────────
+ *  Brass + copper on aged leather/mahogany. Warm parchment text. */
+body.theme-eva-steampunk {
+  --eva-bg:          #150f09;
+  --eva-sidebar:     #20160c;
+  --eva-sidebar-item:#322412;
+  --eva-surface:     #1e150b;
+  --eva-surface-2:   #2c2011;
+  --eva-chat-bg:     #18110a;
+  --eva-border:      rgba(201,162,39,0.12);
+  --eva-border-hl:   rgba(201,162,39,0.40);
+  --eva-text:        #ede0c8;
+  --eva-text-muted:  #a89372;
+  --eva-accent:      #c9962c;
+  --eva-accent-hover:#e0b341;
+  --eva-purple:      #b87333;
+  --eva-purple-light:#e0a35c;
+  --eva-purple-glow: rgba(201,150,44,0.28);
+  --eva-blue-glow:   rgba(184,115,51,0.18);
+  --eva-success:     #8a9a3c;
+  --eva-warning:     #d98e1f;
+  --eva-danger:      #b4442e;
+}
+
+/* ── Eva Greyscale (Stargate installation) ─────────────────────
+ *  Cold concrete + brushed steel. Muted blue-grey signal accent. */
+body.theme-eva-greyscale {
+  --eva-bg:          #0e0f10;
+  --eva-sidebar:     #16181a;
+  --eva-sidebar-item:#23272b;
+  --eva-surface:     #161819;
+  --eva-surface-2:   #232729;
+  --eva-chat-bg:     #101213;
+  --eva-border:      rgba(170,180,190,0.10);
+  --eva-border-hl:   rgba(140,155,170,0.38);
+  --eva-text:        #d7dbdf;
+  --eva-text-muted:  #868d96;
+  --eva-accent:      #6d8493;
+  --eva-accent-hover:#8fa6b4;
+  --eva-purple:      #566b78;
+  --eva-purple-light:#9aaeba;
+  --eva-purple-glow: rgba(130,150,165,0.22);
+  --eva-blue-glow:   rgba(120,140,155,0.14);
+  --eva-success:     #7d8c84;
+  --eva-warning:     #b8a878;
+  --eva-danger:      #a85c54;
+}
