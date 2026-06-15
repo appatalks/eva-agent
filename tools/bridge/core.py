@@ -2349,15 +2349,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # local models (which struggle with long system prompts) still know
             # about the camera.  This is ephemeral and not persisted.
             _camera_keywords = {'look', 'see', 'holding', 'camera', 'webcam', 'picture', 'photo', 'show me', 'what am i'}
-            if any(kw in user_message.lower() for kw in _camera_keywords):
+            _signal_keywords = {'signal', 'text me', 'text message', 'send me a message', 'send a message', 'notify me', 'message me'}
+            _is_signal_request = any(kw in user_message.lower() for kw in _signal_keywords)
+            # Skip camera reminder when the user is asking for a Signal message
+            if any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request:
                 lms_messages.append({"role": "system", "content": (
                     "REMINDER: You have webcam access. To look through the camera, "
                     "emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]. "
                     "Do NOT say you cannot see or access the camera."
                 )})
             # Signal messaging reminder for local models
-            _signal_keywords = {'signal', 'text me', 'text message', 'send me a message', 'send a message', 'notify me', 'message me'}
-            if any(kw in user_message.lower() for kw in _signal_keywords):
+            if _is_signal_request:
                 lms_messages.append({"role": "system", "content": (
                     "REMINDER: You CAN send Signal text messages. To send one, "
                     "emit [[EVA_SIGNAL]]{\"message\":\"<text to send>\"}[[/EVA_SIGNAL]]. "
@@ -2393,7 +2395,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # instruction.  If the user clearly asked about the camera/webcam
             # and the model didn't emit the marker, append it so the frontend
             # triggers the capture automatically.
-            if any(kw in user_message.lower() for kw in _camera_keywords) and '[[EVA_LOOK]]' not in response_text:
+            # Skip when the user is asking for a Signal message.
+            if any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request and '[[EVA_LOOK]]' not in response_text:
                 # Extract a question from the user message for the vision model
                 _look_q = user_message.strip()
                 response_text = response_text.rstrip()
@@ -2402,7 +2405,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
             # Signal fallback: if the user asked for a Signal/text message and
             # the model didn't emit the marker, inject it so the message sends.
-            if any(kw in user_message.lower() for kw in _signal_keywords) and '[[EVA_SIGNAL]]' not in response_text:
+            if _is_signal_request and '[[EVA_SIGNAL]]' not in response_text:
                 # Try to extract the message content from the user request
                 _sig_body = user_message.strip()
                 # Look for quoted text the user wants sent
