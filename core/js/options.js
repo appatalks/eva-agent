@@ -4118,15 +4118,12 @@ function applyTheme(theme) {
   var evaDisclaimer = document.getElementById('evaDisclaimer');
   if (evaDisclaimer) evaDisclaimer.style.display = isEva ? 'block' : 'none';
 
-  // Swap avatar images for specific variants
+  // Eva themes all use the thumb-125 portrait
   var welcomeAvatar = document.querySelector('.eva-welcome-avatar');
   var sidebarAvatar = document.querySelector('.eva-sidebar-avatar');
-  if (theme === 'eva-greyscale') {
+  if (isEva) {
     if (welcomeAvatar) welcomeAvatar.src = 'core/img/thumb-125.jpeg';
     if (sidebarAvatar) sidebarAvatar.src = 'core/img/thumb-125.jpeg';
-  } else if (isEva) {
-    if (welcomeAvatar) welcomeAvatar.src = 'core/img/eva-face-lg.png';
-    if (sidebarAvatar) sidebarAvatar.src = 'core/img/eva-face-sm.png';
   }
 
   // Populate Eva sidebar sessions
@@ -6052,7 +6049,7 @@ function restoreEvaWelcome() {
   var theme = (localStorage.getItem('theme') || 'eva');
   if (theme !== 'eva' && theme.indexOf('eva-') !== 0) return;
   out.innerHTML = '<div id="evaWelcome" class="eva-welcome">'
-    + '<img src="core/img/eva-face-lg.png" alt="Eva" class="eva-welcome-avatar">'
+    + '<img src="core/img/thumb-125.jpeg" alt="Eva" class="eva-welcome-avatar">'
     + '<h2 class="eva-welcome-title">Hello! I\'m <span class="eva-highlight">Eva</span></h2>'
     + '<p class="eva-welcome-subtitle">Your AI assistant. Ask me anything or choose a suggestion to get started.</p>'
     + '<div class="eva-suggestions">'
