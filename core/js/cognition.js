@@ -617,7 +617,8 @@
       '{"id":"<capability-id>","args":{...}}',
       '[[/EVA_ACTION]]',
       'The browser will execute it and replace the block with the rendered result.',
-      'Use file.download for any user-requested downloadable artifact (markdown, csv, txt, etc.).'
+      'Use file.download ONLY when the user explicitly asks for a file, document, PDF, report, or download.',
+      'Default: answer inline in chat. Do NOT auto-generate file artifacts unless the user asks for one.'
     ].join('\n');
 
     // Stage 1: Eva plans and drafts the user-facing answer
@@ -631,7 +632,11 @@
       actionHelp,
       '',
       'Write the user-facing answer now.',
-      'When the user asked for a downloadable file, you MUST emit a [[EVA_ACTION]] file.download block.',
+      'IMPORTANT: By default, answer INLINE in the chat. Present briefings, reports, and summaries',
+      'as formatted text in your response. Only emit a [[EVA_ACTION]] file.download block when the',
+      'user EXPLICITLY asks for a file, document, PDF, report download, or specific file format.',
+      'Phrases like "give me a briefing" or "what\'s the news" = answer inline.',
+      'Phrases like "create a PDF report" or "generate a markdown file" or "make a document" = file.download.',
       'When the user asks to OPEN or VIEW a file that was already created earlier in this conversation,',
       'use file.open with the existing filename. Do NOT recreate the file as a PDF or any other format.',
       'Never simulate or describe phases. Never print PHASE headers. Just answer.',

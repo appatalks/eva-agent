@@ -21,6 +21,9 @@ function lmsSend() {
               "- If asked for a briefing and you have no real data, tell the user you need their location and that live data is being fetched.\n" +
               "- Always close action blocks: [[EVA_ACTION]]{...}[[/EVA_ACTION]]. Never leave them unclosed.\n" +
               "\nFILE CAPABILITIES:\n" +
+              "- By DEFAULT, answer inline in chat. Present briefings, reports, summaries as formatted text.\n" +
+              "- Only create a file when the user EXPLICITLY asks for one (e.g. 'create a PDF', 'generate a report file', 'make a document', 'download as markdown').\n" +
+              "- 'Give me a briefing' or 'what's the news' = answer inline. 'Create a PDF report' = file.download.\n" +
               "- file.download: Create a new downloadable file. Args: {filename, content, mime}. Use [[EVA_ACTION]]{\"id\":\"file.download\",\"args\":{...}}[[/EVA_ACTION]]\n" +
               "- file.open: Open an EXISTING file that was already created. Args: {filename}. Use [[EVA_ACTION]]{\"id\":\"file.open\",\"args\":{\"filename\":\"<name>\"}}[[/EVA_ACTION]]\n" +
               "- When the user asks to 'open', 'view', or 'show' a file that already exists (look for [[EVA_FILE]] markers in conversation history), use file.open with the SAME filename. Do NOT recreate the file.\n" +
