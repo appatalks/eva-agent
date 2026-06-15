@@ -2406,6 +2406,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         _signal_send(_sig_msg)
                 except (json.JSONDecodeError, AttributeError):
                     print("[AIG] EVA_SIGNAL marker had invalid JSON")
+                # Strip spurious [[EVA_LOOK]] if the user asked for messaging,
+                # not camera.  The model sometimes emits both by mistake.
+                if not any(kw in user_message.lower() for kw in _camera_keywords):
+                    response_text = _re.sub(
+                        r'\[\[EVA_LOOK\]\]\s*(?:\{[\s\S]*?\})?\s*(?:\[\[/EVA_LOOK\]\])?',
+                        '', response_text)
 
             # Post-process: convert blob/download links to [[EVA_FILE]] markers.
             # ACP or the model may produce blob:file:/// URLs or markdown download links
@@ -3624,6 +3630,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
         else:
             _st.local_mode = False
             print("[Mode] Switched to CLOUD (Copilot CLI)")
+
+        # Persist mode preference so it survives bridge restarts
+        try:
+            os.makedirs(os.path.dirname(_cfg.MODE_PREF_PATH), exist_ok=True)
+            with open(_cfg.MODE_PREF_PATH, "w") as f:
+                f.write("local" if _st.local_mode else "cloud")
+        except OSError:
+            pass
 
         self._json_response(200, {
             "mode": "local" if _st.local_mode else "cloud",

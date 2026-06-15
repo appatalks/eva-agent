@@ -87,5 +87,12 @@ notify_ring = []
 
 # ── Local MCP (no-cloud mode) ──────────────────────────────────────
 local_mcp_manager = None    # LocalMCPManager instance (lazy)
-local_mode = False          # True = use local tool-calling, False = use ACP/Copilot CLI
+# Restore persisted mode preference (local vs cloud).
+_mode_pref_path = os.path.join(
+    os.path.expanduser("~/.config/eva-standalone"), "mode.txt")
+try:
+    _saved_mode = open(_mode_pref_path).read().strip().lower() if os.path.isfile(_mode_pref_path) else ""
+except OSError:
+    _saved_mode = ""
+local_mode = (_saved_mode == "local")
 

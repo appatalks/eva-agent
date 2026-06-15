@@ -79,6 +79,10 @@ def _load_alerts():
                     for k in _DEFAULT_ALERT_SETTINGS:
                         if k in settings:
                             doc["settings"][k] = settings[k]
+                    # Signal config (not in DEFAULT but persisted by sanitize)
+                    for k in ("signal_sender", "signal_recipient"):
+                        if k in settings:
+                            doc["settings"][k] = settings[k]
     except (OSError, json.JSONDecodeError) as exc:
         print(f"[Bridge] Could not load alerts config: {exc}", file=sys.stderr)
     return doc

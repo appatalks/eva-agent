@@ -41,6 +41,7 @@ ALERTS_CONFIG_PATH = os.path.join(EVA_CONFIG_DIR, "alerts.json")
 NOTIFY_PATH = os.path.join(EVA_CONFIG_DIR, "notifications.jsonl")
 EMBEDDING_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "embeddings_cache.json")
 MEMORY_BACKEND_PREF_PATH = os.path.join(EVA_CONFIG_DIR, "memory_backend.txt")
+MODE_PREF_PATH = os.path.join(EVA_CONFIG_DIR, "mode.txt")
 TELEMETRY_PATH = os.path.join(EVA_CONFIG_DIR, "telemetry.jsonl")
 
 # ── Networking / validation ─────────────────────────────────────────
