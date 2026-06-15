@@ -86,6 +86,20 @@ body.eva-standalone {
   color: #fff;
 }
 
+/* In the frameless standalone window, keep the full-height slide-in panels and
+   the centered settings modal below the 32px custom title bar so their headers
+   and controls are never clipped by it. */
+body.eva-standalone .session-panel,
+body.eva-standalone .skills-panel,
+body.eva-standalone .assets-panel,
+body.eva-standalone .terminal-panel {
+  top: 32px;
+  height: calc(100vh - 32px);
+}
+body.eva-standalone #settingsMenu {
+  max-height: calc(100vh - 64px);
+}
+
 /* ------------------------------------------------------------
  *  Settings Overlay & Panel
  * ------------------------------------------------------------- */

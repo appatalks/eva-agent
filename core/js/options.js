@@ -4038,9 +4038,12 @@ function applyTheme(theme) {
 
   // Remove all theme-* classes (covers variants like theme-eva-rose, etc.)
   body.className = body.className.replace(/\btheme-\S+/g, '').trim();
-  // Unload any theme stylesheets we previously loaded
+  // eva.css holds global component styles (voice view, welcome screen, color
+  // variants) that all themes rely on, not just theme-eva. Keep it loaded for
+  // every theme so switching to LCARS/legacy doesn't strip those base rules
+  // (which previously left the voice-view HUD visible and broke the layout).
+  ensureThemeStylesheet('eva', 'core/themes/eva.css');
   unloadThemeStylesheet('lcars');
-  unloadThemeStylesheet('eva');
 
   // Add selected theme class
   var isEva = (theme === 'eva' || theme.indexOf('eva-') === 0);
