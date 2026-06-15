@@ -208,14 +208,12 @@
       );
       overflow: hidden;
     }
-    .orb-pupil {
-      position: absolute; width: 44px; height: 44px;
-      top: 50%; left: 50%;
-      transform: translate(-50%, -50%);
+    .orb-avatar {
+      position: absolute; width: 100%; height: 100%;
+      top: 0; left: 0;
       border-radius: 50%;
-      background: radial-gradient(circle, #080814 60%, #161630);
-      box-shadow: 0 0 24px rgba(0,0,0,0.9);
-      transition: transform 0.08s ease-out;
+      object-fit: cover;
+      z-index: 1;
     }
     .orb-glint {
       position: absolute; width: 14px; height: 14px;
@@ -318,6 +316,17 @@
     }
     .terminal-code:hover { text-shadow: 0 0 16px rgba(103,232,249,0.4); }
     .terminal-code .c { color: var(--text-dim); }
+
+    /* ── App preview ───────────────────────────────────────── */
+    .preview {
+      max-width: 820px; width: 100%; margin: 48px auto 0;
+      animation: heroReveal 1.2s ease-out 0.8s both;
+    }
+    .preview img {
+      width: 100%; border-radius: var(--radius);
+      border: 1px solid var(--glass-edge);
+      box-shadow: 0 8px 60px rgba(103,232,249,0.08), 0 2px 20px rgba(0,0,0,0.5);
+    }
 
     /* ── Section shared ────────────────────────────────────── */
     section { position: relative; z-index: 2; }
@@ -575,7 +584,7 @@
     <div class="orb-pulse d"></div>
     <div class="orb-ring"></div>
     <div class="orb-iris">
-      <div class="orb-pupil" id="orbPupil"></div>
+      <img src="../core/img/thumb-125.jpeg" alt="Eva" class="orb-avatar">
       <div class="orb-glint"></div>
     </div>
   </div>
@@ -595,9 +604,10 @@
       curl -fsSL https://appatalks.github.io/eva-agent/get-eva.sh | bash
     </div>
   </div>
+  <div class="preview">
+    <img src="../core/img/Eva-splash.png" alt="Eva AI Assistant interface preview">
+  </div>
 </section>
-
-<!-- Capabilities -->
 <section id="capabilities">
   <div class="section-inner">
     <h2>What Eva does</h2>
