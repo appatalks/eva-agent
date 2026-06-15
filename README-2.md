@@ -12,12 +12,12 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 | Provider | Models |
 |---|---|
 | Eva (AIG) | Multi-agent orchestration over GitHub Models, ACP, and LM Studio |
-| OpenAI | GPT-4o, o1, o3-mini, GPT-5-mini |
-| GitHub Copilot (PAT) | GPT-4.1, GPT-5, o4-mini, GPT-4o, DeepSeek-R1 |
-| GitHub Copilot (ACP) | Claude, Gemini 3 Pro, GPT-5.x via Copilot CLI |
-| Google Gemini | Gemini 2.0 Flash Thinking |
+| OpenAI | GPT-4o, GPT-4o Mini, o1, o1-preview, o1-mini, o3-mini, latest |
+| GitHub Copilot (PAT) | GPT-4o, GPT-4o Mini, o3-mini, GPT-5, o4-mini, DeepSeek-R1, Llama 4 Maverick |
+| GitHub Copilot (ACP) | Claude, GPT-5.x, GPT-4.1 via Copilot CLI |
+| Google Gemini | Gemini 2.0 Flash (Thinking Exp) |
 | LM Studio | Any local OpenAI-compatible model (fully offline) |
-| DALL-E 3 | Image generation |
+| gpt-image-1 | Image generation |
 
 ## Highlights
 
@@ -27,7 +27,7 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 - Persistent memory via Azure Data Explorer (Kusto) or local SQLite
 - Autonomous browser control (Playwright + CDP) and desktop control (pyautogui)
 - Webcam presence detection (OpenCV face + motion)
-- Inline image search (Wikimedia) and generation (DALL-E 3, gpt-image-1)
+- Inline image search (Wikimedia) and generation (gpt-image-1)
 - Downloadable artifact creation (PDF, text, CSV, markdown) with auto-open
 - Skill import/normalization from paste, URL, GitHub, or file upload
 - Background memory consolidation with human-in-the-loop proposals
@@ -121,7 +121,7 @@ Browser -> XHR/fetch -> Provider API -> JSON response -> `renderEvaResponse()`
 1. `_detectGenerationIntent()` captures user's intent + subject before send
 2. AI responds with `[Image of ...]` placeholder
 3. `renderEvaResponse()` detects placeholder, routes to:
-   - **DALL-E 3** / **gpt-image-1** if user said "generate/create/draw" (uses user's simple subject)
+   - **gpt-image-1** if user said "generate/create/draw" (uses user's simple subject)
    - **Wikimedia Commons** otherwise (progressive query: full -> 2 words -> 1 word)
 4. Image inserted inline with lightbox click-to-expand
 
@@ -183,7 +183,7 @@ core/
                            - Built-in PDF generator (Helvetica, Latin-1, multi-page)
                            - Marker protocol: [[EVA_BROWSER]], [[EVA_DESKTOP]],
                              [[EVA_LOOK]], [[EVA_FILE]]
-    dalle3.js              DALL-E 3 image generation (dalle3Send)
+    dalle3.js              Image generation via gpt-image-1 (dalle3Send)
     idb-store.js           IndexedDB storage backend (sessions + blobs)
     sessions.js            Session persistence and management
     voice.js               Wake-word "Eva" via Web Speech API
@@ -303,15 +303,18 @@ catalog evolves; this list reflects a recent `copilot --list-models` output.
 
 | Provider | Model ID | Notes |
 |---|---|---|
-| **Anthropic** | `claude-opus-4.7` | Most capable Claude. Variants: `-high`, `-xhigh` |
+| **Anthropic** | `claude-opus-4.8` | AIG backend only |
+| | `claude-opus-4.7` | Variants: `-high`, `-xhigh` |
 | | `claude-opus-4.6` | Variant: `-1m` (1M context) |
-| | `claude-sonnet-4.6` | Default sonnet tier |
+| | `claude-opus-4.5` | |
+| | `claude-sonnet-4.6` | Default AIG backend |
+| | `claude-sonnet-4.5`, `claude-sonnet-4` | |
 | | `claude-haiku-4.5` | Fastest Claude |
 | **OpenAI** | `gpt-5.5` | |
 | | `gpt-5.4`, `gpt-5.4-mini` | |
 | | `gpt-5.3-codex`, `gpt-5.2-codex` | |
 | | `gpt-5.2`, `gpt-5-mini` | |
-| | `gpt-4.1` | Default AIG backend |
+| | `gpt-4.1` | |
 
 ### CLI Flags
 
@@ -923,7 +926,7 @@ routing decisions only. Never records message content, tokens, keys, or MCP env 
 
 ## Settings Panel
 
-Seven tabs in a modal overlay:
+Eight tabs in a modal overlay:
 
 | Tab | Contents |
 |---|---|
@@ -931,8 +934,9 @@ Seven tabs in a modal overlay:
 | **Models** | Model selector (grouped by provider), temperature, max tokens, reasoning effort, AIG backend selector, ACP model selector, cognitive layer controls (toggle, per-agent model selectors, max cycles, editable prompts, debug trace) |
 | **Auth** | API key inputs with show/hide toggles, ACP bridge URL, LM Studio base URL and model name |
 | **Prompts** | Personality presets (Default/Concise/Advanced/Terminal/Custom), editable system prompt textarea |
-| **Goals/Skills** | Goals list with create/edit/delete. Skills list with import (paste/URL/GitHub/file), evarise preview, enable/disable |
+| **Goals** | Goals list with create/edit/delete. Skills list with import (paste/URL/GitHub/file), evarise preview, enable/disable |
 | **Background** | Background loop status, enable/interval controls, run-once, proposal approval/rejection, recent activity |
+| **Cron** | Cron task list with create/edit/delete, schedule expression, prompt, last/next run timestamps |
 | **MCP** | Azure MCP, GitHub MCP, Kusto MCP toggles with config fields. Apply/refresh buttons |
 
 ## Deployment
