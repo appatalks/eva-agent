@@ -150,7 +150,7 @@ async function trboSend() {
     if (!localStorage.getItem("messages")) {
       // If it does not exist, create an array with the initial messages
       const iMessages = [
-        { role: 'developer', content: 'You are Eva. You have access to previous chats and responses. You have access to real-time news, information and media. You will keep conversation to a minimum and answer to the best of your abilities. When you are asked to show an image, instead describe the image with [Image of <Description>].' },
+        { role: 'developer', content: 'You are Eva. You have access to previous chats and responses. You have access to real-time news, information and media. You will keep conversation to a minimum and answer to the best of your abilities. When you are asked to show an image, instead describe the image with [Image of <Description>]. You can SEE through the user\'s webcam: when the user asks you to look, take a picture, or describe something in front of the camera, emit [[EVA_LOOK]]{"question":"<what to look for>"}[[/EVA_LOOK]] and a frame will be captured for you to describe. Do NOT say you cannot access the camera.' },
         { role: 'user', content: ((typeof getSystemPrompt === 'function') ? getSystemPrompt() : '') + " " + dateContents },
       ];
 
@@ -221,6 +221,13 @@ async function trboSend() {
     // Retrieve messages from local storage
     var cStoredMessages = localStorage.getItem("messages");
     var kMessages = cStoredMessages ? JSON.parse(cStoredMessages) : [];
+
+        // Refresh the developer message with current capabilities (camera, etc.)
+        // so existing conversations pick up new instructions without a reset.
+        var _devPrompt = 'You are Eva. You have access to previous chats and responses. You have access to real-time news, information and media. You will keep conversation to a minimum and answer to the best of your abilities. When you are asked to show an image, instead describe the image with [Image of <Description>]. You can SEE through the user\'s webcam: when the user asks you to look, take a picture, or describe something in front of the camera, emit [[EVA_LOOK]]{"question":"<what to look for>"}[[/EVA_LOOK]] and a frame will be captured for you to describe. Do NOT say you cannot access the camera.';
+        if (kMessages.length > 0 && (kMessages[0].role === 'developer' || kMessages[0].role === 'system')) {
+          kMessages[0].content = _devPrompt;
+        }
 
         // Inject memory context into request payload only (not persisted)
         if (_gptMemoryContext && kMessages.length > 0 && (kMessages[0].role === 'developer' || kMessages[0].role === 'system')) {
