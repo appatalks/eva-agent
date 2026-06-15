@@ -3863,6 +3863,27 @@ def main():
     else:
         print(f"[Bridge] Cognition layer disabled (no Kusto MCP or token, and backend is not sqlite)")
 
+    # Restore persisted local mode: spawn MCP servers so data retrieval works.
+    if _st.local_mode and (not _st.local_mcp_manager or not _st.local_mcp_manager.alive):
+        try:
+            from bridge.local_mcp import LocalMCPManager
+            _local_cfg = dict(mcp_config) if mcp_config else _load_persisted_mcp_config()
+            if "eva-web-search" not in _local_cfg:
+                _ws_candidates = [
+                    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web_search_mcp.py"),
+                    os.path.expanduser("~/.eva/tools/web_search_mcp.py"),
+                ]
+                for _ws_path in _ws_candidates:
+                    if os.path.isfile(_ws_path):
+                        _local_cfg["eva-web-search"] = {"command": sys.executable, "args": [_ws_path]}
+                        break
+            _st.local_mcp_manager = LocalMCPManager()
+            _st.local_mcp_manager.start_servers(_local_cfg)
+            print(f"[Mode] Restored LOCAL mode: {_st.local_mcp_manager.tool_count} tools")
+        except Exception as e:
+            print(f"[Mode] Failed to restore local mode: {e}")
+            _st.local_mode = False
+
     # Start HTTP server. Threaded so a long-running browser agent run does not
     # block status/cancel/confirm polling on other connections.
     server = ThreadingHTTPServer((args.bind, args.port), BridgeHandler)
