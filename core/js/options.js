@@ -751,6 +751,7 @@ function switchDataMode(mode) {
     }
     var sel = document.getElementById('selDataMode');
     if (sel) sel.value = d.mode;
+    try { localStorage.setItem('evaDataMode', d.mode); } catch (_) {}
     if (statusEl) {
       if (d.mode === 'local') {
         statusEl.textContent = 'Local mode active (' + (d.local_tools || 0) + ' MCP tools available)';
@@ -772,6 +773,7 @@ function loadDataMode() {
   .then(function(d) {
     var sel = document.getElementById('selDataMode');
     if (sel) sel.value = d.mode || 'cloud';
+    try { localStorage.setItem('evaDataMode', d.mode || 'cloud'); } catch (_) {}
     var statusEl = document.getElementById('dataModeStatus');
     if (statusEl) {
       var parts = [];
@@ -2319,6 +2321,14 @@ document.addEventListener('DOMContentLoaded', () => {
     var el = document.getElementById(id);
     if (el) el.addEventListener('change', saveAuthKeys);
   });
+
+  // Restore persisted data mode before model-settings init fires auto-switch logic
+  var _savedMode = '';
+  try { _savedMode = localStorage.getItem('evaDataMode') || ''; } catch (_) {}
+  if (_savedMode) {
+    var _modeSel = document.getElementById('selDataMode');
+    if (_modeSel) _modeSel.value = _savedMode;
+  }
 
   // Init auth, system prompt, and model settings
   loadAuthOverrides();
