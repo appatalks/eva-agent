@@ -439,6 +439,32 @@
     }
   });
 
+  registerCapability({
+    id: 'file.open',
+    description: 'Open an existing artifact file that was already created in this conversation. ' +
+                 'args: {filename:string}. Use this when the user asks to open, view, or show ' +
+                 'a file that was already created via file.download. Do NOT recreate the file.',
+    run: async function (args) {
+      args = args || {};
+      var filename = String(args.filename || '').replace(/[^A-Za-z0-9._\-]+/g, '_').slice(0, 120);
+      if (!filename) {
+        return { html: '<div class="cog-action-err">[file.open: no filename provided]</div>' };
+      }
+      var bUrl = bridgeUrl().replace(/\/+$/, '');
+      try {
+        var resp = await fetch(bUrl + '/v1/files/' + encodeURIComponent(filename) + '?open=1');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        var data = await resp.json();
+        if (data.opened) {
+          return { html: '<div class="cog-action-ok">[Opened ' + filename + ']</div>' };
+        }
+        throw new Error('open returned false');
+      } catch (e) {
+        return { html: '<div class="cog-action-err">[Could not open ' + filename + ': ' + String(e.message || e) + ']</div>' };
+      }
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // Bridge call primitive
   // ---------------------------------------------------------------------------
@@ -606,6 +632,8 @@
       '',
       'Write the user-facing answer now.',
       'When the user asked for a downloadable file, you MUST emit a [[EVA_ACTION]] file.download block.',
+      'When the user asks to OPEN or VIEW a file that was already created earlier in this conversation,',
+      'use file.open with the existing filename. Do NOT recreate the file as a PDF or any other format.',
       'Never simulate or describe phases. Never print PHASE headers. Just answer.',
       '',
       'After your answer, on the very last line, append a SILENT self-review signal the user never sees:',

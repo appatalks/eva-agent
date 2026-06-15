@@ -19,7 +19,12 @@ function lmsSend() {
               "- Do NOT generate fake source citations unless they appear in [Data Retrieved] in your system prompt.\n" +
               "- When creating files or reports, only include facts from [Data Retrieved] or [Memory]. Use placeholders for missing data.\n" +
               "- If asked for a briefing and you have no real data, tell the user you need their location and that live data is being fetched.\n" +
-              "- Always close action blocks: [[EVA_ACTION]]{...}[[/EVA_ACTION]]. Never leave them unclosed."
+              "- Always close action blocks: [[EVA_ACTION]]{...}[[/EVA_ACTION]]. Never leave them unclosed.\n" +
+              "\nFILE CAPABILITIES:\n" +
+              "- file.download: Create a new downloadable file. Args: {filename, content, mime}. Use [[EVA_ACTION]]{\"id\":\"file.download\",\"args\":{...}}[[/EVA_ACTION]]\n" +
+              "- file.open: Open an EXISTING file that was already created. Args: {filename}. Use [[EVA_ACTION]]{\"id\":\"file.open\",\"args\":{\"filename\":\"<name>\"}}[[/EVA_ACTION]]\n" +
+              "- When the user asks to 'open', 'view', or 'show' a file that already exists (look for [[EVA_FILE]] markers in conversation history), use file.open with the SAME filename. Do NOT recreate the file.\n" +
+              "- [[EVA_FILE]] markers in prior messages indicate files that were already created and are available to open."
         },
         {
             "role": "assistant",
