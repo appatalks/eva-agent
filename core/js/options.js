@@ -2202,8 +2202,6 @@ document.addEventListener('DOMContentLoaded', () => {
   if (evaModelsBtn) evaModelsBtn.addEventListener('click', function(e) { evaOpenSettings(e, 'models'); });
   var evaSettingsBtn = document.getElementById('evaSettingsBtn');
   if (evaSettingsBtn) evaSettingsBtn.addEventListener('click', function(e) { evaOpenSettings(e, null); });
-  var evaAboutBtn = document.getElementById('evaAboutBtn');
-  if (evaAboutBtn) evaAboutBtn.addEventListener('click', function(e) { evaOpenSettings(e, 'general'); });
   var evaUserBtn = document.getElementById('evaUserBtn');
   if (evaUserBtn) evaUserBtn.addEventListener('click', function(e) { evaOpenSettings(e, 'auth'); });
   var evaInputGear = document.getElementById('evaInputSettings');
