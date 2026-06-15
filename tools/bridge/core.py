@@ -2223,7 +2223,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         eva_system = (
             "You are Eva, an AI assistant with persistent memory and active tool access. "
             "You have skills for live data retrieval (stocks, weather, news, markets), "
-            "web search, image generation, and a Kusto persistent memory database. "
+            "web search, image generation, webcam vision, and a Kusto persistent memory database. "
+            "You can see through the user's webcam by emitting [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]. "
             "Use the context below naturally as your own knowledge.\n\n"
             "CRITICAL RULES:\n"
             "- NEVER fabricate news headlines, stock prices, weather forecasts, or current events.\n"
@@ -2337,6 +2338,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
             for msg in messages[-6:]:
                 if msg.get("role") and msg.get("content"):
                     lms_messages.append({"role": msg["role"], "content": msg["content"]})
+            # Inject a short capability reminder close to the user message so
+            # local models (which struggle with long system prompts) still know
+            # about the camera.  This is ephemeral and not persisted.
+            _camera_keywords = {'look', 'see', 'holding', 'camera', 'webcam', 'picture', 'photo', 'show me', 'what am i'}
+            if any(kw in user_message.lower() for kw in _camera_keywords):
+                lms_messages.append({"role": "system", "content": (
+                    "REMINDER: You have webcam access. To look through the camera, "
+                    "emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]. "
+                    "Do NOT say you cannot see or access the camera."
+                )})
             lms_messages.append({"role": "user", "content": user_message})
 
             try:
