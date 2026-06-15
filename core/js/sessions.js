@@ -409,7 +409,7 @@ function loadAssetsList() {
   var ul = document.getElementById('assetsList');
   if (!ul) return;
   ul.innerHTML = '<li class="session-empty">Loading...</li>';
-  var base = (typeof detectACPBridge === 'function' ? detectACPBridge() : '') || 'http://localhost:8888';
+  var base = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
   fetch(base + '/v1/files').then(function(r) { return r.json(); }).then(function(data) {
     ul.innerHTML = '';
     if (!data.files || data.files.length === 0) {
@@ -475,7 +475,7 @@ function loadAssetsList() {
 
 function purgeAssets() {
   if (!confirm('Delete all generated assets?')) return;
-  var base = (typeof detectACPBridge === 'function' ? detectACPBridge() : '') || 'http://localhost:8888';
+  var base = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
   fetch(base + '/v1/files/purge', { method: 'POST' }).then(function() {
     loadAssetsList();
   }).catch(function(e) {
@@ -499,19 +499,16 @@ function initTerminal() {
   var frame = document.getElementById('terminalFrame');
   if (!container) return;
 
-  // In Electron, expose a real terminal via bridge's /v1/terminal endpoint
-  // or via an iframe to ttyd/gotty. For now, provide a simple web-terminal
-  // that connects to the bridge's exec endpoint, or show fallback.
   var isElectron = window.evaStandalone && window.evaStandalone.isStandalone;
-  var base = (typeof detectACPBridge === 'function' ? detectACPBridge() : '') || 'http://localhost:8888';
 
-  // Try to detect if ttyd or similar is available on port 7681
+  // detectACPBridge is async, so resolve it first
+  var baseUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
+
   if (frame && fallback) {
-    // Use a simple textarea-based terminal that runs copilot CLI through the bridge
     fallback.style.display = 'none';
     if (!frame._evaTermInit) {
       frame._evaTermInit = true;
-      _buildSimpleTerminal(frame, base);
+      _buildSimpleTerminal(frame, baseUrl);
     }
   }
 }

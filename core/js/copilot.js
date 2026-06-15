@@ -470,7 +470,10 @@ async function autoApplySavedMCPConfig() {
       var resp = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/mcp/configure', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mcp_servers: saved })
+        body: JSON.stringify({
+          mcp_servers: saved,
+          github_pat: (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : ''
+        })
       });
       if (resp.ok) {
         var data = await resp.json();
@@ -541,10 +544,14 @@ async function applyMCPConfig() {
   setStatus('info', 'Configuring MCP servers...');
   try {
     var url = bridgeUrl.replace(/\/+$/, '') + '/v1/mcp/configure';
+    var configBody = { mcp_servers: mcpServers };
+    // Include GitHub PAT so the bridge can inject it into the MCP server env
+    var ghPat = (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : '';
+    if (ghPat) configBody.github_pat = ghPat;
     var resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mcp_servers: mcpServers })
+      body: JSON.stringify(configBody)
     });
     var data = await resp.json();
     if (resp.ok) {

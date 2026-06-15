@@ -2986,15 +2986,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _persist_mcp_config(mcp_servers)
 
         # Resolve internal flags in MCP server env before passing to copilot
+        # If the browser sent a github_pat, use it for _useGitHubPAT resolution
+        request_github_pat = data.get('github_pat', '')
         for srv_name, srv_cfg in mcp_servers.items():
             env = srv_cfg.get('env', {})
             resolved_env = {}
             for k, v in env.items():
-                # _useGitHubPAT: resolve to actual PAT from process environment
+                # _useGitHubPAT: resolve to actual PAT from request body or environment
                 if k == '_useGitHubPAT':
-                    pat = os.environ.get('GITHUB_PERSONAL_ACCESS_TOKEN', '')
+                    pat = request_github_pat or os.environ.get('GITHUB_PERSONAL_ACCESS_TOKEN', '') or os.environ.get('GITHUB_PAT', '')
                     if pat:
                         resolved_env['GITHUB_PERSONAL_ACCESS_TOKEN'] = pat
+                    else:
+                        print(f"[MCP] Warning: GitHub PAT not available for {srv_name}. Set it in Settings > Auth.")
                     continue
                 # Skip any other internal flags (prefixed with _)
                 if k.startswith('_'):
