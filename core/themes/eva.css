@@ -1407,3 +1407,8 @@ body.theme-eva-greyscale {
   --eva-warning:     #b8a878;
   --eva-danger:      #a85c54;
 }
+/* Greyscale avatar: desaturate to match the cold palette */
+body.theme-eva-greyscale .eva-welcome-avatar,
+body.theme-eva-greyscale .eva-sidebar-avatar {
+  filter: grayscale(0.85) contrast(1.1);
+}
