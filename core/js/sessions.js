@@ -563,7 +563,11 @@ function _buildSimpleTerminal(frame, bridgeBase) {
 function _termPrint(output, cls, text) {
   var line = document.createElement('div');
   line.className = 'eva-term-line eva-term-' + cls;
-  line.textContent = text;
+  if (cls === 'eva' && typeof renderMarkdown === 'function') {
+    line.innerHTML = renderMarkdown(text);
+  } else {
+    line.textContent = text;
+  }
   output.appendChild(line);
   output.scrollTop = output.scrollHeight;
 }
