@@ -190,6 +190,7 @@ from bridge.alerts import (  # noqa: F401
     _notify_in_quiet_hours,
     _notify_enqueue,
     _notify_mark_seen,
+    _signal_send,
 )
 from bridge.cron import (  # noqa: F401
     _load_cron_tasks,
@@ -2289,6 +2290,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "user wants to see their MONITOR — use [[EVA_DESKTOP]] with a goal like 'take a screenshot and "
             "describe what is on screen'. 'Take a picture', 'what am I holding', or 'look at me' means the "
             "user wants the WEBCAM — use [[EVA_LOOK]]. NEVER confuse these two.\n\n"
+            "SIGNAL MESSAGING:\n"
+            "- You can send the user a Signal text message by emitting a single line of the form: "
+            "[[EVA_SIGNAL]]{\"message\":\"<text to send>\"}[[/EVA_SIGNAL]]. "
+            "Use this when the user asks you to text them, send them a message, or notify them via Signal. "
+            "The message is sent to the recipient phone number configured in settings. Emit at most one "
+            "EVA_SIGNAL block per reply, and only when the user explicitly asks to be messaged.\n\n"
         )
 
         if no_tools:
@@ -2384,6 +2391,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 response_text = response_text.rstrip()
                 response_text += f'\n\n[[EVA_LOOK]]{{"question":"{_look_q}"}}[[/EVA_LOOK]]'
                 print("[AIG] Camera fallback: injected [[EVA_LOOK]] for local model")
+
+            # Signal: parse [[EVA_SIGNAL]]{"message":"..."}[[/EVA_SIGNAL]] and
+            # dispatch via signal-cli before the response reaches the frontend.
+            _sig_match = _re.search(
+                r'\[\[EVA_SIGNAL\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[/EVA_SIGNAL\]\])?',
+                response_text
+            )
+            if _sig_match:
+                try:
+                    _sig_data = json.loads(_sig_match.group(1))
+                    _sig_msg = _sig_data.get("message", "").strip()
+                    if _sig_msg:
+                        _signal_send(_sig_msg)
+                except (json.JSONDecodeError, AttributeError):
+                    print("[AIG] EVA_SIGNAL marker had invalid JSON")
 
             # Post-process: convert blob/download links to [[EVA_FILE]] markers.
             # ACP or the model may produce blob:file:/// URLs or markdown download links
