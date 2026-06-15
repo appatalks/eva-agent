@@ -1861,6 +1861,7 @@ function getReasoningEffort() {
   return el ? el.value : 'medium';
 }
 
+var _modeInitDone = false;
 function onModelSettingsChange() {
   var sel = document.getElementById('selModel');
   if (!sel) return;
@@ -1891,11 +1892,14 @@ function onModelSettingsChange() {
   // Auto-switch data retrieval mode based on selected model.
   // lm-studio (or aig with lmstudio backend) -> local mode
   // Cloud models: leave the user's persisted mode choice alone.
-  var needsLocal = (model === 'lm-studio') ||
-    (model === 'aig' && (localStorage.getItem('aigBackend') || '') === 'lmstudio');
-  var currentMode = (document.getElementById('selDataMode') || {}).value || 'cloud';
-  if (needsLocal && currentMode !== 'local') {
-    switchDataMode('local');
+  // Skip during init — the bridge (mode.txt) is the source of truth at startup.
+  if (_modeInitDone) {
+    var needsLocal = (model === 'lm-studio') ||
+      (model === 'aig' && (localStorage.getItem('aigBackend') || '') === 'lmstudio');
+    var currentMode = (document.getElementById('selDataMode') || {}).value || 'cloud';
+    if (needsLocal && currentMode !== 'local') {
+      switchDataMode('local');
+    }
   }
 }
 
@@ -2322,19 +2326,15 @@ document.addEventListener('DOMContentLoaded', () => {
     if (el) el.addEventListener('change', saveAuthKeys);
   });
 
-  // Restore persisted data mode before model-settings init fires auto-switch logic
-  var _savedMode = '';
-  try { _savedMode = localStorage.getItem('evaDataMode') || ''; } catch (_) {}
-  if (_savedMode) {
-    var _modeSel = document.getElementById('selDataMode');
-    if (_modeSel) _modeSel.value = _savedMode;
-  }
-
   // Init auth, system prompt, and model settings
   loadAuthOverrides();
   populateAuthFields();
   initSystemPrompt();
   onModelSettingsChange();
+  // Now enable auto-switch for user-initiated model changes and seed
+  // the selector from the bridge (source of truth for persisted mode).
+  _modeInitDone = true;
+  if (typeof loadDataMode === 'function') loadDataMode();
   if (typeof cogInit === 'function') cogInit();
   if (typeof initGoals === 'function') initGoals();
   if (typeof initBackground === 'function') initBackground();
