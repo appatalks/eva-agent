@@ -25,6 +25,7 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 - Dual-mode data retrieval: cloud (Copilot CLI + MCP) or local (LM Studio + direct MCP)
 - MCP tool access (Kusto, GitHub, Azure, web search) hot-reloadable at runtime
 - Persistent memory via Azure Data Explorer (Kusto) or local SQLite
+- Signal text messaging (send-only via signal-cli, keyword-triggered fallback for local models)
 - Autonomous browser control (Playwright + CDP) and desktop control (pyautogui)
 - Webcam presence detection (OpenCV face + motion)
 - Inline image search (Wikimedia) and generation (gpt-image-1)
@@ -32,9 +33,10 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 - Skill import/normalization from paste, URL, GitHub, or file upload
 - Background memory consolidation with human-in-the-loop proposals
 - Cron scheduler for recurring tasks (briefings, checks, reminders)
-- Alert system (SEC filings, weather, space weather, keyword watch)
+- Alert system (SEC filings, weather, space weather, keyword watch) with Signal delivery
+- Mode persistence across restarts (bridge-side mode.txt, frontend localStorage)
 - TTS: OpenAI (default), browser, Bark, Amazon Polly
-- LCARS and Eva themes
+- LCARS and Eva themes (7 Eva variants)
 - Standalone Electron AppImage with bundled bridge
 - Full behavioral eval harness with mock and live modes
 
@@ -88,6 +90,11 @@ model or manually via Settings > General.
 - MCP servers spawned directly by the bridge as subprocesses
 - Web search via `web_search_mcp.py` (DuckDuckGo HTML scraping, no API key)
 - Zero cloud AI, zero tokens, fully offline-capable
+
+**Mode persistence:** The selected mode is persisted to `~/.config/eva-standalone/mode.txt`
+by the bridge. On startup, the bridge reads this file to restore the previous mode.
+The frontend seeds its selector from the bridge via `GET /v1/mode` after init, and
+skips auto-switch logic during startup to avoid overriding the persisted choice.
 
 ### Request Flow
 
@@ -210,6 +217,7 @@ tools/
     background.py          Background job system (12 job types, proposals)
     cron.py                Cron scheduler (5-field expressions)
     alerts.py              Alert/notification system (SEC, weather, space weather)
+                           Signal messaging via signal-cli
     telemetry.py           Structured event logging (latency, routing decisions)
     utils.py               URL validation, LM Studio validation, config persistence
   web_search_mcp.py        MCP server: DuckDuckGo + Google fallback (no API key)
@@ -252,6 +260,7 @@ standalone/
 | Playwright | Browser agent | `pip install playwright && playwright install` |
 | pyautogui | Desktop agent | `pip install pyautogui` |
 | opencv-python | Camera presence | `pip install opencv-python` |
+| signal-cli | Signal messaging | Native binary from [GitHub releases](https://github.com/AsamK/signal-cli/releases), or `install.sh` auto-installs |
 
 ### API Keys
 | Key | Used by | Get it from |
@@ -411,6 +420,7 @@ Options:
 |---|---|---|
 | `/v1/alerts` | GET/POST | List or create alert rules |
 | `/v1/alerts/<id>` | PATCH/DELETE | Update or delete an alert rule |
+| `/v1/alerts/settings` | GET/POST | Get or update alert settings (quiet hours, rate limits, Signal numbers) |
 | `/v1/notifications` | GET | Unseen notifications |
 
 **MCP:**
@@ -573,6 +583,7 @@ output structure:
 **Skills manifest (always injected):**
 - data-retrieval, weather-news, web-search
 - browser-control ([[EVA_BROWSER]]), desktop-control ([[EVA_DESKTOP]]), camera-vision ([[EVA_LOOK]])
+- signal-messaging ([[EVA_SIGNAL]])
 - file-creation ([[EVA_ACTION]] file.download)
 - image-search, image-generation
 - persistent-memory (table list)
@@ -769,6 +780,7 @@ Eva uses marker blocks for agent capabilities:
 | `[[EVA_BROWSER]]` | Launch Playwright browser agent | `[[EVA_BROWSER]]{"goal":"search for cats","start_url":"https://example.com"}[[/EVA_BROWSER]]` |
 | `[[EVA_DESKTOP]]` | Launch desktop vision agent | `[[EVA_DESKTOP]]{"goal":"open GIMP and create canvas"}[[/EVA_DESKTOP]]` |
 | `[[EVA_LOOK]]` | Capture webcam frame | `[[EVA_LOOK]]{"question":"what am I holding?"}[[/EVA_LOOK]]` |
+| `[[EVA_SIGNAL]]` | Send Signal text message | `[[EVA_SIGNAL]]{"message":"hello world"}[[/EVA_SIGNAL]]` |
 | `[[EVA_FILE]]` | Artifact download/open links | `[[EVA_FILE]] report.pdf` (rendered by `renderEvaResponse`) |
 
 ## Autonomous Agents
@@ -911,7 +923,28 @@ Alert rules trigger on conditions and deliver notifications:
 | `research_question` | question | Recurring research probes |
 
 Cooldown: 1-20160 minutes (default 1440/24 hours). Rate limit: 8 per hour.
-Quiet hours configurable. Channels: `chat` or `voice`.
+Quiet hours configurable. Channels: `chat`, `voice`, or `signal`.
+
+### Signal Messaging
+
+Eva can send text messages via Signal using signal-cli (native binary, no Java).
+
+**Setup:**
+1. Install signal-cli (v0.14.5+ native binary at `~/.local/bin/signal-cli`, or let `install.sh` handle it)
+2. Link to your Signal account: `signal-cli link -n "Eva"` and scan the QR code from Signal mobile
+3. Enter sender and recipient numbers in Settings > Auth
+
+**How it works:**
+- The `[[EVA_SIGNAL]]` marker in the system prompt tells the model to emit `[[EVA_SIGNAL]]{"message":"..."}[[/EVA_SIGNAL]]`
+- The bridge parses the marker, calls `signal-cli -u <sender> send -m <message> <recipient>`
+- The frontend strips the marker and shows "Signal message sent."
+- For local models that refuse to emit the marker, keyword-triggered fallback injects it automatically and replaces the model's refusal text
+
+**Signal keywords** (trigger REMINDER injection and fallback): `signal`, `text me`, `text message`, `send me a message`, `send a message`, `notify me`, `message me`
+
+**Configuration persisted to:** `~/.config/eva-standalone/alerts.json` (signal_sender, signal_recipient fields)
+
+**Camera/Signal conflict prevention:** When signal keywords match, camera REMINDER and camera fallback injection are suppressed to prevent spurious `[[EVA_LOOK]]` markers.
 
 ## Telemetry
 
@@ -930,9 +963,9 @@ Eight tabs in a modal overlay:
 
 | Tab | Contents |
 |---|---|
-| **General** | Theme, TTS engine/voice, auto-speak, data retrieval mode (cloud/local) with status |
+| **General** | Theme, TTS engine/voice, auto-speak, camera presence, vision provider, data retrieval mode (cloud/local) with status |
 | **Models** | Model selector (grouped by provider), temperature, max tokens, reasoning effort, AIG backend selector, ACP model selector, cognitive layer controls (toggle, per-agent model selectors, max cycles, editable prompts, debug trace) |
-| **Auth** | API key inputs with show/hide toggles, ACP bridge URL, LM Studio base URL and model name |
+| **Auth** | API key inputs with show/hide toggles, ACP bridge URL, Signal sender/recipient numbers |
 | **Prompts** | Personality presets (Default/Concise/Advanced/Terminal/Custom), editable system prompt textarea |
 | **Goals** | Goals list with create/edit/delete. Skills list with import (paste/URL/GitHub/file), evarise preview, enable/disable |
 | **Background** | Background loop status, enable/interval controls, run-once, proposal approval/rejection, recent activity |
@@ -983,11 +1016,12 @@ Host prerequisites: Node.js 24+, Python 3.12+, Copilot CLI authenticated (for cl
 
 ### ACP Infrastructure Roadmap (tracking)
 
-Current state (2026-06-14):
+Current state (2026-06-15):
 - Static web tier can run on legacy 32-bit hosts.
 - ACP Bridge currently runs on a separate compatible machine.
 - Single-host deployment is blocked until new hardware is available.
 - Local mode (LM Studio + direct MCP) works on any x86_64 machine without Copilot CLI.
+- Signal messaging available via signal-cli (native binary, linked account required).
 
 | Milestone | Status | Notes |
 |---|---|---|
