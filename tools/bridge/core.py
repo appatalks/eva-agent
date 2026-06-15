@@ -360,6 +360,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._prefs_get()
         elif parsed_path == "/v1/mode":
             self._get_mode()
+        elif parsed_path == "/v1/files":
+            self._list_artifacts()
         elif parsed_path.startswith("/v1/files/"):
             requested_name = urllib.parse.unquote(parsed_path.split("/v1/files/", 1)[1])
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -1211,6 +1213,26 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(500, {"error": {"message": "Skill write failed"}})
             return
         self._json_response(200, {"skill": row, "status": "deleted"})
+
+    def _list_artifacts(self):
+        """List all artifacts in ARTIFACTS_DIR with name, size, and mtime."""
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "only available on localhost"}})
+            return
+        os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
+        base = os.path.realpath(_ARTIFACTS_DIR)
+        items = []
+        for name in sorted(os.listdir(_ARTIFACTS_DIR)):
+            if not _valid_artifact_name(name):
+                continue
+            entry_path = os.path.join(_ARTIFACTS_DIR, name)
+            target = os.path.realpath(entry_path)
+            if not target.startswith(base + os.sep) or not os.path.isfile(target):
+                continue
+            st = os.stat(target)
+            items.append({"name": name, "size": st.st_size, "modified": st.st_mtime})
+        items.sort(key=lambda x: x["modified"], reverse=True)
+        self._json_response(200, {"files": items})
 
     def _open_artifact(self, requested_name):
         """Open an artifact file with the system's default application."""

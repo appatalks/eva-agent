@@ -1489,17 +1489,146 @@ body.theme-eva .skills-panel .session-panel-header { border-color: var(--eva-bor
   font-size: 11px; color: #8899bb;
 }
 .session-delete {
-  grid-column: 2; grid-row: 1 / 3;
-  align-self: center;
   background: none; border: none; color: #ff6b6b;
-  font-size: 18px; cursor: pointer; padding: 0 4px;
-  opacity: 0; transition: opacity 0.15s;
+  font-size: 18px; cursor: pointer; padding: 0 3px;
+  transition: opacity 0.15s;
 }
 .session-item:hover .session-delete { opacity: 1; }
 .session-empty {
   padding: 24px 16px;
   text-align: center; color: #8899bb; font-size: 13px;
 }
+
+/* Session actions (pin + delete wrapper) */
+.session-actions {
+  grid-column: 2; grid-row: 1 / 3;
+  align-self: center;
+  display: flex; gap: 2px;
+  opacity: 0; transition: opacity 0.15s;
+}
+.session-item:hover .session-actions { opacity: 1; }
+.session-item.pinned .session-actions { opacity: 0.6; }
+.session-item.pinned:hover .session-actions { opacity: 1; }
+.session-pin {
+  background: none; border: none; color: #8899bb;
+  font-size: 14px; cursor: pointer; padding: 0 3px;
+  transition: color 0.15s;
+}
+.session-pin:hover { color: #eef5ff; }
+.session-pin.active { color: #fbbf24; opacity: 1; }
+.session-item.pinned { border-left: 3px solid #fbbf24; background: rgba(251,191,36,0.06); }
+.session-item.pinned.active { border-left-color: #fbbf24; }
+
+/* ── Assets Panel ──────────────────────────────────────────── */
+.assets-panel {
+  position: fixed;
+  top: 0; left: 0;
+  width: 340px; max-width: 92vw; height: 100vh;
+  background: #1a1a2e;
+  color: #eef5ff;
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(-100%);
+  transition: transform 0.25s ease;
+  box-shadow: 4px 0 20px rgba(0,0,0,0.5);
+  font-family: inherit;
+}
+.assets-panel[aria-hidden="false"] { transform: translateX(0); }
+body.theme-lcars .assets-panel { background: #0b0e14; font-family: "Barlow Condensed", sans-serif; }
+body.theme-lcars .assets-panel .session-panel-header { border-color: var(--ld-alpha-blue); }
+body.theme-eva .assets-panel { background: var(--eva-surface, #15151f); }
+body.theme-eva .assets-panel .session-panel-header { border-color: var(--eva-border); color: var(--eva-text); }
+.asset-item .session-title { font-size: 12px; }
+
+/* ── Terminal Panel ────────────────────────────────────────── */
+.terminal-panel {
+  position: fixed;
+  top: 0; left: 0;
+  width: 520px; max-width: 96vw; height: 100vh;
+  background: #0d0d1a;
+  color: #eef5ff;
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(-100%);
+  transition: transform 0.25s ease;
+  box-shadow: 4px 0 20px rgba(0,0,0,0.5);
+  font-family: inherit;
+}
+.terminal-panel[aria-hidden="false"] { transform: translateX(0); }
+body.theme-lcars .terminal-panel { background: #0b0e14; font-family: "Barlow Condensed", sans-serif; }
+body.theme-lcars .terminal-panel .session-panel-header { border-color: var(--ld-alpha-blue); }
+body.theme-eva .terminal-panel { background: var(--eva-surface, #0d0d1a); }
+body.theme-eva .terminal-panel .session-panel-header { border-color: var(--eva-border); color: var(--eva-text); }
+.terminal-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.terminal-frame {
+  flex: 1;
+  border: none;
+  background: #000;
+  width: 100%;
+}
+.terminal-fallback {
+  padding: 24px;
+  color: #8899bb;
+  font-size: 13px;
+  text-align: center;
+}
+.terminal-fallback code {
+  background: rgba(255,255,255,0.08);
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-family: monospace;
+}
+.eva-terminal {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', 'Menlo', monospace;
+  font-size: 13px;
+}
+.eva-terminal-output {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.eva-terminal-input-row {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+  background: rgba(0,0,0,0.3);
+}
+.eva-terminal-prompt {
+  color: #6e8efb;
+  font-weight: 700;
+  margin-right: 4px;
+  white-space: nowrap;
+}
+.eva-terminal-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #eef5ff;
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.eva-terminal-input::placeholder { color: #556; }
+.eva-term-line { padding: 2px 0; line-height: 1.5; }
+.eva-term-user { color: #6e8efb; }
+.eva-term-user::before { content: '> '; color: #556; }
+.eva-term-eva { color: #c8d6e5; }
+.eva-term-info { color: #556; font-style: italic; }
+.eva-term-error { color: #ff6b6b; }
 
 /* LCARS theme overrides for session panel */
 body.theme-lcars .session-panel { background: #0b0e14; font-family: "Barlow Condensed", sans-serif; }

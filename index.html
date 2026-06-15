@@ -71,6 +71,12 @@
       <button id="evaSkillsBtn" class="eva-nav-item" type="button" title="Skills" onclick="toggleSkillsPanel()">
         <span class="eva-nav-icon">&#x1F9E9;</span> Skills
       </button>
+      <button id="evaAssetsBtn" class="eva-nav-item" type="button" title="Assets" onclick="toggleAssetsPanel()">
+        <span class="eva-nav-icon">&#x1F4C1;</span> Assets
+      </button>
+      <button id="evaTerminalBtn" class="eva-nav-item" type="button" title="Terminal" onclick="toggleTerminalPanel()">
+        <span class="eva-nav-icon">&#x1F4BB;</span> Terminal
+      </button>
       <button id="evaSettingsBtn" class="eva-nav-item" type="button" title="Settings">
         <span class="eva-nav-icon">&#x2699;&#xFE0F;</span> Settings
       </button>
@@ -127,6 +133,7 @@
     </div>
     <div class="session-panel-actions">
       <button id="sessionNewBtn" title="New session">+ New</button>
+      <button id="sessionExportBtn" title="Export session">&#x2913; Export</button>
     </div>
     <ul id="sessionList" class="session-list"></ul>
   </div>
@@ -204,6 +211,31 @@
 
       <h4 class="settings-subhead">My skills</h4>
       <div id="skillsList" class="background-list"></div>
+    </div>
+  </div>
+
+  <!-- Assets panel (file browser for generated artifacts) -->
+  <div id="assetsPanel" class="assets-panel" aria-hidden="true">
+    <div class="session-panel-header">
+      <span>Assets</span>
+      <button id="assetsPanelClose" aria-label="Close assets">&times;</button>
+    </div>
+    <div class="session-panel-actions">
+      <button id="assetsRefreshBtn" title="Refresh" onclick="loadAssetsList()">&#x21BB; Refresh</button>
+      <button id="assetsPurgeBtn" title="Delete all artifacts" onclick="purgeAssets()">&#x1F5D1; Clear all</button>
+    </div>
+    <ul id="assetsList" class="session-list assets-list"></ul>
+  </div>
+
+  <!-- Terminal panel (inline copilot CLI) -->
+  <div id="terminalPanel" class="terminal-panel" aria-hidden="true">
+    <div class="session-panel-header">
+      <span>Terminal</span>
+      <button id="terminalPanelClose" aria-label="Close terminal">&times;</button>
+    </div>
+    <div id="terminalContainer" class="terminal-container">
+      <iframe id="terminalFrame" class="terminal-frame" sandbox="allow-same-origin allow-scripts allow-forms" aria-label="Terminal"></iframe>
+      <p class="terminal-fallback" id="terminalFallback">Terminal is available in Electron standalone mode. In browser mode, open a system terminal and run:<br><code>copilot</code></p>
     </div>
   </div>
 
