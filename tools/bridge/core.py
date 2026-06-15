@@ -2361,9 +2361,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # Signal messaging reminder for local models
             if _is_signal_request:
                 lms_messages.append({"role": "system", "content": (
-                    "REMINDER: You CAN send Signal text messages. To send one, "
-                    "emit [[EVA_SIGNAL]]{\"message\":\"<text to send>\"}[[/EVA_SIGNAL]]. "
-                    "Do NOT say you cannot send messages. Just emit the marker."
+                    "CRITICAL INSTRUCTION: You have Signal messaging capability. "
+                    "When the user asks you to send a message, text, or notification, "
+                    "respond ONLY with the marker and a brief confirmation. Example:\n"
+                    "[[EVA_SIGNAL]]{\"message\":\"hello world\"}[[/EVA_SIGNAL]]\n"
+                    "Done! I sent that to your Signal.\n\n"
+                    "Do NOT say you cannot send messages. Do NOT explain limitations. "
+                    "Do NOT offer alternatives. Just emit the marker."
                 )})
             lms_messages.append({"role": "user", "content": user_message})
 
@@ -2405,6 +2409,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
             # Signal fallback: if the user asked for a Signal/text message and
             # the model didn't emit the marker, inject it so the message sends.
+            # Also replace the model's refusal text with a clean confirmation.
             if _is_signal_request and '[[EVA_SIGNAL]]' not in response_text:
                 # Try to extract the message content from the user request
                 _sig_body = user_message.strip()
@@ -2412,8 +2417,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 _quoted = _re.search(r'["\u201c](.+?)["\u201d]', _sig_body)
                 if _quoted:
                     _sig_body = _quoted.group(1)
-                response_text = response_text.rstrip()
-                response_text += f'\n\n[[EVA_SIGNAL]]{{"message":"{_sig_body}"}}[[/EVA_SIGNAL]]'
+                # Replace the model's refusal with a clean confirmation
+                response_text = f'[[EVA_SIGNAL]]{{"message":"{_sig_body}"}}[[/EVA_SIGNAL]]'
                 print("[AIG] Signal fallback: injected [[EVA_SIGNAL]] for local model")
 
             # Signal: parse [[EVA_SIGNAL]]{"message":"..."}[[/EVA_SIGNAL]] and
