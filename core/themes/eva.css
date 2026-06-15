@@ -47,11 +47,16 @@ body.theme-eva {
   justify-content: stretch;
   /* Reserve space at the viewport bottom for the pinned status + disclaimer
      band so the chat input never gets covered. Status line is ~17px when
-     visible, disclaimer is ~27px, so 50px is enough for both. */
+     visible, disclaimer is ~27px, so 50px is enough for both.
+     When running in standalone (frameless), also offset by the 32px title bar. */
   height: calc(100vh - 50px);
   padding: 0;
   box-sizing: border-box;
   overflow: hidden;
+}
+body.eva-standalone.theme-eva {
+  padding-top: 32px;
+  height: calc(100vh - 50px);
 }
 
 /* ── Hide LCARS sidebar in Eva theme ───────────────────────── */

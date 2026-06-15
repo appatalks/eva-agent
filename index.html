@@ -39,6 +39,27 @@
 </head>
 
 <body onload="OnLoad()">
+  <!-- Custom window title bar (frameless Electron) -->
+  <div id="evaTitleBar" class="eva-titlebar">
+    <span class="eva-titlebar-label">Eva</span>
+    <div class="eva-titlebar-controls">
+      <button class="eva-titlebar-btn" id="winMinBtn" aria-label="Minimize">&#x2013;</button>
+      <button class="eva-titlebar-btn" id="winMaxBtn" aria-label="Maximize">&#x25A1;</button>
+      <button class="eva-titlebar-btn eva-titlebar-close" id="winCloseBtn" aria-label="Close">&#x2715;</button>
+    </div>
+  </div>
+  <script>
+    (function() {
+      if (typeof evaStandalone !== 'undefined' && evaStandalone.isStandalone) {
+        document.body.classList.add('eva-standalone');
+        document.getElementById('winMinBtn').addEventListener('click', function() { evaStandalone.minimize(); });
+        document.getElementById('winMaxBtn').addEventListener('click', function() { evaStandalone.maximize(); });
+        document.getElementById('winCloseBtn').addEventListener('click', function() { evaStandalone.close(); });
+      } else {
+        document.getElementById('evaTitleBar').style.display = 'none';
+      }
+    })();
+  </script>
   <script>
     // Adjust for Mobile User Agents
     useragent_adjust();

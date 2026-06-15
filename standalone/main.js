@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, session, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, session, shell } = require('electron');
 const http = require('http');
 const net = require('net');
 const path = require('path');
@@ -348,6 +348,9 @@ function createWindow(acpBaseUrl) {
     width: 1280,
     height: 900,
     show: false,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -361,6 +364,14 @@ function createWindow(acpBaseUrl) {
       ]
     }
   });
+
+  // Window control IPC
+  ipcMain.on('win-minimize', function() { mainWindow.minimize(); });
+  ipcMain.on('win-maximize', function() {
+    if (mainWindow.isMaximized()) { mainWindow.unmaximize(); }
+    else { mainWindow.maximize(); }
+  });
+  ipcMain.on('win-close', function() { mainWindow.close(); });
 
   mainWindow.once('ready-to-show', function() {
     mainWindow.show();

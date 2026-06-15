@@ -1,4 +1,4 @@
-const { contextBridge } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
 
 function readArg(name) {
   const prefix = '--' + name + '=';
@@ -11,5 +11,8 @@ function readArg(name) {
 contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   acpBaseUrl: readArg('eva-acp-base-url'),
   isStandalone: true,
-  version: readArg('eva-version')
+  version: readArg('eva-version'),
+  minimize: function() { ipcRenderer.send('win-minimize'); },
+  maximize: function() { ipcRenderer.send('win-maximize'); },
+  close: function() { ipcRenderer.send('win-close'); }
 }));
