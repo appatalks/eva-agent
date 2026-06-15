@@ -280,6 +280,14 @@ function initSessions() {
   var exportBtn = document.getElementById('sessionExportBtn');
   if (exportBtn) exportBtn.addEventListener('click', function() { exportCurrentSession(); });
 
+  // Assets panel close button
+  var assetsClose = document.getElementById('assetsPanelClose');
+  if (assetsClose) assetsClose.addEventListener('click', toggleAssetsPanel);
+
+  // Terminal panel close button
+  var termClose = document.getElementById('terminalPanelClose');
+  if (termClose) termClose.addEventListener('click', toggleTerminalPanel);
+
   // Migrate localStorage sessions to IndexedDB, then restore active session
   idbMigrateFromLocalStorage().then(function() {
     var activeId = _activeSessionId();
