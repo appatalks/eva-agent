@@ -3,6 +3,9 @@
 import datetime
 import json
 import os
+import re
+import subprocess
+import sys
 import time
 from bridge import config as _cfg
 from bridge import state as _st
@@ -19,6 +22,40 @@ _NOTIFY_CRITICAL_SALIENCE = _cfg.NOTIFY_CRITICAL_SALIENCE
 _NOTIFY_MAX_BYTES = _cfg.NOTIFY_MAX_BYTES
 _NOTIFY_PATH = _cfg.NOTIFY_PATH
 _NOTIFY_RING_MAX = _cfg.NOTIFY_RING_MAX
+_SIGNAL_CLI_PATH = _cfg.SIGNAL_CLI_PATH
+_SIGNAL_SENDER = _cfg.SIGNAL_SENDER
+_SIGNAL_RECIPIENT = _cfg.SIGNAL_RECIPIENT
+_SIGNAL_SEND_TIMEOUT = _cfg.SIGNAL_SEND_TIMEOUT
+
+
+def _signal_send(message):
+    """Send a text message via signal-cli. Returns True on success.
+    Reads sender/recipient from alerts settings (UI), falling back to env vars."""
+    settings = _load_alerts().get("settings", {})
+    sender = settings.get("signal_sender") or _SIGNAL_SENDER
+    recipient = settings.get("signal_recipient") or _SIGNAL_RECIPIENT
+    if not sender or not recipient:
+        print("[Signal] Skipped: no sender or recipient configured", file=sys.stderr)
+        return False
+    try:
+        subprocess.run(
+            [_SIGNAL_CLI_PATH, "-u", sender, "send",
+             "-m", message, recipient],
+            capture_output=True, text=True, timeout=_SIGNAL_SEND_TIMEOUT,
+            check=True,
+        )
+        print(f"[Signal] Sent to {recipient[:4]}...")
+        return True
+    except FileNotFoundError:
+        print(f"[Signal] signal-cli not found at: {_SIGNAL_CLI_PATH}", file=sys.stderr)
+        return False
+    except subprocess.TimeoutExpired:
+        print("[Signal] Send timed out", file=sys.stderr)
+        return False
+    except subprocess.CalledProcessError as exc:
+        print(f"[Signal] Send failed: {exc.stderr[:200] if exc.stderr else exc}", file=sys.stderr)
+        return False
+
 
 def _alerts_default_doc():
     return {"alerts": [], "settings": dict(_DEFAULT_ALERT_SETTINGS)}
@@ -169,6 +206,12 @@ def _sanitize_alert_settings(raw):
     except (TypeError, ValueError):
         sal = 0.0
     settings["min_salience"] = max(0.0, min(sal, 1.0))
+    # Signal phone numbers (E.164 format)
+    _PHONE_RE = re.compile(r"^\+[1-9]\d{6,14}$")
+    for key in ("signal_sender", "signal_recipient"):
+        val = str(raw.get(key, "")).strip()
+        if val and _PHONE_RE.match(val):
+            settings[key] = val
     return settings
 
 
@@ -317,6 +360,9 @@ def _notify_enqueue(title, body, source, salience, channels, settings=None):
         _telemetry_emit("notify", result="emit", source=source, salience=salience,
                         channels=",".join(record["channels"]))
         print(f"[Notify] {record['title']} (salience {salience}, {source})")
+        # Dispatch to Signal when requested
+        if "signal" in record["channels"]:
+            _signal_send(f"{record['title']}\n{record['body']}".strip())
         return record
     except Exception:
         return None

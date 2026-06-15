@@ -603,6 +603,21 @@
           </div>
         </div>
 
+        <hr style="border:none;border-top:1px solid rgba(255,255,255,.12);margin:14px 0 10px">
+        <p class="auth-note">Signal notifications (send-only via signal-cli on the bridge host).</p>
+        <div class="auth-field">
+          <label for="authSignalSender">Signal Sender Number:</label>
+          <div class="auth-input-wrap">
+            <input type="text" id="authSignalSender" placeholder="+1XXXXXXXXXX" autocomplete="off">
+          </div>
+        </div>
+        <div class="auth-field">
+          <label for="authSignalRecipient">Signal Recipient Number:</label>
+          <div class="auth-input-wrap">
+            <input type="text" id="authSignalRecipient" placeholder="+1YYYYYYYYYY" autocomplete="off">
+          </div>
+        </div>
+
         <button type="button" class="auth-save" onclick="saveAuthKeys()">Save Keys</button>
       </div>
 

@@ -110,10 +110,40 @@ function saveAuthKeys() {
   } else if (lmsModelEl) {
     localStorage.removeItem('aig_lmstudio_model');
   }
+  // Save Signal sender/recipient to localStorage and push to bridge
+  var sigSender = document.getElementById('authSignalSender');
+  var sigRecip = document.getElementById('authSignalRecipient');
+  if (sigSender && sigSender.value.trim()) {
+    localStorage.setItem('signal_sender', sigSender.value.trim());
+  } else if (sigSender) {
+    localStorage.removeItem('signal_sender');
+  }
+  if (sigRecip && sigRecip.value.trim()) {
+    localStorage.setItem('signal_recipient', sigRecip.value.trim());
+  } else if (sigRecip) {
+    localStorage.removeItem('signal_recipient');
+  }
+  _pushSignalSettingsToBridge();
   if (typeof _acpBridgeCache !== 'undefined') _acpBridgeCache = null;
   if (typeof loadGoals === 'function') loadGoals(true);
   if (typeof loadBackgroundData === 'function') loadBackgroundData(true);
   setStatus('info', 'API keys saved to browser storage.');
+}
+
+function _pushSignalSettingsToBridge() {
+  var sender = (localStorage.getItem('signal_sender') || '').trim();
+  var recipient = (localStorage.getItem('signal_recipient') || '').trim();
+  if (!sender && !recipient) return;
+  var bUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
+  try {
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', bUrl + '/v1/alerts/settings', true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.send(JSON.stringify({
+      signal_sender: sender,
+      signal_recipient: recipient
+    }));
+  } catch (e) { /* bridge may not be running */ }
 }
 
 function populateAuthFields() {
@@ -144,6 +174,11 @@ function populateAuthFields() {
   if (lmsModelEl) {
     lmsModelEl.value = (typeof getLmStudioModel === 'function') ? getLmStudioModel() : (localStorage.getItem('aig_lmstudio_model') || 'granite-3.1-8b-instruct');
   }
+  // Signal fields
+  var sigSender = document.getElementById('authSignalSender');
+  if (sigSender) sigSender.value = localStorage.getItem('signal_sender') || '';
+  var sigRecip = document.getElementById('authSignalRecipient');
+  if (sigRecip) sigRecip.value = localStorage.getItem('signal_recipient') || '';
 }
 
 function getLmStudioBaseUrl() {

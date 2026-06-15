@@ -135,7 +135,7 @@ LOG_LINE_CAP = 240
 
 # ── Alerts / notifications ─────────────────────────────────────────
 ALERT_TYPES = ("sec_filing", "weather", "space_weather", "keyword_watch", "research_question")
-ALERT_CHANNELS = ("chat", "voice")
+ALERT_CHANNELS = ("chat", "voice", "signal")
 NOTIFY_RING_MAX = 100
 NOTIFY_MAX_BYTES = 2 * 1024 * 1024
 NOTIFY_CRITICAL_SALIENCE = 0.9
@@ -144,6 +144,12 @@ DEFAULT_ALERT_SETTINGS = {
     "quiet_hours_start": None,
     "quiet_hours_end": None,
 }
+
+# ── Signal (send-only) ─────────────────────────────────────────────
+SIGNAL_CLI_PATH = os.environ.get("EVA_SIGNAL_CLI", "signal-cli")
+SIGNAL_SENDER = os.environ.get("EVA_SIGNAL_SENDER", "").strip()
+SIGNAL_RECIPIENT = os.environ.get("EVA_SIGNAL_RECIPIENT", "").strip()
+SIGNAL_SEND_TIMEOUT = 15
 
 # ── Entity extraction ──────────────────────────────────────────────
 ENTITY_IGNORE_WORDS = {
