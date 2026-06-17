@@ -2321,7 +2321,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  ['aigLmStudioBaseUrl', 'aigLmStudioModel'].forEach(function(id) {
+  ['aigLmStudioBaseUrl', 'aigLmStudioModel', 'authSignalSender', 'authSignalRecipient'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('change', saveAuthKeys);
   });
