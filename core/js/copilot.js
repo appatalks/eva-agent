@@ -796,13 +796,15 @@ document.addEventListener('DOMContentLoaded', function() {
 // ── Memory backend selector ─────────────────────────────────────────────
 function initMemoryBackendSelector() {
   var sel = document.getElementById('memoryBackendSelect');
+  var selGeneral = document.getElementById('selMemoryBackend');
   var statusEl = document.getElementById('memoryBackendStatus');
-  if (!sel) return;
+  var statusGeneral = document.getElementById('memoryBackendGeneralStatus');
 
   // Load persisted preference
   var saved = localStorage.getItem('eva_memory_backend');
   if (saved && (saved === 'kusto' || saved === 'sqlite')) {
-    sel.value = saved;
+    if (sel) sel.value = saved;
+    if (selGeneral) selGeneral.value = saved;
   }
 
   // Fetch current state from bridge
@@ -811,44 +813,71 @@ function initMemoryBackendSelector() {
     signal: AbortSignal.timeout(3000)
   }).then(function(r) { return r.json(); }).then(function(data) {
     if (data.backend) {
-      sel.value = data.backend;
+      if (sel) sel.value = data.backend;
+      if (selGeneral) selGeneral.value = data.backend;
       localStorage.setItem('eva_memory_backend', data.backend);
-      if (statusEl) {
-        if (data.backend === 'sqlite') {
-          statusEl.textContent = 'Active: local SQLite' + (data.db_path ? ' (' + data.db_path + ')' : '');
-        } else {
-          statusEl.textContent = 'Active: Azure Data Explorer' + (data.cluster ? ' (' + data.database + ')' : '');
-        }
-      }
+      var label = data.backend === 'sqlite'
+        ? 'Active: local SQLite' + (data.db_path ? ' (' + data.db_path + ')' : '')
+        : 'Active: Azure Data Explorer' + (data.cluster ? ' (' + data.database + ')' : '');
+      if (statusEl) statusEl.textContent = label;
+      if (statusGeneral) statusGeneral.textContent = label;
     }
   }).catch(function() {
-    // Bridge not available — use localStorage value
-    if (statusEl) statusEl.textContent = 'Bridge not reachable — using saved preference';
+    var msg = 'Bridge not reachable — using saved preference';
+    if (statusEl) statusEl.textContent = msg;
+    if (statusGeneral) statusGeneral.textContent = msg;
   });
 
-  sel.addEventListener('change', function() {
-    var backend = sel.value;
-    localStorage.setItem('eva_memory_backend', backend);
-    if (statusEl) statusEl.textContent = 'Switching...';
-    fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/backend', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ backend: backend }),
-      signal: AbortSignal.timeout(5000)
-    }).then(function(r) { return r.json(); }).then(function(data) {
-      if (data.status === 'ok') {
-        if (statusEl) {
-          if (backend === 'sqlite') {
-            statusEl.textContent = 'Switched to local SQLite' + (data.db_path ? ' (' + data.db_path + ')' : '');
-          } else {
-            statusEl.textContent = 'Switched to Azure Data Explorer — configure Kusto MCP below';
-          }
-        }
-      } else {
-        if (statusEl) statusEl.textContent = 'Error: ' + JSON.stringify(data.error || data);
-      }
-    }).catch(function(e) {
-      if (statusEl) statusEl.textContent = 'Failed to switch: ' + e.message;
-    });
+  // Change handler for MCP tab selector
+  if (sel) sel.addEventListener('change', function() {
+    _doSwitchMemoryBackend(sel.value);
+  });
+  // Change handler for General tab selector is via onchange="switchMemoryBackend()"
+}
+
+/**
+ * Switch memory backend (called from General tab selector or programmatically).
+ */
+function switchMemoryBackend(backend) {
+  _doSwitchMemoryBackend(backend);
+}
+
+function _doSwitchMemoryBackend(backend) {
+  var sel = document.getElementById('memoryBackendSelect');
+  var selGeneral = document.getElementById('selMemoryBackend');
+  var statusEl = document.getElementById('memoryBackendStatus');
+  var statusGeneral = document.getElementById('memoryBackendGeneralStatus');
+
+  // Sync both selectors
+  if (sel) sel.value = backend;
+  if (selGeneral) selGeneral.value = backend;
+  localStorage.setItem('eva_memory_backend', backend);
+
+  var msg = 'Switching...';
+  if (statusEl) statusEl.textContent = msg;
+  if (statusGeneral) statusGeneral.textContent = msg;
+
+  var bridgeUrl = getACPBridgeUrl();
+  fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/backend', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ backend: backend }),
+    signal: AbortSignal.timeout(5000)
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    if (data.status === 'ok') {
+      var label = backend === 'sqlite'
+        ? 'Switched to local SQLite' + (data.db_path ? ' (' + data.db_path + ')' : '')
+        : 'Switched to Azure Data Explorer — configure Kusto MCP in Settings > MCP';
+      if (statusEl) statusEl.textContent = label;
+      if (statusGeneral) statusGeneral.textContent = label;
+    } else {
+      var err = 'Error: ' + JSON.stringify(data.error || data);
+      if (statusEl) statusEl.textContent = err;
+      if (statusGeneral) statusGeneral.textContent = err;
+    }
+  }).catch(function(e) {
+    var err = 'Failed to switch: ' + e.message;
+    if (statusEl) statusEl.textContent = err;
+    if (statusGeneral) statusGeneral.textContent = err;
   });
 }

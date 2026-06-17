@@ -379,10 +379,19 @@
           <option value="local">Local (LM Studio + MCP tools, no cloud AI)</option>
         </select>
         <div class="auth-note" id="dataModeNote" style="margin:4px 0 0;font-size:11px;opacity:0.75">
-          Cloud: uses Copilot CLI for web search, Kusto, GitHub tools (uses Copilot tokens).<br>
-          Local: spawns MCP servers directly and uses LM Studio for tool-calling (fully offline AI, zero cloud tokens).
         </div>
         <div id="dataModeStatus" style="margin:4px 0;font-size:11px;opacity:0.7"></div>
+
+        <label for="selMemoryBackend" style="margin-top:10px">Memory backend:</label>
+        <select id="selMemoryBackend" onchange="switchMemoryBackend(this.value)">
+          <option value="sqlite">Local (SQLite)</option>
+          <option value="kusto">Cloud (Azure Data Explorer / Kusto)</option>
+        </select>
+        <div class="auth-note" id="memoryBackendNote" style="margin:4px 0 0;font-size:11px;opacity:0.75">
+          Local (SQLite): zero setup, all data on this machine, works offline.<br>
+          Cloud (Kusto): syncs across devices, richer queries, requires Azure Data Explorer cluster.
+        </div>
+        <div id="memoryBackendGeneralStatus" style="margin:4px 0;font-size:11px;opacity:0.7"></div>
 
         <hr style="margin:14px 0;border:none;border-top:1px solid rgba(127,127,127,0.25)">
         <div class="auth-note" style="margin:0">
