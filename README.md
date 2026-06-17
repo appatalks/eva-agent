@@ -12,7 +12,15 @@ A voice-first AI assistant that sees through your camera, controls your browser 
 curl -fsSL https://appatalks.github.io/eva-agent/get-eva.sh | bash
 ```
 
-Or clone and run locally:
+Then launch:
+
+```bash
+eva
+```
+
+Eva is also added to your system application menu (GNOME, KDE, etc.), so you can search for "Eva" in your app launcher.
+
+Or clone and run manually:
 
 ```bash
 git clone https://github.com/appatalks/eva-agent.git

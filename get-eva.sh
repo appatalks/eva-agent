@@ -176,6 +176,26 @@ LAUNCHER
   ok "Created launcher: $EVA_BIN/eva"
 fi
 
+# ── Create .desktop entry (Linux app launcher icon) ─────────────────────────
+DESKTOP_DIR="$HOME/.local/share/applications"
+mkdir -p "$DESKTOP_DIR"
+EVA_ICON="$EVA_DIR/core/img/eva-icon.svg"
+EVA_EXEC="$EVA_BIN/eva"
+
+cat > "$DESKTOP_DIR/eva.desktop" <<EOF
+[Desktop Entry]
+Name=Eva
+Comment=Eva AI Assistant
+Exec=$EVA_EXEC
+Icon=$EVA_ICON
+Terminal=false
+Type=Application
+Categories=Utility;ArtificialIntelligence;
+StartupWMClass=eva-standalone
+EOF
+chmod 644 "$DESKTOP_DIR/eva.desktop"
+ok "Desktop entry: $DESKTOP_DIR/eva.desktop"
+
 # Ensure ~/.local/bin is on PATH
 case ":$PATH:" in
   *":$EVA_BIN:"*) ;;

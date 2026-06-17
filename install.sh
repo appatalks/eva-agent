@@ -279,14 +279,15 @@ register_dependencies() {
   fi
 
   hr; info "Signal notifications (optional)"; hr
+  local SIGNAL_CLI_VERSION="0.14.5"
   if have_cmd signal-cli; then
     local scver; scver="$(signal-cli --version 2>/dev/null | awk '{print $NF}')"
     ok "signal-cli ${scver:-present}"; PRESENT_COUNT=$((PRESENT_COUNT+1))
   else
     local sc_arch; sc_arch="$(uname -m)"
     if [ "$sc_arch" = "x86_64" ] || [ "$sc_arch" = "amd64" ]; then
-      queue "signal-cli (native binary)" \
-        "curl -fsSL -o /tmp/signal-cli-native.tar.gz https://github.com/AsamK/signal-cli/releases/latest/download/signal-cli-\$(curl -fsSL https://api.github.com/repos/AsamK/signal-cli/releases/latest | grep -oP '\"tag_name\": \"v\\K[^\"]+')}-Linux-native.tar.gz && tar xzf /tmp/signal-cli-native.tar.gz -C /tmp && install -m 755 /tmp/signal-cli \"\${HOME}/.local/bin/signal-cli\" && rm -f /tmp/signal-cli /tmp/signal-cli-native.tar.gz"
+      queue "signal-cli ${SIGNAL_CLI_VERSION} (native binary)" \
+        "curl -fsSL -o /tmp/signal-cli-native.tar.gz https://github.com/AsamK/signal-cli/releases/download/v${SIGNAL_CLI_VERSION}/signal-cli-${SIGNAL_CLI_VERSION}-Linux-native.tar.gz && tar xzf /tmp/signal-cli-native.tar.gz -C /tmp && install -m 755 /tmp/signal-cli \"\${HOME}/.local/bin/signal-cli\" && rm -f /tmp/signal-cli /tmp/signal-cli-native.tar.gz"
     else
       warn "signal-cli: no prebuilt native binary for $sc_arch. Install manually from https://github.com/AsamK/signal-cli"
     fi
