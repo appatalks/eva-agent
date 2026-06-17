@@ -146,6 +146,31 @@ function _pushSignalSettingsToBridge() {
   } catch (e) { /* bridge may not be running */ }
 }
 
+function _hydrateSignalFromBridge(senderEl, recipEl) {
+  var bUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
+  try {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', bUrl + '/v1/alerts', true);
+    xhr.onload = function() {
+      if (xhr.status !== 200) return;
+      try {
+        var data = JSON.parse(xhr.responseText);
+        var s = (data.settings || {}).signal_sender || '';
+        var r = (data.settings || {}).signal_recipient || '';
+        if (s && senderEl && !senderEl.value) {
+          senderEl.value = s;
+          localStorage.setItem('signal_sender', s);
+        }
+        if (r && recipEl && !recipEl.value) {
+          recipEl.value = r;
+          localStorage.setItem('signal_recipient', r);
+        }
+      } catch (e) { /* parse error */ }
+    };
+    xhr.send();
+  } catch (e) { /* bridge may not be running */ }
+}
+
 function populateAuthFields() {
   var map = {
     'authOpenAI': 'OPENAI_API_KEY',
@@ -174,11 +199,15 @@ function populateAuthFields() {
   if (lmsModelEl) {
     lmsModelEl.value = (typeof getLmStudioModel === 'function') ? getLmStudioModel() : (localStorage.getItem('aig_lmstudio_model') || 'granite-3.1-8b-instruct');
   }
-  // Signal fields
+  // Signal fields: prefer localStorage, but if empty, hydrate from the bridge
+  // (the bridge persists numbers in alerts.json, which survives AppImage rebuilds).
   var sigSender = document.getElementById('authSignalSender');
   if (sigSender) sigSender.value = localStorage.getItem('signal_sender') || '';
   var sigRecip = document.getElementById('authSignalRecipient');
   if (sigRecip) sigRecip.value = localStorage.getItem('signal_recipient') || '';
+  if ((!sigSender || !sigSender.value) || (!sigRecip || !sigRecip.value)) {
+    _hydrateSignalFromBridge(sigSender, sigRecip);
+  }
 }
 
 function getLmStudioBaseUrl() {
