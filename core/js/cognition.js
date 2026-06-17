@@ -62,6 +62,8 @@
       "front of the camera, emit one line [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] (the",
       "question is optional). A frame is captured and you describe it. Do NOT claim you cannot see or use a",
       "camera. Emit at most one EVA_LOOK per reply, only when the user asks you to look or about what you see.",
+      "You can also send Signal messages by emitting [[EVA_SIGNAL]]{\"message\":\"<text>\"}[[/EVA_SIGNAL]] when",
+      "the user asks to text them.",
       "SCHEDULED TASKS: Eva has a cron scheduler. When the user asks to schedule something recurring",
       "(daily briefings, periodic checks, reminders), acknowledge that this can be set up in Settings > Cron.",
       "SUBAGENTS: For multi-part tasks that can run in parallel, Eva can spawn isolated subagents. Each runs",
