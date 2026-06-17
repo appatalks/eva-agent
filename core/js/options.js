@@ -1579,6 +1579,33 @@ function readAlertForm() {
 
 async function saveAlert() {
   var rule = readAlertForm();
+  // Client-side validation for required fields
+  var type = rule.type;
+  var params = rule.params || {};
+  if (type === 'keyword_watch' && !params.topic) {
+    setStatus('error', 'Topic to watch is required.');
+    var topicInput = document.getElementById('alertParamTopic');
+    if (topicInput) topicInput.focus();
+    return;
+  }
+  if (type === 'research_question' && !params.question) {
+    setStatus('error', 'Question to track is required.');
+    var topicInput = document.getElementById('alertParamTopic');
+    if (topicInput) topicInput.focus();
+    return;
+  }
+  if (type === 'sec_filing' && !params.symbols) {
+    setStatus('error', 'At least one ticker symbol is required.');
+    var topicInput = document.getElementById('alertParamTopic');
+    if (topicInput) topicInput.focus();
+    return;
+  }
+  if (type === 'weather' && !params.location) {
+    setStatus('error', 'Location is required.');
+    var topicInput = document.getElementById('alertParamTopic');
+    if (topicInput) topicInput.focus();
+    return;
+  }
   try {
     await backgroundBridgeRequest('/v1/alerts', {
       method: 'POST',
