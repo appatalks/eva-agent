@@ -240,9 +240,15 @@ body.eva-standalone #settingsMenu {
     .cog-section .cog-grid select, .cog-section .cog-grid input { width: 100%; box-sizing: border-box; }
     .cog-section details.cog-prompts { margin: 6px 0 10px; }
     .cog-section details.cog-prompts > summary { cursor: pointer; font-size: 12px; opacity: 0.85; margin-bottom: 6px; }
-    .cog-section .cog-prompt-row { margin-bottom: 8px; }
-    .cog-section .cog-prompt-row label { display: block; font-size: 12px; opacity: 0.85; margin-bottom: 3px; }
-    .cog-section .cog-prompt-row textarea { width: 100%; box-sizing: border-box; font-family: var(--eva-font, monospace); font-size: 12px; }
+    /* Cognitive layer prompts section in Prompts tab */
+    .cog-prompts-section { margin-top: 16px; }
+    .cog-prompts-section .cog-prompt-row { margin-bottom: 12px; }
+    .cog-prompts-section .cog-prompt-row label { display: block; font-size: 12px; font-weight: 600; opacity: 0.9; margin-bottom: 3px; }
+    .cog-prompts-section .cog-prompt-row textarea { width: 100%; box-sizing: border-box; font-family: var(--eva-font, monospace); font-size: 12px; padding: 8px; border-radius: 4px; }
+    /* Cognitive status indicator */
+    .cog-status-indicator { display: flex; align-items: center; gap: 8px; padding: 8px 12px; margin-bottom: 16px; border-radius: 6px; background: linear-gradient(135deg, rgba(76,175,80,0.1), rgba(76,175,80,0.05)); border: 1px solid rgba(76,175,80,0.3); }
+    .cog-status-icon { font-size: 16px; color: #4caf50; font-weight: bold; }
+    .cog-status-text { font-size: 12px; opacity: 0.9; }
     /* Inline trace block in chat output */
     details.cog-trace { margin: 8px 0; padding: 6px 8px; border: 1px dashed #b0bec5; border-radius: 6px; font-size: 12px; opacity: 0.9; }
     details.cog-trace > summary { cursor: pointer; }

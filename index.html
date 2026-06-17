@@ -542,28 +542,12 @@
               </div>
             </div>
 
-            <details class="cog-prompts">
-              <summary>Edit agent system prompts</summary>
-              <div class="cog-prompt-row">
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:3px">
-                  <label for="cogEvaPrompt" style="margin:0">Eva prompt:</label>
-                  <button type="button" class="auth-toggle" style="padding:3px 8px;font-size:11px" onclick="cogResetPrompt('eva')" aria-label="Reset Eva prompt to default">Reset</button>
-                </div>
-                <textarea id="cogEvaPrompt" rows="3" onchange="cogPersist()" placeholder="(default Eva prompt)"></textarea>
-              </div>
-              <div class="cog-prompt-row">
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:3px">
-                  <label for="cogReviewerPrompt" style="margin:0">Reviewer prompt:</label>
-                  <button type="button" class="auth-toggle" style="padding:3px 8px;font-size:11px" onclick="cogResetPrompt('reviewer')" aria-label="Reset reviewer prompt to default">Reset</button>
-                </div>
-                <textarea id="cogReviewerPrompt" rows="3" onchange="cogPersist()" placeholder="(default reviewer prompt)"></textarea>
-              </div>
-            </details>
-
             <label class="cog-toggle-row">
               <input type="checkbox" id="cogShowTrace" onchange="cogPersist()">
               <span>Show pipeline trace below each response (debug)</span>
             </label>
+
+            <p class="prompt-hint" style="margin-top:10px;font-size:11px">Edit Eva and Reviewer system prompts in the <strong>Prompts</strong> tab.</p>
           </div>
         </div>
       </div>
@@ -632,6 +616,12 @@
 
       <!-- Prompts Tab -->
       <div class="settings-panel" data-stab="prompts">
+        <!-- Cognitive Layer Status Indicator -->
+        <div id="cogStatusIndicator" class="cog-status-indicator" style="display:none">
+          <span class="cog-status-icon">✓</span>
+          <span class="cog-status-text"><strong>Cognitive Layer Enabled</strong> &mdash; Eva and Reviewer agents are active.</span>
+        </div>
+
         <label for="selPers">Personality Preset:</label>
         <select id="selPers" aria-label="Select personality" onchange="applyPersonalityPreset()">
           <option value="default" title="Eva's Default Personality">Default</option>
@@ -644,6 +634,29 @@
         <label for="txtSystemPrompt">System / Developer Prompt:</label>
         <textarea id="txtSystemPrompt" rows="8" placeholder="Enter custom system instructions..."></textarea>
         <p class="prompt-hint">This prompt is sent as the system/developer message to the AI. Select a preset above or write your own.</p>
+
+        <!-- Cognitive Layer Agent Prompts -->
+        <div id="cogPromptsSection" class="cog-prompts-section" style="display:none">
+          <hr style="border:none;border-top:1px solid rgba(255,255,255,.12);margin:20px 0 16px">
+          <h3 style="margin:0 0 12px;font-size:14px;font-weight:600">Cognitive Layer Agent Prompts</h3>
+          <p class="prompt-hint" style="margin-top:0;margin-bottom:12px">Configure system prompts for Eva and Reviewer agents when Cognitive Layer is enabled.</p>
+          
+          <div class="cog-prompt-row">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:3px">
+              <label for="cogEvaPrompt" style="margin:0">Eva Agent Prompt:</label>
+              <button type="button" class="auth-toggle" style="padding:3px 8px;font-size:11px" onclick="cogResetPrompt('eva')" aria-label="Reset Eva prompt to default">Reset</button>
+            </div>
+            <textarea id="cogEvaPrompt" rows="5" onchange="cogPersist()" placeholder="(default Eva prompt)"></textarea>
+          </div>
+          
+          <div class="cog-prompt-row">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:3px">
+              <label for="cogReviewerPrompt" style="margin:0">Reviewer Agent Prompt:</label>
+              <button type="button" class="auth-toggle" style="padding:3px 8px;font-size:11px" onclick="cogResetPrompt('reviewer')" aria-label="Reset reviewer prompt to default">Reset</button>
+            </div>
+            <textarea id="cogReviewerPrompt" rows="5" onchange="cogPersist()" placeholder="(default reviewer prompt)"></textarea>
+          </div>
+        </div>
       </div>
 
       <!-- Goals Tab -->

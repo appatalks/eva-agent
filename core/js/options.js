@@ -2336,6 +2336,7 @@ document.addEventListener('DOMContentLoaded', () => {
   _modeInitDone = true;
   if (typeof loadDataMode === 'function') loadDataMode();
   if (typeof cogInit === 'function') cogInit();
+  if (typeof cogUpdatePromptsTabUI === 'function') cogUpdatePromptsTabUI();
   if (typeof initGoals === 'function') initGoals();
   if (typeof initBackground === 'function') initBackground();
   if (typeof initAlerts === 'function') initAlerts();
@@ -4436,6 +4437,24 @@ function cogPersist() {
   });
   Cognition.setCfg(partial);
   cogUpdateBadge();
+  cogUpdatePromptsTabUI();
+}
+
+function cogUpdatePromptsTabUI() {
+  var $ = function (id) { return document.getElementById(id); };
+  var enabled = false;
+  try { enabled = (typeof Cognition !== 'undefined' && Cognition.isEnabled && Cognition.isEnabled()); } catch (_) {}
+  
+  // Show/hide cognitive layer sections in Prompts tab
+  var indicator = $('cogStatusIndicator');
+  var promptsSection = $('cogPromptsSection');
+  
+  if (indicator) {
+    indicator.style.display = enabled ? 'flex' : 'none';
+  }
+  if (promptsSection) {
+    promptsSection.style.display = enabled ? 'block' : 'none';
+  }
 }
 
 function cogUpdateBadge() {
