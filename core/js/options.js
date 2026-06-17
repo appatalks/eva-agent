@@ -5678,10 +5678,22 @@ async function renderEvaResponse(content, txtOutput) {
     text = text.replace(/\n{3,}/g, '\n\n').trim();
   }
 
-  // Strip [[EVA_SIGNAL]]{"message":"..."}[[/EVA_SIGNAL]] — the bridge already
-  // dispatched via signal-cli; replace with a brief confirmation in the chat.
-  text = text.replace(/\[\[EVA_SIGNAL\]\]\s*(\{[\s\S]*?\})?\s*(?:\[\[\/EVA_SIGNAL\]\])?/g,
-    '\n_Signal message sent._\n');
+  // Strip [[EVA_SIGNAL]] — the bridge dispatches via signal-cli before
+  // returning the response. Only show confirmation if the marker was the
+  // *entire* response (AIG bridge path). If it appears inside a longer
+  // response the model hallucinated it — strip silently so a false
+  // "Signal message sent" never shows for lm-studio or other direct paths.
+  var _sigRe = /\[\[EVA_SIGNAL\]\]\s*(?:\{[\s\S]*?\})?\s*(?:\[\[\/EVA_SIGNAL\]\])?/g;
+  if (/\[\[EVA_SIGNAL\]\]/.test(text)) {
+    var _sigStripped = text.replace(_sigRe, '').trim();
+    if (_sigStripped.length === 0) {
+      // Whole response was the marker — bridge actually sent the message.
+      text = '\n_Signal message sent._\n';
+    } else {
+      // Marker embedded in a longer response — hallucination, strip silently.
+      text = text.replace(/\[\[EVA_SIGNAL\]\]\s*(?:\{[\s\S]*?\})?\s*(?:\[\[\/EVA_SIGNAL\]\])?/g, '');
+    }
+  }
   text = text.replace(/\n{3,}/g, '\n\n').trim();
 
   text = text.replace(/^\s*\[\[EVA_FILE\]\]\s+([A-Za-z0-9._-]{1,128})\s*$/gm, function(fullMatch, filename) {
