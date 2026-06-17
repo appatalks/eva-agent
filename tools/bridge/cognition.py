@@ -122,6 +122,11 @@ _ENTITY_IGNORE_WORDS = _cfg.ENTITY_IGNORE_WORDS
 _ENTITY_RESERVED_TERMS = _cfg.ENTITY_RESERVED_TERMS
 
 _EXPLICIT_FACT_WHITESPACE_RE = re.compile(r"\s+", re.IGNORECASE)
+_EXPLICIT_NAME_RE = re.compile(
+    r"\b(?:(?:my )?name is spelled|my name is|call me|i go by|i'm called|my name's)\s+"
+    r"([A-Za-z][A-Za-z0-9_\-]{1,48})",
+    re.IGNORECASE
+)
 # CHILDREN, PARTNER, PET, LOCATION patterns deliberately omit re.IGNORECASE
 # so the [A-Z] anchor on the captured name keeps real proper-noun semantics.
 # Users typing "my kids are happy" with a lowercase "happy" are not captured;
@@ -240,6 +245,8 @@ def _extract_explicit_user_facts(user_message):
             "Decay": 0.005,
         })
 
+    for match in _EXPLICIT_NAME_RE.finditer(user_message or ""):
+        add_fact("user_name", match.group(1).strip(), 0.95)
     for match in _EXPLICIT_CHILDREN_RE.finditer(user_message or ""):
         add_fact("user_children", _normalize_explicit_children(match.group(1)), 0.85)
     for match in _EXPLICIT_MOTTO_RE.finditer(user_message or ""):
@@ -497,12 +504,16 @@ def _build_memory_context_sqlite(user_message):
         id_lines = [f"- {r.get('Relation','?')}: {r.get('Value','?')}" for r in eva_identity]
         context_parts.append("[Identity — Who You Are]\n" + "\n".join(id_lines))
 
-    # User profile
+    # User profile — pick the most recent value per relation
     user_profile = mem.query(
-        "SELECT Relation, Value, Confidence FROM Knowledge "
-        "WHERE Entity = 'User' COLLATE NOCASE AND Confidence >= 0.5 "
-        "GROUP BY Relation HAVING MAX(Timestamp) "
-        "ORDER BY Confidence DESC LIMIT 30"
+        "SELECT k.Relation, k.Value, k.Confidence FROM Knowledge k "
+        "INNER JOIN ("
+        "  SELECT Relation, MAX(Timestamp) AS MaxTs FROM Knowledge "
+        "  WHERE Entity = 'User' COLLATE NOCASE AND Confidence >= 0.5 "
+        "  GROUP BY Relation"
+        ") latest ON k.Relation = latest.Relation AND k.Timestamp = latest.MaxTs "
+        "WHERE k.Entity = 'User' COLLATE NOCASE AND k.Confidence >= 0.5 "
+        "ORDER BY k.Confidence DESC LIMIT 30"
     )
     if user_profile:
         profile_lines = [f"- {r.get('Relation','?')}: {r.get('Value','?')}" for r in user_profile]
