@@ -2359,22 +2359,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 response_text += f'\n\n[[EVA_LOOK]]{{"question":"{_look_q}"}}[[/EVA_LOOK]]'
                 print("[AIG] Camera fallback: injected [[EVA_LOOK]] for local model")
 
-            # Signal fallback: if the user asked for a Signal/text message and
-            # the model didn't emit the marker, inject it so the message sends.
-            # Also replace the model's refusal text with a clean confirmation.
-            if _is_signal_request and '[[EVA_SIGNAL]]' not in response_text:
-                # Try to extract the message content from the user request
-                _sig_body = user_message.strip()
-                # Look for quoted text the user wants sent
-                _quoted = _re.search(r'["\u201c](.+?)["\u201d]', _sig_body)
-                if _quoted:
-                    _sig_body = _quoted.group(1)
-                # Replace the model's refusal with a clean confirmation
-                response_text = f'[[EVA_SIGNAL]]{{"message":"{_sig_body}"}}[[/EVA_SIGNAL]]'
-                print("[AIG] Signal fallback: injected [[EVA_SIGNAL]] for local model")
-
             # Signal: parse [[EVA_SIGNAL]]{"message":"..."}[[/EVA_SIGNAL]] and
             # dispatch via signal-cli before the response reaches the frontend.
+            # No fallback injection — the model decides whether to emit the
+            # marker based on the system prompt. If it doesn't, the user's
+            # message was not a Signal request.
             _sig_match = _re.search(
                 r'\[\[EVA_SIGNAL\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[/EVA_SIGNAL\]\])?',
                 response_text
