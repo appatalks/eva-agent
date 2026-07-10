@@ -88,13 +88,36 @@ model or manually via Settings > General.
 **Local mode** (automatic for LM Studio):
 - LM Studio provides chat completions and tool-calling reasoning
 - MCP servers spawned directly by the bridge as subprocesses
-- Web search via `web_search_mcp.py` (DuckDuckGo HTML scraping, no API key)
-- Zero cloud AI, zero tokens, fully offline-capable
+- Optional web search via `web_search_mcp.py` when the `cloud` egress policy permits it
+- No cloud model inference; network access is governed independently by `EVA_EGRESS_MODE`
 
 **Mode persistence:** The selected mode is persisted to `~/.config/eva-standalone/mode.txt`
 by the bridge. On startup, the bridge reads this file to restore the previous mode.
 The frontend seeds its selector from the bridge via `GET /v1/mode` after init, and
 skips auto-switch logic during startup to avoid overriding the persisted choice.
+
+### Security Boundary and Egress Policy
+
+The local/cloud data-retrieval selector is separate from the process-wide egress
+policy. `EVA_EGRESS_MODE` accepts exactly `cloud`, `local-network`, or `offline`:
+
+| Policy | Allowed |
+|---|---|
+| `cloud` | Configured cloud providers, ACP, ADX, web access, and approved MCP servers |
+| `local-network` | SQLite and LM Studio on loopback or private IP literals; no public-cloud calls |
+| `offline` | SQLite and loopback LM Studio only; no public or LAN calls |
+
+Eva Standalone generates a per-launch bearer token in Electron main and injects
+it only for the exact local bridge `/v1/*` origin. All `/v1/*` methods authenticate
+before dispatch; `/health` is a redacted unauthenticated readiness probe and
+`OPTIONS` is side-effect-free. The token is removed before model/tool subprocesses
+start. Manual clients must provide `EVA_BRIDGE_TOKEN`; the only unauthenticated
+escape hatch is `EVA_ALLOW_UNAUTHENTICATED_LOOPBACK=1`, which is restricted to a
+loopback bind.
+
+ACP permissions are default-deny and ACP terminal execution is not advertised.
+Background jobs honor each proposal's `auto_apply` policy; inferred facts,
+reflections, and summaries marked for review remain pending until approved.
 
 ### Request Flow
 
@@ -104,7 +127,7 @@ Browser -> XHR/fetch -> Provider API -> JSON response -> `renderEvaResponse()`
 **ACP models (Copilot CLI):**
 1. Browser -> `POST /v1/chat/completions` -> ACP Bridge (HTTP)
 2. Bridge -> `session/prompt` -> Copilot CLI (JSON-RPC over NDJSON/stdio)
-3. Copilot may invoke MCP tools (bridge auto-grants permissions)
+3. Copilot may request MCP tools; the bridge applies its default-deny permission policy
 4. Copilot streams `session/update` notifications with text chunks
 5. Bridge accumulates chunks -> returns OpenAI-compatible JSON response
 
@@ -112,8 +135,8 @@ Browser -> XHR/fetch -> Provider API -> JSON response -> `renderEvaResponse()`
 1. Browser fetches `/v1/memory/context` + `/v1/data/retrieve` in parallel from bridge
 2. Bridge injects memory context from SQLite/Kusto
 3. Bridge runs data retrieval via local MCP tool-calling loop (see below)
-4. Browser prepends memory + data to system prompt
-5. Browser sends directly to `http://localhost:1234/v1/chat/completions`
+4. Browser prepends memory + data to the system prompt in cloud egress mode
+5. Browser sends to LM Studio directly in ordinary browser mode; restricted Eva Standalone routes through the authenticated bridge
 6. Response processed by `Cognition.executeActions()` for any action blocks
 7. Rendered via `renderEvaResponse()`
 
@@ -253,7 +276,7 @@ standalone/
 |---|---|---|
 | Python 3.12+ | ACP Bridge, Kusto MCP | System package or `pyenv` |
 | Node.js 24+ | Copilot CLI | `nvm install 24` or system package |
-| `@github/copilot` | Copilot CLI | `npm install -g @github/copilot` |
+| `@github/copilot` | Copilot CLI in cloud mode | `npm install -g @github/copilot`, then `copilot auth login` |
 | `azure-identity` | Kusto MCP auth | `pip install azure-identity` |
 | `requests` | AIG HTTP calls | `pip install requests` |
 | Docker | GitHub MCP server | [docker.com](https://docker.com) |
@@ -286,11 +309,12 @@ The bridge implements the [Agent Client Protocol (ACP)](https://agentclientproto
 | `session/new` | Client -> Agent | Create conversation session |
 | `session/prompt` | Client -> Agent | Send user message |
 | `session/update` | Agent -> Client | Stream response chunks, tool calls, plans |
-| `session/request_permission` | Agent -> Client | Request tool execution permission (auto-granted) |
+| `session/request_permission` | Agent -> Client | Request tool execution permission (default-deny) |
 | `session/cancel` | Client -> Agent | Cancel ongoing operation |
-| `terminal/create` | Agent -> Client | Execute shell command |
-| `terminal/output` | Agent -> Client | Get command output |
-| `terminal/release` | Agent -> Client | Release terminal |
+
+ACP terminal methods are not advertised and are rejected. Host command execution
+will only return after the capability broker can mediate the complete ACP terminal
+contract with typed policy and one-use approval receipts.
 
 ### ACP Client Pool
 
@@ -888,9 +912,10 @@ background loop (default: every 2 hours, pauses within 120s of user activity).
 | `research_deepdive` | Deep-dive on research topics |
 | `alert_watch` | Check alert rules for triggers |
 
-**Human-in-the-loop:** The loop never writes directly to memory tables. It creates
-proposals in `BackgroundProposals` with status `pending`. A human reviews them in
-Settings > Background. Approval writes the payload; rejection marks it rejected.
+**Proposal governance:** Every result is recorded in `BackgroundProposals`. Jobs
+marked `auto_apply: false` remain `pending` for review in Settings > Background.
+Narrow deterministic maintenance outputs explicitly marked `auto_apply: true`
+may be applied immediately and are recorded as reviewed by `auto`.
 
 ### Cron Scheduler
 
@@ -983,6 +1008,13 @@ xdg-open index.html                  # or open in any browser
 
 For `file://` usage without a JSON loader, copy `config.local.example.js` to `config.local.js`.
 
+Plain browser mode supports direct provider models only. It does not authenticate
+to Eva's privileged `/v1/*` bridge and therefore does not expose persistent
+memory, ACP/MCP, scheduling, camera, browser, or desktop controls. Use Eva
+Standalone for those capabilities. A hosted deployment must terminate HTTPS and
+inject an authenticated bridge identity through a trusted reverse proxy; opaque
+`file://` origins and renderer-stored bearer tokens are intentionally unsupported.
+
 ### Manual ACP bridge
 
 ```bash
@@ -991,6 +1023,10 @@ python3 tools/acp_bridge.py --port 8888 \
   --kusto-cluster "https://<your-cluster>.region.kusto.windows.net" \
   --kusto-database Eva
 ```
+
+Manual API clients must set `EVA_BRIDGE_TOKEN` and include the matching bearer
+header on every `/v1/*` request. The unauthenticated loopback escape hatch is for
+isolated development only and is not a browser authentication mechanism.
 
 ### Standalone (Electron AppImage)
 
@@ -1007,10 +1043,19 @@ npm run dist
 
 **Electron lifecycle:**
 1. `getFreeLocalPort()`: OS-allocated free port
-2. `startBridge(port)`: Spawn `python3 tools/acp_bridge.py --bind 127.0.0.1 --port <port>`
-3. `waitForBridge(url, process, timeout)`: Poll `/health` every 500ms
-4. On `EADDRINUSE`: retry with new port (max 3 attempts)
-5. On bridge crash: show error dialog and quit
+2. `startBridge(port)`: generate a one-time readiness nonce and spawn
+  `python3 tools/acp_bridge.py --bind 127.0.0.1 --port <port>` with the nonce
+  and per-launch bearer available only to that child.
+3. After `ThreadingHTTPServer` successfully binds, the child emits one stdout
+  proof: an HMAC over the nonce, exact child PID, loopback host, and selected
+  port. The proof contains neither the nonce nor bearer.
+4. `waitForBridge(url, process, timeout)`: accept only the exact spawned child's
+  buffered, authenticated bind proof; make no `/health` request before it.
+5. After proof, poll `/health` every 500ms. Only proof plus health may create the
+  renderer window and install main-process `/v1/*` bearer injection.
+6. On `EADDRINUSE`: retry with a new nonce and port (max 3 attempts).
+7. On malformed proof, child exit, timeout, or post-ready bridge crash: show an
+  error dialog and quit without creating a trusted renderer.
 
 Host prerequisites: Node.js 24+, Python 3.12+, Copilot CLI authenticated (for cloud mode). LM Studio for local-only mode.
 
@@ -1020,7 +1065,7 @@ Current state (2026-06-15):
 - Static web tier can run on legacy 32-bit hosts.
 - ACP Bridge currently runs on a separate compatible machine.
 - Single-host deployment is blocked until new hardware is available.
-- Local mode (LM Studio + direct MCP) works on any x86_64 machine without Copilot CLI.
+- Local mode (LM Studio + direct MCP) works on supported `x86_64` or `arm64`/`aarch64` machines without Copilot CLI.
 - Signal messaging available via signal-cli (native binary, linked account required).
 
 | Milestone | Status | Notes |
@@ -1037,16 +1082,16 @@ Current state (2026-06-15):
 ## Security
 
 - Bridge binds to `127.0.0.1` by default (localhost only)
-- `--allow-all-tools` bypasses ACP permission prompts (required for non-interactive MCP)
-- Terminal commands execute with bridge process's user permissions
+- ACP permissions are default-deny; `--allow-all-tools` is not used
+- ACP terminal capability is disabled and terminal methods are rejected
 - MCP env vars (tokens) are redacted from `/v1/mcp` responses and persisted configs
 - URL fetching uses SSRF protection: DNS resolution validated, all IPs must be public, IP pinning prevents DNS rebinding, redirect hops re-validated
 - Skill import treats source text as untrusted data (explicit anti-injection prompt)
-- LM Studio base URL restricted to localhost/private IPs on whitelisted ports (1234, 8000, 8080, 11434)
+- LM Studio base URL is restricted to loopback in `offline`, and loopback/private IP literals in `local-network`, on whitelisted ports (1234, 8000, 8080, 11434); redirects are rejected
 - Camera off by default, subprocess-isolated, state read-only from bridge
 - Sensitive browser/desktop actions require user confirmation
 - `pyautogui.FAILSAFE = True` (mouse to corner = emergency stop)
-- Background proposals require human approval before writing to memory
+- Background proposals honor per-job governance: review-required outputs remain pending; explicit auto-apply maintenance outputs are audited
 
 ## CI / Testing
 

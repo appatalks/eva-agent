@@ -374,6 +374,7 @@ function renderGoalsList() {
 }
 
 async function goalsBridgeRequest(path, options) {
+  options = _withBridgeMutationEnvelope(options || {});
   var bridgeUrl = await getGoalsBridgeUrl();
   var response = await fetch(bridgeUrl.replace(/\/+$/, '') + path, options || {});
   var text = await response.text();
@@ -514,7 +515,11 @@ async function deleteGoal(goalId, title) {
   if (!confirm('Drop goal "' + title + '"?')) return;
   setGoalsStatus('info', 'Dropping goal...', true);
   try {
-    await goalsBridgeRequest('/v1/goals/' + encodeURIComponent(goalId), { method: 'DELETE' });
+    var mutationEnvelope = (typeof captureMutationEnvelope === 'function')
+      ? captureMutationEnvelope() : null;
+    await goalsBridgeRequest('/v1/goals/' + encodeURIComponent(goalId), {
+      method: 'DELETE', evaMutationEnvelope: mutationEnvelope
+    });
     await loadGoals(true);
     setGoalsStatus('info', 'Goal dropped.', false);
   } catch (error) {
@@ -538,7 +543,32 @@ function initGoals() {
 
 var _backgroundState = { status: null, proposals: [], activity: [], loading: false, error: '' };
 
+function _withBridgeMutationEnvelope(options) {
+  var copy = Object.assign({}, options || {});
+  var method = String(copy.method || 'GET').toUpperCase();
+  if (method !== 'POST' && method !== 'PATCH' && method !== 'DELETE') return copy;
+  var operationEnvelope = copy.evaMutationEnvelope ||
+    ((typeof captureMutationEnvelope === 'function') ? captureMutationEnvelope() :
+      ((typeof captureOperationEnvelope === 'function') ? captureOperationEnvelope() : null));
+  delete copy.evaMutationEnvelope;
+  if ((method === 'POST' || method === 'PATCH') && copy.body && operationEnvelope) {
+    try {
+      var parsed = JSON.parse(copy.body);
+      copy.body = JSON.stringify(Object.assign({}, parsed, operationEnvelope));
+    } catch (_) {}
+  } else if (method === 'DELETE' && operationEnvelope) {
+    copy.headers = Object.assign({}, copy.headers || {}, {
+      'X-Eva-Request-Id': operationEnvelope.request_id,
+      'X-Eva-Correlation-Id': operationEnvelope.correlation_id,
+      'X-Eva-Session-Id': operationEnvelope.session_id,
+      'X-Eva-Turn-Id': operationEnvelope.turn_id
+    });
+  }
+  return copy;
+}
+
 async function backgroundBridgeRequest(path, options) {
+  options = _withBridgeMutationEnvelope(options || {});
   var bridgeUrl = await getSettingsBridgeUrl();
   var response = await fetch(bridgeUrl.replace(/\/+$/, '') + path, options || {});
   var text = await response.text();
@@ -641,7 +671,7 @@ function renderBackgroundProposals() {
   if (!_backgroundState.proposals.length) {
     var emptyEl = document.createElement('div');
     emptyEl.className = 'auth-note';
-    emptyEl.textContent = 'No pending proposals.';
+    emptyEl.textContent = 'No active proposals.';
     listEl.appendChild(emptyEl);
     return;
   }
@@ -682,6 +712,13 @@ function renderBackgroundProposals() {
       rejectButton.textContent = 'Reject';
       rejectButton.addEventListener('click', function() { reviewBackgroundProposal(proposalId, 'reject'); });
       actions.appendChild(rejectButton);
+    } else if (status.toLowerCase() === 'applying') {
+      var retryButton = document.createElement('button');
+      retryButton.type = 'button';
+      retryButton.className = 'auth-save background-inline-button';
+      retryButton.textContent = 'Retry Apply';
+      retryButton.addEventListener('click', function() { reviewBackgroundProposal(proposalId, 'approve'); });
+      actions.appendChild(retryButton);
     }
     head.appendChild(actions);
     row.appendChild(head);
@@ -968,18 +1005,26 @@ async function cronDelete(taskId) {
 // ---------------------------------------------------------------------------
 // Skills auto-learn — extract skill from recent interaction
 // ---------------------------------------------------------------------------
-async function autoLearnSkill(messages, taskSummary) {
+async function autoLearnSkill(messages, taskSummary, capturedEnvelope) {
+  function learningIsCurrent() {
+    return !capturedEnvelope || _agentEnvelopeCurrent(capturedEnvelope);
+  }
+  if (!learningIsCurrent()) return null;
   try {
     var bridgeUrl = await detectACPBridge();
+    if (!learningIsCurrent()) return null;
     var resp = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/skills/auto-learn', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: messages || [], task_summary: taskSummary || '' })
     });
+    if (!learningIsCurrent()) return null;
     var data = await resp.json();
+    if (!learningIsCurrent()) return null;
     if (resp.ok && data.draft) {
       // Auto-create the skill as a draft
       var draft = data.draft;
+      if (!learningIsCurrent()) return null;
       var createResp = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/skills', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -993,6 +1038,7 @@ async function autoLearnSkill(messages, taskSummary) {
           Status: 'draft'
         })
       });
+      if (!learningIsCurrent()) return null;
       if (createResp.ok) {
         setStatus('info', 'Skill learned: ' + (draft.Name || 'untitled'));
       }
@@ -1025,9 +1071,14 @@ async function loadBackgroundData(quiet) {
     }
     _backgroundState.status = await backgroundBridgeRequest('/v1/background/status', options);
     try {
-      var proposalData = await backgroundBridgeRequest('/v1/background/proposals?status=pending', options);
+      var proposalData = await backgroundBridgeRequest('/v1/background/proposals?status=all', options);
       var activityData = await backgroundBridgeRequest('/v1/background/activity', options);
-      _backgroundState.proposals = Array.isArray(proposalData.proposals) ? proposalData.proposals : [];
+      _backgroundState.proposals = Array.isArray(proposalData.proposals)
+        ? proposalData.proposals.filter(function(p) {
+            var s = String(getBackgroundField(p, 'Status', 'status') || '').toLowerCase();
+            return s === 'pending' || s === 'applying';
+          })
+        : [];
       _backgroundState.activity = Array.isArray(activityData.activity) ? activityData.activity : [];
     } catch (listError) {
       _backgroundState.proposals = [];
@@ -1144,8 +1195,16 @@ function injectProactiveBubble(notif) {
 // view stays in sync, and (3) appends an assistant-role note to the AIG
 // conversation history so follow-up turns ("did it work?") are answered from
 // fact rather than from the intent Eva announced before acting.
-function _evaAgentFeedback(status, endpoint, title) {
-  if (!status) return;
+function _agentEnvelopeCurrent(capturedEnvelope) {
+  return !!(
+    capturedEnvelope &&
+    typeof isCurrentRequestEnvelope === 'function' &&
+    isCurrentRequestEnvelope(capturedEnvelope)
+  );
+}
+
+function _evaAgentFeedback(status, endpoint, title, capturedEnvelope) {
+  if (!_agentEnvelopeCurrent(capturedEnvelope) || !status) return;
   // Clear the progress-narration throttle so the completion line is never
   // suppressed as a near-duplicate of the last "working on it" update.
   try { if (typeof _agentProgress !== 'undefined') { _agentProgress.last = 0; _agentProgress.lastText = ''; } } catch (_) {}
@@ -1217,6 +1276,7 @@ function _evaAgentFeedback(status, endpoint, title) {
   try {
     if (typeof _vv !== 'undefined' && _vv.open) {
       setTimeout(function() {
+        if (!_agentEnvelopeCurrent(capturedEnvelope)) return;
         if (_vv.phase === 'speaking' || _vv.phase === 'thinking') {
           if (typeof _vv._finishSpeaking === 'function') {
             _vv._finishSpeaking(false);
@@ -1231,10 +1291,11 @@ function _evaAgentFeedback(status, endpoint, title) {
 
   // 5) Auto-learn: when a complex task completes successfully, extract a reusable skill.
   if (state === 'done' && goal && typeof autoLearnSkill === 'function') {
+    if (!_agentEnvelopeCurrent(capturedEnvelope)) return;
     try {
       var hist = JSON.parse(localStorage.getItem('aigMessages') || '[]');
       var recent = Array.isArray(hist) ? hist.slice(-10) : [];
-      autoLearnSkill(recent, goal);
+      autoLearnSkill(recent, goal, capturedEnvelope);
     } catch (_) {}
   }
 }
@@ -1277,13 +1338,30 @@ function _evaCameraLookResult(desc) {
 // it), and _agentConfirm is armed so the user's next message is interpreted as
 // the answer (yes/no, or free text) and routed to the agent rather than sent as
 // a normal turn.
-var _agentConfirm = { pending: false, needsText: false };
+var _agentConfirm = { pending: false, needsText: false, envelope: null, _timeout: null };
 
 // Narrate agent progress so the user knows Eva is working and not stuck. Eva
 // speaks/prints a short status when the plan changes, throttled so it does not
 // chatter. Phrased as a brief present-tense update.
 var _agentProgress = { last: 0, lastText: '' };
-function _evaAgentProgress(subgoal) {
+function _resetAgentInteractionState() {
+  if (_agentConfirm._timeout) clearTimeout(_agentConfirm._timeout);
+  _agentConfirm.pending = false;
+  _agentConfirm.needsText = false;
+  _agentConfirm.envelope = null;
+  _agentConfirm._timeout = null;
+  _agentProgress.last = 0;
+  _agentProgress.lastText = '';
+  try {
+    var controller = (typeof EvaBrowser !== 'undefined' && EvaBrowser)
+      ? EvaBrowser
+      : ((typeof EvaDesktop !== 'undefined' && EvaDesktop) ? EvaDesktop : null);
+    if (controller && typeof controller.cancel === 'function') controller.cancel();
+  } catch (_) {}
+}
+
+function _evaAgentProgress(subgoal, status, capturedEnvelope) {
+  if (!_agentEnvelopeCurrent(capturedEnvelope)) return;
   var sub = String(subgoal || '').trim();
   if (!sub) return;
   var now = Date.now();
@@ -1309,12 +1387,18 @@ function _evaAgentProgress(subgoal) {
   } catch (_) {}
 }
 
-function _evaAgentConfirmAsk(question, needsText) {
+function _evaAgentConfirmAsk(question, needsText, status, capturedEnvelope) {
+  if (!_agentEnvelopeCurrent(capturedEnvelope)) return;
   _agentConfirm.pending = true;
   _agentConfirm.needsText = !!needsText;
+  _agentConfirm.envelope = capturedEnvelope;
   // Auto-cancel after 60s so a stale confirm doesn't block voice forever.
   if (_agentConfirm._timeout) clearTimeout(_agentConfirm._timeout);
   _agentConfirm._timeout = setTimeout(function() {
+    if (!_agentEnvelopeCurrent(capturedEnvelope)) {
+      _resetAgentInteractionState();
+      return;
+    }
     if (_agentConfirm.pending) {
       console.warn('[AgentConfirm] Auto-cancelling after 60s timeout');
       _agentConfirm.pending = false;
@@ -1361,6 +1445,11 @@ var _NEGATE_RE = /\b(no|nope|nah|stop|cancel|don'?t|do not|decline|abort|never m
 // should NOT send it as a normal chat turn).
 function _maybeAnswerAgentConfirm(text) {
   if (!_agentConfirm.pending) return false;
+  if (!_agentEnvelopeCurrent(_agentConfirm.envelope)) {
+    _resetAgentInteractionState();
+    return false;
+  }
+  var confirmationEnvelope = _agentConfirm.envelope;
   var active = (typeof EvaBrowser !== 'undefined' && EvaBrowser &&
                 typeof EvaBrowser.isAwaitingConfirm === 'function' && EvaBrowser.isAwaitingConfirm());
   if (!active) { _agentConfirm.pending = false; return false; }
@@ -1372,7 +1461,7 @@ function _maybeAnswerAgentConfirm(text) {
     _agentConfirm.pending = false;
     _agentConfirm.needsText = false;
     EvaBrowser.answerConfirm(true, msg);
-    _agentConfirmEcho(msg, null);
+    _agentConfirmEcho(msg, null, confirmationEnvelope);
     return true;
   }
 
@@ -1380,16 +1469,17 @@ function _maybeAnswerAgentConfirm(text) {
   var no = _NEGATE_RE.test(msg);
   // Ambiguous (neither or both): ask once more, keep the gate armed.
   if (yes === no) {
-    _agentConfirmEcho(msg, 'ambiguous');
+    _agentConfirmEcho(msg, 'ambiguous', confirmationEnvelope);
     return true;
   }
   _agentConfirm.pending = false;
   EvaBrowser.answerConfirm(yes, '');
-  _agentConfirmEcho(msg, yes ? 'yes' : 'no');
+  _agentConfirmEcho(msg, yes ? 'yes' : 'no', confirmationEnvelope);
   return true;
 }
 
-function _agentConfirmEcho(userMsg, decision) {
+function _agentConfirmEcho(userMsg, decision, capturedEnvelope) {
+  if (!_agentEnvelopeCurrent(capturedEnvelope)) return;
   var txtOutput = document.getElementById('txtOutput');
   if (txtOutput) {
     var safeU = escapeHtml(String(userMsg)).replace(/\n/g, '<br>');
@@ -4300,53 +4390,8 @@ function _detectGenerationIntent() {
 
 function updateButton() {
   applyStandaloneSimplifications();
-    var selModel = document.getElementById("selModel");
     var btnSend = document.getElementById("btnSend");
-
-  if (selModel.value === 'aig') {
-        btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            aigSend();
-        };
-    } else if (selModel.value.indexOf('copilot-') === 0) {
-        btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            copilotSend();
-        };
-    } else if (selModel.value == "gpt-4o-mini" || selModel.value == "o1" || selModel.value == "o1-mini" || selModel.value == "gpt-4o" || selModel.value == "o3-mini" || selModel.value == "o1-preview" || selModel.value == "gpt-5-mini" || selModel.value == "latest") {
-        btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            trboSend();
-        };
-    } else if (selModel.value == "gemini") {
-        btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            geminiSend();
-        };
-   } else if (selModel.value == "lm-studio") {
-        btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            lmsSend();
-        };
-    } else if (selModel.value == "dall-e-3") {
-        btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            dalle3Send();
-        };
-    } else {
-        btnSend.onclick = function() {
-            clearText();
-           // Send();
-	   document.getElementById("txtOutput").innerHTML = "\n" + "Invalid Model" 
-	   console.error('Invalid Model')
-        };
-    }
+  if (btnSend) btnSend.onclick = sendData;
 }
 
 function sendData() {
@@ -4367,25 +4412,42 @@ function sendData() {
 
     // Logic required for initial message
     var selModel = document.getElementById("selModel");
+    var _dispatchEnvelope = null;
+    if (typeof newEnvelopeTurn === 'function') {
+      newEnvelopeTurn();
+      var _turnEnvelope = captureRequestEnvelope();
+      _dispatchEnvelope = _turnEnvelope;
+      window._evaSessionId = _turnEnvelope.session_id;
+      window._evaTurnId = _turnEnvelope.turn_id;
+    }
+    var _egressMode = (typeof window !== 'undefined' && window.evaStandalone && window.evaStandalone.egressMode) || 'cloud';
+    if (_egressMode !== 'cloud' && selModel.value !== 'aig' && selModel.value !== 'lm-studio') {
+      setStatus('error', 'Cloud models are disabled in ' + _egressMode + ' mode. Select Eva (AIG) or LM Studio.');
+      return;
+    }
 
   // Detect if user wants image generation (for renderEvaResponse routing)
   _detectGenerationIntent();
 
   if (selModel.value === 'aig') {
         clearText();
-        aigSend();
+      aigSend(null, _dispatchEnvelope);
     } else if (selModel.value.indexOf('copilot-') === 0) {
         clearText();
-        copilotSend();
+        copilotSend(_dispatchEnvelope);
     } else if (selModel.value == "gpt-4o-mini" || selModel.value == "o1" || selModel.value == "o1-mini" || selModel.value == "gpt-4o" || selModel.value == "o3-mini" || selModel.value == "o1-preview" || selModel.value == "gpt-5-mini" || selModel.value == "latest") {
         clearText();
-        trboSend();
+        trboSend(_dispatchEnvelope);
     } else if (selModel.value == "gemini") {
         clearText();
-        geminiSend();
+        geminiSend(_dispatchEnvelope);
     } else if (selModel.value == "lm-studio") {
         clearText();
-        lmsSend();
+      if (_egressMode !== 'cloud' && typeof isEvaStandalone === 'function' && isEvaStandalone()) {
+        aigSend('lmstudio', _dispatchEnvelope);
+      } else {
+        lmsSend(_dispatchEnvelope);
+      }
     } else if (selModel.value == "dall-e-3") {
         clearText();
         dalle3Send();
@@ -5645,11 +5707,17 @@ async function _generateImage(prompt) {
  * Detects [Image of ...] placeholders, routes to DALL-E (generation)
  * or Wikimedia (search) based on the user's original request.
  */
-async function renderEvaResponse(content, txtOutput) {
+async function renderEvaResponse(content, txtOutput, capturedEnvelope) {
+  function responseIsCurrent() {
+    if (!capturedEnvelope) return true;
+    return typeof isCurrentRequestEnvelope === 'function' &&
+      isCurrentRequestEnvelope(capturedEnvelope);
+  }
+  if (!responseIsCurrent()) return false;
   if (!content || !content.trim()) {
     txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> Sorry, can you please ask me in another way?</div>';
     txtOutput.scrollTop = txtOutput.scrollHeight;
-    return;
+    return true;
   }
 
   var text = content.trim();
@@ -5864,6 +5932,7 @@ async function renderEvaResponse(content, txtOutput) {
     });
 
     var results = await Promise.all(fetchPromises);
+    if (!responseIsCurrent()) return false;
 
     results.forEach(function(r) {
       if (r.url) {
@@ -5933,13 +6002,15 @@ async function renderEvaResponse(content, txtOutput) {
 
   appendArtifactLinks();
 
+  if (!responseIsCurrent()) return false;
+
   // Auto-open artifact files so the user doesn't have to click.
   if (artifactNames.length) {
     var bridgeUrl = getSafeBridgeBaseUrl();
     artifactNames.forEach(function(filename) {
       var openUrl = bridgeUrl + '/v1/files/' + encodeURIComponent(filename) + '?open=1';
       fetch(openUrl).then(function(res) {
-        if (res.ok) console.log('[Artifact] Auto-opened:', filename);
+        if (responseIsCurrent() && res.ok) console.log('[Artifact] Auto-opened:', filename);
       }).catch(function() {});
     });
   }
@@ -5954,38 +6025,65 @@ async function renderEvaResponse(content, txtOutput) {
 
   // Launch the visual browser agent if Eva requested it.
   if (browserLaunch && typeof EvaBrowser !== 'undefined' && EvaBrowser && typeof EvaBrowser.launch === 'function') {
+    var browserComplete = function(status, endpoint, title) {
+      if (!responseIsCurrent()) return;
+      _evaAgentFeedback(status, endpoint, title, capturedEnvelope);
+    };
+    var browserConfirm = function(question, needsText, status) {
+      if (!responseIsCurrent()) return;
+      _evaAgentConfirmAsk(question, needsText, status, capturedEnvelope);
+    };
+    var browserProgress = function(subgoal, status) {
+      if (!responseIsCurrent()) return;
+      _evaAgentProgress(subgoal, status, capturedEnvelope);
+    };
     EvaBrowser.launch(browserLaunch.goal, {
       start_url: browserLaunch.start_url,
       vision_model: browserLaunch.vision_model,
       max_steps: browserLaunch.max_steps,
-      onComplete: _evaAgentFeedback,
-      onConfirm: _evaAgentConfirmAsk,
-      onProgress: _evaAgentProgress
+      onComplete: browserComplete,
+      onConfirm: browserConfirm,
+      onProgress: browserProgress
     });
   }
 
   // Launch the desktop ("computer use") agent if Eva requested it.
   if (desktopLaunch && typeof EvaDesktop !== 'undefined' && EvaDesktop && typeof EvaDesktop.launch === 'function') {
+    var desktopComplete = function(status, endpoint, title) {
+      if (!responseIsCurrent()) return;
+      _evaAgentFeedback(status, endpoint, title, capturedEnvelope);
+    };
+    var desktopConfirm = function(question, needsText, status) {
+      if (!responseIsCurrent()) return;
+      _evaAgentConfirmAsk(question, needsText, status, capturedEnvelope);
+    };
+    var desktopProgress = function(subgoal, status) {
+      if (!responseIsCurrent()) return;
+      _evaAgentProgress(subgoal, status, capturedEnvelope);
+    };
     EvaDesktop.launch(desktopLaunch.goal, {
       vision_model: desktopLaunch.vision_model,
       max_steps: desktopLaunch.max_steps,
-      onComplete: _evaAgentFeedback,
-      onConfirm: _evaAgentConfirmAsk,
-      onProgress: _evaAgentProgress
+      onComplete: desktopComplete,
+      onConfirm: desktopConfirm,
+      onProgress: desktopProgress
     });
   }
 
   // Look through the webcam if Eva requested it (Eva's eyes).
   if (cameraLook && typeof EvaCamera !== 'undefined' && EvaCamera && typeof EvaCamera.look === 'function') {
     EvaCamera.look(cameraLook.question).then(function (desc) {
+      if (!responseIsCurrent()) return;
       _evaCameraLookResult(desc || 'I could not make out anything.');
     }).catch(function (err) {
+      if (!responseIsCurrent()) return;
       _evaCameraLookResult('I tried to look but ' + ((err && err.message) ? err.message : 'something went wrong') + '.');
     });
   }
 
   // Auto-save session after each response
-  if (typeof saveCurrentSession === 'function') saveCurrentSession();
+  if (responseIsCurrent() && typeof saveCurrentSession === 'function') saveCurrentSession();
+  return responseIsCurrent();
 }
 
 /**
@@ -6177,6 +6275,23 @@ document.querySelector("#txtMsg").addEventListener("keydown", function(event) {
 }
 
 // Clear Messages for Clear Memory Button
+function resetTransientConversationState() {
+  if (typeof invalidateSessionLoads === 'function') invalidateSessionLoads();
+    lastResponse = "";
+    userMasterResponse = "";
+    aiMasterResponse = "";
+    masterOutput = "";
+    storageAssistant = "";
+    retryCount = 0;
+    if (typeof window !== 'undefined') {
+      window._evaSessionId = '';
+      window._evaTurnId = '';
+    }
+    if (typeof _resetAgentInteractionState === 'function') {
+      _resetAgentInteractionState();
+    }
+}
+
 function clearMessages() {
     // Preserve auth keys, settings, and session data across clear
     var keysToKeep = [];
@@ -6193,6 +6308,8 @@ function clearMessages() {
     keysToKeep.forEach(function(item) { localStorage.setItem(item.k, item.v); });
     // Start a fresh session (don't carry old active id)
     localStorage.removeItem('eva_active_session');
+    resetTransientConversationState();
+    if (typeof resetEnvelopeSession === 'function') resetEnvelopeSession();
     document.getElementById("txtOutput").innerHTML = "\n" + "		MEMORY CLEARED";
 }
 

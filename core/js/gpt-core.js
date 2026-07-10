@@ -2,7 +2,14 @@
 // For OpenAI API
 
 // API Call for latest gpt classes
-async function trboSend() {
+async function trboSend(capturedEnvelope) {
+  capturedEnvelope = capturedEnvelope || ((typeof captureRequestEnvelope === 'function')
+    ? captureRequestEnvelope() : null);
+  function requestIsCurrent() {
+    return !!(capturedEnvelope && typeof isCurrentRequestEnvelope === 'function' &&
+      isCurrentRequestEnvelope(capturedEnvelope));
+  }
+  if (!requestIsCurrent()) return;
 
   // Remove occurrences of the specific syntax from the txtMsg element
 	txtMsg.innerHTML = txtMsg.innerHTML.replace(/<img\b[^>]*>/g, '');
@@ -24,24 +31,25 @@ async function trboSend() {
     // Error Handling - Needs more testing
     oHttp.onreadystatechange = async function () {
         if (oHttp.readyState === 4) {
+        if (!requestIsCurrent()) return;
     	  // Check for errors
     	  if (oHttp.status === 500) {
-      	    txtOutput.innerHTML += "<br> Error 500: Internal Server Error" + "<br>" + oHttp.responseText;
+          txtOutput.innerHTML += "<br> Error 500: Internal Server Error" + "<br>" + escapeHtml(oHttp.responseText);
       	    console.log("Error 500: Internal Server Error gpt-core.js");
       	    return;
     	  }
     	  if (oHttp.status === 429) {
-      	    txtOutput.innerHTML += "<br> Error 429: Too Many Requests" + "<br>" + oHttp.responseText;
+          txtOutput.innerHTML += "<br> Error 429: Too Many Requests" + "<br>" + escapeHtml(oHttp.responseText);
             console.log("Error 429: Too Many Requests gpt-core.js");
       	    return;
     	  }
           if (oHttp.status === 404) {
-            txtOutput.innerHTML += "<br> Error 404: Not Found" + "<br>" + oHttp.responseText;
+            txtOutput.innerHTML += "<br> Error 404: Not Found" + "<br>" + escapeHtml(oHttp.responseText);
             console.log("Error 404: Not Found gpt-core.js");
             return;
           }
           if (oHttp.status === 400) {
-            txtOutput.innerHTML += "<br> Error 400: Invalid Request" + "<br>" + oHttp.responseText;
+            txtOutput.innerHTML += "<br> Error 400: Invalid Request" + "<br>" + escapeHtml(oHttp.responseText);
             console.log("Error 400: Invalid Request gpt-core.js");
             return;
           }
@@ -50,7 +58,7 @@ async function trboSend() {
             try {
                 oJson = JSON.parse(oHttp.responseText);  // API Response Data
             } catch (ex) {
-                txtOutput.innerHTML += "Error: " + ex.message;
+                txtOutput.innerHTML += "Error: " + escapeHtml(ex.message);
 		console.log("Error: gpt-core.js JSON parse");
 		return;
               }
@@ -79,11 +87,13 @@ async function trboSend() {
                 retryCount++;
                 var retryDelay = Math.pow(2, retryCount) * 1000;
                 console.log("Too busy. Retrying in " + retryDelay + "ms");
-                setTimeout(trboSend, retryDelay);
+                setTimeout(function() {
+                  if (requestIsCurrent()) trboSend(capturedEnvelope);
+                }, retryDelay);
                 return;
             }
 	    else {
-                txtOutput.innerHTML += "Error Other: " + oJson.error.message;
+                txtOutput.innerHTML += "Error Other: " + escapeHtml(oJson.error.message);
 	        console.log("Error Other: gpt-core.js Line 89");
                 retryCount = 0;	  
 	    }
@@ -95,7 +105,8 @@ async function trboSend() {
 	    // Always Run Response 
             var s = oJson.choices[0].message;
 	    // Empty Response Handling / Render via unified renderer
-	    await renderEvaResponse(s.content, txtOutput);
+      if (!await renderEvaResponse(s.content, txtOutput, capturedEnvelope)) return;
+            if (!requestIsCurrent()) return;
        	
             // Send to Local Storage - possibly way to intigrate into memory
 	    let outputWithoutTags = txtOutput.innerText + "\n";
@@ -106,25 +117,16 @@ async function trboSend() {
 	    lastResponse = s.content + "\n";
             // console.log("gpt-core.js Line 152" + lastResponse);
 
-            // --- Cognition: Post-response reflection ---
-            try {
-              var _brUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
-              fetch(_brUrl.replace(/\/+$/, '') + '/v1/memory/reflect', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  user_message: sQuestion.substring(0, 500),
-                  assistant_message: s.content.substring(0, 500),
-                  model: sModel
-                }),
-                signal: AbortSignal.timeout(5000)
-              }).catch(function() {});
-            } catch (e) {}
+            if (typeof finalizeDirectProviderTurn === 'function') {
+              await finalizeDirectProviderTurn(sQuestion, s.content, sModel, capturedEnvelope);
+              if (!requestIsCurrent()) return;
+            }
             }            
         }
 
   	// Check the state of the checkbox and have fun
-	   const checkbox = document.getElementById("autoSpeak");
+     if (!requestIsCurrent()) return;
+     const checkbox = document.getElementById("autoSpeak");
 	   if (checkbox.checked) {
 	     speakText();
     	     const audio = document.getElementById("audioPlayback");
@@ -144,6 +146,7 @@ async function trboSend() {
   // Model flags
   var isGpt5 = (sModel && sModel.indexOf('gpt-5') === 0);
   var isLatest = (sModel === 'latest');
+  var isO1 = (sModel && sModel.indexOf('o1') === 0);
 
     // Messages payload
     // Check if the messages item exists in localStorage
@@ -165,13 +168,16 @@ async function trboSend() {
       var _ctxResp = await fetch(_bridgeUrl.replace(/\/+$/, '') + '/v1/memory/context?message=' + encodeURIComponent(sQuestion), {
         signal: AbortSignal.timeout(3000)
       });
+      if (!requestIsCurrent()) return;
       if (_ctxResp.ok) {
         var _ctxData = await _ctxResp.json();
+        if (!requestIsCurrent()) return;
         if (_ctxData.context && _ctxData.cognition_enabled) {
           _gptMemoryContext = _ctxData.context;
         }
       }
     } catch (e) {}
+    if (!requestIsCurrent()) return;
 
     // Create a new array to store the messages
     let newMessages = [];
@@ -236,7 +242,7 @@ async function trboSend() {
 
         // Exclude messages with the "developer" role see 
         // https://github.com/appatalks/eva-agent/issues/63#issuecomment-2492821202 
-        if (sModel === 'o1-preview' || sModel === 'o1-mini') {
+        if (isO1) {
           kMessages = kMessages.filter(msg => msg.role === 'user' || msg.role === 'assistant');
           dTemperature = 1;
         }
@@ -266,6 +272,7 @@ async function trboSend() {
     }   
 
     // Sending API Payload
+    if (!requestIsCurrent()) return;
     oHttp.send(JSON.stringify(data));
     // console.log("gpt-core.js Line 330" + JSON.stringify(data));
 

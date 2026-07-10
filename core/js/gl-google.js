@@ -3,7 +3,14 @@
 
 // Google Gemini
 
-function geminiSend() {
+function geminiSend(capturedEnvelope) {
+    capturedEnvelope = capturedEnvelope || ((typeof captureRequestEnvelope === 'function')
+        ? captureRequestEnvelope() : null);
+    function requestIsCurrent() {
+        return !!(capturedEnvelope && typeof isCurrentRequestEnvelope === 'function' &&
+            isCurrentRequestEnvelope(capturedEnvelope));
+    }
+    if (!requestIsCurrent()) return;
     // Remove occurrences of specific syntax from the txtMsg element
     txtMsg.innerHTML = txtMsg.innerHTML.replace(/<div[^>]*>.*<\/div>/g, '');
 
@@ -55,8 +62,9 @@ function geminiSend() {
     }
 
     getGoogleGlKey().then(GOOGLE_GL_KEY => {
+        if (!requestIsCurrent()) return;
         document.getElementById("txtMsg").innerHTML = "";
-        document.getElementById("txtOutput").innerHTML += '<span class="user">You: </span>' + sQuestion + "<br>\n";
+        document.getElementById("txtOutput").innerHTML += '<span class="user">You: </span>' + escapeHtml(sQuestion) + "<br>\n";
 
     const geminiUrl = `https://generativelanguage.googleapis.com/v1alpha/models/gemini-2.0-flash-thinking-exp:generateContent?key=${GOOGLE_GL_KEY}`;
 
@@ -80,6 +88,7 @@ function geminiSend() {
     fetch(geminiUrl, requestOptions)
             .then(response => response.ok ? response.json() : Promise.reject(new Error(`Error: ${response.status}`))) // Updated Error handling
             .then(result => {
+                if (!requestIsCurrent()) return;
                 if (result.candidates[0].finishReason === "RECITATION") {
                     document.getElementById("txtOutput").innerHTML += '<span class="eva">Eva: Sorry, please ask me another way.</span><br>\n';
                 } else { 
@@ -91,25 +100,38 @@ function geminiSend() {
 
                     // Display thoughts (if any)
                     if (thoughts) {
-                        document.getElementById("txtOutput").innerHTML += '<span class="eva-thoughts">Eva\'s Thoughts:</span><br>' + thoughts + "<br><br>\n";
+                        document.getElementById("txtOutput").innerHTML += '<span class="eva-thoughts">Eva\'s Thoughts:</span><br>' + escapeHtml(thoughts) + "<br><br>\n";
                     }
+
+                    // Persist provider history before rendering. The unified
+                    // renderer auto-saves sessions, so ordering matters on the
+                    // first Gemini response.
+                    geminiMessages.push({ role: "user", parts: [{ text: sQuestion }] });
+                    geminiMessages.push({ role: "model", parts: [...candidate] }); // Log the entire candidate
+                    localStorage.setItem("geminiMessages", JSON.stringify(geminiMessages));
 
                     // Display main response via unified renderer
                     (async () => {
                         let mainResponse = nonThoughts.map(part => part.text).join("\n").trim();
                         const out = document.getElementById("txtOutput");
-                        await renderEvaResponse(mainResponse, out);
+                        if (!await renderEvaResponse(mainResponse, out, capturedEnvelope)) return;
+                        if (!requestIsCurrent()) return;
+                        if (typeof finalizeDirectProviderTurn === 'function') {
+                            await finalizeDirectProviderTurn(sQuestion, mainResponse, 'gemini', capturedEnvelope);
+                            if (!requestIsCurrent()) return;
+                        }
+                        if (typeof saveCurrentSession === 'function') saveCurrentSession();
                     })();
-
-                    // Update conversation history: log both thoughts and non-thoughts
-                    geminiMessages.push({ role: "user", parts: [{ text: sQuestion }] });
-                    geminiMessages.push({ role: "model", parts: [...candidate] }); // Log the entire candidate
-                    localStorage.setItem("geminiMessages", JSON.stringify(geminiMessages));
                 }
 	    })
             .catch(error => {
+                if (!requestIsCurrent()) return;
                 console.error("Error:", error);
-                document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + error.message + "<br>\n";
+                document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + escapeHtml(error.message) + "<br>\n";
             });
+    }).catch(error => {
+        if (!requestIsCurrent()) return;
+        console.error("Error:", error);
+        document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + escapeHtml(error.message) + "<br>\n";
     });
 }

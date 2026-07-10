@@ -6,8 +6,8 @@ This directory contains the Electron scaffold for the Linux AppImage build. The 
 
 - Node.js >= 24
 - Python >= 3.12
-- GitHub Copilot CLI installed on the host
-- Copilot CLI authenticated on the host with `copilot auth login`
+- GitHub Copilot CLI installed and authenticated only when using `EVA_EGRESS_MODE=cloud`
+- LM Studio for `offline` or `local-network` operation
 
 ## Run In Development
 
@@ -33,17 +33,20 @@ The AppImage build is configured in `package.json` but this scaffold does not in
 
 ```sh
 cd standalone/dist
-chmod +x "Eva Standalone-5.2.3.AppImage"
-"./Eva Standalone-5.2.3.AppImage"
+chmod +x "Eva Standalone-5.3.0.AppImage"
+"./Eva Standalone-5.3.0.AppImage"
 ```
 
 If the host is missing FUSE (common on minimal containers and some distros), launch with extraction instead:
 
 ```sh
-"./Eva Standalone-5.2.3.AppImage" --appimage-extract-and-run
+"./Eva Standalone-5.3.0.AppImage" --appimage-extract-and-run
 ```
 
-The AppImage is self-contained: it spawns the bundled ACP bridge on a random localhost port at startup. The host still needs Copilot CLI authenticated once via `copilot auth login`.
+The AppImage spawns the bundled bridge on a random localhost port at startup.
+Cloud mode needs Copilot CLI authenticated once via `copilot auth login`.
+`EVA_EGRESS_MODE=offline` or `local-network` starts without ACP and routes Eva
+through the configured LM Studio model.
 
 ## Runtime Notes
 

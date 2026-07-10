@@ -492,6 +492,7 @@ def _build_memory_context_sqlite(user_message):
     import datetime
 
     mem = _get_sqlite_mem()
+    from bridge.normalization import latest_row_sql
     context_parts = []
 
     # Eva's core identity (always injected first)
@@ -623,8 +624,8 @@ def _build_memory_context_sqlite(user_message):
     # Goals
     if mem.table_exists("Goals"):
         goals = mem.query(
-            "SELECT * FROM Goals WHERE Status = 'active' "
-            "ORDER BY Priority DESC, UpdatedAt DESC LIMIT 10"
+            latest_row_sql("Goals", "GoalId", "UpdatedAt")
+            + " AND Status = 'active' ORDER BY Priority DESC, UpdatedAt DESC LIMIT 10"
         )
         if goals:
             goal_lines = [f"  [{g.get('Category','?')}] {g.get('Title','?')}: {g.get('Description','?')}" for g in goals]
@@ -632,7 +633,9 @@ def _build_memory_context_sqlite(user_message):
 
     # Skills (semantic match)
     if user_message.strip() and mem.table_exists("Skills"):
-        active_skills = mem.query("SELECT * FROM Skills WHERE Status = 'active'") or []
+        active_skills = mem.query(
+            latest_row_sql("Skills", "SkillId", "UpdatedAt") + " AND Status = 'active'"
+        ) or []
         if active_skills:
             chosen = []
             descs = [str(s.get("Description", "") or s.get("Name", "")).strip() for s in active_skills]
@@ -800,17 +803,97 @@ def _build_memory_context_sqlite(user_message):
 
 
 
-def _post_response_reflection_sqlite(user_message, assistant_response, model_name):
-    """SQLite equivalent of _post_response_reflection. Same write pattern, SQL instead of KQL."""
+def _post_response_reflection_sqlite(user_message, assistant_response, model_name,
+                                      envelope=None):
+    """SQLite equivalent of _post_response_reflection. Same write pattern, SQL instead of KQL.
+
+    When *envelope* (a dict with session_id, turn_id, correlation_id, etc.) is
+    provided, stable IDs are used for the conversation session and events.
+    Shadow-appends immutable events before legacy writes; legacy writes are
+    guarded by LegacyProjectionReceipts to prevent duplicates on retry.
+    """
     # global statement removed — writes go to _st.*
     import datetime, uuid
 
     mem = _get_sqlite_mem()
     now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-    session_id = str(uuid.uuid4())[:8]
+
+    # Use envelope IDs when available; fall back to random for compatibility
+    env = envelope if isinstance(envelope, dict) else {}
+    session_id = env.get("session_id") or str(uuid.uuid4())[:8]
+    turn_id = env.get("turn_id") or str(uuid.uuid4())
+    correlation_id = env.get("correlation_id") or env.get("request_id") or ""
+    actor_id = env.get("user_id") or ""
     source_id = f"{_st.cognition_launch_id or 'launch'}:{session_id}"
 
+    if envelope:
+        from bridge.finalize import finalize_turn
+        return finalize_turn(
+            mem,
+            mem.event_repository(),
+            session_id=session_id,
+            turn_id=turn_id,
+            user_message=user_message,
+            assistant_message=assistant_response,
+            model=model_name,
+            correlation_id=correlation_id,
+            actor_id=actor_id,
+            origin=env.get("origin") or "bridge",
+            extract_facts_fn=_extract_explicit_user_facts,
+            extract_candidates_fn=_extract_entity_candidates,
+        )
+
+    # ── Shadow-append events ────────────────────────────────────────
+    event_repo = mem.event_repository()
+    user_msg_id = str(uuid.uuid4())
+    asst_msg_id = str(uuid.uuid4())
+
+    if event_repo is not None:
+        try:
+            event_repo.append_event(
+                stream_id=f"conversation:{session_id}",
+                event_type="conversation.user_observed",
+                payload={
+                    "role": "user",
+                    "content": user_message[:_CONVO_CONTENT_CAP],
+                    "model": model_name,
+                    "token_estimate": len(user_message.split()),
+                },
+                session_id=session_id,
+                turn_id=turn_id,
+                correlation_id=correlation_id,
+                source_message_id=user_msg_id,
+                actor_type="user",
+                actor_id=actor_id,
+                trust=1.0,
+                idempotency_key=f"conv:user:{turn_id}",
+            )
+            event_repo.append_event(
+                stream_id=f"conversation:{session_id}",
+                event_type="conversation.assistant_observed",
+                payload={
+                    "role": "assistant",
+                    "content": assistant_response[:_CONVO_CONTENT_CAP],
+                    "model": model_name,
+                    "token_estimate": len(assistant_response.split()),
+                },
+                session_id=session_id,
+                turn_id=turn_id,
+                correlation_id=correlation_id,
+                source_message_id=asst_msg_id,
+                actor_type="system",
+                actor_id="eva",
+                trust=0.9,
+                idempotency_key=f"conv:asst:{turn_id}",
+            )
+        except Exception as e:
+            print(f"[Cognition/SQLite] Event shadow-write error (non-fatal): {e}")
+
+    # ── Legacy writes (guarded by receipts) ─────────────────────────
+
     # 1. Log conversation
+    _conv_idem = f"conv:user:{turn_id}"
+    _do_legacy_conv = (event_repo is None or not event_repo.has_legacy_receipt(_conv_idem, "conversations"))
     conv_columns = ["SessionId", "Timestamp", "Role", "Provider", "Model", "Content", "TokenEstimate", "ImageGenerated"]
     conv_rows = [
         {"SessionId": session_id, "Timestamp": now, "Role": "user", "Provider": "copilot-acp",
@@ -820,7 +903,10 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
          "Model": model_name, "Content": assistant_response[:_CONVO_CONTENT_CAP],
          "TokenEstimate": len(assistant_response.split()), "ImageGenerated": 0},
     ]
-    mem.ingest("Conversations", conv_columns, conv_rows)
+    if _do_legacy_conv:
+        mem.ingest("Conversations", conv_columns, conv_rows)
+        if event_repo is not None:
+            event_repo.record_legacy_receipt(_conv_idem, "conversations", len(conv_rows))
     print(f"[Cognition/SQLite] Logged conversation ({len(user_message)} -> {len(assistant_response)} chars)")
 
     # 2. Extract explicit user facts
@@ -836,6 +922,33 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
             })
         if rows and mem.ingest("Knowledge", know_columns, rows):
             print(f"[Cognition/SQLite] Explicit user facts: {len(rows)}")
+
+        # Shadow-append fact extraction events
+        if event_repo is not None:
+            for i, fact in enumerate(explicit_user_facts):
+                try:
+                    event_repo.append_event(
+                        stream_id=f"knowledge:User",
+                        event_type="memory.fact_candidate_extracted",
+                        payload={
+                            "entity": fact["Entity"],
+                            "relation": fact["Relation"],
+                            "value": fact["Value"][:200],
+                            "confidence": fact["Confidence"],
+                            "extraction_method": "explicit_regex",
+                            "confidence_source": "pattern_match",
+                            "evidence_source_message_id": user_msg_id,
+                            "provisional_trust": True,
+                        },
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        correlation_id=correlation_id,
+                        source_message_id=user_msg_id,
+                        trust=fact["Confidence"],
+                        idempotency_key=f"fact:{turn_id}:{i}",
+                    )
+                except Exception:
+                    pass
 
     # 3. Candidate entities
     candidate_entities, rejected_entities = _extract_entity_candidates(user_message)
@@ -937,6 +1050,26 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
                 "ActionTaken": "",
                 "Effectiveness": 0.0,
             }])
+            # Shadow-append reflection event
+            if event_repo is not None:
+                try:
+                    event_repo.append_event(
+                        stream_id=f"reflection:{session_id}",
+                        event_type="reflection.generated",
+                        payload={
+                            "trigger": user_message[:100],
+                            "observation": reflection_text[:500],
+                            "exchange_number": _st.session_exchange_count,
+                            "is_significant": is_significant,
+                        },
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        correlation_id=correlation_id,
+                        trust=0.7,
+                        idempotency_key=f"refl:{turn_id}",
+                    )
+                except Exception:
+                    pass
             print(f"[Cognition/SQLite] Auto-reflection #{_st.session_exchange_count}: {reflection_text[:100]}")
         except Exception as e:
             print(f"[Cognition/SQLite] Reflection error: {e}")
@@ -1011,13 +1144,13 @@ def _build_memory_context(user_message):
         profile_lines = [f"- {item.get('Relation','?')}: {item.get('Value','?')}" for item in user_profile]
         context_parts.append("[User Profile]\n" + "\n".join(profile_lines))
 
-    if _kusto_database_locked:
+    if _st.kusto_database_locked:
         db_label = db or "configured database"
-        persistent_memory_capability = f"• persistent-memory: Read/write your configured Kusto database ({db_label}). Tables:\n"
-        kusto_query_capability = f"• kusto-query: Execute KQL queries against the configured Kusto database ({db_label})\n"
+        persistent_memory_capability = f"• persistent-memory: Read your configured Kusto projection ({db_label}); writes are automatic event-first mutations. Tables:\n"
+        kusto_query_capability = f"• kusto-query: Execute read-only KQL queries against the configured Kusto database ({db_label})\n"
     else:
-        persistent_memory_capability = "• persistent-memory: Read/write your Kusto database (Eva). Tables:\n"
-        kusto_query_capability = "• kusto-query: Execute arbitrary KQL queries against any database (Eva, MEMORY_CORE, ynot)\n"
+        persistent_memory_capability = "• persistent-memory: Read the Kusto projection; writes are automatic event-first mutations. Tables:\n"
+        kusto_query_capability = "• kusto-query: Execute read-only KQL queries against configured databases\n"
 
     # ── 1. Skills manifest (always injected, concise) ──────────────────
     import datetime
@@ -1068,11 +1201,9 @@ def _build_memory_context(user_message):
         "\n"
         "[Workflow: Capturing Knowledge]\n"
         "When the user shares a durable fact or asks you to remember something:\n"
-        "1. Persist it via kusto_ingest_inline, table=\"Knowledge\", columns: "
-        "Timestamp, Entity, Relation, Value, Confidence=0.85, Source=\"learned\", Decay=0.01.\n"
-        "2. Entity=\"User\" for user facts; proper-noun subject otherwise.\n"
-        "3. One row per distinct fact. Do NOT save chit-chat or one-off questions.\n"
-        "4. Briefly confirm what you stored.\n"
+        "1. Do not call database ingest or management tools.\n"
+        "2. The authenticated bridge records the turn locally, extracts evidence-linked provisional facts, and projects approved state automatically.\n"
+        "3. Acknowledge what the user asked to remember without claiming a tool write occurred.\n"
         "\n"
         "[Workflow: Adaptive Execution]\n"
         "When asked to do something you are unsure about:\n"
@@ -1284,7 +1415,7 @@ def _build_memory_context(user_message):
     import re as _re
 
     if _re.search(r'\b(database|databases|kusto|adx|data explorer)\b', msg_lower):
-        if _kusto_database_locked:
+        if _st.kusto_database_locked:
             context_parts.append(f"[Live Data] Database: {db}")
         else:
             dbs = _kusto_query_direct(cluster, db, ".show databases", is_mgmt=True)
@@ -1357,15 +1488,27 @@ def _build_memory_context(user_message):
     return ""
 
 
-def _post_response_reflection(user_message, assistant_response, model_name):
-    """Background: log conversation and trigger reflection after response."""
+def _post_response_reflection(user_message, assistant_response, model_name,
+                               envelope=None):
+    """Background: log conversation and trigger reflection after response.
+
+    *envelope* is an optional dict with session_id, turn_id, etc. passed
+    from the caller for stable IDs and event shadow-writes.
+    """
     # global statement removed — writes go to _st.*
-    if not _st.cognition_enabled:
+    if not _st.cognition_enabled and not envelope:
         return
 
-    # Route to SQLite-specific implementation when that backend is active
+    # Phase 1 write authority is always the local immutable SQLite journal,
+    # regardless of the selected legacy read backend.
+    if envelope:
+        return _post_response_reflection_sqlite(
+            user_message, assistant_response, model_name, envelope=envelope
+        )
     if _resolve_memory_backend() == "sqlite":
-        return _post_response_reflection_sqlite(user_message, assistant_response, model_name)
+        return _post_response_reflection_sqlite(
+            user_message, assistant_response, model_name, envelope=None
+        )
 
     cluster, db = _get_kusto_config()
     if not cluster or not db:

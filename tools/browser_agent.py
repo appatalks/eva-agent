@@ -28,6 +28,8 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 
+from bridge import config as _bridge_config
+
 _TRAJ_DIR = os.path.expanduser("~/.config/eva-standalone/browser_trajectories")
 # Dedicated, persistent Chrome profile for the agent. Logins (e.g. Amazon) made
 # once in the agent window persist here across runs, so the agent is not a fresh
@@ -95,7 +97,7 @@ def _clean_chrome_env():
     The system Chrome inherits those and its sandbox helper fails (the "sandbox"
     launch error). Removing them lets Chrome load its own libraries normally.
     """
-    env = dict(os.environ)
+    env = _bridge_config.child_process_env()
     for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "APPDIR", "APPIMAGE", "ARGV0",
                 "GTK_PATH", "GDK_PIXBUF_MODULE_FILE", "GIO_MODULE_DIR",
                 "GSETTINGS_SCHEMA_DIR", "FONTCONFIG_PATH", "FONTCONFIG_FILE",

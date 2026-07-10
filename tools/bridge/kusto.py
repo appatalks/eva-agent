@@ -14,6 +14,8 @@ from bridge import state as _st
 def _refresh_kusto_token():
     """Try to refresh the cached Kusto token using the stored credential. Returns True if refreshed."""
     # global statement removed — writes go to _st.*
+    if _st.egress_mode != "cloud":
+        return False
     if not _st.kusto_credential:
         return False
     try:
@@ -48,6 +50,8 @@ def _inject_kusto_token(mcp_config):
 def _ensure_kusto_token():
     """Ensure the bridge has a Kusto token for direct bridge-side Kusto calls."""
     # global statement removed — writes go to _st.*
+    if _st.egress_mode != "cloud":
+        return False, f"Kusto disabled by EVA_EGRESS_MODE={_st.egress_mode}"
     if _st.kusto_token_cache:
         return True, ""
     if _refresh_kusto_token():
@@ -74,6 +78,8 @@ def _ensure_kusto_token():
 def _try_kusto_silent_auth():
     """Attempt MSAL silent token refresh from cached credentials. Returns True if successful."""
     # global statement removed — writes go to _st.*
+    if _st.egress_mode != "cloud":
+        return False
     try:
         import msal as _msal
         _cache_path = os.path.expanduser("~/.azure/msal_token_cache.json")
@@ -253,7 +259,7 @@ class _MSALSilentCredential:
 def _kusto_query_direct(cluster_url, database, query, is_mgmt=False):
     """Execute a Kusto query directly (bypasses MCP). Returns text result or None on error."""
     # global statement removed — writes go to _st.*
-    if not _st.kusto_token_cache:
+    if _st.egress_mode != "cloud" or not _st.kusto_token_cache:
         return None
     import requests as _requests_mod
     endpoint = "mgmt" if is_mgmt else "query"
@@ -313,6 +319,8 @@ def _short_kusto_error(value):
 def _kusto_query_with_error(cluster_url, database, query, is_mgmt=False):
     """Execute a Kusto query and return (rows, error_text) for seed diagnostics."""
     # global statement removed — writes go to _st.*
+    if _st.egress_mode != "cloud":
+        return None, f"Kusto disabled by EVA_EGRESS_MODE={_st.egress_mode}"
     if not _st.kusto_token_cache:
         return None, "Kusto token is not available"
     import requests as _requests_mod
@@ -396,10 +404,15 @@ def _get_table_columns(cluster_url, database, table):
     return cols
 
 
+def _canonical_kusto_ingest_string(value):
+    """Canonical text representation used by Kusto inline CSV ingest."""
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+
+
 def _kusto_ingest_direct(cluster_url, database, table, columns, rows_data):
     """Ingest data directly into Kusto via .ingest inline."""
     # global statement removed — writes go to _st.*
-    if not _st.kusto_token_cache:
+    if _st.egress_mode != "cloud" or not _st.kusto_token_cache:
         return False
 
     table_columns = _get_table_columns(cluster_url, database, table)
@@ -432,7 +445,7 @@ def _kusto_ingest_direct(cluster_url, database, table, columns, rows_data):
                 j = json.dumps(v)
                 vals.append('"' + j.replace('"', '""') + '"')
             else:
-                s = str(v).replace("\n", "\\n").replace("\r", "")
+                s = _canonical_kusto_ingest_string(v)
                 # CSV-quote any string containing commas or quotes
                 if ',' in s or '"' in s:
                     vals.append('"' + s.replace('"', '""') + '"')

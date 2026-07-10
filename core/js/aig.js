@@ -3,7 +3,14 @@
 // Routes through the bridge which picks the best model for each task,
 // maintains Eva's persona, and handles data retrieval seamlessly.
 
-async function aigSend() {
+async function aigSend(forcedModel, capturedEnvelope) {
+  capturedEnvelope = capturedEnvelope || ((typeof captureRequestEnvelope === 'function')
+    ? captureRequestEnvelope() : null);
+  function requestIsCurrent() {
+    return !!(capturedEnvelope && typeof isCurrentRequestEnvelope === 'function' &&
+      isCurrentRequestEnvelope(capturedEnvelope));
+  }
+  if (!requestIsCurrent()) return;
   var txtMsg = document.getElementById('txtMsg');
   var txtOutput = document.getElementById('txtOutput');
 
@@ -61,6 +68,13 @@ async function aigSend() {
   // Send to AIG orchestrator via bridge
   var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
 
+  var _envelope = capturedEnvelope || ((typeof captureRequestEnvelope === 'function')
+    ? captureRequestEnvelope()
+    : { session_id: window._evaSessionId || '', turn_id: window._evaTurnId || '' });
+  var _turnId = _envelope.turn_id;
+  window._evaSessionId = _envelope.session_id;
+  window._evaTurnId = _turnId;
+
   setStatus('info', 'Eva (AIG) processing...');
   if (typeof _copilotLastUserMsg !== 'undefined') { _copilotLastUserMsg = sQuestion; }
 
@@ -79,18 +93,22 @@ async function aigSend() {
       var cogResult = await Cognition.run({
         userMessage: sQuestion,
         messages: existingMessages,
+        envelope: _envelope,
         forceEnable: cogDecision.reason === 'phrase',
         forcedReason: cogDecision.reason
       });
+      if (!requestIsCurrent()) return;
       var cogContent = (cogResult && cogResult.content) ? cogResult.content : '';
       // Execute any [[EVA_ACTION]] blocks Eva emitted, then render.
       var actionsRun = [];
       if (Cognition.executeActions) {
-        var execRes = await Cognition.executeActions(cogContent);
+        var execRes = await Cognition.executeActions(cogContent, _envelope);
+        if (!requestIsCurrent()) return;
         cogContent = execRes.content;
         actionsRun = execRes.actions || [];
       }
-      await renderEvaResponse(cogContent, txtOutput);
+      if (!await renderEvaResponse(cogContent, txtOutput, _envelope)) return;
+      if (!requestIsCurrent()) return;
       if (Cognition.getCfg && Cognition.getCfg().showTrace && Cognition.renderTraceHtml) {
         try {
           txtOutput.innerHTML += Cognition.renderTraceHtml(cogResult.trace || []);
@@ -108,18 +126,10 @@ async function aigSend() {
                    (cogDecision.reason === 'phrase' ? '/forced' : '') +
                    (actionsRun.length ? '/act' + actionsRun.length : '');
       if (cogContent) {
-        try {
-          fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/reflect', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              user_message: sQuestion,
-              assistant_message: cogContent,
-              model: cogTag
-            }),
-            signal: AbortSignal.timeout(5000)
-          }).catch(function () {});
-        } catch (_) {}
+        if (typeof finalizeDirectProviderTurn === 'function') {
+          await finalizeDirectProviderTurn(sQuestion, cogContent, cogTag, _envelope);
+          if (!requestIsCurrent()) return;
+        }
       }
       setStatus('info', 'Eva (AIG, cognition) \u2014 ' +
                 (cogResult.evaModel || 'eva') +
@@ -132,6 +142,7 @@ async function aigSend() {
       }
       return;
     } catch (cogErr) {
+      if (!requestIsCurrent()) return;
       var cogMsg = (cogErr && cogErr.message) ? cogErr.message : String(cogErr);
       setStatus('warn', 'Cognition failed, falling back: ' + cogMsg);
       // fall through to single-shot path
@@ -166,8 +177,8 @@ async function aigSend() {
 
     // Prefer cognition evaModel when cognition is configured,
     // otherwise fall back to the AIG backend selector dropdown.
-    var aigModel = (document.getElementById('selAIGBackend') || {}).value || 'claude-opus-4.8';
-    if (typeof Cognition !== 'undefined' && Cognition.getCfg) {
+    var aigModel = forcedModel || (document.getElementById('selAIGBackend') || {}).value || 'claude-opus-4.8';
+    if (!forcedModel && typeof Cognition !== 'undefined' && Cognition.getCfg) {
       var cogModelCfg = Cognition.getCfg();
       if (cogModelCfg.enabled && cogModelCfg.evaModel) {
         aigModel = cogModelCfg.evaModel;
@@ -181,15 +192,21 @@ async function aigSend() {
         messages: existingMessages,
         user_message: sQuestion,
         model: aigModel,
+        session_id: _envelope.session_id,
+        turn_id: _envelope.turn_id,
+        request_id: _envelope.request_id,
+        correlation_id: _envelope.correlation_id,
         lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
         lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
         github_pat: (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : '',
         openai_api_key: (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : ''
       })
     });
+    if (!requestIsCurrent()) return;
 
     if (!resp.ok) {
       var errText = await resp.text();
+      if (!requestIsCurrent()) return;
       var errMsg = 'AIG Error ' + resp.status + ': ' + errText;
       txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="error">' + escapeHtml(errMsg) + '</span></div>';
       txtOutput.scrollTop = txtOutput.scrollHeight;
@@ -198,11 +215,13 @@ async function aigSend() {
     }
 
     var data = await resp.json();
+    if (!requestIsCurrent()) return;
     var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
     var modelUsed = data.model || 'aig';
 
     // Render response
-    await renderEvaResponse(content, txtOutput);
+    if (!await renderEvaResponse(content, txtOutput, _envelope)) return;
+    if (!requestIsCurrent()) return;
 
     if (content) {
       lastResponse = content;
@@ -239,6 +258,7 @@ async function aigSend() {
     }
 
   } catch (err) {
+    if (!requestIsCurrent()) return;
     var errorMessage = err.message || String(err);
     if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError')) {
       errorMessage += ' — Is the ACP bridge server running? Start it with: python3 tools/acp_bridge.py --enable-kusto-mcp';

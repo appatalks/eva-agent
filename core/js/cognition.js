@@ -226,7 +226,21 @@
   // forget the closing tag). The second alternation grabs to end-of-string.
   var ACTION_BLOCK_RE = /\[\[EVA_ACTION\]\]([\s\S]*?)\[\[\/EVA_ACTION\]\]|\[\[EVA_ACTION\]\]([\s\S]+)$/g;
 
-  async function executeActions(text) {
+  function envelopeIsCurrent(envelope) {
+    if (!envelope) return true;
+    return typeof isCurrentRequestEnvelope === 'function' &&
+      isCurrentRequestEnvelope(envelope);
+  }
+
+  function requireCurrentEnvelope(envelope) {
+    if (envelopeIsCurrent(envelope)) return;
+    var error = new Error('Stale request completion ignored');
+    error.code = 'EVA_STALE_ENVELOPE';
+    throw error;
+  }
+
+  async function executeActions(text, capturedEnvelope) {
+    requireCurrentEnvelope(capturedEnvelope);
     if (!text) return { content: '', actions: [] };
     var actions = [];
     var out = text;
@@ -256,12 +270,15 @@
         continue;
       }
       try {
+        requireCurrentEnvelope(capturedEnvelope);
         var result = await cap.run(spec.args || {});
+        requireCurrentEnvelope(capturedEnvelope);
         actions.push({ ok: true, id: spec.id, result: result });
         var html = (result && typeof result.html === 'string') ? result.html :
                    '<div class="cog-action-ok">[action ' + spec.id + ' completed]</div>';
         out = out.replace(r.full, html);
       } catch (err) {
+        if (err && err.code === 'EVA_STALE_ENVELOPE') throw err;
         var msg = (err && err.message) ? err.message : String(err);
         actions.push({ ok: false, id: spec.id, error: 'run-failed', detail: msg });
         out = out.replace(r.full,
@@ -470,7 +487,8 @@
   // ---------------------------------------------------------------------------
   // Bridge call primitive
   // ---------------------------------------------------------------------------
-  async function callAgent(role, model, systemPrompt, conversation, taskMessage, extra) {
+  async function callAgent(role, model, systemPrompt, conversation, taskMessage, extra, capturedEnvelope) {
+    requireCurrentEnvelope(capturedEnvelope);
     var url = bridgeUrl().replace(/\/+$/, '') + '/v1/aig/chat';
     var msgs = [{ role: 'system', content: systemPrompt }];
     if (Array.isArray(conversation) && conversation.length) {
@@ -480,10 +498,20 @@
     if (taskMessage) {
       msgs.push({ role: 'user', content: taskMessage });
     }
+    var _callEnvelope = capturedEnvelope || ((typeof captureRequestEnvelope === 'function')
+      ? captureRequestEnvelope()
+      : {
+          session_id: (typeof window !== 'undefined' && window._evaSessionId) ? window._evaSessionId : '',
+          turn_id: (typeof window !== 'undefined' && window._evaTurnId) ? window._evaTurnId : ''
+        });
     var payload = {
       messages: msgs,
       user_message: taskMessage || '',
       model: model,
+      session_id: _callEnvelope.session_id,
+      turn_id: _callEnvelope.turn_id,
+      request_id: _callEnvelope.request_id,
+      correlation_id: _callEnvelope.correlation_id,
       lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
       lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
       github_pat: authPat(),
@@ -497,12 +525,15 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
+    requireCurrentEnvelope(_callEnvelope);
     if (!resp.ok) {
       var t = '';
       try { t = await resp.text(); } catch (_) {}
+      requireCurrentEnvelope(_callEnvelope);
       throw new Error(role + ' (' + model + ') HTTP ' + resp.status + (t ? ': ' + t : ''));
     }
     var data = await resp.json();
+    requireCurrentEnvelope(_callEnvelope);
     var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
     return { content: content, model: data.model || model };
   }
@@ -605,6 +636,8 @@
     opts = opts || {};
     var cfg = getCfg();
     var userMsg = String(opts.userMessage || '').trim();
+    var runEnvelope = opts.envelope || ((typeof captureRequestEnvelope === 'function') ? captureRequestEnvelope() : null);
+    requireCurrentEnvelope(runEnvelope);
     var convo = Array.isArray(opts.messages) ? opts.messages.slice() : [];
     var trace = [];
     var _turnStart = Date.now();
@@ -651,8 +684,9 @@
     ].join('\n');
     var draft = await callAgent(
       'eva', cfg.evaModel, cfg.evaPrompt, convo, draftTask,
-      { inject_memory: true, recall_query: userMsg, retrieve_data: true }
+      { inject_memory: true, recall_query: userMsg, retrieve_data: true }, runEnvelope
     );
+    requireCurrentEnvelope(runEnvelope);
 
     // Eva's silent self-review signal decides whether a second opinion runs.
     var sentinel = parseReviewSentinel(draft.content);
@@ -712,13 +746,15 @@
       try {
         review = await callAgent(
           'reviewer', cfg.reviewerModel, cfg.reviewerPrompt, convo, reviewTask,
-          { no_tools: true }
+          { no_tools: true }, runEnvelope
         );
       } catch (reviewErr) {
+        if (reviewErr && reviewErr.code === 'EVA_STALE_ENVELOPE') throw reviewErr;
         // Review failed (timeout, network). Skip review and use the draft as-is.
         console.warn('[Cognition] Review failed, using draft:', reviewErr.message);
         break;
       }
+      requireCurrentEnvelope(runEnvelope);
       _reviewMs += Date.now() - _revStart;
       var verdict = parseVerdict(review.content);
       lastVerdict = verdict;
@@ -752,15 +788,17 @@
       try {
         revised = await callAgent(
           'eva', cfg.evaModel, cfg.evaPrompt, convo, reviseTask,
-          { inject_memory: true, recall_query: userMsg }
+          { inject_memory: true, recall_query: userMsg }, runEnvelope
         );
       } catch (reviseErr) {
+        if (reviseErr && reviseErr.code === 'EVA_STALE_ENVELOPE') throw reviseErr;
         // Revise failed (timeout, network error). Fall back to the draft
         // rather than surfacing a raw error message to the user.
         console.warn('[Cognition] Revise failed, using draft:', reviseErr.message);
         trace.push({ role: 'eva', model: cfg.evaModel, content: '[revise failed: ' + reviseErr.message + ']', cycle: cycle, revised: true });
         break;
       }
+      requireCurrentEnvelope(runEnvelope);
       _reviseMs += Date.now() - _reviseStart;
       // Strip any sentinel the revision may have re-emitted.
       var revisedClean = parseReviewSentinel(revised.content).cleaned;
@@ -787,6 +825,7 @@
       last_verdict: doReview ? lastVerdict : 'n/a',
       sentinel_want: (sentinel.want === null ? 'absent' : String(sentinel.want))
     };
+    requireCurrentEnvelope(runEnvelope);
     postTelemetry(telem);
 
     return {

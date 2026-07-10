@@ -25,7 +25,9 @@
     "files": [
       "package.json",
       "main.js",
-      "preload.js"
+      "preload.js",
+      "bridge-readiness.js",
+      "security-policy.js"
     ],
     "extraResources": [
       {
@@ -47,6 +49,7 @@
           "tools/kusto_mcp.py",
           "tools/sqlite_memory.py",
           "tools/sqlite_mcp.py",
+          "tools/web_search_mcp.py",
           "tools/eva_seed.kql",
           "!config.json",
           "!config.local.js",

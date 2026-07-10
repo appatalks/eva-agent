@@ -133,7 +133,15 @@ def test_no_hardcoded_keys():
 
 def test_python_syntax():
     """All Python files compile without errors."""
-    for py in ["tools/acp_bridge.py", "tools/kusto_mcp.py", "tools/test_eva.py", "tools/eval/run.py"]:
+    py_files = ["tools/acp_bridge.py", "tools/kusto_mcp.py", "tools/test_eva.py", "tools/eval/run.py",
+                 "tools/sqlite_memory.py", "tools/test_phase0.py", "tools/test_phase1.py"]
+    # Include all bridge package files
+    bridge_dir = "tools/bridge"
+    if os.path.isdir(bridge_dir):
+        for name in sorted(os.listdir(bridge_dir)):
+            if name.endswith(".py"):
+                py_files.append(os.path.join(bridge_dir, name))
+    for py in py_files:
         if not os.path.isfile(py):
             report(f"python_syntax:{py}", None, "file missing")
             continue
@@ -328,7 +336,8 @@ def test_seed_file():
     # Must contain table creation commands
     required_tables = ["SelfState", "Knowledge", "Conversations", "EmotionState",
                        "HeuristicsIndex", "MemorySummaries", "Reflections", "Goals", "EmotionBaseline",
-                       "BackgroundProposals", "BackgroundActivity"]
+                       "BackgroundProposals", "BackgroundActivity", "MemoryEvents",
+                       "MemoryProjectionReceipts"]
     for tbl in required_tables:
         if f".create-merge table {tbl}" in content or f".create table {tbl}" in content:
             report(f"seed_table:{tbl}", True)

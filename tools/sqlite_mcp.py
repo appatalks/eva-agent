@@ -175,6 +175,7 @@ class SqliteMCPServer:
             },
         },
     ]
+    TOOLS = [tool for tool in TOOLS if tool.get("name") != "kusto_ingest_inline"]
 
     def __init__(self):
         db_path = os.environ.get("EVA_MEMORY_DB", os.path.expanduser("~/.eva/memory.db"))
@@ -267,17 +268,7 @@ class SqliteMCPServer:
             return f"Error: {e}"
 
     def _tool_ingest(self, args):
-        table = args.get("table", "")
-        data = args.get("data", [])
-        if not table or not data:
-            return "Error: 'table' and 'data' are required."
-        if not isinstance(data, list):
-            return "Error: 'data' must be an array of row objects."
-        columns = list(data[0].keys()) if data else []
-        ok = self._mem.ingest(table, columns, data)
-        if ok:
-            return f"Ingested {len(data)} row(s) into {table}."
-        return f"Error: ingest into {table} failed."
+        return "Error: generic MCP writes are disabled; use Eva's authenticated event-first mutation APIs."
 
     def _tool_recall_knowledge(self, args):
         entity = args.get("entity", "")

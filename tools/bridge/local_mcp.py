@@ -16,6 +16,8 @@ import time
 import urllib.request
 import urllib.error
 
+from bridge import config as _cfg
+
 _ARTIFACTS_DIR = os.path.expanduser("~/.config/eva-standalone/artifacts")
 
 
@@ -42,10 +44,12 @@ class MCPServer:
     def start(self):
         """Spawn the MCP server process and initialize."""
         cmd = [self.command] + self.args
-        process_env = os.environ.copy()
-        process_env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
+        explicit_env = {}
         for k, v in self.env.items():
-            process_env[k] = str(v) if not isinstance(v, str) else v
+            if k != "EVA_BRIDGE_TOKEN":
+                explicit_env[k] = str(v) if not isinstance(v, str) else v
+        explicit_env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
+        process_env = _cfg.child_process_env(explicit_env)
         try:
             self.process = subprocess.Popen(
                 cmd,
@@ -274,8 +278,7 @@ def local_agent_query(user_message, mcp_manager, lms_base_url="http://localhost:
     if not tools:
         return "", ""
 
-    lms_base = lms_base_url.rstrip("/")
-    endpoint = f"{lms_base}/chat/completions"
+    from bridge.lmstudio import post_json as _lmstudio_post_json
 
     messages = [
         {
@@ -308,18 +311,10 @@ def local_agent_query(user_message, mcp_manager, lms_base_url="http://localhost:
             "temperature": 0.1,
         }
 
-        try:
-            req = urllib.request.Request(
-                endpoint,
-                data=json.dumps(payload).encode(),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            remaining = max(10, _deadline - time.perf_counter())
-            with urllib.request.urlopen(req, timeout=remaining) as resp:
-                result = json.loads(resp.read().decode())
-        except Exception as e:
-            print(f"[LocalAgent] LM Studio request failed: {e}")
+        remaining = max(10, _deadline - time.perf_counter())
+        status, result, error = _lmstudio_post_json(lms_base_url, payload, timeout=remaining)
+        if error:
+            print(f"[LocalAgent] LM Studio request failed: {error}")
             return "", ""
 
         choice = (result.get("choices") or [{}])[0]

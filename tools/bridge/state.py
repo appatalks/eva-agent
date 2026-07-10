@@ -43,6 +43,7 @@ last_interaction_date = None
 # ── Memory backend ──────────────────────────────────────────────────
 memory_backend = os.environ.get("EVA_MEMORY_BACKEND", "").strip().lower() or None
 sqlite_mem = None           # SqliteMemory instance (lazy)
+sqlite_mem_lock = threading.Lock()
 openai_api_key_cache = ""
 embedding_cache = None      # lazy dict: sha1(text) -> [floats]
 embedding_cache_lock = threading.Lock()
@@ -95,4 +96,19 @@ try:
 except OSError:
     _saved_mode = ""
 local_mode = (_saved_mode == "local")
+
+# ── Per-launch auth ────────────────────────────────────────────────
+bridge_auth_token = ""      # Set at startup; empty = auth disabled
+
+# ── Proposal review lock ───────────────────────────────────────────
+proposal_review_lock = threading.Lock()
+proposal_transition_lock = threading.Lock()
+proposal_last_transition_at = None
+
+# ── Egress mode ────────────────────────────────────────────────────
+_egress_mode_raw = os.environ.get("EVA_EGRESS_MODE", "").strip().lower()
+egress_mode_invalid = bool(_egress_mode_raw and _egress_mode_raw not in ("offline", "local-network", "cloud"))
+egress_mode = _egress_mode_raw or "cloud"
+if egress_mode_invalid:
+    egress_mode = "cloud"
 

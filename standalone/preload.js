@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   acpBaseUrl: readArg('eva-acp-base-url'),
   isStandalone: true,
   version: readArg('eva-version'),
+  egressMode: readArg('eva-egress-mode') || 'cloud',
   minimize: function() { ipcRenderer.send('win-minimize'); },
   maximize: function() { ipcRenderer.send('win-maximize'); },
   close: function() { ipcRenderer.send('win-close'); }

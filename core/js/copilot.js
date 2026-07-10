@@ -92,7 +92,15 @@ async function detectACPBridge() {
 
 // --- Main send function ---
 
-async function copilotSend() {
+function _copilotRequestIsCurrent(capturedEnvelope) {
+  return !!(capturedEnvelope && typeof isCurrentRequestEnvelope === 'function' &&
+    isCurrentRequestEnvelope(capturedEnvelope));
+}
+
+async function copilotSend(capturedEnvelope) {
+  capturedEnvelope = capturedEnvelope || ((typeof captureRequestEnvelope === 'function')
+    ? captureRequestEnvelope() : null);
+  if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
   var txtMsg = document.getElementById('txtMsg');
   var txtOutput = document.getElementById('txtOutput');
 
@@ -161,20 +169,17 @@ async function copilotSend() {
   existingMessages = existingMessages.concat(newMessages);
   localStorage.setItem(storageKey, JSON.stringify(existingMessages));
 
-  // Track for post-response reflection
-  _copilotLastUserMsg = sQuestion;
-
   // Route to the appropriate backend
   if (mode === 'acp') {
-    await _copilotSendACP(existingMessages, sQuestion, txtOutput, storageKey);
+    await _copilotSendACP(existingMessages, sQuestion, txtOutput, storageKey, capturedEnvelope);
   } else {
-    await _copilotSendModelsAPI(existingMessages, selModel.value, txtOutput, storageKey);
+    await _copilotSendModelsAPI(existingMessages, selModel.value, txtOutput, storageKey, sQuestion, capturedEnvelope);
   }
 }
 
 // --- GitHub Models API mode ---
 
-async function _copilotSendModelsAPI(messages, modelValue, txtOutput, storageKey) {
+async function _copilotSendModelsAPI(messages, modelValue, txtOutput, storageKey, question, capturedEnvelope) {
   var githubToken = getAuthKey('GITHUB_PAT');
   var model = modelValue.replace(/^copilot-/, '');
 
@@ -188,8 +193,10 @@ async function _copilotSendModelsAPI(messages, modelValue, txtOutput, storageKey
     var ctxResp = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/context?message=' + encodeURIComponent(lastUserMsg), {
       signal: AbortSignal.timeout(3000)
     });
+    if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
     if (ctxResp.ok) {
       var ctxData = await ctxResp.json();
+      if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
       if (ctxData.context && ctxData.cognition_enabled) {
         // Prepend memory context to the first system message, or insert one
         var injected = false;
@@ -206,8 +213,10 @@ async function _copilotSendModelsAPI(messages, modelValue, txtOutput, storageKey
       }
     }
   } catch (e) {
+    if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
     // Bridge not available — continue without memory
   }
+  if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
 
   var temp = (typeof getModelTemperature === 'function') ? getModelTemperature() : 0.7;
   var maxTok = (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 4096;
@@ -266,25 +275,28 @@ async function _copilotSendModelsAPI(messages, modelValue, txtOutput, storageKey
       },
       body: JSON.stringify(payload)
     });
+    if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
 
     if (!resp.ok) {
-      _copilotHandleHTTPError(resp, txtOutput);
+      await _copilotHandleHTTPError(resp, txtOutput, capturedEnvelope);
       return;
     }
 
     var data = await resp.json();
-    _copilotRenderResponse(data, txtOutput, model);
+    if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
+    await _copilotRenderResponse(data, txtOutput, model, false, question, capturedEnvelope);
 
   } catch (err) {
-    _copilotHandleFetchError(err, txtOutput);
+    _copilotHandleFetchError(err, txtOutput, capturedEnvelope);
   }
 }
 
 // --- ACP Bridge mode ---
 
-async function _copilotSendACP(messages, question, txtOutput, storageKey) {
+async function _copilotSendACP(messages, question, txtOutput, storageKey, capturedEnvelope) {
   // Auto-detect bridge URL (tries configured, same-host, localhost)
   var bridgeUrl = await detectACPBridge();
+  if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
 
   // Get selected ACP model (empty string = use CLI default)
   var acpModel = (typeof getACPModel === 'function') ? getACPModel() : '';
@@ -296,6 +308,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey) {
     var url = bridgeUrl.replace(/\/+$/, '') + '/v1/chat/completions';
 
     var payload = { messages: messages, model: 'copilot-acp' };
+    if (capturedEnvelope) Object.assign(payload, capturedEnvelope);
     if (acpModel) payload.acp_model = acpModel;
 
     var resp = await fetch(url, {
@@ -303,31 +316,35 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
+    if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
 
     if (!resp.ok) {
-      _copilotHandleHTTPError(resp, txtOutput);
+      await _copilotHandleHTTPError(resp, txtOutput, capturedEnvelope);
       return;
     }
 
     var data = await resp.json();
-    _copilotRenderResponse(data, txtOutput, modelLabel);
+    if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
+    await _copilotRenderResponse(data, txtOutput, modelLabel, true, question, capturedEnvelope);
 
   } catch (err) {
     var errorMessage = err.message || String(err);
     if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError')) {
       errorMessage += ' \u2014 Is the ACP bridge server running? Start it with: python3 tools/acp_bridge.py';
     }
-    _copilotHandleFetchError({ message: errorMessage }, txtOutput);
+    _copilotHandleFetchError({ message: errorMessage }, txtOutput, capturedEnvelope);
   }
 }
 
 // --- Shared response rendering ---
 
-async function _copilotRenderResponse(data, txtOutput, modelLabel) {
+async function _copilotRenderResponse(data, txtOutput, modelLabel, bridgeOwnedReflection, question, capturedEnvelope) {
+  if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
   var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
 
   // Use unified renderer
-  await renderEvaResponse(content, txtOutput);
+  if (!await renderEvaResponse(content, txtOutput, capturedEnvelope)) return;
+  if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
 
   if (content) {
     lastResponse = content;
@@ -338,22 +355,10 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel) {
 
   setStatus('info', 'Response received from ' + modelLabel);
 
-  // --- Cognition: Trigger post-response reflection via bridge ---
-  if (content && typeof _copilotLastUserMsg !== 'undefined' && _copilotLastUserMsg) {
-    try {
-      var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
-      fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/reflect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_message: _copilotLastUserMsg,
-          assistant_message: content.substring(0, 500),
-          model: modelLabel
-        }),
-        signal: AbortSignal.timeout(5000)
-      }).catch(function() {}); // fire-and-forget
-    } catch (e) {}
-    _copilotLastUserMsg = '';
+  if (!bridgeOwnedReflection && content && question &&
+      typeof finalizeDirectProviderTurn === 'function') {
+    await finalizeDirectProviderTurn(question, content, modelLabel, capturedEnvelope);
+    if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
   }
 
   // Auto-speak
@@ -367,8 +372,10 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel) {
 
 // --- Error handling ---
 
-async function _copilotHandleHTTPError(resp, txtOutput) {
+async function _copilotHandleHTTPError(resp, txtOutput, capturedEnvelope) {
+  if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
   var errText = await resp.text();
+  if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
   var errMsg = 'Error ' + resp.status;
   try {
     var errJson = JSON.parse(errText);
@@ -381,7 +388,8 @@ async function _copilotHandleHTTPError(resp, txtOutput) {
   setStatus('error', errMsg);
 }
 
-function _copilotHandleFetchError(err, txtOutput) {
+function _copilotHandleFetchError(err, txtOutput, capturedEnvelope) {
+  if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
   console.error('Copilot error:', err);
   var errorMessage = err.message || String(err);
   if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError') || errorMessage.includes('CORS')) {
@@ -821,6 +829,11 @@ function initMemoryBackendSelector() {
         : 'Active: Azure Data Explorer' + (data.cluster ? ' (' + data.database + ')' : '');
       if (statusEl) statusEl.textContent = label;
       if (statusGeneral) statusGeneral.textContent = label;
+      if (data.reconciliation && !data.reconciliation.reconciled) {
+        var warning = ' Warning: ' + data.reconciliation.message;
+        if (statusEl) statusEl.textContent += warning;
+        if (statusGeneral) statusGeneral.textContent += warning;
+      }
     }
   }).catch(function() {
     var msg = 'Bridge not reachable — using saved preference';
@@ -848,23 +861,45 @@ function _doSwitchMemoryBackend(backend) {
   var statusEl = document.getElementById('memoryBackendStatus');
   var statusGeneral = document.getElementById('memoryBackendGeneralStatus');
 
-  // Sync both selectors
+  var previous = localStorage.getItem('eva_memory_backend') || 'sqlite';
+  // Sync both selectors visually while request is pending
   if (sel) sel.value = backend;
   if (selGeneral) selGeneral.value = backend;
-  localStorage.setItem('eva_memory_backend', backend);
 
   var msg = 'Switching...';
   if (statusEl) statusEl.textContent = msg;
   if (statusGeneral) statusGeneral.textContent = msg;
 
   var bridgeUrl = getACPBridgeUrl();
-  fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/backend', {
+  var payload = { backend: backend };
+  var mutationEnvelope = (typeof captureMutationEnvelope === 'function')
+    ? captureMutationEnvelope()
+    : ((typeof captureOperationEnvelope === 'function') ? captureOperationEnvelope() : null);
+  if (mutationEnvelope) Object.assign(payload, mutationEnvelope);
+  function sendSwitch(confirmOverride) {
+    payload.confirm_unreconciled = !!confirmOverride;
+    return fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/backend', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ backend: backend }),
+    body: JSON.stringify(payload),
     signal: AbortSignal.timeout(5000)
-  }).then(function(r) { return r.json(); }).then(function(data) {
+    }).then(function(r) {
+      return r.json().then(function(data) { return { response: r, data: data }; });
+    });
+  }
+  sendSwitch(false).then(function(result) {
+    if (result.response.status === 409 && result.data.requires_confirmation) {
+      var detail = (result.data.reconciliation && result.data.reconciliation.message) || 'Memory journals are not reconciled.';
+      if (!window.confirm(detail + '\n\nSwitch anyway and record an audit event?')) {
+        throw new Error('Switch cancelled: ' + detail);
+      }
+      return sendSwitch(true);
+    }
+    return result;
+  }).then(function(result) {
+    var data = result.data;
     if (data.status === 'ok') {
+      localStorage.setItem('eva_memory_backend', backend);
       var label = backend === 'sqlite'
         ? 'Switched to local SQLite' + (data.db_path ? ' (' + data.db_path + ')' : '')
         : 'Switched to Azure Data Explorer — configure Kusto MCP in Settings > MCP';
@@ -874,10 +909,14 @@ function _doSwitchMemoryBackend(backend) {
       var err = 'Error: ' + JSON.stringify(data.error || data);
       if (statusEl) statusEl.textContent = err;
       if (statusGeneral) statusGeneral.textContent = err;
+      if (sel) sel.value = previous;
+      if (selGeneral) selGeneral.value = previous;
     }
   }).catch(function(e) {
     var err = 'Failed to switch: ' + e.message;
     if (statusEl) statusEl.textContent = err;
     if (statusGeneral) statusGeneral.textContent = err;
+    if (sel) sel.value = previous;
+    if (selGeneral) selGeneral.value = previous;
   });
 }

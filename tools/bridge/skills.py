@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import socket
 import urllib.parse
 from bridge import config as _cfg
 from bridge import state as _st
@@ -194,6 +195,8 @@ def _fetch_skill_source(source_type, data):
         if not isinstance(content, str) or not content.strip():
             return None, "no content provided"
         return content[:_SKILL_SOURCE_MAX_BYTES], ""
+    if _st.egress_mode != "cloud":
+        return None, f"external skill imports are disabled by EVA_EGRESS_MODE={_st.egress_mode}"
     if source_type == "url":
         url = str(data.get("url", "")).strip()
         if not url:
@@ -345,28 +348,20 @@ def _evarise_skill(raw_text):
     if lms_error:
         return None, f"agent unavailable (ACP not connected, LM Studio: {lms_error})"
 
-    import urllib.request
-    payload = json.dumps({
+    payload = {
         "model": lms_model or "default",
         "messages": [
             {"role": "system", "content": "You are a skill normalizer. Reply with ONLY valid JSON, no code fences, no prose."},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.3,
-    }).encode()
+    }
 
-    try:
-        req = urllib.request.Request(
-            lms_base + "/chat/completions",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            body = json.loads(resp.read())
-        text = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
-    except Exception as exc:
-        return None, f"LM Studio evarise failed: {str(exc)[:160]}"
+    from bridge.lmstudio import post_json as _lmstudio_post_json
+    _, body, request_error = _lmstudio_post_json(lms_base, payload, timeout=120)
+    if request_error:
+        return None, "LM Studio request failed: " + request_error[:160]
+    text = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
 
     obj, err = _parse_evarise_json(text)
     if err:

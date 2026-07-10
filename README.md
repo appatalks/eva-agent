@@ -27,10 +27,12 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh            # install dependencies
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.2.3.AppImage'
+./dist/'Eva Standalone-5.3.0.AppImage'
 ```
 
-Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).
+Prereqs: Node.js 24+ and Python 3.12+. GitHub Copilot CLI plus
+`copilot auth login` is required only for `cloud` egress mode; LM Studio local
+operation does not require Copilot CLI.
 
 ## Features
 
@@ -49,7 +51,7 @@ Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).
 | **Doctor diagnostics** | Structured readiness probe for every subsystem with actionable fixes |
 | **MCP ecosystem** | Azure, GitHub, Kusto, computer-use-linux desktop control |
 | **Cognitive layer** | Eva + Reviewer dual-agent pipeline with configurable models |
-| **Dual data mode** | Cloud (Copilot CLI + MCP) or Local (LM Studio + direct MCP, fully offline) |
+| **Explicit egress policy** | Cloud, local-network, or air-gapped offline operation with fail-closed routing |
 
 ## Get started
 
@@ -60,6 +62,28 @@ For persistent memory, point Settings > MCP at an Azure Data Explorer cluster, o
 For Signal notifications, install [signal-cli](https://github.com/AsamK/signal-cli) and link it to your Signal account (`signal-cli link -n "Eva"`). Enter sender and recipient numbers in Settings > Auth.
 
 Import skills from text, URLs, GitHub repos, or files in Settings. Eva normalizes them into her format, stores in ADX, and applies matching skills automatically.
+
+## Security and egress modes
+
+Eva Standalone creates a random bridge bearer token for every launch. Electron's
+main process injects it only into requests sent from Eva's trusted window to the
+exact local `/v1/*` bridge origin. The token is not exposed to renderer scripts,
+preload APIs, model prompts, ACP, MCP children, or process arguments.
+
+Set `EVA_EGRESS_MODE` before launch:
+
+- `cloud` (default): configured providers, ACP, and approved MCP servers are available.
+- `local-network`: SQLite plus LM Studio on a validated loopback/private address; public providers, ACP, ADX, web imports, and cloud vision are blocked.
+- `offline`: SQLite plus loopback LM Studio only; public and LAN network requests are blocked.
+
+Invalid non-empty values fail startup. In restricted modes, select **Eva (AIG)**
+or **LM Studio**; AIG is forced through the configured local model. ACP terminal
+execution is disabled until it is mediated by the capability broker.
+
+Manual bridge clients must supply `EVA_BRIDGE_TOKEN` and send it as a bearer
+token. `EVA_ALLOW_UNAUTHENTICATED_LOOPBACK=1` is a development-only escape hatch
+and is refused on non-loopback binds. Never expose an unauthenticated bridge to a
+LAN or the internet.
 
 ## Documentation
 

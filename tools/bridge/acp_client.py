@@ -28,6 +28,7 @@ class ACPClient:
         self.process = None
         self.request_id = 0
         self.lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self.pending = {}           # id -> {"event": Event, "result": None, "error": None}
         self.session_id = None
         self.response_chunks = {}   # prompt_id -> accumulated text
@@ -35,27 +36,41 @@ class ACPClient:
         self.agent_info = {}
         self.alive = False
         self.terminals = {}  # terminal_id -> {"process": Popen, "output": str}
+        self._prompt_lock = threading.Lock()  # Serialize prompt calls
+        # Terminal authority remains disabled until the complete ACP terminal
+        # contract is implemented behind Eva's capability broker.
+        self._terminal_allowed = False
 
     # --- Lifecycle ---
 
     def start(self):
         """Spawn copilot subprocess, initialize ACP, create session."""
-        cmd = [self.copilot_path, "--acp", "--stdio", "--allow-all-tools"]
+        cmd = [self.copilot_path, "--acp", "--stdio"]
         if self.model:
             cmd.extend(["--model", self.model])
         # Pass MCP server config via --additional-mcp-config
         if self.mcp_config:
-            mcp_json = json.dumps({"mcpServers": self.mcp_config})
+            # Secrets are inherited through the scrubbed child environment, not
+            # serialized into argv where process listings can expose them.
+            cli_config = {}
+            for name, raw in self.mcp_config.items():
+                cfg = dict(raw) if isinstance(raw, dict) else {}
+                cfg.pop("env", None)
+                cli_config[name] = cfg
+            mcp_json = json.dumps({"mcpServers": cli_config})
             cmd.extend(["--additional-mcp-config", mcp_json])
         try:
             # Pass env vars from MCP config to the copilot process itself
             # (copilot spawns MCP servers as children, inheriting the env)
             os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
-            process_env = os.environ.copy()
+            explicit_env = {}
             for srv_name, srv_cfg in self.mcp_config.items():
                 for k, v in srv_cfg.get('env', {}).items():
+                    if k == "EVA_BRIDGE_TOKEN":
+                        continue
                     # subprocess.Popen env requires all values to be strings
-                    process_env[k] = str(v) if not isinstance(v, str) else v
+                    explicit_env[k] = str(v) if not isinstance(v, str) else v
+            process_env = _cfg.child_process_env(explicit_env)
             process_env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
 
             self.process = subprocess.Popen(
@@ -85,7 +100,7 @@ class ACPClient:
         init_result = self._send_request("initialize", {
             "protocolVersion": self.PROTOCOL_VERSION,
             "clientCapabilities": {
-                "terminal": True
+                "terminal": self._terminal_allowed
             },
             "clientInfo": {
                 "name": "eva-acp-bridge",
@@ -122,6 +137,8 @@ class ACPClient:
     def stop(self):
         """Shut down the copilot subprocess."""
         self.alive = False
+        self.session_id = None
+        self._current_prompt_id = None
         if self.process:
             try:
                 self.process.stdin.close()
@@ -151,18 +168,49 @@ class ACPClient:
         }) + "\n"
 
         try:
-            self.process.stdin.write(msg.encode("utf-8"))
-            self.process.stdin.flush()
-        except (BrokenPipeError, OSError) as e:
+            self._write_raw(msg)
+        except (BrokenPipeError, OSError, RuntimeError) as e:
             self.pending.pop(rid, None)
             return {"error": f"Copilot process pipe error: {e}"}
 
-        event.wait(timeout=timeout)
+        completed = event.wait(timeout=timeout)
+        if not completed:
+            self.pending.pop(rid, None)
+            self._cancel_and_quarantine(f"request timeout: {method}")
+            return {"error": f"Copilot request timed out after {timeout}s"}
 
         entry = self.pending.pop(rid, {})
         if entry.get("error"):
             return {"error": entry["error"]}
         return entry.get("result")
+
+    def _write_raw(self, text):
+        """Write one complete NDJSON frame without interleaving writers."""
+        if not self.process or not self.process.stdin or not self.alive:
+            raise RuntimeError("Copilot process is not active")
+        with self._write_lock:
+            self.process.stdin.write(text.encode("utf-8"))
+            self.process.stdin.flush()
+
+    def _cancel_and_quarantine(self, reason):
+        """Best-effort cancel, then retire a timed-out ACP session.
+
+        ACP updates do not carry a prompt identifier Eva can safely use for
+        late-chunk routing. A timed-out session is therefore never reused.
+        """
+        session_id = self.session_id
+        if session_id and self.process and self.process.stdin and self.alive:
+            notice = json.dumps({
+                "jsonrpc": "2.0",
+                "method": "session/cancel",
+                "params": {"sessionId": session_id},
+            }) + "\n"
+            try:
+                self._write_raw(notice)
+            except (BrokenPipeError, OSError, RuntimeError):
+                pass
+        print(f"[ACP] Quarantining session ({reason})")
+        self.stop()
 
     def _send_response(self, rid, result):
         """Send a JSON-RPC response (for server-initiated requests like requestPermission)."""
@@ -172,9 +220,19 @@ class ACPClient:
             "result": result
         }) + "\n"
         try:
-            self.process.stdin.write(msg.encode("utf-8"))
-            self.process.stdin.flush()
-        except (BrokenPipeError, OSError):
+            self._write_raw(msg)
+        except (BrokenPipeError, OSError, RuntimeError):
+            pass
+
+    def _send_error_response(self, rid, code, message):
+        msg = json.dumps({
+            "jsonrpc": "2.0",
+            "id": rid,
+            "error": {"code": code, "message": message},
+        }) + "\n"
+        try:
+            self._write_raw(msg)
+        except (BrokenPipeError, OSError, RuntimeError):
             pass
 
     # --- Reader Loop ---
@@ -240,39 +298,54 @@ class ACPClient:
 
         # Server-initiated request: session/request_permission
         if "id" in msg and msg.get("method") == "session/request_permission":
-            # Auto-grant permissions for chat usage
-            print(f"[ACP] Permission requested: {json.dumps(msg.get('params', {}))}")
-            self._send_response(msg["id"], {"outcome": {"outcome": "granted"}})
+            params = msg.get("params", {})
+            tool_call = params.get("toolCall", {}) if isinstance(params.get("toolCall"), dict) else {}
+            tool_kind = str(tool_call.get("kind", "other") or "other")
+            tool_id = str(tool_call.get("toolCallId", "") or "")[:64]
+            options = params.get("options", []) if isinstance(params.get("options"), list) else []
+
+            reject_option = next((
+                opt for opt in options
+                if isinstance(opt, dict) and opt.get("kind") in ("reject_once", "reject_always") and opt.get("optionId")
+            ), None)
+            if reject_option:
+                print(f"[ACP] Permission REJECT kind={tool_kind} id={tool_id}")
+                outcome = {"outcome": "selected", "optionId": reject_option["optionId"]}
+            else:
+                print(f"[ACP] Permission CANCEL kind={tool_kind} id={tool_id}")
+                outcome = {"outcome": "cancelled"}
+            self._send_response(msg["id"], {"outcome": outcome})
             return
 
         # Server-initiated requests for terminal
         if "id" in msg and msg.get("method") == "terminal/create":
-            self._handle_terminal_create(msg["id"], msg.get("params", {}))
+            print("[ACP] terminal/create DENIED (terminal capability disabled)")
+            self._send_error_response(msg["id"], -32601, "Terminal capability is disabled")
             return
 
         if "id" in msg and msg.get("method") == "terminal/output":
-            self._handle_terminal_output(msg["id"], msg.get("params", {}))
+            self._send_error_response(msg["id"], -32601, "Terminal capability is disabled")
             return
 
         if "id" in msg and msg.get("method") == "terminal/release":
-            self._handle_terminal_release(msg["id"], msg.get("params", {}))
+            self._send_error_response(msg["id"], -32601, "Terminal capability is disabled")
+            return
+
+        if "id" in msg and msg.get("method", "").startswith("terminal/"):
+            self._send_error_response(msg["id"], -32601, "Terminal capability is disabled")
             return
 
         # Server-initiated requests for fs (decline)
         if "id" in msg and msg.get("method", "").startswith("fs/"):
             print(f"[ACP] Declining capability request: {msg.get('method')}")
-            self._send_response(msg["id"], {
-                "error": {"code": -32601, "message": "Method not supported by bridge"}
-            })
+            self._send_error_response(msg["id"], -32601, "Method not supported by bridge")
             return
 
         # Unknown message
         if "id" in msg and "method" in msg:
             # Unknown server request — respond with error
             print(f"[ACP] Unknown server request: {msg.get('method')}")
-            self._send_response(msg["id"], {
-                "error": {"code": -32601, "message": "Not implemented"}
-            })
+            self._send_error_response(msg["id"], -32601, "Not implemented")
 
     def _handle_session_update(self, params):
         """Accumulate text from agent_message_chunk updates."""
@@ -305,24 +378,41 @@ class ACPClient:
     # --- Terminal handlers (for ACP tool execution) ---
 
     def _handle_terminal_create(self, rid, params):
-        """Execute a shell command requested by the agent."""
+        """Execute a command requested by the agent (shell=False, cwd-constrained)."""
         command = params.get("command", "")
         args = params.get("args", [])
         cwd = params.get("cwd") or self.cwd
         env_vars = params.get("env", [])
 
-        # Build the full command
-        full_cmd = command
-        if args:
-            full_cmd = command + " " + " ".join(args)
+        # Validate command and args are strings
+        if not isinstance(command, str) or not command.strip():
+            self._send_response(rid, {"error": {"code": -32602, "message": "command must be a non-empty string"}})
+            return
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            self._send_response(rid, {"error": {"code": -32602, "message": "args must be a list of strings"}})
+            return
 
-        print(f"[ACP Terminal] Creating terminal: {full_cmd[:100]}")
+        # Constrain cwd under the configured ACP cwd
+        if not isinstance(cwd, str):
+            cwd = self.cwd
+        real_cwd = os.path.realpath(cwd)
+        allowed_base = os.path.realpath(self.cwd)
+        if not (real_cwd == allowed_base or real_cwd.startswith(allowed_base + os.sep)):
+            print(f"[ACP Terminal] DENIED: cwd {cwd!r} outside allowed base {self.cwd!r}")
+            self._send_response(rid, {"error": {"code": -32602, "message": "cwd outside allowed base directory"}})
+            return
+
+        argv = [command] + args
+        print(f"[ACP Terminal] Creating executable={os.path.basename(command)!r} argc={len(args)}")
 
         # Build environment
-        env = os.environ.copy()
+        explicit_env = {}
         for ev in env_vars:
             if isinstance(ev, dict) and "name" in ev and "value" in ev:
-                env[ev["name"]] = ev["value"]
+                name = str(ev["name"])
+                if name != "EVA_BRIDGE_TOKEN":
+                    explicit_env[name] = str(ev["value"])
+        env = _cfg.child_process_env(explicit_env)
         os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
         env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
 
@@ -331,11 +421,11 @@ class ACPClient:
 
         try:
             proc = subprocess.Popen(
-                full_cmd,
-                shell=True,
+                argv,
+                shell=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                cwd=cwd,
+                cwd=real_cwd,
                 env=env
             )
             self.terminals[terminal_id] = {"process": proc, "output": ""}
@@ -372,13 +462,7 @@ class ACPClient:
             return
 
         proc = term["process"]
-        # Wait a bit if still running
-        if proc.poll() is None:
-            try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                pass
-
+        # Never block the sole ACP reader; the output worker updates the record.
         output = term.get("output", "")
         exit_code = term.get("exit_code", proc.returncode)
 
@@ -402,8 +486,13 @@ class ACPClient:
     # --- Public API ---
 
     def prompt(self, text, timeout=120):
-        """Send a text prompt and return the accumulated response text."""
-        if not self.session_id:
+        """Send a text prompt and return the accumulated response text.
+        Serialized per client to prevent cross-talk between concurrent callers."""
+        with self._prompt_lock:
+            return self._prompt_impl(text, timeout)
+
+    def _prompt_impl(self, text, timeout=120):
+        if not self.alive or not self.session_id:
             return {"error": "No active ACP session"}
 
         pid = self._next_id()
@@ -411,13 +500,15 @@ class ACPClient:
         self.response_chunks[pid] = ""
 
         _t0 = time.perf_counter()
-        result = self._send_request("session/prompt", {
-            "sessionId": self.session_id,
-            "prompt": [{"type": "text", "text": text}]
-        }, timeout=timeout)
-
-        response_text = self.response_chunks.pop(pid, "")
-        self._current_prompt_id = None
+        try:
+            result = self._send_request("session/prompt", {
+                "sessionId": self.session_id,
+                "prompt": [{"type": "text", "text": text}]
+            }, timeout=timeout)
+        finally:
+            response_text = self.response_chunks.pop(pid, "")
+            if self._current_prompt_id == pid:
+                self._current_prompt_id = None
         _ms = round((time.perf_counter() - _t0) * 1000.0, 1)
 
         if result and isinstance(result, dict):
@@ -438,11 +529,11 @@ class ACPClient:
         return {"text": response_text, "stop_reason": "end_turn"}
 
     def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120):
-        """Send a text + image prompt and return the accumulated response text.
+        """Send a text + image prompt (serialized)."""
+        with self._prompt_lock:
+            return self._prompt_with_image_impl(text, image_b64, mime, timeout)
 
-        Uses the ACP content-block image type (the agent advertised
-        promptCapabilities.image=true). image_b64 is base64 with no data: prefix.
-        """
+    def _prompt_with_image_impl(self, text, image_b64, mime="image/jpeg", timeout=120):
         if not self.session_id:
             return {"error": "No active ACP session"}
 

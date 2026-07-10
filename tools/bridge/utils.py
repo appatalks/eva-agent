@@ -1,6 +1,7 @@
 """Bridge domain: utils."""
 
 import copy
+import datetime
 import json
 import os
 import re
@@ -12,11 +13,11 @@ import urllib.parse
 from bridge import config as _cfg
 from bridge import state as _st
 from bridge.cron import _push_notification
+from bridge.sensitive import redact_credentials
 
 _HTTP_CONTENT_TYPE_RE = _cfg.HTTP_CONTENT_TYPE_RE
 _LMSTUDIO_ALLOWED_PORTS = _cfg.LMSTUDIO_ALLOWED_PORTS
 _MCP_CONFIG_CACHE_PATH = _cfg.MCP_CONFIG_CACHE_PATH
-_MCP_SECRET_ENV_MARKERS = ("TOKEN", "KEY", "SECRET", "PAT", "PASSWORD", "CREDENTIAL")
 
 def _env_truthy(name):
     """Return True when an environment flag uses the shared truthy form."""
@@ -79,6 +80,8 @@ def _validate_lmstudio_base_url(raw):
     host = (parsed.hostname or "").lower()
     if not _is_local_or_private(host):
         return "", "lmstudio_base_url must point at localhost or a private network address"
+    if _st.egress_mode == "offline" and host not in ("localhost", "127.0.0.1", "::1"):
+        return "", "offline mode requires a loopback LM Studio address"
 
     try:
         port = parsed.port
@@ -112,15 +115,38 @@ def _sanitize_mcp_for_persist(mcp_servers):
         if isinstance(env, dict):
             cleaned = {}
             for k, v in env.items():
-                upper = str(k).upper()
+                if not isinstance(k, str):
+                    continue
+                if k == "_useGitHubPAT":
+                    if v is True:
+                        cleaned[k] = True
+                    continue
                 if k.startswith("_"):
-                    cleaned[k] = v  # internal flag, not a secret value
-                elif any(marker in upper for marker in _MCP_SECRET_ENV_MARKERS):
+                    continue
+                if _cfg.is_sensitive_env_name(k):
                     continue  # drop tokens/keys/secrets
-                else:
-                    cleaned[k] = v
+                if not isinstance(v, (str, int, float, bool)) or v is None:
+                    continue
+                if redact_credentials(k) != k or redact_credentials(v) != v:
+                    continue
+                if (
+                    isinstance(v, str)
+                    and len(v.strip()) >= 32
+                    and re.fullmatch(r"[A-Za-z0-9_+/=.-]+", v.strip())
+                ):
+                    continue
+                cleaned[k] = v
             safe_srv["env"] = cleaned
-        safe[srv_name] = safe_srv
+        safe_name = redact_credentials(str(srv_name))
+        redacted_srv = redact_credentials(safe_srv)
+        if (
+            isinstance(redacted_srv, dict)
+            and isinstance(redacted_srv.get("env"), dict)
+            and isinstance(env, dict)
+            and env.get("_useGitHubPAT") is True
+        ):
+            redacted_srv["env"]["_useGitHubPAT"] = True
+        safe[safe_name] = redacted_srv
     return safe
 
 
@@ -145,7 +171,10 @@ def _load_persisted_mcp_config():
             with open(_MCP_CONFIG_CACHE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                return data
+                safe = _sanitize_mcp_for_persist(data)
+                if safe != data:
+                    _persist_mcp_config(safe)
+                return safe
     except (OSError, json.JSONDecodeError) as exc:
         print(f"[Bridge] Could not load persisted MCP config: {exc}", file=sys.stderr)
     return {}
@@ -228,13 +257,20 @@ def _subagent_worker(task_id, prompt, label):
     try:
         if not _st.acp_client or not _st.acp_client.alive:
             raise RuntimeError("ACP not available")
-        messages = [{"role": "user", "content": f"[Subagent task: {label}] {prompt}"}]
-        result = _st.acp_client.send_prompt(messages)
+        prompt_text = f"[Subagent task: {label}] {prompt}"
+        result = _st.acp_client.prompt(prompt_text)
+        response_text = ""
+        if isinstance(result, dict):
+            if "error" in result:
+                raise RuntimeError(str(result["error"]))
+            response_text = result.get("text", "")
+        else:
+            response_text = str(result or "")
         with _st.subagent_lock:
             task["status"] = "done"
-            task["result"] = str(result or "")[:4000]
+            task["result"] = response_text[:4000]
             task["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        _push_notification(f"Subagent done: {label}", str(result or "")[:300], channel="chat")
+        _push_notification(f"Subagent done: {label}", response_text[:300], channel="chat")
     except Exception as e:
         with _st.subagent_lock:
             task["status"] = "error"
@@ -279,24 +315,11 @@ def _classify_request_type(msg_lower):
     return "general"
 _MEMORY_TABLES = _cfg.MEMORY_TABLES
 
-# Injected into tool-active ACP prompts so Eva persists durable facts herself.
-# The model decides salience (not regex), and writes via the kusto_ingest_inline MCP tool.
 _MEMORY_CAPTURE_DIRECTIVE = (
-    "\n\n[Memory Capture — act before answering]\n"
-    "If this message states a durable fact about the user (preferences, plans, relationships, "
-    "possessions, identity, or a list such as a music playlist), OR the user asks you to "
-    "remember/save/note something, you MUST persist it first by calling the kusto_ingest_inline tool.\n"
-    "Call it with table=\"Knowledge\" and one row object per fact, using exactly these columns:\n"
-    "  Timestamp = current UTC time in ISO-8601 (e.g. 2026-06-02T12:00:00Z)\n"
-    "  Entity = \"User\" for facts about the user; otherwise the proper-noun subject\n"
-    "  Relation = a short snake_case key (e.g. youtube_music_playlist, favorite_song, upcoming_trip)\n"
-    "  Value = the concrete content; for a list, a single comma-separated string of the items\n"
-    "  Confidence = 0.85 when the user stated it directly\n"
-    "  Source = \"learned\"\n"
-    "  Decay = 0.01\n"
-    "Split distinct facts into separate rows. Do NOT save greetings, one-off questions, or "
-    "ephemeral chit-chat. If nothing durable was shared, do not call the tool. "
-    "After saving, briefly confirm what you stored so the user knows it persisted."
+    "\n\n[Memory Capture]\n"
+    "Do not call database ingest or management tools to save memory. The bridge's "
+    "authenticated event-first turn finalizer extracts evidence-linked provisional facts "
+    "and commits them after the response. Never claim a fact was stored before finalization."
 )
 _GOAL_CATEGORIES = _cfg.GOAL_CATEGORIES
 _GOAL_STATUSES = _cfg.GOAL_STATUSES

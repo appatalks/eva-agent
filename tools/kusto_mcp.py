@@ -237,6 +237,7 @@ class KustoMCPServer:
             }
         }
     ]
+    TOOLS = [tool for tool in TOOLS if tool.get("name") != "kusto_ingest_inline"]
 
     def __init__(self):
         self.cluster_url = os.environ.get("KUSTO_CLUSTER_URL", "")
@@ -489,6 +490,8 @@ class KustoMCPServer:
 
         # Detect management commands (.show, .create, etc.)
         is_mgmt = query.strip().startswith(".")
+        if is_mgmt and not query.strip().lower().startswith(".show"):
+            return "Error: mutating Kusto management commands are disabled by Eva's event-first policy."
         return self._kusto_query(cluster_url, database, query, is_mgmt=is_mgmt)
 
     def _tool_show_tables(self, args):
@@ -526,6 +529,8 @@ class KustoMCPServer:
         return self._kusto_query(cluster_url, database, f"{table} | take {count}")
 
     def _tool_ingest_inline(self, args):
+        return "Error: generic MCP writes are disabled; use Eva's authenticated event-first mutation APIs."
+        """Legacy implementation retained below for source compatibility, unreachable by policy."""
         """Ingest data into a Kusto table using .ingest inline."""
         cluster_url, err = self._resolve_cluster(args)
         if err:

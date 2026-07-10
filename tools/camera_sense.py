@@ -32,6 +32,8 @@ import signal
 import threading
 import subprocess
 
+from bridge import config as _bridge_config
+
 _CAM_DIR = os.path.expanduser("~/.config/eva-standalone/camera")
 _STATE_PATH = os.path.join(_CAM_DIR, "state.json")
 _FRAME_PATH = os.path.join(_CAM_DIR, "frame.jpg")
@@ -106,6 +108,7 @@ def start(device=None):
             [sys.executable, os.path.abspath(__file__),
              "--worker", "--device", str(dev), "--dir", _CAM_DIR],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=_bridge_config.child_process_env(),
         )
         _proc_device = dev
         return _read_status()

@@ -11,16 +11,20 @@ import uuid
 from bridge import config as _cfg
 from bridge import state as _st
 from bridge.kusto import (_kusto_query_direct, _kusto_ingest_direct,
-    _get_kusto_config, _ensure_kusto_token, _get_table_columns)
+    _get_kusto_config, _ensure_kusto_token, _get_table_columns,
+    _canonical_kusto_ingest_string)
 from bridge.memory import (_memory_query, _memory_ingest,
     _get_sqlite_mem, _resolve_memory_backend)
 from bridge.cognition import _enable_cognition
+from bridge.normalization import latest_row_sql
+from bridge.sensitive import redact_credentials
 from bridge.cron import _load_cron_tasks, _cron_tick
 from bridge.alerts import (_load_alerts, _save_alerts, _alert_cooldown_elapsed,
     _alert_build_prompt, _alert_salience, _alert_clip, _notify_enqueue)
 
 _BG_ACTIVITY_COLUMNS = _cfg.BG_ACTIVITY_COLUMNS
 _BG_JOB_ALERT_WATCH = _cfg.BG_JOB_ALERT_WATCH
+_BG_JOB_ADX_PROJECTION = _cfg.BG_JOB_ADX_PROJECTION
 _BG_JOB_DAILY_DIGEST = _cfg.BG_JOB_DAILY_DIGEST
 _BG_JOB_EMOTION_DRIFT = _cfg.BG_JOB_EMOTION_DRIFT
 _BG_JOB_GOAL_CHECKIN = _cfg.BG_JOB_GOAL_CHECKIN
@@ -40,6 +44,7 @@ _BG_JOBS_ENABLED = {
     _BG_JOB_PROACTIVE_BRIEFING: True, _BG_JOB_MARKET_SNAPSHOT: True,
     _BG_JOB_SEC_FILINGS: True, _BG_JOB_SPACE_WEATHER: True,
     _BG_JOB_RESEARCH_DEEPDIVE: True, _BG_JOB_ALERT_WATCH: True,
+    _BG_JOB_ADX_PROJECTION: _cfg.env_truthy("EVA_ADX_PROJECTION"),
 }
 _BG_PROPOSALS_LATEST_QUERY = (
     "BackgroundProposals "
@@ -76,6 +81,17 @@ def _to_utc_iso(value):
     if active_value.tzinfo is None:
         active_value = active_value.replace(tzinfo=datetime.timezone.utc)
     return active_value.astimezone(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _proposal_transition_iso():
+    """Return a strictly increasing UTC key for proposal append versions."""
+    with _st.proposal_transition_lock:
+        now = _utc_now()
+        prior = _st.proposal_last_transition_at
+        if prior is not None and now <= prior:
+            now = prior + datetime.timedelta(microseconds=1)
+        _st.proposal_last_transition_at = now
+        return now.astimezone(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 
@@ -170,10 +186,22 @@ def _record_background_activity(cluster, database, tick_id, started_at, ended_at
     }
     wrote = False
     backend = _resolve_memory_backend()
-    if backend == "sqlite":
+    try:
+        from bridge.finalize import mutate_event
         mem = _get_sqlite_mem()
-        wrote = mem.ingest("BackgroundActivity", _BG_ACTIVITY_COLUMNS, [row])
-    elif cluster and database and _st.kusto_token_cache:
+        mutate_event(
+            mem, mem.event_repository(), stream_id=f"background:activity:{tick_id}",
+            event_type="background.activity_recorded", payload=row,
+            actor_type="background", actor_id="eva-background", origin="background",
+            trust=1.0, sensitivity="normal", consent_scope="local_only",
+            idempotency_key=f"background-activity:{tick_id}:{status}:{row['EndedAt']}",
+            legacy_table="BackgroundActivity", legacy_columns=_BG_ACTIVITY_COLUMNS,
+            legacy_row=row, projection_name="background_activity",
+        )
+        wrote = True
+    except Exception as exc:
+        print(f"[Background] Activity event mutation failed: {exc}")
+    if wrote and backend == "kusto" and cluster and database and _st.kusto_token_cache:
         wrote = _kusto_ingest_direct(cluster, database, "BackgroundActivity", _BG_ACTIVITY_COLUMNS, [row])
     error_text = row["Notes"] if status == "failed" else ""
     if status == "failed" and not wrote:
@@ -267,10 +295,30 @@ def _build_background_summary(conversation_rows):
 
 def _write_background_proposal(cluster, database, proposal_row):
     backend = _resolve_memory_backend()
-    if backend == "sqlite":
-        mem = _get_sqlite_mem()
-        return mem.ingest("BackgroundProposals", _BG_PROPOSAL_COLUMNS, [proposal_row])
-    return _kusto_ingest_direct(cluster, database, "BackgroundProposals", _BG_PROPOSAL_COLUMNS, [proposal_row])
+    from bridge.finalize import mutate_event
+    safe_row = redact_credentials(proposal_row)
+    mem = _get_sqlite_mem()
+    try:
+        mutate_event(
+            mem, mem.event_repository(),
+            stream_id=f"background:proposal:{safe_row.get('ProposalId', '')}",
+            event_type="background.proposal_recorded", payload=safe_row,
+            actor_type="background", actor_id=str(safe_row.get("ReviewedBy") or "eva-background"),
+            origin="background", trust=1.0, sensitivity="private",
+            consent_scope="cloud_allowed" if backend == "kusto" and _st.egress_mode == "cloud" else "local_only",
+            idempotency_key=(
+                f"background-proposal:{safe_row.get('ProposalId','')}:"
+                f"{safe_row.get('Status','')}:{safe_row.get('ReviewedAt') or safe_row.get('CreatedAt','')}"
+            ),
+            legacy_table="BackgroundProposals", legacy_columns=_BG_PROPOSAL_COLUMNS,
+            legacy_row=safe_row, projection_name="background_proposals",
+        )
+    except Exception as exc:
+        print(f"[Background] Proposal event mutation failed: {exc}")
+        return False
+    if backend == "kusto":
+        return _kusto_ingest_direct(cluster, database, "BackgroundProposals", _BG_PROPOSAL_COLUMNS, [safe_row])
+    return True
 
 
 
@@ -282,20 +330,19 @@ def _background_memory_summary_exists(cluster, database, summary_row):
     backend = _resolve_memory_backend()
     if backend == "sqlite":
         mem = _get_sqlite_mem()
-        safe_period = _safe_kusto_string(summary_row.get("Period"))
-        safe_summary = _safe_kusto_string(summary_row.get("Summary"))
         rows = mem.query(
-            f"SELECT 1 FROM MemorySummaries WHERE Period = '{safe_period}' "
-            f"AND Timestamp = '{timestamp_iso}' AND Summary = '{safe_summary}' LIMIT 1"
+            "SELECT 1 FROM MemorySummaries WHERE Period = ? "
+            "AND Timestamp = ? AND Summary = ? LIMIT 1",
+            (str(summary_row.get("Period") or ""), timestamp_iso, str(summary_row.get("Summary") or "")),
         )
         if rows is None:
             return False, "MemorySummaries lookup failed"
         return bool(rows), ""
     query = (
         "MemorySummaries\n"
-        f"| where Period == '{_safe_kusto_string(summary_row.get('Period'))}'\n"
+        f"| where Period == '{_safe_kusto_string(_canonical_kusto_ingest_string(summary_row.get('Period')))}'\n"
         f"| where Timestamp == datetime('{timestamp_iso}')\n"
-        f"| where Summary == '{_safe_kusto_string(summary_row.get('Summary'))}'\n"
+        f"| where Summary == '{_safe_kusto_string(_canonical_kusto_ingest_string(summary_row.get('Summary')))}'\n"
         "| take 1"
     )
     rows = _kusto_query_direct(cluster, database, query)
@@ -305,7 +352,7 @@ def _background_memory_summary_exists(cluster, database, summary_row):
 
 
 
-def _apply_proposal_payload(cluster, database, target_table, payload):
+def _apply_proposal_payload(cluster, database, target_table, payload, mutation_id=""):
     """Apply a background proposal payload to its target table.
 
     Returns (ok, error, note). Used by both the auto-apply path inside a tick
@@ -314,6 +361,11 @@ def _apply_proposal_payload(cluster, database, target_table, payload):
     if not isinstance(payload, dict):
         return False, "proposal payload missing or not an object", ""
     backend = _resolve_memory_backend()
+    from bridge.events import canonical_json, payload_hash
+    from bridge.finalize import mutate_event
+    mutation_key = mutation_id or payload_hash(canonical_json(payload))
+    local_mem = _get_sqlite_mem()
+    local_repo = local_mem.event_repository()
     if target_table == "MemorySummaries":
         summary_row = {
             "Period": str(payload.get("Period", "") or ""),
@@ -326,17 +378,31 @@ def _apply_proposal_payload(cluster, database, target_table, payload):
         if not parsed_timestamp:
             return False, "Proposal payload Timestamp must be a valid datetime", ""
         summary_row["Timestamp"] = _to_utc_iso(parsed_timestamp)
-        summary_exists, error = _background_memory_summary_exists(cluster, database, summary_row)
-        if error:
-            return False, error, ""
-        if not summary_exists:
-            if backend == "sqlite":
-                mem = _get_sqlite_mem()
-                if not mem.ingest("MemorySummaries", ["Period", "Summary", "Timestamp"], [summary_row]):
-                    return False, "MemorySummaries write failed", ""
-            else:
-                if not _kusto_ingest_direct(cluster, database, "MemorySummaries", ["Period", "Summary", "Timestamp"], [summary_row]):
-                    return False, "MemorySummaries write failed", ""
+        summary_row = redact_credentials(summary_row)
+        try:
+            mutate_event(
+                local_mem, local_repo,
+                stream_id=f"background:summary:{summary_row['Period']}",
+                event_type="background.memory_summary_applied", payload=summary_row,
+                actor_type="background", actor_id="eva-background", origin="background",
+                trust=0.6, sensitivity="private",
+                consent_scope="cloud_allowed" if backend == "kusto" and _st.egress_mode == "cloud" else "local_only",
+                idempotency_key=f"background:{mutation_key}:MemorySummaries",
+                legacy_table="MemorySummaries",
+                legacy_columns=["Period", "Summary", "Timestamp"],
+                legacy_row=summary_row, projection_name="memory_summaries",
+            )
+        except Exception as exc:
+            return False, f"Memory summary event mutation failed: {exc}", ""
+        if backend == "kusto":
+            summary_exists, error = _background_memory_summary_exists(cluster, database, summary_row)
+            if error:
+                return False, error, ""
+            if not summary_exists and not _kusto_ingest_direct(
+                cluster, database, "MemorySummaries",
+                ["Period", "Summary", "Timestamp"], [summary_row]
+            ):
+                return False, "MemorySummaries ADX projection failed", ""
         return True, "", "applied to MemorySummaries"
     if target_table == "Reflections":
         observation = str(payload.get("Observation", "") or "").strip()
@@ -354,20 +420,48 @@ def _apply_proposal_payload(cluster, database, target_table, payload):
             "ActionTaken": str(payload.get("ActionTaken", "") or "")[:500],
             "Effectiveness": effectiveness,
         }
-        if backend == "sqlite":
-            mem = _get_sqlite_mem()
-            if not mem.ingest("Reflections", ["Timestamp", "Trigger", "Observation", "ActionTaken", "Effectiveness"], [reflection_row]):
-                return False, "Reflections write failed", ""
-        else:
-            if not _kusto_ingest_direct(cluster, database, "Reflections", ["Timestamp", "Trigger", "Observation", "ActionTaken", "Effectiveness"], [reflection_row]):
-                return False, "Reflections write failed", ""
+        reflection_row = redact_credentials(reflection_row)
+        try:
+            mutate_event(
+                local_mem, local_repo,
+                stream_id=f"background:reflection:{str(payload.get('Trigger', 'general'))[:100]}",
+                event_type="background.reflection_applied", payload=reflection_row,
+                actor_type="background", actor_id="eva-background", origin="background",
+                trust=0.5, sensitivity="private",
+                consent_scope="cloud_allowed" if backend == "kusto" and _st.egress_mode == "cloud" else "local_only",
+                idempotency_key=f"background:{mutation_key}:Reflections",
+                legacy_table="Reflections",
+                legacy_columns=["Timestamp", "Trigger", "Observation", "ActionTaken", "Effectiveness"],
+                legacy_row=reflection_row, projection_name="reflections",
+            )
+        except Exception as exc:
+            return False, f"Reflection event mutation failed: {exc}", ""
+        if backend == "kusto":
+            canonical_trigger = _canonical_kusto_ingest_string(reflection_row["Trigger"])
+            canonical_observation = _canonical_kusto_ingest_string(reflection_row["Observation"])
+            canonical_action = _canonical_kusto_ingest_string(reflection_row["ActionTaken"])
+            exists_query = (
+                "Reflections\n"
+                f"| where Timestamp == datetime('{reflection_row['Timestamp']}')\n"
+                f"| where Trigger == '{_safe_kusto_string(canonical_trigger)}'\n"
+                f"| where Observation == '{_safe_kusto_string(canonical_observation)}'\n"
+                f"| where ActionTaken == '{_safe_kusto_string(canonical_action)}'\n"
+                f"| where todouble(Effectiveness) == {reflection_row['Effectiveness']}\n"
+                "| take 1"
+            )
+            existing = _kusto_query_direct(cluster, database, exists_query)
+            if existing is None:
+                return False, "Reflections idempotency lookup failed", ""
+            if not existing:
+                if not _kusto_ingest_direct(cluster, database, "Reflections", ["Timestamp", "Trigger", "Observation", "ActionTaken", "Effectiveness"], [reflection_row]):
+                    return False, "Reflections ADX projection failed", ""
         return True, "", "applied to Reflections"
     return False, "Unsupported proposal target table", ""
 
 
 
 def _create_background_proposal_row(job_type, target_table, payload, window_start, window_end, notes, status="pending"):
-    now_iso = _to_utc_iso(_utc_now())
+    now_iso = _proposal_transition_iso()
     return {
         "ProposalId": "bgp-" + str(uuid.uuid4()),
         "CreatedAt": now_iso,
@@ -389,13 +483,16 @@ def _existing_goal_checkin_ids(cluster, database):
     backend = _resolve_memory_backend()
     if backend == "sqlite":
         mem = _get_sqlite_mem()
-        safe_jt = _BG_JOB_GOAL_CHECKIN.replace("'", "''")
         rows = mem.query(
-            f"SELECT Payload FROM BackgroundProposals WHERE Status = 'pending' "
-            f"AND JobType = '{safe_jt}' LIMIT 100"
+            "SELECT bp.Payload FROM BackgroundProposals bp "
+            "WHERE bp.rowid = (SELECT newer.rowid FROM BackgroundProposals newer "
+            "WHERE newer.ProposalId = bp.ProposalId "
+            "ORDER BY COALESCE(NULLIF(newer.ReviewedAt,''), newer.CreatedAt) DESC, newer.rowid DESC LIMIT 1) "
+            "AND bp.Status IN ('pending', 'applying', 'approved') AND bp.JobType = ? LIMIT 100",
+            (_BG_JOB_GOAL_CHECKIN,),
         ) or []
     else:
-        query = _BG_PROPOSALS_LATEST_QUERY + f" | where Status == 'pending' | where JobType == '{_BG_JOB_GOAL_CHECKIN}' | take 100"
+        query = _BG_PROPOSALS_LATEST_QUERY + f" | where Status in ('pending', 'applying', 'approved') | where JobType == '{_BG_JOB_GOAL_CHECKIN}' | take 100"
         rows = _kusto_query_direct(cluster, database, query) or []
     ids = set()
     for row in rows:
@@ -445,7 +542,10 @@ def _bg_goals_query(ctx):
     backend = ctx.get("backend", "kusto")
     if backend == "sqlite":
         mem = _get_sqlite_mem()
-        return mem.query("SELECT * FROM Goals ORDER BY Priority DESC, UpdatedAt DESC")
+        return mem.query(
+            latest_row_sql("Goals", "GoalId", "UpdatedAt")
+            + " ORDER BY Priority DESC, UpdatedAt DESC"
+        )
     return _kusto_query_direct(ctx["cluster"], ctx["database"], _GOALS_LATEST_QUERY)
 
 
@@ -476,8 +576,8 @@ def _job_goal_checkin(ctx):
     if backend == "sqlite":
         mem = _get_sqlite_mem()
         goal_rows = mem.query(
-            "SELECT * FROM Goals WHERE Status = 'active' OR Status = 'paused' "
-            "ORDER BY Priority DESC, UpdatedAt DESC"
+            latest_row_sql("Goals", "GoalId", "UpdatedAt")
+            + " AND Status IN ('active','paused') ORDER BY Priority DESC, UpdatedAt DESC"
         )
     else:
         goal_rows = _kusto_query_direct(ctx["cluster"], ctx["database"], _GOALS_LATEST_QUERY)
@@ -547,7 +647,10 @@ def _job_daily_digest(ctx):
     if not conversation_rows:
         return [], "no conversations for " + period
     if backend == "sqlite":
-        goal_rows = mem.query("SELECT * FROM Goals ORDER BY Priority DESC, UpdatedAt DESC") or []
+        goal_rows = mem.query(
+            latest_row_sql("Goals", "GoalId", "UpdatedAt")
+            + " ORDER BY Priority DESC, UpdatedAt DESC"
+        ) or []
     else:
         goal_rows = _kusto_query_direct(cluster, database, _GOALS_LATEST_QUERY) or []
     digest_text = _build_daily_digest(conversation_rows, goal_rows, period)
@@ -586,13 +689,16 @@ def _pending_proposal_exists(cluster, database, job_type):
     backend = _resolve_memory_backend()
     if backend == "sqlite":
         mem = _get_sqlite_mem()
-        safe_jt = job_type.replace("'", "''")
         rows = mem.query(
-            f"SELECT 1 FROM BackgroundProposals WHERE Status = 'pending' "
-            f"AND JobType = '{safe_jt}' LIMIT 1"
+            "SELECT 1 FROM BackgroundProposals bp "
+            "WHERE bp.rowid = (SELECT newer.rowid FROM BackgroundProposals newer "
+            "WHERE newer.ProposalId = bp.ProposalId "
+            "ORDER BY COALESCE(NULLIF(newer.ReviewedAt,''), newer.CreatedAt) DESC, newer.rowid DESC LIMIT 1) "
+            "AND bp.Status IN ('pending', 'applying', 'approved') AND bp.JobType = ? LIMIT 1",
+            (job_type,),
         )
         return bool(rows)
-    query = _BG_PROPOSALS_LATEST_QUERY + f" | where Status == 'pending' | where JobType == '{job_type}' | take 1"
+    query = _BG_PROPOSALS_LATEST_QUERY + f" | where Status in ('pending', 'applying', 'approved') | where JobType == '{job_type}' | take 1"
     rows = _kusto_query_direct(cluster, database, query)
     return bool(rows)
 
@@ -886,7 +992,10 @@ def _job_proactive_briefing(ctx):
             "WHERE Timestamp >= datetime('now', '-3 days') AND Period NOT LIKE 'briefing-%' "
             "ORDER BY Timestamp DESC LIMIT 8"
         ) or []
-        goal_rows = mem.query("SELECT * FROM Goals ORDER BY Priority DESC, UpdatedAt DESC") or []
+        goal_rows = mem.query(
+            latest_row_sql("Goals", "GoalId", "UpdatedAt")
+            + " ORDER BY Priority DESC, UpdatedAt DESC"
+        ) or []
         active = [g for g in goal_rows if str(g.get("Status", "")).lower() == "active"]
         convo = mem.query("SELECT MAX(Timestamp) AS Last FROM Conversations") or []
     else:
@@ -1160,10 +1269,25 @@ def _job_alert_watch(ctx):
     return proposals, f"{fired} alert(s) triggered"
 
 
+def _job_adx_projection(ctx):
+    if _st.egress_mode != "cloud":
+        return [], "ADX projection unavailable for current egress mode"
+    if not _cfg.env_truthy("EVA_ADX_PROJECTION"):
+        return [], "ADX projection disabled"
+    from bridge.adx_projection import project_pending_events
+    mem = _get_sqlite_mem()
+    succeeded, failed = project_pending_events(
+        mem.event_repository(), _kusto_ingest_direct, _get_kusto_config,
+        kusto_query_fn=_kusto_query_direct, limit=20,
+    )
+    return [], f"projected {succeeded}, failed {failed}"
+
+
 # Ordered registry of automation jobs run on each tick. Fast Kusto-only jobs
 # run first; the slower agent-prompt jobs (market, SEC, space weather, research)
 # run last so a single tick stays responsive and can bail if the user returns.
 _BG_JOBS = [
+    (_BG_JOB_ADX_PROJECTION, _job_adx_projection),
     (_BG_JOB_TYPE, _job_memory_consolidation),
     (_BG_JOB_GOAL_CHECKIN, _job_goal_checkin),
     (_BG_JOB_DAILY_DIGEST, _job_daily_digest),
@@ -1259,46 +1383,60 @@ def _run_background_tick(trigger="scheduled"):
             created = 0
             applied = 0
             failed_apply = 0
+            pending_count = 0
             for proposal in proposals:
                 target_table = proposal.get("target_table")
                 payload = proposal.get("payload")
                 notes = proposal.get("notes", "")
-                # Hands-off mode: every proposal is auto-applied regardless of the
-                # job's auto_apply hint. The recent-activity report is the audit
-                # trail, so no proposal sits in a pending state awaiting approval.
-                apply_ok, apply_error, apply_note = _apply_proposal_payload(cluster, database, target_table, payload)
-                if apply_ok:
-                    applied += 1
-                    row = _create_background_proposal_row(job_type, target_table, payload, window_start, window_end, notes + "; auto-applied (" + apply_note + ")", status="applied")
-                    # Surface findings the job flagged for the user (alert rules,
-                    # proactive briefings). Restraint + dedup live in _notify_enqueue.
-                    notify = proposal.get("notify")
-                    if isinstance(notify, dict):
-                        # Coerce salience without treating a legitimate 0.0 as
-                        # missing (a plain `or 0.5` would mask zero-salience).
-                        try:
-                            _salience = float(notify.get("salience", 0.5))
-                        except (TypeError, ValueError):
-                            _salience = 0.5
-                        _notify_enqueue(
-                            notify.get("title", ""),
-                            notify.get("body", ""),
-                            notify.get("source", job_type),
-                            _salience,
-                            notify.get("channels") or ["chat"],
-                            settings=notify.get("settings"),
-                        )
+                should_auto_apply = proposal.get("auto_apply", False)
+                if should_auto_apply:
+                    row = _create_background_proposal_row(
+                        job_type, target_table, payload, window_start, window_end,
+                        notes, status="applying"
+                    )
+                    # Auto-apply: write the result immediately
+                    apply_ok, apply_error, apply_note = _apply_proposal_payload(
+                        cluster, database, target_table, payload,
+                        mutation_id=row["ProposalId"],
+                    )
+                    if apply_ok:
+                        applied += 1
+                        row["Status"] = "applied"
+                        row["Notes"] = (notes + "; auto-applied (" + apply_note + ")")[:500]
+                        # Surface findings the job flagged for the user (alert rules,
+                        # proactive briefings). Restraint + dedup live in _notify_enqueue.
+                        notify = proposal.get("notify")
+                        if isinstance(notify, dict):
+                            try:
+                                _salience = float(notify.get("salience", 0.5))
+                            except (TypeError, ValueError):
+                                _salience = 0.5
+                            _notify_enqueue(
+                                notify.get("title", ""),
+                                notify.get("body", ""),
+                                notify.get("source", job_type),
+                                _salience,
+                                notify.get("channels") or ["chat"],
+                                settings=notify.get("settings"),
+                            )
+                    else:
+                        failed_apply += 1
+                        row["Status"] = "failed"
+                        row["Notes"] = (notes + "; auto-apply failed: " + apply_error)[:500]
+                    row["ReviewedAt"] = _proposal_transition_iso()
+                    row["ReviewedBy"] = "auto"
                 else:
-                    failed_apply += 1
-                    row = _create_background_proposal_row(job_type, target_table, payload, window_start, window_end, notes + "; auto-apply failed: " + apply_error, status="failed")
-                row["ReviewedAt"] = _to_utc_iso(_utc_now())
-                row["ReviewedBy"] = "auto"
+                    # Pending: create proposal for human review, do NOT apply
+                    pending_count += 1
+                    row = _create_background_proposal_row(job_type, target_table, payload, window_start, window_end, notes, status="pending")
                 if _write_background_proposal(cluster, database, row):
                     created += 1
 
             summary_note = note_prefix + (job_note or "done")
             if applied:
                 summary_note += f"; auto-applied {applied}"
+            if pending_count:
+                summary_note += f"; {pending_count} pending review"
             if failed_apply:
                 summary_note += f"; {failed_apply} auto-apply failure(s)"
             status = "succeeded" if created else "failed"
@@ -1394,7 +1532,7 @@ def _background_proposal_update_row(current, status, reviewed_by, notes):
     if payload is not None:
         row["Payload"] = payload
     row["Status"] = status
-    row["ReviewedAt"] = _to_utc_iso(_utc_now())
+    row["ReviewedAt"] = _proposal_transition_iso()
     row["ReviewedBy"] = reviewed_by
     row["Notes"] = notes or row.get("Notes", "")
     return row

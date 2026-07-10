@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from bridge import config as _cfg
 from bridge import state as _st
 from bridge.telemetry import _telemetry_emit
@@ -31,6 +32,9 @@ _SIGNAL_SEND_TIMEOUT = _cfg.SIGNAL_SEND_TIMEOUT
 def _signal_send(message):
     """Send a text message via signal-cli. Returns True on success.
     Reads sender/recipient from alerts settings (UI), falling back to env vars."""
+    if _st.egress_mode != "cloud":
+        print(f"[Signal] Skipped: disabled by EVA_EGRESS_MODE={_st.egress_mode}", file=sys.stderr)
+        return False
     settings = _load_alerts().get("settings", {})
     sender = settings.get("signal_sender") or _SIGNAL_SENDER
     recipient = settings.get("signal_recipient") or _SIGNAL_RECIPIENT
@@ -42,7 +46,7 @@ def _signal_send(message):
             [_SIGNAL_CLI_PATH, "-u", sender, "send",
              "-m", message, recipient],
             capture_output=True, text=True, timeout=_SIGNAL_SEND_TIMEOUT,
-            check=True,
+            check=True, env=_cfg.child_process_env(),
         )
         print(f"[Signal] Sent to {recipient[:4]}...")
         return True

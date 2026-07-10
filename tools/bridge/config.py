@@ -9,6 +9,7 @@ a future phase extracts it into ``state.py``.
 import datetime
 import os
 import re
+import sys
 
 
 def env_truthy(name):
@@ -33,6 +34,9 @@ def to_utc_iso(value):
 
 
 # ── Filesystem paths ────────────────────────────────────────────────
+BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
+TOOLS_DIR = os.path.dirname(BRIDGE_DIR)
+PROJECT_ROOT = os.path.dirname(TOOLS_DIR)
 EVA_CONFIG_DIR = os.path.expanduser("~/.config/eva-standalone")
 ARTIFACTS_DIR = os.path.join(EVA_CONFIG_DIR, "artifacts")
 KUSTO_CLUSTER_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "kusto_cluster.txt")
@@ -47,6 +51,84 @@ TELEMETRY_PATH = os.path.join(EVA_CONFIG_DIR, "telemetry.jsonl")
 # ── Networking / validation ─────────────────────────────────────────
 LMSTUDIO_ALLOWED_PORTS = {1234, 8000, 8080, 11434}
 HTTP_CONTENT_TYPE_RE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
+
+# ── Request limits ──────────────────────────────────────────────────
+MAX_JSON_BODY_BYTES = 1 * 1024 * 1024  # 1 MiB
+
+# ── Egress mode ─────────────────────────────────────────────────────
+EGRESS_MODE_VALUES = ("offline", "local-network", "cloud")
+REQUEST_ENVELOPE_FIELDS = {
+    "request_id", "correlation_id", "session_id", "turn_id",
+    "actor", "origin", "installation_id", "user_id",
+}
+SENSITIVE_ENV_MARKERS = {
+    "TOKEN", "TOKENS", "KEY", "KEYS", "SECRET", "SECRETS", "PAT",
+    "PASSWORD", "PASSWORDS", "CREDENTIAL", "CREDENTIALS", "AUTH",
+    "AUTHORIZATION",
+}
+SENSITIVE_ENV_SUFFIXES = (
+    "APIKEY", "ACCESSKEY", "PRIVATEKEY", "TOKEN", "SECRET", "PASSWORD",
+    "CREDENTIAL", "CREDENTIALS", "AUTH", "AUTHORIZATION", "PAT",
+)
+
+
+def is_sensitive_env_name(name):
+    upper = str(name or "").upper()
+    if upper == "EVA_BRIDGE_TOKEN":
+        return True
+    parts = {part for part in re.split(r"[^A-Z0-9]+", upper) if part}
+    if parts.intersection(SENSITIVE_ENV_MARKERS):
+        return True
+    compact = re.sub(r"[^A-Z0-9]", "", upper)
+    return compact != "PATH" and any(compact.endswith(suffix) for suffix in SENSITIVE_ENV_SUFFIXES)
+
+
+def child_process_env(explicit=None):
+    """Build a child environment without ambient credentials.
+
+    Callers may add credentials explicitly when a particular configured child
+    requires them. The bridge bearer token is never permitted across a child
+    boundary.
+    """
+    result = {}
+    for name, value in os.environ.items():
+        if is_sensitive_env_name(name):
+            continue
+        result[name] = value
+    for name, value in (explicit or {}).items():
+        if name != "EVA_BRIDGE_TOKEN":
+            result[str(name)] = str(value)
+    return result
+
+
+def mcp_config_for_egress(mcp_config, mode):
+    """Return the MCP subset permitted by an egress policy.
+
+    Cloud mode preserves configured servers. Offline and local-network modes
+    are deliberately fail-closed: only Eva's bundled SQLite MCP process is
+    allowed. This prevents persisted or HTTP-supplied commands from bypassing
+    the selected network boundary.
+    """
+    if mode == "cloud":
+        return dict(mcp_config or {}), []
+
+    allowed = {}
+    rejected = []
+    sqlite_mcp = os.path.realpath(os.path.join(TOOLS_DIR, "sqlite_mcp.py"))
+    python_executable = os.path.realpath(sys.executable)
+    for name, raw in (mcp_config or {}).items():
+        cfg = raw if isinstance(raw, dict) else {}
+        command = str(cfg.get("command", "") or "")
+        args = cfg.get("args") if isinstance(cfg.get("args"), list) else []
+        first_arg = os.path.realpath(os.path.expanduser(str(args[0]))) if args else ""
+        command_path = os.path.realpath(os.path.expanduser(command)) if command else ""
+        env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
+        safe_env = {"EVA_MEMORY_DB": str(env["EVA_MEMORY_DB"])} if "EVA_MEMORY_DB" in env else {}
+        if command_path == python_executable and len(args) == 1 and first_arg == sqlite_mcp:
+            allowed[str(name)] = {"command": sys.executable, "args": [sqlite_mcp], "env": safe_env}
+        else:
+            rejected.append(str(name))
+    return allowed, rejected
 
 # ── ACP pool ────────────────────────────────────────────────────────
 ACP_POOL_MAX = 4
@@ -108,6 +190,7 @@ BG_JOB_SEC_FILINGS = "sec_filing_watch"
 BG_JOB_SPACE_WEATHER = "space_weather_alert"
 BG_JOB_RESEARCH_DEEPDIVE = "research_deepdive"
 BG_JOB_ALERT_WATCH = "alert_watch"
+BG_JOB_ADX_PROJECTION = "adx_projection"
 BG_APPLY_TABLES = {"MemorySummaries", "Reflections"}
 GOAL_STALE_DAYS = 3
 GOAL_CHECKIN_MAX = 2

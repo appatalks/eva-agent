@@ -1,7 +1,14 @@
 // lm-studio.js
 // Function to send data to local OpenAI-like endpoint
 
-function lmsSend() {
+function lmsSend(capturedEnvelope) {
+    capturedEnvelope = capturedEnvelope || ((typeof captureRequestEnvelope === 'function')
+      ? captureRequestEnvelope() : null);
+    function requestIsCurrent() {
+      return !!(capturedEnvelope && typeof isCurrentRequestEnvelope === 'function' &&
+        isCurrentRequestEnvelope(capturedEnvelope));
+    }
+    if (!requestIsCurrent()) return;
     // Remove occurrences of specific syntax from the txtMsg element
     txtMsg.innerHTML = txtMsg.innerHTML.replace(/<div[^>]*>.*<\/div>/g, '');
 
@@ -69,6 +76,7 @@ function lmsSend() {
     } catch (e) {}
 
     Promise.all([_lmsMemoryPromise, _lmsDataPromise]).then(function(results) {
+      if (!requestIsCurrent()) return;
       var _memCtx = results[0];
       var _acpData = results[1];
 
@@ -124,20 +132,23 @@ function lmsSend() {
         fetch(openAIUrl, requestOptions)
                 .then(response => response.ok ? response.json() : Promise.reject(new Error(`Error: ${response.status}`)))
                 .then(async (result) => {
+                  if (!requestIsCurrent()) return;
                         var candidate = (result && result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content) || '';
 
                         // Process [[EVA_ACTION]] blocks (file.download, etc.)
                         // so local models get the same capability execution as AIG.
                         if (typeof Cognition !== 'undefined' && Cognition.executeActions) {
                           try {
-                            var execRes = await Cognition.executeActions(candidate);
+                            var execRes = await Cognition.executeActions(candidate, capturedEnvelope);
+                            if (!requestIsCurrent()) return;
                             candidate = execRes.content;
                           } catch (_) {}
                         }
 
                         // Render via unified renderer
                         const out = document.getElementById("txtOutput");
-                        await renderEvaResponse(candidate, out);
+                        if (!await renderEvaResponse(candidate, out, capturedEnvelope)) return;
+                        if (!requestIsCurrent()) return;
 
                         // Keep the global last-response synced so Auto Speak
                         // and other consumers do not pick up a stale prior turn.
@@ -158,24 +169,19 @@ function lmsSend() {
                             if (audio) audio.setAttribute("autoplay", true);
                         }
 
-                        // --- Cognition: Post-response reflection ---
-                        try {
-                          var _brUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
-                          fetch(_brUrl.replace(/\/+$/, '') + '/v1/memory/reflect', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              user_message: sQuestion.substring(0, 500),
-                              assistant_message: candidate.substring(0, 500),
-                              model: 'lm-studio'
-                            }),
-                            signal: AbortSignal.timeout(5000)
-                          }).catch(function() {});
-                        } catch (e) {}
+                        if (typeof finalizeDirectProviderTurn === 'function') {
+                          await finalizeDirectProviderTurn(sQuestion, candidate, 'lm-studio', capturedEnvelope);
+                            if (!requestIsCurrent()) return;
+                        }
                 })
         .catch(error => {
+                          if (!requestIsCurrent()) return;
             console.error("Error:", error);
             document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + error.message + "<br>\n";
         });
+    }).catch(function(error) {
+      if (!requestIsCurrent()) return;
+      console.error("Error:", error);
+      document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + escapeHtml(error.message || String(error)) + "<br>\n";
     }); // end Promise.all
 }

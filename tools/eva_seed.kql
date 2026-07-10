@@ -244,3 +244,41 @@ skill-open-file,Open File on Desktop,"Open a file using the system's default app
 //
 //    3. Start chatting — Eva will learn and remember!
 // ═══════════════════════════════════════════════════════════════════
+
+// ── Table: MemoryEvents (Phase 1) ─────────────────────────────────
+// Append-only event journal. All memory mutations are recorded here.
+// Since ADX lacks uniqueness constraints, dedup queries use:
+//   | summarize arg_max(RecordedAt, *) by EventId
+.create-merge table MemoryEvents (
+    EventId: string,
+    StreamId: string,
+    StreamVersion: int,
+    EventType: string,
+    SchemaVersion: int,
+    ActorType: string,
+    ActorId: string,
+    Origin: string,
+    OccurredAt: datetime,
+    RecordedAt: datetime,
+    CorrelationId: string,
+    CausationId: string,
+    SessionId: string,
+    TurnId: string,
+    SourceMessageId: string,
+    Trust: real,
+    Sensitivity: string,
+    ConsentScope: string,
+    Payload: dynamic,
+    PayloadHash: string,
+    EventHash: string,
+    IdempotencyKey: string
+)
+
+// ── Table: MemoryProjectionReceipts (Phase 1) ─────────────────────
+// Records which events have been projected to legacy tables or ADX.
+// Dedup: | summarize arg_max(ProjectedAt, *) by EventId, Destination
+.create-merge table MemoryProjectionReceipts (
+    EventId: string,
+    Destination: string,
+    ProjectedAt: datetime
+)

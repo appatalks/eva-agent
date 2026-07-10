@@ -1,8 +1,20 @@
 const { app, BrowserWindow, dialog, ipcMain, session, shell } = require('electron');
+const crypto = require('crypto');
 const http = require('http');
 const net = require('net');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { spawn } = require('child_process');
+const securityPolicy = require('./security-policy');
+const bridgeReadiness = require('./bridge-readiness');
+
+// Per-launch bearer token for bridge auth
+const bridgeToken = crypto.randomBytes(32).toString('base64url');
+const rawEgressMode = String(process.env.EVA_EGRESS_MODE || '').trim().toLowerCase();
+let egressMode = 'cloud';
+let egressModeError = null;
+try { egressMode = securityPolicy.normalizeEgressMode(rawEgressMode); }
+catch (err) { egressModeError = err; }
 
 let bridgeProcess = null;
 let readyBridgeProcess = null;
@@ -14,6 +26,10 @@ let stoppingBridge = false;
 const BRIDGE_READY_TIMEOUT_MS = 60000;
 const BRIDGE_PORT_RETRY_LIMIT = 2;
 const ADDRESS_IN_USE_PATTERN = /Address already in use|EADDRINUSE/i;
+
+function requestAllowedByEgress(rawUrl) {
+  return securityPolicy.requestAllowedByEgress(rawUrl, egressMode);
+}
 
 function clearBridgeStopTimer() {
   if (bridgeStopTimer) {
@@ -132,62 +148,12 @@ function requestBridgeHealth(baseUrl) {
 }
 
 function waitForBridge(baseUrl, childProcess, timeoutMs) {
-  const startedAt = Date.now();
-  return new Promise(function(resolve, reject) {
-    let settled = false;
-
-    function finish(fn, value) {
-      if (settled) return;
-      settled = true;
-      childProcess.off('exit', onExit);
-      childProcess.off('error', onError);
-      childProcess.off('eva-address-in-use', onAddressInUse);
-      fn(value);
-    }
-
-    function onAddressInUse(err) {
-      finish(reject, err);
-    }
-
-    function onError(err) {
-      childProcess.evaSpawnError = err;
-      finish(reject, err);
-    }
-
-    function onExit(code, signal) {
-      if (childProcess.evaAddressInUseError) {
-        finish(reject, childProcess.evaAddressInUseError);
-        return;
-      }
-      finish(reject, new Error('ACP bridge exited before it was ready (' + formatExitDetails(code, signal) + ').'));
-    }
-
-    function poll() {
-      if (settled) return;
-      requestBridgeHealth(baseUrl).then(function(data) {
-        finish(resolve, data);
-      }).catch(function(err) {
-        if (settled) return;
-        if (Date.now() - startedAt >= timeoutMs) {
-          finish(reject, new Error('Timed out waiting for ACP bridge: ' + err.message));
-          return;
-        }
-        setTimeout(poll, 500);
-      });
-    }
-
-    childProcess.on('exit', onExit);
-    childProcess.on('error', onError);
-    childProcess.on('eva-address-in-use', onAddressInUse);
-    if (childProcess.evaSpawnError) {
-      finish(reject, childProcess.evaSpawnError);
-      return;
-    }
-    if (childProcess.evaAddressInUseError) {
-      finish(reject, childProcess.evaAddressInUseError);
-      return;
-    }
-    poll();
+  return bridgeReadiness.waitForVerifiedBridge({
+    baseUrl: baseUrl,
+    childProcess: childProcess,
+    requestHealth: requestBridgeHealth,
+    timeoutMs: timeoutMs,
+    pollIntervalMs: 500
   });
 }
 
@@ -216,8 +182,11 @@ function startBridge(port) {
   const appRoot = getAppRoot();
   const bridgePath = path.join(appRoot, 'tools', 'acp_bridge.py');
   const args = [bridgePath, '--bind', '127.0.0.1', '--port', String(port), '--cwd', appRoot];
+  const readyNonce = crypto.randomBytes(32).toString('base64url');
   const env = Object.assign({}, process.env, {
     EVA_ACP_PORT: String(port),
+    EVA_BRIDGE_TOKEN: bridgeToken,
+    EVA_BRIDGE_READY_NONCE: readyNonce,
     KUSTO_DATABASE_LOCKED: '1',
     PYTHONUNBUFFERED: '1'
   });
@@ -248,15 +217,24 @@ function startBridge(port) {
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let stderrBuffer = '';
+  const proofTracker = bridgeReadiness.createChildProofTracker(child, {
+    token: bridgeToken,
+    nonce: readyNonce,
+    pid: child.pid,
+    host: '127.0.0.1',
+    port: port
+  });
 
   bridgeProcess = child;
   child.evaAwaitingReady = true;
   child.evaClearStderrBuffer = function() {
     stderrBuffer = '';
+    proofTracker.clear();
   };
 
   child.stdout.on('data', function(chunk) {
     process.stdout.write('[eva-acp] ' + chunk.toString());
+    proofTracker.push(chunk);
   });
   child.stderr.on('data', function(chunk) {
     const text = chunk.toString();
@@ -327,6 +305,16 @@ function stopBridge() {
 
 function createWindow(acpBaseUrl) {
   const appRoot = getAppRoot();
+  const trustedDocumentUrl = pathToFileURL(path.join(appRoot, 'index.html')).toString();
+
+  // Enforce offline/local-network below renderer code. Cloud mode preserves
+  // direct provider behavior; restricted modes can only reach permitted hosts.
+  session.defaultSession.webRequest.onBeforeRequest(
+    { urls: ['http://*/*', 'https://*/*'] },
+    function(details, callback) {
+      callback({ cancel: !requestAllowedByEgress(details.url) });
+    }
+  );
 
   // Grant microphone access for Web Speech API (webkitSpeechRecognition).
   // Only allow media permissions for local file:// pages.
@@ -360,7 +348,8 @@ function createWindow(acpBaseUrl) {
       allowRunningInsecureContent: false,
       additionalArguments: [
         '--eva-acp-base-url=' + acpBaseUrl,
-        '--eva-version=' + app.getVersion()
+        '--eva-version=' + app.getVersion(),
+        '--eva-egress-mode=' + egressMode
       ]
     }
   });
@@ -383,32 +372,39 @@ function createWindow(acpBaseUrl) {
   // Open external links (http/https) in the system browser instead of
   // navigating the Electron window away from Eva's UI.
   mainWindow.webContents.on('will-navigate', function(event, url) {
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      // Block localhost /v1/files/ navigation — these are artifact downloads,
-      // not page navigations. Without this, Electron replaces Eva's UI with
-      // raw file content, making the app appear frozen.
-      if (url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost')) {
-        if (url.indexOf('/v1/files/') !== -1) {
-          event.preventDefault();
-          return;
-        }
-        return;
-      }
-      event.preventDefault();
+    if (url === trustedDocumentUrl) return;
+    event.preventDefault();
+    if ((url.startsWith('http://') || url.startsWith('https://')) && requestAllowedByEgress(url)) {
       shell.openExternal(url);
     }
   });
+  mainWindow.webContents.on('will-redirect', function(event, url) {
+    if (url !== trustedDocumentUrl) event.preventDefault();
+  });
   mainWindow.webContents.setWindowOpenHandler(function(details) {
-    if (details.url.startsWith('http://') || details.url.startsWith('https://')) {
+    if ((details.url.startsWith('http://') || details.url.startsWith('https://')) && requestAllowedByEgress(details.url)) {
       shell.openExternal(details.url);
     }
     return { action: 'deny' };
+  });
+
+  // Inject bridge auth token for /v1/* requests to the bridge origin only.
+  // The token never enters renderer memory — Electron main injects it at the
+  // network layer so preload/JS cannot read or leak it.
+  var bridgeV1Filter = { urls: [acpBaseUrl.replace(/\/+$/, '') + '/v1/*'] };
+  session.defaultSession.webRequest.onBeforeSendHeaders(bridgeV1Filter, function(details, callback) {
+    if (details.webContentsId === mainWindow.webContents.id && (!details.initiator || details.initiator.indexOf('file://') === 0)) {
+      details.requestHeaders['Authorization'] = 'Bearer ' + bridgeToken;
+      details.requestHeaders['Origin'] = 'file://';
+    }
+    callback({ requestHeaders: details.requestHeaders });
   });
 
   mainWindow.loadFile(path.join(appRoot, 'index.html'));
 }
 
 async function boot() {
+  if (egressModeError) throw egressModeError;
   for (let attempt = 0; attempt <= BRIDGE_PORT_RETRY_LIMIT; attempt += 1) {
     const port = await getFreeLocalPort();
     const acpBaseUrl = 'http://127.0.0.1:' + port;

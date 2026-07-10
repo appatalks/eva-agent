@@ -31,6 +31,8 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
+from bridge import config as _bridge_config
+
 _TRAJ_DIR = os.path.expanduser("~/.config/eva-standalone/desktop_trajectories")
 _DEFAULT_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o")
 _MAX_STEPS_DEFAULT = 25
@@ -404,7 +406,10 @@ def _launch_app(action):
     cmd = [binary] + [str(a) for a in args][:12]
     try:
         # No shell; arguments passed as a list so nothing is interpreted.
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=_bridge_config.child_process_env(),
+        )
         return f"launched {app}"
     except Exception as e:
         return f"error launching {app}: {e}"
@@ -427,7 +432,7 @@ def _focus_window(action):
             # via wmctrl's built-in -a (activates a window by title substring).
             r = subprocess.run([wmctrl, "-a", match],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               timeout=5)
+                               timeout=5, env=_bridge_config.child_process_env())
             if r.returncode == 0:
                 time.sleep(0.6)
                 return f"focused window matching '{match}'"
@@ -437,12 +442,13 @@ def _focus_window(action):
     if xdotool:
         try:
             out = subprocess.run([xdotool, "search", "--name", match],
-                                 capture_output=True, text=True, timeout=5)
+                                 capture_output=True, text=True, timeout=5,
+                                 env=_bridge_config.child_process_env())
             wid = (out.stdout or "").split("\n")[0].strip()
             if wid.isdigit():
                 subprocess.run([xdotool, "windowactivate", wid],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               timeout=5)
+                               timeout=5, env=_bridge_config.child_process_env())
                 time.sleep(0.6)
                 return f"focused window matching '{match}'"
         except Exception:

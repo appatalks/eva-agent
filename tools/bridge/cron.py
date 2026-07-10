@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from bridge import config as _cfg
 from bridge import state as _st
 
@@ -142,12 +143,19 @@ def _cron_execute_task(task_id, prompt, label):
     if not _st.acp_client or not _st.acp_client.alive:
         print(f"[Cron] ACP not available for task {label}")
         return
-    messages = [{"role": "user", "content": f"[Scheduled task: {label}] {prompt}"}]
+    prompt_text = f"[Scheduled task: {label}] {prompt}"
     try:
-        result = _st.acp_client.send_prompt(messages)
-        if result:
-            # Push result as a notification
-            _push_notification(f"Cron: {label}", str(result)[:500], channel="chat")
+        result = _st.acp_client.prompt(prompt_text)
+        response_text = ""
+        if isinstance(result, dict):
+            if "error" in result:
+                print(f"[Cron] Task error: {result['error']}")
+                return
+            response_text = result.get("text", "")
+        else:
+            response_text = str(result or "")
+        if response_text:
+            _push_notification(f"Cron: {label}", response_text[:500], channel="chat")
     except Exception as e:
         print(f"[Cron] Task execution error: {e}")
 

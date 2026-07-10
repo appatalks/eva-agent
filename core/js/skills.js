@@ -270,7 +270,11 @@ async function deleteSkill(id) {
   if (!id) return;
   if (!confirm('Delete this skill?')) return;
   try {
-    await _skillsBridge('/v1/skills/' + encodeURIComponent(id), { method: 'DELETE' });
+    var mutationEnvelope = (typeof captureMutationEnvelope === 'function')
+      ? captureMutationEnvelope() : null;
+    await _skillsBridge('/v1/skills/' + encodeURIComponent(id), {
+      method: 'DELETE', evaMutationEnvelope: mutationEnvelope
+    });
     await loadSkills();
     if (typeof setStatus === 'function') setStatus('info', 'Skill deleted.');
   } catch (error) {

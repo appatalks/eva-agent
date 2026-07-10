@@ -5,8 +5,10 @@ Bridges GitHub Copilot CLI's ACP (Agent Client Protocol) to HTTP
 so the browser-based Eva UI can use Copilot models.
 
 Requirements:
-  - GitHub Copilot CLI installed and authenticated (`copilot auth login`)
-  - Python 3.7+
+    - Python 3.12+
+    - x86_64 or arm64/aarch64 host
+    - Cloud mode only: Node.js 24+ and GitHub Copilot CLI authenticated
+        with `copilot auth login`
 
 Usage:
   python3 tools/acp_bridge.py                    # default port 8888
@@ -31,13 +33,16 @@ import base64
 import copy
 import datetime
 import hashlib
+import hmac
 import json
 import mimetypes
 import os
 import platform
 import re
+import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -50,6 +55,11 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 # Aliased with underscore prefix so existing code keeps working as-is.
 from bridge import config as _cfg
 from bridge import state as _st
+from bridge.identity import RequestEnvelope, EnvelopeValidationError
+from bridge.finalize import mutate_event
+from bridge.normalization import latest_row_sql, reconciliation_status
+from bridge.sensitive import redact_credentials
+from bridge.events import IdempotencyCollisionError, canonical_json, payload_hash
 
 
 # Domain modules
@@ -254,8 +264,8 @@ _BG_PROPOSALS_LATEST_QUERY = (
     "| summarize arg_max(_SortAt, *) by ProposalId "
     "| project-away _SortAt"
 )
-_BG_JOBS_ENABLED = {}  # populated at import from background
-_BG_JOBS = []  # populated at import from background
+# Reference background module's actual registries (not shadows).
+from bridge.background import _BG_JOBS_ENABLED, _BG_JOBS
 
 
 # Vision browser agent (Playwright is imported lazily inside the module, so this
@@ -287,20 +297,316 @@ except Exception as _cam_err:  # pragma: no cover - defensive
 class BridgeHandler(BaseHTTPRequestHandler):
     """HTTP handler that bridges browser requests to ACP."""
 
+    # ── CORS ────────────────────────────────────────────────────────
+    _LOOPBACK_HOSTS = frozenset(("127.0.0.1", "localhost", "::1"))
+
+    @classmethod
+    def _origin_allowed(cls, origin):
+        """Return True only for file://, exact loopback http origins (any port),
+        or no Origin (same-origin).  Validates that the value is a serialized
+        origin: scheme + host + optional port, with no credentials, path,
+        query, or fragment.  Rejects the literal string ``null``."""
+        if not origin:
+            return True  # same-origin requests have no Origin header
+        # Reject opaque "null" origin
+        if origin == "null":
+            return False
+        # Electron file:// sends the exact string "file://"
+        if origin == "file://":
+            return True
+        try:
+            parsed = urllib.parse.urlparse(origin)
+        except ValueError:
+            return False
+        if parsed.scheme not in ("http", "https"):
+            return False
+        # Serialized origins must not carry credentials, path, query, or fragment
+        if parsed.username or parsed.password:
+            return False
+        if parsed.path:
+            return False
+        if parsed.query or parsed.fragment:
+            return False
+        host = (parsed.hostname or "").lower()
+        # Validate port when present
+        try:
+            if parsed.port is not None:
+                p = int(parsed.port)
+                if p < 1 or p > 65535:
+                    return False
+        except (ValueError, TypeError):
+            return False
+        if host in cls._LOOPBACK_HOSTS:
+            return True
+        configured = {
+            item.strip().rstrip("/")
+            for item in os.environ.get("EVA_ALLOWED_ORIGINS", "").split(",")
+            if item.strip()
+        }
+        return origin in configured
+
     def _cors_headers(self):
         origin = self.headers.get("Origin", "")
         # Reject any origin containing CRLF or null bytes to prevent HTTP response splitting
         if "\r" in origin or "\n" in origin or "\x00" in origin:
             origin = ""
-        allowed = not origin or origin.startswith("file://") or origin.startswith("http://127.0.0.1") or origin.startswith("http://localhost") or origin.startswith("http://[::1]")
-        if allowed:
+        if self._origin_allowed(origin):
             self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
-        else:
-            self.send_header("Access-Control-Allow-Origin", "null")
+        # Else: do not set ACAO at all (browser blocks the response).
+        self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Authorization, X-Eva-Request-Id, X-Eva-Correlation-Id, "
+            "X-Eva-Session-Id, X-Eva-Turn-Id",
+        )
+
+    # ── Per-launch bearer auth ──────────────────────────────────────
+    def _check_auth(self):
+        """Verify Authorization header.  Fail-closed: rejects requests when
+        no bridge token is set unless EVA_ALLOW_UNAUTHENTICATED_LOOPBACK=1
+        is explicitly enabled (development escape hatch on loopback only)."""
+        token = _st.bridge_auth_token
+        if not token:
+            # No token configured — fail closed unless explicit dev escape
+            if _cfg.env_truthy("EVA_ALLOW_UNAUTHENTICATED_LOOPBACK") and _is_loopback_bind():
+                return True
+            self._send_simple_error(401, "Unauthorized: bridge token required")
+            return False
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            self._send_simple_error(401, "Unauthorized")
+            return False
+        presented = auth[7:]
+        if not hmac.compare_digest(presented, token):
+            self._send_simple_error(401, "Unauthorized")
+            return False
+        return True
+
+    def _send_simple_error(self, code, message):
+        """Send a JSON error with CORS headers so browsers receive the error."""
+        body = json.dumps({"error": {"message": message}}).encode("utf-8")
+        try:
+            self.send_response(code)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass
+
+    def _build_envelope(
+        self, data, *, require_session=False, require_request=False,
+        origin="browser", actor="user",
+    ):
+        """Build a validated envelope using server-owned installation/user IDs."""
+        source = dict(data) if isinstance(data, dict) else {}
+        headers = getattr(self, "headers", {}) or {}
+        header_fields = {
+            "request_id": "X-Eva-Request-Id",
+            "correlation_id": "X-Eva-Correlation-Id",
+            "session_id": "X-Eva-Session-Id",
+            "turn_id": "X-Eva-Turn-Id",
+        }
+        for field, header in header_fields.items():
+            if not source.get(field) and headers.get(header):
+                source[field] = headers.get(header)
+        if require_request and not source.get("request_id"):
+            self._json_response(400, {
+                "error": {"message": "X-Eva-Request-Id is required for this mutation"}
+            })
+            return None
+        source["origin"] = origin
+        source["actor"] = actor
+        try:
+            envelope = RequestEnvelope(source, egress_mode=_st.egress_mode)
+        except EnvelopeValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return None
+        if require_session and (not envelope.session_id or not source.get("turn_id")):
+            self._json_response(400, {
+                "error": {"message": "session_id and turn_id are required for a logical turn"}
+            })
+            return None
+        return envelope
+
+    @staticmethod
+    def _mutation_idempotency_key(envelope, event_type):
+        return f"request:{envelope.request_id}:{event_type}"
+
+    def _mutation_replay(self, envelope, event_type, command_payload):
+        """Return the stored mutation result before consulting mutable state."""
+        repo = _get_sqlite_mem().event_repository()
+        key = self._mutation_idempotency_key(envelope, event_type)
+        existing = repo.get_by_idempotency_key(key)
+        if not existing:
+            return None
+        stored = json.loads(existing["Payload"])
+        if (
+            not isinstance(stored, dict)
+            or "command" not in stored
+            or "command_hash" not in stored
+            or not isinstance(stored.get("result"), dict)
+        ):
+            raise IdempotencyCollisionError(key, "stored mutation lacks command receipt")
+        safe_command = self._canonical_redacted(command_payload)
+        command_json = canonical_json(safe_command)
+        if (
+            stored["command_hash"] != payload_hash(command_json)
+            or canonical_json(stored["command"]) != command_json
+        ):
+            raise IdempotencyCollisionError(key, "request identity reused with different command")
+        return existing, stored["result"]
+
+    @staticmethod
+    def _canonical_redacted(value):
+        return json.loads(canonical_json(redact_credentials(value)))
+
+    @classmethod
+    def _mutation_receipt(cls, command_payload, result):
+        safe_command = cls._canonical_redacted(command_payload)
+        return {
+            "command": safe_command,
+            "command_hash": payload_hash(canonical_json(safe_command)),
+            "result": cls._canonical_redacted(result),
+        }
+
+    @staticmethod
+    def _ensure_kusto_row_projection(cluster, db, table, id_column, row,
+                                      columns, event_id, time_column="UpdatedAt"):
+        """Retry-safe direct projection for the selected Kusto legacy read model."""
+        mem = _get_sqlite_mem()
+        repo = mem.event_repository()
+        destination = f"kusto:{table}"
+        try:
+            # This is already present atomically for new events. ensure_outbox
+            # also repairs pre-receipt draft events before any network attempt.
+            repo.ensure_outbox(event_id, destination)
+        except Exception as exc:
+            print(f"[Memory] Could not prepare {destination} outbox: {exc}", file=sys.stderr)
+            return False
+        if repo.has_projection_receipt(event_id, destination):
+            try:
+                repo.complete_outbox(event_id, destination)
+            except Exception as exc:
+                print(f"[Memory] Could not reconcile {destination} outbox: {exc}", file=sys.stderr)
+                return False
+            return True
+        if _st.egress_mode != "cloud":
+            return False
+        claim = repo.claim_outbox_entry(event_id, destination)
+        if claim is None:
+            # Another worker owns the live lease. It may have completed between
+            # the failed claim and this read, so recheck once without polling.
+            return repo.has_projection_receipt(event_id, destination)
+        safe_id = _safe_kusto_string(row.get(id_column, ""))
+        safe_time = _safe_kusto_string(row.get(time_column, ""))
+        try:
+            existing = _kusto_query_direct(
+                cluster, db,
+                f"{table} | where {id_column} == '{safe_id}' "
+                f"and todatetime({time_column}) == todatetime('{safe_time}') | take 1",
+            )
+        except Exception as exc:
+            repo.fail_outbox(event_id, str(exc)[:500], destination)
+            return False
+        if existing is None:
+            repo.fail_outbox(event_id, "destination query failed", destination)
+            return False
+        if not existing:
+            try:
+                ingested = _kusto_ingest_direct(
+                    cluster, db, table, columns, [row]
+                )
+            except Exception as exc:
+                repo.fail_outbox(event_id, str(exc)[:500], destination)
+                return False
+            if not ingested:
+                repo.fail_outbox(event_id, "destination ingest failed", destination)
+                return False
+        try:
+            repo.complete_outbox(event_id, destination)
+        except Exception as exc:
+            print(f"[Memory] Could not receipt {destination} projection: {exc}", file=sys.stderr)
+            return False
+        return repo.has_projection_receipt(event_id, destination)
+
+    def _mutation_replay_with_projection(
+        self, envelope, event_type, command_payload, backend, cluster, db,
+        table, id_column, columns, time_column="UpdatedAt",
+    ):
+        replay = self._mutation_replay(envelope, event_type, command_payload)
+        if not replay:
+            return None
+        event, result = replay
+        projected = backend != "kusto" or self._ensure_kusto_row_projection(
+            cluster, db, table, id_column, result, columns,
+            event["EventId"], time_column,
+        )
+        return projected, result
+
+    # ── POST body route classifications ─────────────────────────────
+    _BODYLESS_POST_ROUTES = frozenset((
+        "/v1/camera/stop", "/v1/files/purge",
+    ))
+
+    # ── Content-Type / body enforcement ─────────────────────────────
+    def _enforce_json_content(self):
+        """Enforce application/json content-type and body size cap.
+        Rejects Transfer-Encoding, non-integer or out-of-range Content-Length,
+        and non-JSON media types (including application/jsonp).
+        Returns True if OK, False if a 4xx was sent."""
+        if self.headers.get("Transfer-Encoding"):
+            self._send_simple_error(400, "Transfer-Encoding is not supported")
+            return False
+        ct = self.headers.get("Content-Type", "")
+        media_type = ct.split(";")[0].strip().lower()
+        if media_type != "application/json":
+            self._send_simple_error(415, "Content-Type must be application/json")
+            return False
+        cl_raw = self.headers.get("Content-Length", "")
+        if not cl_raw:
+            self._send_simple_error(411, "Content-Length required")
+            return False
+        try:
+            cl = int(cl_raw)
+        except ValueError:
+            self._send_simple_error(400, "Content-Length must be a non-negative integer")
+            return False
+        if cl < 0:
+            self._send_simple_error(400, "Content-Length must be a non-negative integer")
+            return False
+        if cl > _cfg.MAX_JSON_BODY_BYTES:
+            self._send_simple_error(413, "Request body too large")
+            return False
+        return True
+
+    def _enforce_request_framing(self, parsed_path):
+        """Route-aware body enforcement for POST routes.
+        Bodyless action routes skip content checks; JSON-required routes
+        delegate to _enforce_json_content.  Returns True if OK."""
+        if self.headers.get("Transfer-Encoding"):
+            self._send_simple_error(400, "Transfer-Encoding is not supported")
+            return False
+        bodyless = parsed_path in self._BODYLESS_POST_ROUTES or bool(
+            re.fullmatch(r"/v1/background/proposals/[^/]+/(approve|reject)", parsed_path)
+        )
+        if bodyless:
+            raw = self.headers.get("Content-Length", "0") or "0"
+            try:
+                length = int(raw)
+            except ValueError:
+                self._send_simple_error(400, "Content-Length must be a non-negative integer")
+                return False
+            if length != 0:
+                self._send_simple_error(400, "This action does not accept a request body")
+                return False
+            return True
+        return self._enforce_json_content()
 
     def do_OPTIONS(self):
+        # OPTIONS must remain unauthenticated; must not cause side effects.
         self.send_response(200)
         self._cors_headers()
         self.end_headers()
@@ -309,7 +615,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         parsed_path = urllib.parse.urlparse(self.path).path
         if parsed_path == "/health":
             self._health()
-        elif parsed_path == "/v1/doctor":
+            return
+        # Auth required for all /v1/* routes
+        if not self._check_auth():
+            return
+        if parsed_path == "/v1/doctor":
             self._doctor()
         elif parsed_path == "/v1/models":
             self._models()
@@ -374,7 +684,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
 
     def do_POST(self):
+        if not self._check_auth():
+            return
         parsed_path = urllib.parse.urlparse(self.path).path
+        # Route-aware body enforcement (bodyless action routes skip JSON checks)
+        if not self._enforce_request_framing(parsed_path):
+            return
         if parsed_path == "/v1/chat/completions":
             self._chat_completions()
         elif parsed_path == "/v1/mcp/configure":
@@ -441,7 +756,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
 
     def do_PATCH(self):
+        if not self._check_auth():
+            return
         parsed_path = urllib.parse.urlparse(self.path).path
+        if not self._enforce_json_content():
+            return
         if parsed_path.startswith("/v1/goals/"):
             self._goals_patch(urllib.parse.unquote(parsed_path.split("/v1/goals/", 1)[1]))
         elif parsed_path.startswith("/v1/skills/"):
@@ -452,6 +771,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
 
     def do_DELETE(self):
+        if not self._check_auth():
+            return
         parsed_path = urllib.parse.urlparse(self.path).path
         if parsed_path.startswith("/v1/goals/"):
             self._goals_delete(urllib.parse.unquote(parsed_path.split("/v1/goals/", 1)[1]))
@@ -465,21 +786,34 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
 
     def _read_json_body(self):
+        """Read and parse JSON body, caching the result for handler re-reads."""
+        if hasattr(self, '_cached_json'):
+            return self._cached_json
         try:
             content_length = int(self.headers.get("Content-Length", 0))
         except ValueError:
-            return None, "Invalid Content-Length"
+            result = (None, "Invalid Content-Length")
+            self._cached_json = result
+            return result
         if content_length == 0:
-            return None, "Empty request body"
+            result = (None, "Empty request body")
+            self._cached_json = result
+            return result
         try:
             body = self.rfile.read(content_length).decode("utf-8")
         except UnicodeDecodeError:
-            return None, "Request body must be UTF-8 JSON"
+            result = (None, "Request body must be UTF-8 JSON")
+            self._cached_json = result
+            return result
         try:
             data = json.loads(body)
         except json.JSONDecodeError:
-            return None, "Invalid JSON"
-        return data, ""
+            result = (None, "Invalid JSON")
+            self._cached_json = result
+            return result
+        result = (data, "")
+        self._cached_json = result
+        return result
 
     def _kusto_context(self):
         cluster, db = _get_kusto_config()
@@ -560,9 +894,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _validate_goal_payload(self, data, creating):
         if not isinstance(data, dict):
             return None, "Request body must be an object"
-        allowed = {"title", "description", "category", "priority", "relatedTopics"}
+        business_fields = {
+            "title", "description", "category", "priority", "relatedTopics"
+        }
+        allowed = set(business_fields)
+        allowed.update(_cfg.REQUEST_ENVELOPE_FIELDS)
         if not creating:
             allowed.add("status")
+            business_fields.add("status")
         unknown = sorted(set(data.keys()) - allowed)
         if unknown:
             return None, "Unsupported field(s): " + ", ".join(unknown)
@@ -570,7 +909,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             for field in ("title", "category", "priority"):
                 if field not in data:
                     return None, field + " is required"
-        elif not data:
+        elif not any(field in data for field in business_fields):
             return None, "At least one field is required"
 
         row = {}
@@ -614,7 +953,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _goal_now(self):
         import datetime
-        return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     def _goal_latest_by_id(self, cluster, db, goal_id):
         safe_goal_id = goal_id.replace("'", "''")
@@ -623,7 +962,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             mem = _get_sqlite_mem()
             rows = mem.query(
                 f"SELECT * FROM Goals WHERE GoalId = '{safe_goal_id}' "
-                f"ORDER BY UpdatedAt DESC LIMIT 1"
+                f"ORDER BY UpdatedAt DESC, rowid DESC LIMIT 1"
             )
         else:
             query = _GOALS_LATEST_QUERY + f" | where GoalId == '{safe_goal_id}' | take 1"
@@ -647,12 +986,54 @@ class BridgeHandler(BaseHTTPRequestHandler):
             row["Priority"] = 0
         return row
 
-    def _write_goal_row(self, cluster, db, row):
+    def _write_goal_row(self, cluster, db, row, envelope, event_type, command_payload):
         backend = _resolve_memory_backend()
-        if backend == "sqlite":
-            mem = _get_sqlite_mem()
-            return mem.ingest("Goals", _GOAL_COLUMNS, [row])
-        return _kusto_ingest_direct(cluster, db, "Goals", _GOAL_COLUMNS, [row])
+        mem = _get_sqlite_mem()
+        safe_row = self._canonical_redacted(row)
+        repo = mem.event_repository()
+        idempotency_key = self._mutation_idempotency_key(envelope, event_type)
+        replay = self._mutation_replay(envelope, event_type, command_payload)
+        event = None
+        persisted = safe_row
+        idempotent = False
+        if replay:
+            event, persisted = replay
+            idempotent = True
+        if event is None:
+            destination = "kusto:Goals" if backend == "kusto" and _st.egress_mode == "cloud" else None
+            try:
+                event = mutate_event(
+                    mem, repo,
+                    stream_id=f"goal:{row['GoalId']}", event_type=event_type,
+                    payload=self._mutation_receipt(command_payload, safe_row),
+                    session_id=envelope.session_id,
+                    turn_id=envelope.turn_id, correlation_id=envelope.correlation_id,
+                    actor_type="user", actor_id=envelope.user_id, origin=envelope.origin,
+                    trust=1.0, sensitivity="private",
+                    consent_scope="cloud_allowed" if destination else "local_only",
+                    idempotency_key=idempotency_key,
+                    legacy_table="Goals", legacy_columns=_GOAL_COLUMNS,
+                    legacy_row=safe_row, projection_name="goals",
+                    projection_destination=destination,
+                )
+            except IdempotencyCollisionError:
+                # A concurrent same-command call may have won with a different
+                # generated timestamp. Resolve by durable command identity.
+                replay = self._mutation_replay(envelope, event_type, command_payload)
+                if not replay:
+                    raise
+                event, persisted = replay
+                idempotent = True
+            except Exception as exc:
+                print(f"[Memory] Goal event mutation failed: {exc}", file=sys.stderr)
+                return False, None, False
+        if backend == "kusto":
+            if not self._ensure_kusto_row_projection(
+                cluster, db, "Goals", "GoalId", persisted, _GOAL_COLUMNS,
+                event["EventId"], "UpdatedAt",
+            ):
+                return False, None, False
+        return True, persisted, idempotent
 
     def _background_status(self):
         self._json_response(200, _background_status_dict())
@@ -663,8 +1044,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if backend == "sqlite":
             mem = _get_sqlite_mem()
             rows = mem.query(
-                f"SELECT * FROM BackgroundProposals WHERE ProposalId = '{safe_id}' "
-                f"ORDER BY CreatedAt DESC LIMIT 1"
+                "SELECT * FROM BackgroundProposals WHERE ProposalId = ? "
+                "ORDER BY COALESCE(NULLIF(ReviewedAt,''), CreatedAt) DESC, rowid DESC LIMIT 1",
+                (proposal_id,),
             )
         else:
             query = _BG_PROPOSALS_LATEST_QUERY + f" | where ProposalId == '{safe_id}' | take 1"
@@ -690,11 +1072,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if status not in _BG_PROPOSAL_STATUSES and status != "all":
                 self._json_response(400, {"error": {"message": "status must be pending, approved, rejected, applying, applied, failed, or all"}})
                 return
-            sql = "SELECT * FROM BackgroundProposals"
+            sql = (
+                "SELECT bp.* FROM BackgroundProposals bp "
+                "WHERE bp.rowid = ("
+                "SELECT newer.rowid FROM BackgroundProposals newer "
+                "WHERE newer.ProposalId = bp.ProposalId "
+                "ORDER BY COALESCE(NULLIF(newer.ReviewedAt,''), newer.CreatedAt) DESC, newer.rowid DESC LIMIT 1"
+                ")"
+            )
+            params = ()
             if status != "all":
-                sql += f" WHERE Status = '{_safe_kusto_string(status)}'"
-            sql += " ORDER BY CreatedAt DESC LIMIT 50"
-            rows = mem.query(sql)
+                sql += " AND bp.Status = ?"
+                params = (status,)
+            sql += " ORDER BY COALESCE(NULLIF(bp.ReviewedAt,''), bp.CreatedAt) DESC, bp.rowid DESC LIMIT 50"
+            rows = mem.query(sql, params)
             self._json_response(200, {"proposals": rows or []})
         else:
             cluster, db = handle
@@ -747,7 +1138,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             self._json_response(400, {"error": {"message": "Request body must be an object"}})
             return
-        unknown = sorted(set(data.keys()) - {"enabled", "intervalSeconds", "runNow", "jobs"})
+        unknown = sorted(
+            set(data.keys())
+            - ({"enabled", "intervalSeconds", "runNow", "jobs"} | _cfg.REQUEST_ENVELOPE_FIELDS)
+        )
         if unknown:
             self._json_response(400, {"error": {"message": "Unsupported field(s): " + ", ".join(unknown)}})
             return
@@ -801,8 +1195,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if not _st.cognition_enabled:
                 self._json_response(503, {"error": {"message": "Cognition is not enabled"}})
                 return
-            cluster, db, context_ok = self._kusto_context()
-            if not context_ok:
+            backend, handle, ok = self._memory_context_required()
+            if not ok:
                 return
 
         _st.bg_loop_enabled = requested_enabled
@@ -838,55 +1232,69 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": {"message": error}})
             return
         action = match.group(2)
-        cluster, db, ok = self._kusto_context()
+        backend, handle, ok = self._memory_context_required()
         if not ok:
             return
+        cluster, db = handle if backend == "kusto" else (None, None)
 
-        current, error = self._background_latest_proposal_by_id(cluster, db, proposal_id)
-        if error:
-            self._json_response(500, {"error": {"message": error}})
-            return
-        if not current:
-            self._json_response(404, {"error": {"message": "Proposal not found"}})
-            return
-        current_status = str(current.get("Status", "")).lower()
-        if action == "approve" and current_status not in {"pending", "applying"}:
-            self._json_response(409, {"error": {"message": "Proposal is not pending or applying"}})
-            return
-        if action == "reject" and current_status != "pending":
-            self._json_response(409, {"error": {"message": "Proposal is not pending"}})
-            return
-
-        if action == "approve":
-            target_table = current.get("TargetTable")
-            if target_table not in _BG_APPLY_TABLES:
-                self._json_response(400, {"error": {"message": "Unsupported proposal target table"}})
-                return
-            payload, error = _background_proposal_payload(current)
+        # Serialize proposal reviews to prevent concurrent approval races
+        with _st.proposal_review_lock:
+            current, error = self._background_latest_proposal_by_id(cluster, db, proposal_id)
             if error:
-                self._json_response(400, {"error": {"message": error}})
+                self._json_response(500, {"error": {"message": error}})
                 return
-            if current_status == "pending":
-                applying_row = _background_proposal_update_row(current, "applying", "loopback", f"applying to {target_table}")
-                if not _write_background_proposal(cluster, db, applying_row):
-                    self._json_response(500, {"error": {"message": "BackgroundProposals applying status write failed"}})
-                    return
-                current = applying_row
-            apply_ok, apply_error, apply_note = _apply_proposal_payload(cluster, db, target_table, payload)
-            if not apply_ok:
-                self._json_response(500, {"error": {"message": apply_error + "; proposal remains applying. Retry approve safely after resolving the transient error."}})
+            if not current:
+                self._json_response(404, {"error": {"message": "Proposal not found"}})
                 return
-            reviewed_row = _background_proposal_update_row(current, "applied", "loopback", apply_note or f"approved and applied to {target_table}")
-        else:
-            reviewed_row = _background_proposal_update_row(current, "rejected", "loopback", "rejected by user")
+            current_status = str(current.get("Status", "")).lower()
 
-        if not _write_background_proposal(cluster, db, reviewed_row):
-            message = "BackgroundProposals status write failed"
+            # Idempotency: if already in the target state, return success
+            if action == "approve" and current_status == "applied":
+                self._json_response(200, {"proposal": current, "idempotent": True})
+                return
+            if action == "reject" and current_status == "rejected":
+                self._json_response(200, {"proposal": current, "idempotent": True})
+                return
+
+            if action == "approve" and current_status not in {"pending", "applying"}:
+                self._json_response(409, {"error": {"message": "Proposal is not pending or applying"}})
+                return
+            if action == "reject" and current_status != "pending":
+                self._json_response(409, {"error": {"message": "Proposal is not pending"}})
+                return
+
             if action == "approve":
-                message += "; proposal remains applying. Retry approve safely after resolving the transient error."
-            self._json_response(500, {"error": {"message": message}})
-            return
-        self._json_response(200, {"proposal": reviewed_row})
+                target_table = current.get("TargetTable")
+                if target_table not in _BG_APPLY_TABLES:
+                    self._json_response(400, {"error": {"message": "Unsupported proposal target table"}})
+                    return
+                payload, error = _background_proposal_payload(current)
+                if error:
+                    self._json_response(400, {"error": {"message": error}})
+                    return
+                if current_status == "pending":
+                    applying_row = _background_proposal_update_row(current, "applying", "loopback", f"applying to {target_table}")
+                    if not _write_background_proposal(cluster, db, applying_row):
+                        self._json_response(500, {"error": {"message": "BackgroundProposals applying status write failed"}})
+                        return
+                    current = applying_row
+                apply_ok, apply_error, apply_note = _apply_proposal_payload(
+                    cluster, db, target_table, payload, mutation_id=proposal_id
+                )
+                if not apply_ok:
+                    self._json_response(500, {"error": {"message": apply_error + "; proposal remains applying. Retry approve safely after resolving the transient error."}})
+                    return
+                reviewed_row = _background_proposal_update_row(current, "applied", "loopback", apply_note or f"approved and applied to {target_table}")
+            else:
+                reviewed_row = _background_proposal_update_row(current, "rejected", "loopback", "rejected by user")
+
+            if not _write_background_proposal(cluster, db, reviewed_row):
+                message = "BackgroundProposals status write failed"
+                if action == "approve":
+                    message += "; proposal remains applying. Retry approve safely after resolving the transient error."
+                self._json_response(500, {"error": {"message": message}})
+                return
+            self._json_response(200, {"proposal": reviewed_row})
 
     def _goals_list(self):
         backend, handle, ok = self._memory_context_required()
@@ -894,13 +1302,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         if backend == "sqlite":
             mem = handle
-            goals = mem.query(
-                "SELECT * FROM Goals WHERE Status != 'dropped' "
-                "ORDER BY Priority DESC, UpdatedAt DESC"
-            )
+            goals = mem.query(latest_row_sql("Goals", "GoalId", "UpdatedAt") +
+                              " ORDER BY Priority DESC, UpdatedAt DESC")
         else:
             cluster, db = handle
-            query = _GOALS_LATEST_QUERY + " | order by Priority desc, UpdatedAt desc"
+            query = _GOALS_LATEST_QUERY + " | where Status !in ('dropped','deleted') | order by Priority desc, UpdatedAt desc"
             goals = _kusto_query_direct(cluster, db, query)
         if goals is None:
             self._json_response(200, {"goals": [], "warning": "Goals table may not exist yet; run /v1/kusto/seed to create it"})
@@ -912,22 +1318,42 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(403, {"error": {"message": "goals mutations are restricted to loopback bind"}})
             return
 
-        backend, handle, ok = self._memory_context_required()
-        if not ok:
-            return
-        cluster, db = handle if backend == "kusto" else (None, None)
         data, error = self._read_json_body()
         if error:
             self._json_response(400, {"error": {"message": error}})
+            return
+        envelope = self._build_envelope(data)
+        if envelope is None:
             return
         fields, error = self._validate_goal_payload(data, creating=True)
         if error:
             self._json_response(400, {"error": {"message": error}})
             return
+        backend, handle, ok = self._memory_context_required()
+        if not ok:
+            return
+        cluster, db = handle if backend == "kusto" else (None, None)
+
+        command = {"entity": "goal", "operation": "create", "fields": fields}
+        try:
+            replay = self._mutation_replay_with_projection(
+                envelope, "goal.created", command, backend, cluster, db,
+                "Goals", "GoalId", _GOAL_COLUMNS,
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if replay:
+            projected, persisted_row = replay
+            if not projected:
+                self._json_response(500, {"error": {"message": "Goal projection is pending; retry safely"}})
+                return
+            self._json_response(200, {"goal": persisted_row, "idempotent": True})
+            return
 
         now = self._goal_now()
         row = {
-            "GoalId": str(uuid.uuid4()),
+            "GoalId": str(uuid.uuid5(uuid.NAMESPACE_URL, "eva-goal:" + envelope.request_id)),
             "Title": fields.get("Title", ""),
             "Description": fields.get("Description", ""),
             "Category": fields.get("Category", ""),
@@ -937,20 +1363,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "CreatedAt": now,
             "UpdatedAt": now,
         }
-        if not self._write_goal_row(cluster, db, row):
+        try:
+            ok, persisted_row, idempotent = self._write_goal_row(
+                cluster, db, row, envelope, "goal.created", command
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if not ok:
             self._json_response(500, {"error": {"message": "Goal write failed"}})
             return
-        self._json_response(201, {"goal": row})
+        self._json_response(200 if idempotent else 201, {
+            "goal": persisted_row, "idempotent": idempotent,
+        })
 
     def _goals_patch(self, raw_goal_id):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "goals mutations are restricted to loopback bind"}})
             return
 
-        backend, handle, ok = self._memory_context_required()
-        if not ok:
-            return
-        cluster, db = handle if backend == "kusto" else (None, None)
         goal_id, error = self._validate_goal_id(raw_goal_id)
         if error:
             self._json_response(400, {"error": {"message": error}})
@@ -959,9 +1390,35 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if error:
             self._json_response(400, {"error": {"message": error}})
             return
+        envelope = self._build_envelope(data)
+        if envelope is None:
+            return
         fields, error = self._validate_goal_payload(data, creating=False)
         if error:
             self._json_response(400, {"error": {"message": error}})
+            return
+        backend, handle, ok = self._memory_context_required()
+        if not ok:
+            return
+        cluster, db = handle if backend == "kusto" else (None, None)
+        command = {
+            "entity": "goal", "operation": "update",
+            "goal_id": goal_id, "fields": fields,
+        }
+        try:
+            replay = self._mutation_replay_with_projection(
+                envelope, "goal.updated", command, backend, cluster, db,
+                "Goals", "GoalId", _GOAL_COLUMNS,
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if replay:
+            projected, persisted_row = replay
+            if not projected:
+                self._json_response(500, {"error": {"message": "Goal projection is pending; retry safely"}})
+                return
+            self._json_response(200, {"goal": persisted_row, "idempotent": True})
             return
         current, error = self._goal_latest_by_id(cluster, db, goal_id)
         if error:
@@ -975,23 +1432,51 @@ class BridgeHandler(BaseHTTPRequestHandler):
         row = self._goal_row_from_current(current, goal_id, now)
         row.update(fields)
         row["UpdatedAt"] = now
-        if not self._write_goal_row(cluster, db, row):
+        try:
+            ok, persisted_row, idempotent = self._write_goal_row(
+                cluster, db, row, envelope, "goal.updated", command
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if not ok:
             self._json_response(500, {"error": {"message": "Goal write failed"}})
             return
-        self._json_response(200, {"goal": row})
+        self._json_response(200, {"goal": persisted_row, "idempotent": idempotent})
 
     def _goals_delete(self, raw_goal_id):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "goals mutations are restricted to loopback bind"}})
             return
 
+        goal_id, error = self._validate_goal_id(raw_goal_id)
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        envelope = self._build_envelope({}, require_request=True)
+        if envelope is None:
+            return
+        command = {"entity": "goal", "operation": "delete", "goal_id": goal_id}
         backend, handle, ok = self._memory_context_required()
         if not ok:
             return
         cluster, db = handle if backend == "kusto" else (None, None)
-        goal_id, error = self._validate_goal_id(raw_goal_id)
-        if error:
-            self._json_response(400, {"error": {"message": error}})
+        try:
+            replay = self._mutation_replay_with_projection(
+                envelope, "goal.deleted", command, backend, cluster, db,
+                "Goals", "GoalId", _GOAL_COLUMNS,
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if replay:
+            projected, persisted_row = replay
+            if not projected:
+                self._json_response(500, {"error": {"message": "Goal projection is pending; retry safely"}})
+                return
+            self._json_response(200, {
+                "goal": persisted_row, "status": "dropped", "idempotent": True,
+            })
             return
         current, error = self._goal_latest_by_id(cluster, db, goal_id)
         if error:
@@ -1005,10 +1490,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         row = self._goal_row_from_current(current, goal_id, now)
         row["Status"] = "dropped"
         row["UpdatedAt"] = now
-        if not self._write_goal_row(cluster, db, row):
+        try:
+            ok, persisted_row, idempotent = self._write_goal_row(
+                cluster, db, row, envelope, "goal.deleted", command
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if not ok:
             self._json_response(500, {"error": {"message": "Goal write failed"}})
             return
-        self._json_response(200, {"goal": row, "status": "dropped"})
+        self._json_response(200, {
+            "goal": persisted_row, "status": "dropped", "idempotent": idempotent,
+        })
 
     # ── Skills ────────────────────────────────────────────────────────
     def _skill_latest_by_id(self, cluster, db, skill_id):
@@ -1018,7 +1512,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             mem = _get_sqlite_mem()
             rows = mem.query(
                 f"SELECT * FROM Skills WHERE SkillId = '{safe}' "
-                f"ORDER BY UpdatedAt DESC LIMIT 1"
+                f"ORDER BY UpdatedAt DESC, rowid DESC LIMIT 1"
             )
         else:
             rows = _kusto_query_direct(cluster, db, _SKILLS_LATEST_QUERY + f" | where SkillId == '{safe}' | take 1")
@@ -1028,12 +1522,52 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return {}, ""
         return rows[0], ""
 
-    def _write_skill_row(self, cluster, db, row):
+    def _write_skill_row(self, cluster, db, row, envelope, event_type, command_payload):
         backend = _resolve_memory_backend()
-        if backend == "sqlite":
-            mem = _get_sqlite_mem()
-            return mem.ingest("Skills", _SKILL_COLUMNS, [row])
-        return _kusto_ingest_direct(cluster, db, "Skills", _SKILL_COLUMNS, [row])
+        mem = _get_sqlite_mem()
+        safe_row = self._canonical_redacted(row)
+        repo = mem.event_repository()
+        idempotency_key = self._mutation_idempotency_key(envelope, event_type)
+        replay = self._mutation_replay(envelope, event_type, command_payload)
+        event = None
+        persisted = safe_row
+        idempotent = False
+        if replay:
+            event, persisted = replay
+            idempotent = True
+        if event is None:
+            destination = "kusto:Skills" if backend == "kusto" and _st.egress_mode == "cloud" else None
+            try:
+                event = mutate_event(
+                    mem, repo,
+                    stream_id=f"skill:{row['SkillId']}", event_type=event_type,
+                    payload=self._mutation_receipt(command_payload, safe_row),
+                    session_id=envelope.session_id,
+                    turn_id=envelope.turn_id, correlation_id=envelope.correlation_id,
+                    actor_type="user", actor_id=envelope.user_id, origin=envelope.origin,
+                    trust=0.8, sensitivity="private",
+                    consent_scope="cloud_allowed" if destination else "local_only",
+                    idempotency_key=idempotency_key,
+                    legacy_table="Skills", legacy_columns=_SKILL_COLUMNS,
+                    legacy_row=safe_row, projection_name="skills",
+                    projection_destination=destination,
+                )
+            except IdempotencyCollisionError:
+                replay = self._mutation_replay(envelope, event_type, command_payload)
+                if not replay:
+                    raise
+                event, persisted = replay
+                idempotent = True
+            except Exception as exc:
+                print(f"[Memory] Skill event mutation failed: {exc}", file=sys.stderr)
+                return False, None, False
+        if backend == "kusto":
+            if not self._ensure_kusto_row_projection(
+                cluster, db, "Skills", "SkillId", persisted, _SKILL_COLUMNS,
+                event["EventId"], "UpdatedAt",
+            ):
+                return False, None, False
+        return True, persisted, idempotent
 
     def _validate_skill_id(self, skill_id):
         skill_id = str(skill_id or "").strip()
@@ -1068,6 +1602,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             fields["Status"] = status
         if creating and not fields.get("Instructions"):
             return None, "instructions are required"
+        if not creating and not fields:
+            return None, "At least one field is required"
         return fields, ""
 
     def _skills_list(self):
@@ -1079,7 +1615,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if not mem.table_exists("Skills"):
                 self._json_response(200, {"skills": []})
                 return
-            rows = mem.query("SELECT * FROM Skills WHERE Status != 'deleted' ORDER BY UpdatedAt DESC")
+            rows = mem.query(latest_row_sql("Skills", "SkillId", "UpdatedAt") +
+                             " ORDER BY UpdatedAt DESC")
             self._json_response(200, {"skills": rows or []})
         else:
             cluster, db = handle
@@ -1113,21 +1650,40 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "skill mutations are restricted to loopback bind"}})
             return
-        backend, handle, ok = self._memory_context_required()
-        if not ok:
-            return
-        cluster, db = handle if backend == "kusto" else (None, None)
         data, error = self._read_json_body()
         if error:
             self._json_response(400, {"error": {"message": error}})
+            return
+        envelope = self._build_envelope(data)
+        if envelope is None:
             return
         fields, error = self._validate_skill_payload(data, creating=True)
         if error:
             self._json_response(400, {"error": {"message": error}})
             return
+        backend, handle, ok = self._memory_context_required()
+        if not ok:
+            return
+        cluster, db = handle if backend == "kusto" else (None, None)
+        command = {"entity": "skill", "operation": "create", "fields": fields}
+        try:
+            replay = self._mutation_replay_with_projection(
+                envelope, "skill.created", command, backend, cluster, db,
+                "Skills", "SkillId", _SKILL_COLUMNS,
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if replay:
+            projected, persisted_row = replay
+            if not projected:
+                self._json_response(500, {"error": {"message": "Skill projection is pending; retry safely"}})
+                return
+            self._json_response(200, {"skill": persisted_row, "idempotent": True})
+            return
         now = self._goal_now()
         row = {
-            "SkillId": "sk-" + uuid.uuid4().hex[:12],
+            "SkillId": "sk-" + uuid.uuid5(uuid.NAMESPACE_URL, "eva-skill:" + envelope.request_id).hex[:12],
             "Name": fields.get("Name", "Untitled Skill"),
             "Description": fields.get("Description", ""),
             "Instructions": fields.get("Instructions", ""),
@@ -1138,19 +1694,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "CreatedAt": now,
             "UpdatedAt": now,
         }
-        if not self._write_skill_row(cluster, db, row):
+        try:
+            ok, persisted_row, idempotent = self._write_skill_row(
+                cluster, db, row, envelope, "skill.created", command
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if not ok:
             self._json_response(500, {"error": {"message": "Skill write failed"}})
             return
-        self._json_response(201, {"skill": row})
+        self._json_response(200 if idempotent else 201, {
+            "skill": persisted_row, "idempotent": idempotent,
+        })
 
     def _skills_patch(self, raw_skill_id):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "skill mutations are restricted to loopback bind"}})
             return
-        backend, handle, ok = self._memory_context_required()
-        if not ok:
-            return
-        cluster, db = handle if backend == "kusto" else (None, None)
         skill_id, error = self._validate_skill_id(raw_skill_id)
         if error:
             self._json_response(400, {"error": {"message": error}})
@@ -1159,9 +1720,35 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if error:
             self._json_response(400, {"error": {"message": error}})
             return
+        envelope = self._build_envelope(data)
+        if envelope is None:
+            return
         fields, error = self._validate_skill_payload(data, creating=False)
         if error:
             self._json_response(400, {"error": {"message": error}})
+            return
+        backend, handle, ok = self._memory_context_required()
+        if not ok:
+            return
+        cluster, db = handle if backend == "kusto" else (None, None)
+        command = {
+            "entity": "skill", "operation": "update",
+            "skill_id": skill_id, "fields": fields,
+        }
+        try:
+            replay = self._mutation_replay_with_projection(
+                envelope, "skill.updated", command, backend, cluster, db,
+                "Skills", "SkillId", _SKILL_COLUMNS,
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if replay:
+            projected, persisted_row = replay
+            if not projected:
+                self._json_response(500, {"error": {"message": "Skill projection is pending; retry safely"}})
+                return
+            self._json_response(200, {"skill": persisted_row, "idempotent": True})
             return
         current, error = self._skill_latest_by_id(cluster, db, skill_id)
         if error:
@@ -1179,22 +1766,50 @@ class BridgeHandler(BaseHTTPRequestHandler):
             row["Status"] = "active"
         row.update(fields)
         row["UpdatedAt"] = now
-        if not self._write_skill_row(cluster, db, row):
+        try:
+            ok, persisted_row, idempotent = self._write_skill_row(
+                cluster, db, row, envelope, "skill.updated", command
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if not ok:
             self._json_response(500, {"error": {"message": "Skill write failed"}})
             return
-        self._json_response(200, {"skill": row})
+        self._json_response(200, {"skill": persisted_row, "idempotent": idempotent})
 
     def _skills_delete(self, raw_skill_id):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "skill mutations are restricted to loopback bind"}})
             return
+        skill_id, error = self._validate_skill_id(raw_skill_id)
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        envelope = self._build_envelope({}, require_request=True)
+        if envelope is None:
+            return
+        command = {"entity": "skill", "operation": "delete", "skill_id": skill_id}
         backend, handle, ok = self._memory_context_required()
         if not ok:
             return
         cluster, db = handle if backend == "kusto" else (None, None)
-        skill_id, error = self._validate_skill_id(raw_skill_id)
-        if error:
-            self._json_response(400, {"error": {"message": error}})
+        try:
+            replay = self._mutation_replay_with_projection(
+                envelope, "skill.deleted", command, backend, cluster, db,
+                "Skills", "SkillId", _SKILL_COLUMNS,
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if replay:
+            projected, persisted_row = replay
+            if not projected:
+                self._json_response(500, {"error": {"message": "Skill projection is pending; retry safely"}})
+                return
+            self._json_response(200, {
+                "skill": persisted_row, "status": "deleted", "idempotent": True,
+            })
             return
         current, error = self._skill_latest_by_id(cluster, db, skill_id)
         if error:
@@ -1210,10 +1825,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
             row["CreatedAt"] = now
         row["Status"] = "deleted"
         row["UpdatedAt"] = now
-        if not self._write_skill_row(cluster, db, row):
+        try:
+            ok, persisted_row, idempotent = self._write_skill_row(
+                cluster, db, row, envelope, "skill.deleted", command
+            )
+        except IdempotencyCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        if not ok:
             self._json_response(500, {"error": {"message": "Skill write failed"}})
             return
-        self._json_response(200, {"skill": row, "status": "deleted"})
+        self._json_response(200, {
+            "skill": persisted_row, "status": "deleted", "idempotent": idempotent,
+        })
 
     def _list_artifacts(self):
         """List all artifacts in ARTIFACTS_DIR with name, size, and mtime."""
@@ -1250,7 +1874,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         import subprocess
         try:
-            subprocess.Popen(["xdg-open", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                ["xdg-open", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=_cfg.child_process_env(),
+            )
             self._json_response(200, {"opened": True, "file": requested_name})
         except Exception as e:
             self._json_response(500, {"error": {"message": f"Could not open file: {e}"}})
@@ -1433,21 +2060,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self._json_response(200, {"status": "ok", "purged": purged})
 
     def _health(self):
+        # Health is unauthenticated (used for readiness probes).
+        # Redact details when auth is enabled to avoid leaking session info.
+        acp_ok = bool(_st.acp_client and _st.acp_client.alive)
         backend = _resolve_memory_backend()
         status = {
-            "status": "ok" if (_st.acp_client and _st.acp_client.alive) else "error",
-            "session_id": _st.acp_client.session_id if _st.acp_client else None,
-            "agent": _st.acp_client.agent_info if _st.acp_client else None,
-            "model": _st.acp_client.model if _st.acp_client else None,
-            "mcp_servers": list(_st.acp_client.mcp_config.keys()) if _st.acp_client and _st.acp_client.mcp_config else [],
-            "cognition_enabled": _st.cognition_enabled,
-            "cognition_launch_id": _st.cognition_launch_id,
-            "cognition_launch_iso": _st.cognition_launch_iso,
+            "status": "ok" if (acp_ok or _st.egress_mode != "cloud") else "degraded",
+            "egress_mode": _st.egress_mode,
             "memory_backend": backend,
+            "cognition_enabled": _st.cognition_enabled,
             "memory_available": _memory_available(),
         }
-        if backend == "sqlite" and _st.sqlite_mem:
-            status["memory_db_path"] = _st.sqlite_mem.db_path
+        # Expose full details only when the caller is authenticated
+        auth = self.headers.get("Authorization", "")
+        authed = (not _st.bridge_auth_token) or (
+            auth.startswith("Bearer ") and hmac.compare_digest(auth[7:], _st.bridge_auth_token)
+        )
+        if authed:
+            status["session_id"] = _st.acp_client.session_id if _st.acp_client else None
+            status["agent"] = _st.acp_client.agent_info if _st.acp_client else None
+            status["model"] = _st.acp_client.model if _st.acp_client else None
+            status["mcp_servers"] = list(_st.acp_client.mcp_config.keys()) if _st.acp_client and _st.acp_client.mcp_config else []
+            status["cognition_launch_id"] = _st.cognition_launch_id
+            status["cognition_launch_iso"] = _st.cognition_launch_iso
+            if backend == "sqlite" and _st.sqlite_mem:
+                status["memory_db_path"] = _st.sqlite_mem.db_path
         self._json_response(200, status)
 
     # ------------------------------------------------------------------
@@ -1566,7 +2203,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # System
         node_version = None
         try:
-            node_version = subprocess.check_output(["node", "--version"], stderr=subprocess.DEVNULL, timeout=5).decode().strip()
+            node_version = subprocess.check_output(
+                ["node", "--version"], stderr=subprocess.DEVNULL, timeout=5,
+                env=_cfg.child_process_env(),
+            ).decode().strip()
         except Exception:
             pass
         report["subsystems"]["system"] = {
@@ -1719,11 +2359,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         result_text = ""
         if _st.acp_client and _st.acp_client.alive:
             try:
-                result = _st.acp_client.send_prompt([
-                    {"role": "system", "content": "You extract reusable skills from successful interactions. Output only valid JSON."},
-                    {"role": "user", "content": extract_prompt}
-                ])
-                result_text = str(result or "").strip()
+                prompt_text = (
+                    "You extract reusable skills from successful interactions. "
+                    "Output only valid JSON, no code fences, no prose.\n\n"
+                    + extract_prompt
+                )
+                result = _st.acp_client.prompt(prompt_text)
+                if isinstance(result, dict):
+                    if "error" in result:
+                        self._json_response(502, {"error": {"message": f"skill extraction failed: {result['error']}"}})
+                        return
+                    result_text = (result.get("text") or "").strip()
+                else:
+                    result_text = str(result or "").strip()
             except Exception as e:
                 self._json_response(502, {"error": {"message": f"skill extraction failed: {e}"}})
                 return
@@ -1731,7 +2379,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # Fall back to LM Studio
             try:
                 from bridge.utils import _load_client_prefs, _validate_lmstudio_base_url
-                import urllib.request
                 prefs = _load_client_prefs()
                 lms_base = (prefs.get("lmstudio_base_url") or "http://localhost:1234/v1").rstrip("/")
                 lms_model = prefs.get("lmstudio_model") or ""
@@ -1739,18 +2386,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if lms_error:
                     self._json_response(503, {"error": {"message": f"No agent available: {lms_error}"}})
                     return
-                payload = json.dumps({
+                payload = {
                     "model": lms_model or "default",
                     "messages": [
                         {"role": "system", "content": "You extract reusable skills from successful interactions. Output only valid JSON, no code fences, no prose."},
                         {"role": "user", "content": extract_prompt},
                     ],
                     "temperature": 0.3,
-                }).encode()
-                req = urllib.request.Request(lms_base + "/chat/completions", data=payload,
-                                            headers={"Content-Type": "application/json"}, method="POST")
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    body = json.loads(resp.read())
+                }
+                from bridge.lmstudio import post_json as _lmstudio_post_json
+                _, body, request_error = _lmstudio_post_json(lms_base, payload, timeout=120)
+                if request_error:
+                    raise RuntimeError(request_error)
                 result_text = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
             except Exception as e:
                 self._json_response(502, {"error": {"message": f"skill extraction failed: {e}"}})
@@ -2023,7 +2670,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if "env" in safe_srv:
                 safe_env = {}
                 for k, v in safe_srv["env"].items():
-                    if any(s in k.upper() for s in ("TOKEN", "KEY", "SECRET", "PAT", "PASSWORD", "CREDENTIAL")):
+                    if _cfg.is_sensitive_env_name(k):
                         safe_env[k] = "***REDACTED***"
                     else:
                         safe_env[k] = v
@@ -2049,16 +2696,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _aig_chat(self):
         """AIG orchestrator — intelligently routes to the best model for each task."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
-            self._json_response(400, {"error": {"message": "Empty request body"}})
-            return
-
-        body = self.rfile.read(content_length).decode("utf-8")
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            self._json_response(400, {"error": {"message": "Invalid JSON"}})
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
             return
 
         messages = data.get("messages", [])
@@ -2074,6 +2714,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # tools (that duplicated the draft's retrieval and doubled latency).
         no_tools = bool(data.get("no_tools"))
         model_for_response = data.get("model", "claude-opus-4.8")  # frontend-selectable, default claude-opus-4.8
+        if _st.egress_mode != "cloud" and model_for_response != "lmstudio":
+            print(f"[AIG] {_st.egress_mode} egress policy forcing LM Studio responder")
+            model_for_response = "lmstudio"
         _set_openai_key_from(data)  # cache key for semantic recall (incl. background threads)
 
         if not user_message and messages:
@@ -2087,6 +2730,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         _mark_user_activity()
         _turn_t0 = time.perf_counter()
+
+        envelope = self._build_envelope(data, require_session=True)
+        if envelope is None:
+            return
+        _aig_envelope = envelope.to_dict()
 
         print(f"[AIG] Processing: {user_message[:80]}...")
 
@@ -2168,6 +2816,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         acp_data = ""
         acp_model_used = ""
+        if needs_acp_tools and _st.local_mode:
+            print(f"[AIG] Step 2: Using local MCP ({_request_type})...")
+            acp_data, acp_model_used = self._retrieve_local_data(user_message)
+            needs_acp_tools = False
+            _acp_route = "local-mcp"
         if needs_acp_tools:
             print(f"[AIG] Step 2: Using ACP ({_request_type})...")
             # Ensure ACP is alive before attempting tool calls.
@@ -2323,25 +2976,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 )})
             lms_messages.append({"role": "user", "content": user_message})
 
-            try:
-                import requests as _req
-                lms_resp = _req.post(
-                    lms_base + "/chat/completions",
-                    json={"model": lms_model, "messages": lms_messages, "temperature": 0.7},
-                    timeout=180,
-                )
-                if lms_resp.status_code == 200:
-                    lms_body = lms_resp.json()
-                    response_text = (lms_body.get("choices") or [{}])[0].get("message", {}).get("content", "")
-                    model_used = "aig:lmstudio:" + lms_model
-                else:
-                    print(f"[AIG] LM Studio HTTP error: {lms_resp.status_code}")
-                    self._json_response(502, {"error": {"message": f"LM Studio returned HTTP {lms_resp.status_code}"}})
-                    return
-            except Exception as _lms_err:
-                print(f"[AIG] LM Studio request failed: {_lms_err}")
-                self._json_response(504, {"error": {"message": f"LM Studio request failed: {_lms_err}"}})
+            from bridge.lmstudio import post_json as _lmstudio_post_json
+            lms_status, lms_body, lms_request_error = _lmstudio_post_json(
+                lms_base,
+                {"model": lms_model, "messages": lms_messages, "temperature": 0.7},
+                timeout=180,
+            )
+            if lms_request_error:
+                print(f"[AIG] LM Studio request failed: {lms_request_error}")
+                status = 502 if lms_status else 504
+                self._json_response(status, {"error": {"message": lms_request_error}})
                 return
+            response_text = (lms_body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            model_used = "aig:lmstudio:" + lms_model
 
             print(f"[AIG] LM Studio response: {len(response_text)} chars from {lms_model}")
             # Log the first 500 chars of the response for debugging
@@ -2395,10 +3042,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 response_text
             )
 
-            if response_text and _st.cognition_enabled and not internal:
-                threading.Thread(target=_post_response_reflection,
-                                 args=(user_message, response_text, model_used),
-                                 daemon=True).start()
+            if response_text and not internal:
+                try:
+                    _post_response_reflection(
+                        user_message, response_text, model_used, envelope=_aig_envelope
+                    )
+                except Exception as exc:
+                    self._json_response(500, {"error": {"message": f"Durable turn finalization failed: {exc}"}})
+                    return
 
             response = {
                 "id": f"aig-{int(time.time())}",
@@ -2410,7 +3061,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "message": {"role": "assistant", "content": response_text},
                     "finish_reason": "stop"
                 }],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "envelope": _aig_envelope,
             }
             self._json_response(200, response)
             return
@@ -2628,10 +3280,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 model_used = "aig:unavailable"
 
         # Step 5: Post-response reflection (background)
-        if response_text and _st.cognition_enabled and not internal:
-            threading.Thread(target=_post_response_reflection,
-                           args=(user_message, response_text, model_used),
-                           daemon=True).start()
+        if response_text and not internal:
+            try:
+                _post_response_reflection(
+                    user_message, response_text, model_used, envelope=_aig_envelope
+                )
+            except Exception as exc:
+                self._json_response(500, {"error": {"message": f"Durable turn finalization failed: {exc}"}})
+                return
 
         # Return OpenAI-compatible response
         response = {
@@ -2647,7 +3303,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 },
                 "finish_reason": "stop"
             }],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "envelope": _aig_envelope,
         }
         self._json_response(200, response)
         print(f"[AIG] Complete: {model_used} ({len(response_text)} chars)")
@@ -2668,7 +3325,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _memory_backend_get(self):
         """Return the current memory backend configuration."""
         backend = _resolve_memory_backend()
-        info = {"backend": backend, "available": _memory_available()}
+        local_mem = _get_sqlite_mem()
+        info = {
+            "backend": backend,
+            "available": _memory_available(),
+            "reconciliation": reconciliation_status(
+                local_mem, local_mem.event_repository(), target_backend=backend
+            ),
+        }
         if backend == "sqlite":
             mem = _get_sqlite_mem()
             info["db_path"] = mem.db_path
@@ -2681,32 +3345,117 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _memory_backend_set(self):
         """Switch the memory backend (POST with {"backend": "sqlite"|"kusto"})."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
-            self._json_response(400, {"error": {"message": "Empty request body"}})
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
             return
-        body = self.rfile.read(content_length).decode("utf-8")
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            self._json_response(400, {"error": {"message": "Invalid JSON"}})
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        allowed = {"backend", "confirm_unreconciled"} | _cfg.REQUEST_ENVELOPE_FIELDS
+        unknown = sorted(set(data) - allowed)
+        if unknown:
+            self._json_response(400, {
+                "error": {"message": "Unsupported field(s): " + ", ".join(unknown)}
+            })
+            return
+        if (
+            "confirm_unreconciled" in data
+            and not isinstance(data["confirm_unreconciled"], bool)
+        ):
+            self._json_response(400, {
+                "error": {"message": "confirm_unreconciled must be a boolean"}
+            })
             return
         backend = str(data.get("backend", "")).strip().lower()
         if backend not in ("kusto", "sqlite"):
             self._json_response(400, {"error": {"message": "backend must be 'kusto' or 'sqlite'"}})
             return
+        if backend == "kusto" and _st.egress_mode != "cloud":
+            self._json_response(403, {
+                "error": {"message": f"Kusto is disabled by EVA_EGRESS_MODE={_st.egress_mode}"}
+            })
+            return
+        envelope = self._build_envelope(data)
+        if envelope is None:
+            return
+        local_mem = _get_sqlite_mem()
+        repo = local_mem.event_repository()
+        confirmed = data.get("confirm_unreconciled") is True
+        command = {
+            "operation": "memory_backend_switch",
+            "backend": backend,
+            "confirm_unreconciled": confirmed,
+        }
+        audit_key = f"backend-switch:{envelope.request_id}"
+        existing = repo.get_by_idempotency_key(audit_key)
+        if existing:
+            try:
+                receipt = json.loads(existing["Payload"])
+                if (
+                    not isinstance(receipt, dict)
+                    or canonical_json(receipt.get("command")) != canonical_json(command)
+                    or receipt.get("command_hash") != payload_hash(canonical_json(command))
+                    or not isinstance(receipt.get("result"), dict)
+                ):
+                    raise IdempotencyCollisionError(
+                        audit_key, "backend switch command differs"
+                    )
+            except (ValueError, TypeError, IdempotencyCollisionError) as exc:
+                self._json_response(409, {"error": {"message": str(exc)}})
+                return
+            result = dict(receipt["result"])
+            result["idempotent"] = True
+            self._json_response(200, result)
+            return
+        reconciliation = reconciliation_status(
+            local_mem, repo, target_backend=backend
+        )
+        if backend != _resolve_memory_backend() and not reconciliation["reconciled"] and not confirmed:
+            self._json_response(409, {
+                "error": {"message": "Memory journals are not reconciled; explicit confirmation is required"},
+                "reconciliation": reconciliation,
+                "requires_confirmation": True,
+            })
+            return
+        current_backend = _resolve_memory_backend()
+        result = {
+            "backend": backend, "status": "ok",
+            "reconciliation": reconciliation,
+        }
+        if backend == "sqlite":
+            result["db_path"] = local_mem.db_path
         ok = _set_memory_backend(backend)
+        if not ok:
+            self._json_response(500, {"error": {"message": "Failed to set backend"}})
+            return
+        if confirmed:
+            try:
+                mutate_event(
+                    local_mem, repo,
+                    stream_id="audit:backend-switch",
+                    event_type="memory.backend_switch_overridden",
+                    payload=self._mutation_receipt(command, result),
+                    session_id=envelope.session_id, turn_id=envelope.turn_id,
+                    correlation_id=envelope.correlation_id,
+                    actor_type="admin", actor_id=envelope.user_id, origin=envelope.origin,
+                    trust=1.0, sensitivity="private", consent_scope="local_only",
+                    idempotency_key=audit_key,
+                )
+            except Exception as exc:
+                _set_memory_backend(current_backend)
+                self._json_response(500, {"error": {"message": f"Could not audit override: {exc}"}})
+                return
         if ok and backend == "sqlite":
             # Initialize immediately so the response includes DB info
             mem = _get_sqlite_mem()
             # Enable cognition if not already active
             if not _st.cognition_enabled:
                 _enable_cognition({}, model=None, port=None)
-            self._json_response(200, {"backend": backend, "db_path": mem.db_path, "status": "ok"})
+            result["db_path"] = mem.db_path
+            self._json_response(200, result)
         elif ok:
-            self._json_response(200, {"backend": backend, "status": "ok"})
-        else:
-            self._json_response(500, {"error": {"message": "Failed to set backend"}})
+            self._json_response(200, result)
 
     # ------------------------------------------------------------------
     # Shared ACP data retrieval — used by AIG pipeline and /v1/data/retrieve
@@ -2855,10 +3604,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _memory_reflect(self):
         """Trigger post-response reflection for non-ACP models (browser calls this after getting a response)."""
-        if not _st.cognition_enabled:
-            self._json_response(200, {"status": "cognition_disabled"})
-            return
-
         content_length = int(self.headers.get("Content-Length", 0))
         if content_length == 0:
             self._json_response(400, {"error": {"message": "Empty request body"}})
@@ -2877,12 +3622,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if user_msg:
             _mark_user_activity()
 
-        if user_msg and assistant_msg:
-            threading.Thread(target=_post_response_reflection,
-                           args=(user_msg, assistant_msg, model),
-                           daemon=True).start()
+        envelope = self._build_envelope(data, require_session=True)
+        if envelope is None:
+            return
+        envelope_data = envelope.to_dict()
 
-        self._json_response(200, {"status": "ok"})
+        if user_msg and assistant_msg:
+            try:
+                result = _post_response_reflection(
+                    user_msg, assistant_msg, model, envelope=envelope_data
+                )
+            except Exception as exc:
+                self._json_response(500, {"error": {"message": f"Durable turn finalization failed: {exc}"}})
+                return
+            self._json_response(200, {
+                "status": "ok", "envelope": envelope_data,
+                "event_ids": (result or {}).get("event_ids", []),
+            })
+            return
+        self._json_response(400, {"error": {"message": "user_message and assistant_message are required"}})
 
     def _kusto_seed(self):
         """Apply the Eva Kusto schema seed file to a configured database."""
@@ -2939,7 +3697,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             })
             return
 
-        seed_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eva_seed.kql")
+        seed_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "eva_seed.kql")
         try:
             with open(seed_path, "r", encoding="utf-8") as seed_file:
                 seed_text = seed_file.read()
@@ -2986,20 +3744,27 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _mcp_configure(self):
         """Configure MCP servers and restart the ACP client."""
         # global statement removed — writes go to _st.*
-
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
-            self._json_response(400, {"error": {"message": "Empty request body"}})
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
             return
-
-        body = self.rfile.read(content_length).decode("utf-8")
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            self._json_response(400, {"error": {"message": "Invalid JSON"}})
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
             return
 
         mcp_servers = data.get("mcp_servers", {})
+        if not isinstance(mcp_servers, dict):
+            self._json_response(400, {"error": {"message": "mcp_servers must be an object"}})
+            return
+        mcp_servers, rejected = _cfg.mcp_config_for_egress(mcp_servers, _st.egress_mode)
+        if rejected:
+            self._json_response(403, {
+                "error": {
+                    "message": f"{_st.egress_mode} egress policy rejects MCP server(s): "
+                    + ", ".join(sorted(rejected))
+                }
+            })
+            return
 
         # Persist the raw selection (secrets stripped) so it survives bridge
         # restarts even if the Electron file:// localStorage is cleared.
@@ -3013,7 +3778,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             resolved_env = {}
             for k, v in env.items():
                 # _useGitHubPAT: resolve to actual PAT from request body or environment
-                if k == '_useGitHubPAT':
+                if k == '_useGitHubPAT' and v is True:
                     pat = request_github_pat or os.environ.get('GITHUB_PERSONAL_ACCESS_TOKEN', '') or os.environ.get('GITHUB_PAT', '')
                     if pat:
                         resolved_env['GITHUB_PERSONAL_ACCESS_TOKEN'] = pat
@@ -3026,6 +3791,23 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 # Ensure all env values are strings (subprocess.Popen requirement)
                 resolved_env[k] = str(v) if not isinstance(v, str) else v
             srv_cfg['env'] = resolved_env
+
+        if _st.egress_mode != "cloud":
+            try:
+                from bridge.local_mcp import LocalMCPManager
+                if _st.local_mcp_manager:
+                    _st.local_mcp_manager.stop_all()
+                _st.local_mcp_manager = LocalMCPManager()
+                _st.local_mcp_manager.start_servers(mcp_servers)
+                _st.local_mode = True
+                self._json_response(200, {
+                    "status": "ok",
+                    "message": f"Local MCP servers configured: {list(mcp_servers.keys())}",
+                    "active_servers": list(mcp_servers.keys()),
+                })
+            except Exception as exc:
+                self._json_response(500, {"error": {"message": f"Local MCP configuration failed: {exc}"}})
+            return
 
         if _st.kusto_database_locked and "kusto-mcp-server" in mcp_servers:
             kusto_env = mcp_servers["kusto-mcp-server"].setdefault("env", {})
@@ -3072,22 +3854,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _chat_completions(self):
         # global statement removed — writes go to _st.*
-        if not _st.acp_client or not _st.acp_client.alive:
-            self._json_response(503, {"error": {"message": "ACP bridge not connected to Copilot"}})
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
             return
-
-        # Read request body
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
-            self._json_response(400, {"error": {"message": "Empty request body"}})
+        envelope = self._build_envelope(data, require_session=True)
+        if envelope is None:
             return
-
-        body = self.rfile.read(content_length).decode("utf-8")
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            self._json_response(400, {"error": {"message": "Invalid JSON"}})
-            return
+        envelope_data = envelope.to_dict()
 
         messages = data.get("messages", [])
         if not messages:
@@ -3166,17 +3940,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "total_tokens": 0
-            }
+            },
+            "envelope": envelope_data,
         }
-        self._json_response(200, response)
-
-        # --- Cognition: Post-response reflection (background) ---
+        # --- Cognition: durable turn finalization ---
         response_text = result.get("text", "")
         model_label = f"copilot-acp:{requested_model}" if requested_model else "copilot-acp"
         if last_user_msg and response_text:
-            threading.Thread(target=_post_response_reflection,
-                           args=(last_user_msg, response_text, model_label),
-                           daemon=True).start()
+            try:
+                _post_response_reflection(
+                    last_user_msg, response_text, model_label, envelope=envelope_data
+                )
+            except Exception as exc:
+                self._json_response(500, {"error": {"message": f"Durable turn finalization failed: {exc}"}})
+                return
+        self._json_response(200, response)
 
     # ------------------------------------------------------------------
     # Vision browser agent endpoints
@@ -3209,6 +3987,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         return director
 
     def _browser_run(self):
+        if _st.egress_mode != "cloud":
+            self._json_response(403, {"error": {"message": f"browser vision is disabled by EVA_EGRESS_MODE={_st.egress_mode}"}})
+            return
         data, err = self._read_json_body()
         if err:
             self._json_response(400, {"error": {"message": err}})
@@ -3321,6 +4102,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         return director
 
     def _desktop_run(self):
+        if _st.egress_mode != "cloud":
+            self._json_response(403, {"error": {"message": f"desktop vision is disabled by EVA_EGRESS_MODE={_st.egress_mode}"}})
+            return
         data, err = self._read_json_body()
         if err:
             self._json_response(400, {"error": {"message": err}})
@@ -3460,6 +4244,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     # -- Vision describe via a Copilot/Claude model (ACP image prompt) -------
     def _vision_look(self):
+        if _st.egress_mode != "cloud":
+            self._json_response(403, {"error": {"message": f"cloud vision is disabled by EVA_EGRESS_MODE={_st.egress_mode}"}})
+            return
         data, err = self._read_json_body()
         if err:
             self._json_response(400, {"error": {"message": err}})
@@ -3554,6 +4341,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if requested not in ("local", "cloud"):
             self._json_response(400, {"error": {"message": "mode must be 'local' or 'cloud'"}})
             return
+        if requested == "cloud" and _st.egress_mode != "cloud":
+            self._json_response(403, {
+                "error": {"message": f"cloud mode is disabled by EVA_EGRESS_MODE={_st.egress_mode}"}
+            })
+            return
 
         if requested == "local":
             # Start local MCP servers if not already running
@@ -3566,13 +4358,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         mcp_config = dict(_st.acp_client.mcp_config)
                     if not mcp_config:
                         mcp_config = _load_persisted_mcp_config()
+                    mcp_config, rejected = _cfg.mcp_config_for_egress(mcp_config, _st.egress_mode)
+                    if rejected:
+                        print(f"[Mode] Egress policy rejected MCP server(s): {', '.join(sorted(rejected))}")
                     # Always include the web search MCP server for local mode
                     # (replaces Copilot CLI's built-in Bing search)
-                    if "eva-web-search" not in mcp_config:
+                    if _st.egress_mode == "cloud" and "eva-web-search" not in mcp_config:
                         # Try multiple paths: bridge/../../web_search_mcp.py (source layout)
                         # and $HOME/.eva/tools/web_search_mcp.py (installed copy)
                         _ws_candidates = [
-                            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web_search_mcp.py"),
+                            os.path.join(_cfg.TOOLS_DIR, "web_search_mcp.py"),
                             os.path.expanduser("~/.eva/tools/web_search_mcp.py"),
                         ]
                         for _ws_path in _ws_candidates:
@@ -3639,9 +4434,176 @@ class BridgeHandler(BaseHTTPRequestHandler):
 # Main
 # ---------------------------------------------------------------------------
 
+_BRIDGE_READY_CONTEXT = "eva-bridge-bound-v1"
+_BRIDGE_READY_PREFIX = "EVA_BRIDGE_BOUND "
+
+
+def _bridge_bind_proof_digest(token, nonce, pid, host, port):
+    message = ":".join((
+        _BRIDGE_READY_CONTEXT, str(nonce), str(pid), str(host), str(port)
+    ))
+    return hmac.new(
+        str(token).encode("utf-8"), message.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def _emit_bridge_bind_proof(server, nonce):
+    if not nonce:
+        return
+    if not _st.bridge_auth_token:
+        raise RuntimeError("bridge bind proof requires bearer authentication")
+    address = server.server_address
+    host = str(address[0])
+    port = int(address[1])
+    pid = os.getpid()
+    proof = {
+        "version": 1,
+        "pid": pid,
+        "host": host,
+        "port": port,
+        "proof": _bridge_bind_proof_digest(
+            _st.bridge_auth_token, nonce, pid, host, port
+        ),
+    }
+    sys.stdout.write(
+        _BRIDGE_READY_PREFIX
+        + json.dumps(proof, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    )
+    sys.stdout.flush()
+
+def _write_private_token_file(path, token):
+    absolute_path = os.path.abspath(path)
+    directory = os.path.dirname(absolute_path)
+    token_name = os.path.basename(absolute_path)
+    if not token_name or token_name in (".", ".."):
+        raise OSError("invalid token filename")
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    expected_directory = os.lstat(directory)
+    if not stat.S_ISDIR(expected_directory.st_mode):
+        raise OSError("token directory must be a real directory")
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_CLOEXEC", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(directory, directory_flags)
+    pinned_directory = os.fstat(directory_fd)
+    if (
+        not stat.S_ISDIR(pinned_directory.st_mode)
+        or (pinned_directory.st_dev, pinned_directory.st_ino)
+        != (expected_directory.st_dev, expected_directory.st_ino)
+    ):
+        os.close(directory_fd)
+        raise OSError("token directory changed while opening")
+
+    temp_name = f".bridge_token.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+    file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    file_flags |= getattr(os, "O_CLOEXEC", 0)
+    file_flags |= getattr(os, "O_NOFOLLOW", 0)
+    file_fd = None
+    installed = False
+    succeeded = False
+    try:
+        os.fchmod(directory_fd, 0o700)
+        current_directory = os.lstat(directory)
+        if (
+            not stat.S_ISDIR(current_directory.st_mode)
+            or (current_directory.st_dev, current_directory.st_ino)
+            != (pinned_directory.st_dev, pinned_directory.st_ino)
+        ):
+            raise OSError("token directory path changed")
+
+        file_fd = os.open(
+            temp_name, file_flags, 0o600, dir_fd=directory_fd
+        )
+        os.fchmod(file_fd, 0o600)
+        content = str(token).encode("utf-8")
+        offset = 0
+        while offset < len(content):
+            offset += os.write(file_fd, content[offset:])
+        os.fsync(file_fd)
+        os.close(file_fd)
+        file_fd = None
+        # Atomic replacement replaces a pre-existing symlink itself rather
+        # than following it to attacker-selected content.
+        os.replace(
+            temp_name, token_name,
+            src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+        )
+        installed = True
+        token_stat = os.stat(
+            token_name, dir_fd=directory_fd, follow_symlinks=False
+        )
+        if (
+            not stat.S_ISREG(token_stat.st_mode)
+            or stat.S_IMODE(token_stat.st_mode) != 0o600
+        ):
+            raise OSError("token file did not retain secure regular-file mode")
+        os.fsync(directory_fd)
+
+        current_directory = os.lstat(directory)
+        if (
+            not stat.S_ISDIR(current_directory.st_mode)
+            or (current_directory.st_dev, current_directory.st_ino)
+            != (pinned_directory.st_dev, pinned_directory.st_ino)
+        ):
+            raise OSError("token directory path changed during write")
+        succeeded = True
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        try:
+            os.unlink(temp_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        if installed and not succeeded:
+            try:
+                os.unlink(token_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+            except FileNotFoundError:
+                pass
+        os.close(directory_fd)
+
+
 def main():
     # global statement removed — writes go to _st.*
     _install_log_tee()
+
+    ready_nonce = os.environ.pop("EVA_BRIDGE_READY_NONCE", "").strip()
+    if ready_nonce and not re.fullmatch(r"[A-Za-z0-9_-]{43}", ready_nonce):
+        print("[Bridge] ERROR: invalid bridge readiness nonce")
+        sys.exit(2)
+
+    if _st.egress_mode_invalid:
+        print("[Bridge] ERROR: EVA_EGRESS_MODE must be offline, local-network, or cloud")
+        sys.exit(2)
+
+    # ── Per-launch bearer auth ──────────────────────────────────────
+    env_token = os.environ.get("EVA_BRIDGE_TOKEN", "").strip()
+    if env_token:
+        _st.bridge_auth_token = env_token
+        os.environ.pop("EVA_BRIDGE_TOKEN", None)
+        print("[Bridge] Per-launch bearer auth enabled (from EVA_BRIDGE_TOKEN)")
+    else:
+        # No env token — auto-generate and write to a secure file so scripts
+        # can read it, but never log the token value itself.
+        if not _cfg.env_truthy("EVA_ALLOW_UNAUTHENTICATED_LOOPBACK"):
+            auto_token = secrets.token_urlsafe(32)
+            _st.bridge_auth_token = auto_token
+            token_path = os.path.join(_cfg.EVA_CONFIG_DIR, "bridge_token")
+            try:
+                _write_private_token_file(token_path, auto_token)
+                print(f"[Bridge] Auto-generated bridge token written to {token_path}")
+            except OSError as _te:
+                print(f"[Bridge] Warning: could not write token file: {_te}")
+            print("[Bridge] Bearer auth required for /v1/* (set EVA_BRIDGE_TOKEN or read token file)")
+        else:
+            _st.bridge_auth_token = ""
+            print("[Bridge] Auth disabled (EVA_ALLOW_UNAUTHENTICATED_LOOPBACK=1, loopback only)")
+
+    # ── Egress mode ─────────────────────────────────────────────────
+    print(f"[Bridge] Egress mode: {_st.egress_mode}")
+
     default_port = 8888
     env_port = os.environ.get("EVA_ACP_PORT", "").strip()
     if env_port:
@@ -3665,14 +4627,23 @@ def main():
     parser.add_argument("--kusto-database", default="", help="Default Kusto database name")
     args = parser.parse_args()
     _st.bridge_bind_address = args.bind
+    if (
+        not _st.bridge_auth_token
+        and _cfg.env_truthy("EVA_ALLOW_UNAUTHENTICATED_LOOPBACK")
+        and not _is_loopback_bind()
+    ):
+        print("[Bridge] ERROR: unauthenticated development mode is restricted to loopback bind")
+        sys.exit(2)
+    if _st.egress_mode != "cloud":
+        _st.memory_backend = "sqlite"
+        print(f"[Bridge] {_st.egress_mode} mode: using SQLite memory")
 
     # Build MCP config
     mcp_config = {}
     mcp_config_source = args.mcp_config
     # Auto-discover mcp.json from project root when no explicit --mcp-config
     if not mcp_config_source:
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        auto_path = os.path.join(project_root, "mcp.json")
+        auto_path = os.path.join(_cfg.PROJECT_ROOT, "mcp.json")
         if os.path.isfile(auto_path):
             mcp_config_source = auto_path
             print(f"[Bridge] Auto-discovered MCP config: {auto_path}")
@@ -3689,28 +4660,33 @@ def main():
             print(f"[Bridge] Warning: Failed to parse MCP config: {e}")
 
     if args.enable_azure_mcp:
-        mcp_config["azure-mcp-server"] = {
-            "command": "npx",
-            "args": ["-y", "@azure/mcp@latest", "server", "start"],
-            "env": {"AZURE_MCP_COLLECT_TELEMETRY": "false"}
-        }
-        print("[Bridge] Azure MCP Server enabled (Kusto/ADX, Storage, Monitor, etc.)")
+        if _st.egress_mode != "cloud":
+            print(f"[Bridge] {_st.egress_mode} mode: --enable-azure-mcp ignored")
+        else:
+            mcp_config["azure-mcp-server"] = {
+                "command": "npx",
+                "args": ["-y", "@azure/mcp@latest", "server", "start"],
+                "env": {"AZURE_MCP_COLLECT_TELEMETRY": "false"}
+            }
+            print("[Bridge] Azure MCP Server enabled (Kusto/ADX, Storage, Monitor, etc.)")
 
     if args.enable_github_mcp:
-        gh_token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "")
-        if not gh_token:
-            print("[Bridge] Warning: GITHUB_PERSONAL_ACCESS_TOKEN not set. GitHub MCP tools may not work.")
-        mcp_config["github-mcp-server"] = {
-            "command": "docker",
-            "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"],
-            "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": gh_token} if gh_token else {}
-        }
-        print("[Bridge] GitHub MCP Server enabled")
+        if _st.egress_mode != "cloud":
+            print(f"[Bridge] {_st.egress_mode} mode: --enable-github-mcp ignored")
+        else:
+            gh_token = os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "")
+            if not gh_token:
+                print("[Bridge] Warning: GITHUB_PERSONAL_ACCESS_TOKEN not set. GitHub MCP tools may not work.")
+            mcp_config["github-mcp-server"] = {
+                "command": "docker",
+                "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"],
+                "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": gh_token} if gh_token else {}
+            }
+            print("[Bridge] GitHub MCP Server enabled")
 
-    if args.enable_kusto_mcp:
+    if args.enable_kusto_mcp and _st.egress_mode == "cloud":
         # global statement removed — writes go to _st.*
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        kusto_mcp_path = os.path.join(script_dir, "kusto_mcp.py")
+        kusto_mcp_path = os.path.join(_cfg.TOOLS_DIR, "kusto_mcp.py")
         kusto_env = {}
         if args.kusto_cluster:
             kusto_env["KUSTO_CLUSTER_URL"] = args.kusto_cluster
@@ -3799,6 +4775,15 @@ def main():
             "env": kusto_env
         }
         print(f"[Bridge] Kusto MCP Server enabled (cluster: {args.kusto_cluster or 'from tool params'})")
+    elif args.enable_kusto_mcp:
+        print(f"[Bridge] {_st.egress_mode} mode: --enable-kusto-mcp ignored")
+
+    mcp_config, rejected_mcp = _cfg.mcp_config_for_egress(mcp_config, _st.egress_mode)
+    if rejected_mcp:
+        print(
+            f"[Bridge] {_st.egress_mode} policy removed MCP server(s): "
+            + ", ".join(sorted(rejected_mcp))
+        )
 
     if _st.kusto_database_locked and "kusto-mcp-server" in mcp_config:
         kusto_env = mcp_config["kusto-mcp-server"].setdefault("env", {})
@@ -3815,14 +4800,19 @@ def main():
     if mcp_config:
         print(f"[Bridge] MCP Servers: {', '.join(mcp_config.keys())}")
 
-    # Start ACP client
-    _st.acp_client = ACPClient(copilot_path=args.copilot_path, cwd=args.cwd, model=args.model, mcp_config=mcp_config)
-    try:
-        _st.acp_client.start()
-    except RuntimeError as e:
-        print(f"[Bridge] ERROR: {e}")
-        sys.exit(1)
-
+    # ── Restricted egress modes skip cloud ACP entirely ─────────────
+    if _st.egress_mode in ("offline", "local-network"):
+        print(f"[Bridge] {_st.egress_mode} mode: skipping cloud ACP client startup")
+        _st.acp_client = None
+    elif _st.egress_mode == "cloud":
+        # Start ACP client — cloud mode fails fast if ACP is unavailable
+        _st.acp_client = ACPClient(copilot_path=args.copilot_path, cwd=args.cwd, model=args.model, mcp_config=mcp_config)
+        try:
+            _st.acp_client.start()
+        except RuntimeError as e:
+            print(f"[Bridge] ERROR: {e}")
+            print("[Bridge] Cloud mode: ACP required but unavailable — exiting")
+            sys.exit(1)
     # Enable cognition layer if memory backend is available
     # global statement removed — writes go to _st.*
     _startup_backend = _resolve_memory_backend()
@@ -3840,9 +4830,12 @@ def main():
             try:
                 from bridge.local_mcp import LocalMCPManager
                 _local_cfg = dict(mcp_config) if mcp_config else _load_persisted_mcp_config()
-                if "eva-web-search" not in _local_cfg:
+                _local_cfg, rejected = _cfg.mcp_config_for_egress(_local_cfg, _st.egress_mode)
+                if rejected:
+                    print(f"[Mode] Egress policy rejected persisted MCP server(s): {', '.join(sorted(rejected))}")
+                if _st.egress_mode == "cloud" and "eva-web-search" not in _local_cfg:
                     _ws_candidates = [
-                        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web_search_mcp.py"),
+                        os.path.join(_cfg.TOOLS_DIR, "web_search_mcp.py"),
                         os.path.expanduser("~/.eva/tools/web_search_mcp.py"),
                     ]
                     for _ws_path in _ws_candidates:
@@ -3860,6 +4853,7 @@ def main():
     # Start HTTP server. Threaded so a long-running browser agent run does not
     # block status/cancel/confirm polling on other connections.
     server = ThreadingHTTPServer((args.bind, args.port), BridgeHandler)
+    _emit_bridge_bind_proof(server, ready_nonce)
     print(f"[Bridge] Listening on http://{args.bind}:{args.port}")
     print(f"[Bridge] Endpoints:")
     print(f"  POST /v1/chat/completions   - Send chat messages")
@@ -3900,8 +4894,13 @@ def main():
         print("\n[Bridge] Shutting down...")
     finally:
         _stop_bg_loop()
+        if _st.local_mcp_manager:
+            _st.local_mcp_manager.stop_all()
         if _st.acp_client:
             _st.acp_client.stop()
+        if _st.sqlite_mem:
+            _st.sqlite_mem.close()
+            _st.sqlite_mem = None
         server.server_close()
 
 

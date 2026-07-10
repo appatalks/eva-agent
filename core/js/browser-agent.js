@@ -24,6 +24,7 @@
     poll: null,
     status: null,
     shotTick: 0,
+    base: '',                  // immutable bridge base for the owned run
     endpoint: '/v1/browser',   // bridge path prefix for the active run type
     title: 'Browser Agent',
     onComplete: null,          // fired once when a run reaches a terminal state
@@ -31,7 +32,8 @@
     onConfirm: null,           // fired when the agent parks for confirmation/input
     confirmKey: null,          // de-dupes the confirm callback per park
     onProgress: null,          // fired when the agent's plan/subgoal changes
-    lastProgress: null         // last subgoal narrated, to avoid repeats
+    lastProgress: null,        // last subgoal narrated, to avoid repeats
+    generation: 0
   };
 
   // --- Bridge helpers -------------------------------------------------------
@@ -133,11 +135,7 @@
   }
 
   function closePopup() {
-    stopPolling();
-    var el = document.getElementById('evaBrowserPopup');
-    if (el) el.remove();
-    _state.runId = null;
-    _state.status = null;
+    cancelActiveRun();
   }
 
   // --- Rendering ------------------------------------------------------------
@@ -240,7 +238,7 @@
       var stepKey = String(status.step != null ? status.step : '') + ':' + status.id;
       if (_state._embedShotKey !== stepKey) {
         _state._embedShotKey = stepKey;
-        var url = bridgeBase() + _state.endpoint + '/screenshot?run_id=' +
+        var url = (_state.base || bridgeBase()) + _state.endpoint + '/screenshot?run_id=' +
                   encodeURIComponent(status.id) + '&t=' + (_state.shotTick++);
         _loadShotInto(img, url, stepKey);
       }
@@ -316,7 +314,7 @@
     var pkey = String(status.step != null ? status.step : '') + ':' + status.id;
     if (_state._popupShotKey === pkey) return;
     _state._popupShotKey = pkey;
-    var url = bridgeBase() + _state.endpoint + '/screenshot?run_id=' +
+    var url = (_state.base || bridgeBase()) + _state.endpoint + '/screenshot?run_id=' +
               encodeURIComponent(status.id) + '&t=' + (_state.shotTick++);
     _loadShotInto(img, url);
   }
@@ -328,24 +326,40 @@
   // instead of leaving a stale or blank image up.
   function _loadShotInto(img, url, retryKey) {
     if (!img) return;
+    var shotGeneration = _state.generation;
+    var shotRunId = _state.runId;
+    var shotKey = retryKey || _state._popupShotKey;
+    function shotIsCurrent() {
+      if (shotGeneration !== _state.generation || shotRunId !== _state.runId) return false;
+      return retryKey
+        ? _state._embedShotKey === shotKey
+        : _state._popupShotKey === shotKey;
+    }
     fetch(url, { cache: 'no-store' }).then(function (r) {
+      if (!shotIsCurrent()) throw new Error('stale shot');
       if (!r.ok) throw new Error('shot ' + r.status);
       return r.blob();
     }).then(function (blob) {
+      if (!shotIsCurrent()) throw new Error('stale shot');
       return new Promise(function (resolve, reject) {
         var fr = new FileReader();
-        fr.onload = function () { resolve(fr.result); };
+        fr.onload = function () {
+          if (!shotIsCurrent()) { reject(new Error('stale shot')); return; }
+          resolve(fr.result);
+        };
         fr.onerror = function () { reject(new Error('read failed')); };
         fr.readAsDataURL(blob);
       });
     }).then(function (dataUrl) {
+      if (!shotIsCurrent()) return;
       // Set src directly and force visibility (no reliance on onload), matching
       // the camera path so the element can never get stuck hidden.
       img.style.visibility = 'visible';
       img.src = dataUrl;
     }).catch(function () {
-      if (retryKey && _state._embedShotKey === retryKey) _state._embedShotKey = null;
-      if (!retryKey && _state._popupShotKey) _state._popupShotKey = null;
+      if (!shotIsCurrent()) return;
+      if (retryKey && _state._embedShotKey === shotKey) _state._embedShotKey = null;
+      if (!retryKey && _state._popupShotKey === shotKey) _state._popupShotKey = null;
     });
   }
 
@@ -400,7 +414,12 @@
   async function launch(goal, opts) {
     opts = opts || {};
     goal = (goal || '').trim();
-    _state.endpoint = opts.endpoint || '/v1/browser';
+    cancelActiveRun(); // cancel/detach known or pending prior launch
+    var launchGeneration = _state.generation;
+    var launchBase = bridgeBase();
+    var launchEndpoint = opts.endpoint || '/v1/browser';
+    _state.base = launchBase;
+    _state.endpoint = launchEndpoint;
     _state.title = opts.title || 'Browser Agent';
     _state.onComplete = (typeof opts.onComplete === 'function') ? opts.onComplete : null;
     _state.onConfirm = (typeof opts.onConfirm === 'function') ? opts.onConfirm : null;
@@ -418,7 +437,6 @@
       return;
     }
 
-    closePopup(); // one run at a time
     ensurePopup();
     _applyTitle();
     render({ id: '', goal: goal, status: 'starting', step: 0 });
@@ -434,12 +452,18 @@
     if (opts.max_steps) body.max_steps = opts.max_steps;
 
     try {
-      var resp = await fetch(bridgeBase() + _state.endpoint + '/run', {
+      var resp = await fetch(launchBase + launchEndpoint + '/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
       var data = await resp.json();
+      if (launchGeneration !== _state.generation) {
+        if (resp.ok && data && data.id) {
+          _cancelRemoteRun(launchBase, launchEndpoint, data.id);
+        }
+        return;
+      }
       if (!resp.ok) {
         var msg = (data && data.error && data.error.message) || ('HTTP ' + resp.status);
         setChatStatus('error', _state.title + ': ' + msg);
@@ -451,6 +475,7 @@
       startPolling();
       setChatStatus('info', _state.title + ' started.');
     } catch (e) {
+      if (launchGeneration !== _state.generation) return;
       setChatStatus('error', _state.title + ' could not reach the bridge.');
       render({ id: '', goal: goal, status: 'error', error: String(e) });
     }
@@ -476,9 +501,14 @@
 
   async function pollOnce() {
     if (!_state.runId) return;
+    var pollGeneration = _state.generation;
+    var pollRunId = _state.runId;
+    var pollBase = _state.base;
+    var pollEndpoint = _state.endpoint;
     try {
-      var resp = await fetch(bridgeBase() + _state.endpoint + '/status?run_id=' +
-        encodeURIComponent(_state.runId), { signal: AbortSignal.timeout(8000) });
+      var resp = await fetch(pollBase + pollEndpoint + '/status?run_id=' +
+        encodeURIComponent(pollRunId), { signal: AbortSignal.timeout(8000) });
+      if (pollGeneration !== _state.generation || pollRunId !== _state.runId) return;
       if (!resp.ok) {
         // Track consecutive failures. After 3 404s the run_id is stale
         // (bridge restarted or run expired). Stop spamming the console.
@@ -492,6 +522,7 @@
       }
       _state._pollFails = 0;
       var status = await resp.json();
+      if (pollGeneration !== _state.generation || pollRunId !== _state.runId) return;
       render(status);
       if (status.status === 'done' || status.status === 'cancelled' || status.status === 'error') {
         stopPolling();
@@ -511,33 +542,90 @@
 
   async function confirmRun(approve, text) {
     if (!_state.runId) return;
+    var confirmGeneration = _state.generation;
+    var confirmRunId = _state.runId;
+    var confirmBase = _state.base;
+    var confirmEndpoint = _state.endpoint;
     try {
-      await fetch(bridgeBase() + _state.endpoint + '/confirm', {
+      await fetch(confirmBase + confirmEndpoint + '/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ run_id: _state.runId, approve: approve, text: text || '' })
+        body: JSON.stringify({ run_id: confirmRunId, approve: approve, text: text || '' })
       });
+      if (confirmGeneration !== _state.generation || confirmRunId !== _state.runId) return;
       // optimistic: hide the prompt until next poll
       var wrap = document.getElementById('ebpPrompt');
       if (wrap) wrap.hidden = true;
       pollOnce();
     } catch (e) {
+      if (confirmGeneration !== _state.generation || confirmRunId !== _state.runId) return;
       setChatStatus('error', 'Browser agent: could not send confirmation.');
     }
   }
 
   async function stopRun() {
     if (!_state.runId) { closePopup(); return; }
+    var stopGeneration = _state.generation;
+    var stopRunId = _state.runId;
+    var stopBase = _state.base;
+    var stopEndpoint = _state.endpoint;
     try {
-      await fetch(bridgeBase() + _state.endpoint + '/cancel', {
+      await fetch(stopBase + stopEndpoint + '/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ run_id: _state.runId })
+        body: JSON.stringify({ run_id: stopRunId })
       });
+      if (stopGeneration !== _state.generation || stopRunId !== _state.runId) return;
       pollOnce();
     } catch (e) {
+      if (stopGeneration !== _state.generation || stopRunId !== _state.runId) return;
       closePopup();
     }
+  }
+
+  function _cancelRemoteRun(base, endpoint, runId) {
+    if (!runId) return Promise.resolve();
+    return fetch(base + endpoint + '/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ run_id: runId })
+    }).catch(function() {});
+  }
+
+  function cancelActiveRun() {
+    var runId = _state.runId;
+    var base = _state.base || bridgeBase();
+    var endpoint = _state.endpoint;
+    stopPolling();
+    _state.generation += 1;
+    if (_state._fadeTimer) {
+      clearTimeout(_state._fadeTimer);
+      _state._fadeTimer = null;
+    }
+    _state.runId = null;
+    _state.base = '';
+    _state.status = null;
+    _state.onComplete = null;
+    _state.onConfirm = null;
+    _state.onProgress = null;
+    _state.confirmKey = null;
+    _state.lastProgress = null;
+    _state.completed = true;
+    _state._embedShotKey = null;
+    _state._popupShotKey = null;
+    _state._embedRunId = null;
+    var popup = document.getElementById('evaBrowserPopup');
+    if (popup) popup.remove();
+    var embedded = document.getElementById('vvVision');
+    if (embedded) {
+      embedded.classList.remove('open', 'looking');
+      embedded.setAttribute('aria-hidden', 'true');
+    }
+    var embeddedShot = document.getElementById('vvVisionShot');
+    if (embeddedShot) {
+      try { embeddedShot.removeAttribute('src'); } catch (_) {}
+    }
+    return _cancelRemoteRun(base, endpoint, runId);
   }
 
   function isActive() {
@@ -564,6 +652,7 @@
     isActive: isActive,
     isAwaitingConfirm: isAwaitingConfirm,
     answerConfirm: answerConfirm,
+    cancel: cancelActiveRun,
     close: closePopup
   };
 
@@ -579,6 +668,7 @@
     isActive: isActive,
     isAwaitingConfirm: isAwaitingConfirm,
     answerConfirm: answerConfirm,
+    cancel: cancelActiveRun,
     close: closePopup
   };
 

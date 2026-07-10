@@ -20,7 +20,10 @@ Usage:
 import json
 import os
 import sqlite3
+import sys
 import threading
+import contextlib
+import time
 
 # ── Schema ──────────────────────────────────────────────────────────────────
 # Mirrors eva_seed.kql. Column order matches Kusto table definitions so
@@ -385,14 +388,35 @@ _SEED = {
 class SqliteMemory:
     """Thread-safe SQLite memory backend for Eva."""
 
+    _instance_lock = threading.Lock()
+    _instances = {}  # path -> instance (singleton per path)
+
+    def __new__(cls, db_path=None):
+        if db_path is None:
+            db_path = os.environ.get("EVA_MEMORY_DB", os.path.expanduser("~/.eva/memory.db"))
+        db_path = os.path.expanduser(db_path)
+        with cls._instance_lock:
+            if db_path in cls._instances:
+                return cls._instances[db_path]
+            instance = super().__new__(cls)
+            cls._instances[db_path] = instance
+            return instance
+
     def __init__(self, db_path=None):
+        if hasattr(self, "_initialized"):
+            return
         if db_path is None:
             db_path = os.environ.get("EVA_MEMORY_DB", os.path.expanduser("~/.eva/memory.db"))
         self._db_path = os.path.expanduser(db_path)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._local = threading.local()
+        self._connections = []  # track all thread connections for cleanup
+        self._conn_track_lock = threading.Lock()
+        self._closed = False
+        self._event_repo = None
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
         self._init_db()
+        self._initialized = True
 
     @property
     def db_path(self):
@@ -400,21 +424,82 @@ class SqliteMemory:
 
     def _conn(self):
         """Return a per-thread connection (SQLite objects can't cross threads)."""
+        if self._closed:
+            raise RuntimeError("SqliteMemory is closed")
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = sqlite3.connect(self._db_path, timeout=10)
+            conn = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False)
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA busy_timeout=5000")
             conn.row_factory = sqlite3.Row
             self._local.conn = conn
+            with self._conn_track_lock:
+                self._connections.append(conn)
         return conn
 
+    @contextlib.contextmanager
+    def transaction(self):
+        """Own or nest a write transaction without committing caller state."""
+        with self._lock:
+            conn = self._conn()
+            own = not conn.in_transaction
+            savepoint = None
+            if own:
+                conn.execute("BEGIN IMMEDIATE")
+            else:
+                savepoint = f"sqlite_memory_{threading.get_ident()}_{time.time_ns()}"
+                conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                yield conn
+                if savepoint:
+                    conn.execute(f"RELEASE {savepoint}")
+                elif own:
+                    conn.commit()
+            except Exception:
+                if savepoint:
+                    conn.execute(f"ROLLBACK TO {savepoint}")
+                    conn.execute(f"RELEASE {savepoint}")
+                elif own:
+                    conn.rollback()
+                raise
+
+    def insert_rows(self, conn, table, columns, rows_data):
+        """Insert validated legacy projection rows without committing."""
+        if table not in _SCHEMA:
+            raise ValueError(f"Unknown table: {table}")
+        valid = {column[0] for column in _SCHEMA[table]["columns"]}
+        resolved = [column for column in columns if column in valid]
+        if not resolved:
+            raise ValueError(f"No matching columns for {table}")
+        sql = (
+            f"INSERT INTO {table} ({', '.join(resolved)}) VALUES "
+            f"({', '.join('?' for _ in resolved)})"
+        )
+        count = 0
+        for row in rows_data:
+            values = []
+            for column in resolved:
+                value = row.get(column)
+                if isinstance(value, bool):
+                    value = int(value)
+                elif isinstance(value, (dict, list)):
+                    value = json.dumps(value, sort_keys=True, separators=(",", ":"))
+                values.append(value)
+            conn.execute(sql, values)
+            count += 1
+        return count
+
     def _init_db(self):
-        """Create all tables, indexes, FTS, and seed data if the DB is new."""
+        """Create all tables, indexes, FTS, and seed data if the DB is new.
+
+        Migration failures are FATAL — they raise and prevent construction.
+        Seed is only applied to newly created empty tables, independently
+        idempotent per table.
+        """
         conn = self._conn()
         cursor = conn.cursor()
-        created_any = False
+        newly_created_tables = set()
 
         for table_name, spec in _SCHEMA.items():
             # Check if table exists
@@ -422,12 +507,11 @@ class SqliteMemory:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 (table_name,),
             )
-            if cursor.fetchone():
-                continue
-
-            created_any = True
-            col_defs = ", ".join(f"{name} {typedef}" for name, typedef in spec["columns"])
-            cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({col_defs})")
+            exists = cursor.fetchone() is not None
+            if not exists:
+                newly_created_tables.add(table_name)
+                col_defs = ", ".join(f"{name} {typedef}" for name, typedef in spec["columns"])
+                cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({col_defs})")
 
             for idx_sql in spec.get("indexes", []):
                 cursor.execute(idx_sql)
@@ -439,14 +523,22 @@ class SqliteMemory:
 
         conn.commit()
 
-        if created_any:
-            self._seed(conn)
+        # Seed ONLY newly created empty tables (independently idempotent per table)
+        for table_name in newly_created_tables:
+            if table_name in _SEED:
+                self._seed_table(conn, table_name, _SEED[table_name])
 
-        # Backfill identity seeds into existing databases that predate the
-        # personality rows. Runs on every startup but the INSERT OR IGNORE
-        # is a no-op when the row already exists (matched by Entity+Relation).
+        # Backfill identity seeds (idempotent via INSERT OR IGNORE / existing check)
         self._backfill_identity(conn)
         self._backfill_skills(conn)
+
+        # Run versioned migrations (Phase 1: event journal, outbox, etc.)
+        # Migration failures are FATAL — raise to caller.
+        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        from bridge.migrations import run_migrations
+        run_migrations(conn)
 
     def _backfill_identity(self, conn):
         """Insert or update Eva identity Knowledge rows from seed data."""
@@ -508,40 +600,49 @@ class SqliteMemory:
                 )
         conn.commit()
 
+    def _seed_table(self, conn, table_name, rows):
+        """Insert seed data into a single newly-created empty table.
+
+        Each seed row is independently idempotent — uses INSERT OR IGNORE
+        semantics where possible, or existence check for tables without
+        unique constraints.
+        """
+        if table_name not in _SCHEMA:
+            return
+        col_names = [c[0] for c in _SCHEMA[table_name]["columns"]]
+        for row in rows:
+            present = [c for c in col_names if c in row]
+            if not present:
+                continue
+            placeholders = ", ".join("?" for _ in present)
+            vals = []
+            for c in present:
+                v = row[c]
+                if isinstance(v, (dict, list)):
+                    vals.append(json.dumps(v))
+                else:
+                    vals.append(v)
+            # Use INSERT OR IGNORE to prevent duplicate seed rows on repeat
+            conn.execute(
+                f"INSERT OR IGNORE INTO {table_name} ({', '.join(present)}) VALUES ({placeholders})",
+                vals,
+            )
+        conn.commit()
+
     def _seed(self, conn):
-        """Insert initial seed data into empty tables."""
+        """Insert initial seed data into empty tables (legacy compat)."""
         for table_name, rows in _SEED.items():
             if table_name not in _SCHEMA:
                 continue
-            col_names = [c[0] for c in _SCHEMA[table_name]["columns"]]
-            for row in rows:
-                present = [c for c in col_names if c in row]
-                placeholders = ", ".join("?" for _ in present)
-                vals = []
-                for c in present:
-                    v = row[c]
-                    if isinstance(v, (dict, list)):
-                        vals.append(json.dumps(v))
-                    else:
-                        vals.append(v)
-                conn.execute(
-                    f"INSERT INTO {table_name} ({', '.join(present)}) VALUES ({placeholders})",
-                    vals,
-                )
-        conn.commit()
+            self._seed_table(conn, table_name, rows)
 
     # ── Public API ──────────────────────────────────────────────────────────
 
     def query(self, sql, params=None):
-        """Execute a SELECT query and return list of dicts (same format as
-        _kusto_query_direct).
+        """Execute a SELECT query and return list of dicts.
 
-        Args:
-            sql: Full SQL query string or a table name (shortcut for SELECT *).
-            params: Optional tuple of bind parameters.
-
-        Returns:
-            List of dicts, one per row. Empty list on error or no results.
+        Prevents non-SELECT/CTE read statements from executing against
+        journal tables. Returns empty list on error (backward compat).
         """
         if params is None:
             params = ()
@@ -549,6 +650,14 @@ class SqliteMemory:
         stripped = sql.strip()
         if stripped and " " not in stripped and not stripped.startswith("SELECT"):
             sql = f"SELECT * FROM {stripped}"
+
+        # Guard: prevent writes via query()
+        from bridge.events import guard_read_only, ReadOnlyViolationError
+        try:
+            guard_read_only(sql)
+        except ReadOnlyViolationError:
+            print(f"[SQLite] Read-only violation blocked: {sql[:60]}")
+            return []
 
         with self._lock:
             try:
@@ -559,6 +668,33 @@ class SqliteMemory:
             except Exception as e:
                 print(f"[SQLite] Query error: {e}")
                 return []
+
+    def query_strict(self, sql, params=None):
+        """Like query() but raises MemoryQueryError on failure.
+
+        Guards against write statements on journal tables.
+        """
+        if params is None:
+            params = ()
+        stripped = sql.strip()
+        if stripped and " " not in stripped and not stripped.startswith("SELECT"):
+            sql = f"SELECT * FROM {stripped}"
+
+        # Guard: prevent writes via query_strict()
+        from bridge.events import guard_read_only, ReadOnlyViolationError, MemoryQueryError
+        try:
+            guard_read_only(sql)
+        except ReadOnlyViolationError as e:
+            raise MemoryQueryError(sql, str(e)) from e
+
+        with self._lock:
+            try:
+                cursor = self._conn().execute(sql, params)
+                cols = [d[0] for d in cursor.description] if cursor.description else []
+                rows = cursor.fetchall()
+                return [dict(zip(cols, row)) for row in rows]
+            except Exception as e:
+                raise MemoryQueryError(sql, str(e)) from e
 
     def ingest(self, table, columns, rows_data):
         """Insert rows into a table (same signature as _kusto_ingest_direct).
@@ -589,27 +725,13 @@ class SqliteMemory:
         col_list = ", ".join(resolved)
         insert_sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
 
-        with self._lock:
-            try:
-                conn = self._conn()
-                for row in rows_data:
-                    vals = []
-                    for c in resolved:
-                        v = row.get(c, None)
-                        if v is None:
-                            vals.append(None)
-                        elif isinstance(v, bool):
-                            vals.append(1 if v else 0)
-                        elif isinstance(v, (dict, list)):
-                            vals.append(json.dumps(v))
-                        else:
-                            vals.append(v)
-                    conn.execute(insert_sql, vals)
-                conn.commit()
-                return True
-            except Exception as e:
-                print(f"[SQLite] Ingest error ({table}): {e}")
-                return False
+        try:
+            with self.transaction() as conn:
+                self.insert_rows(conn, table, resolved, rows_data)
+            return True
+        except Exception as e:
+            print(f"[SQLite] Ingest error ({table}): {e}")
+            return False
 
     def fts_search(self, table, terms, limit=20):
         """Full-text search on a table that has an FTS5 index.
@@ -700,6 +822,19 @@ class SqliteMemory:
             )
             return [row[0] for row in cursor.fetchall()]
 
+    def event_repository(self):
+        """Return an EventRepository backed by this database.
+
+        Lazily created; safe to call repeatedly.  The returned repository
+        shares the per-thread connection via ``_conn()``.
+        Uses installation_id for deterministic event ID generation.
+        """
+        if self._event_repo is None:
+            from bridge.events import EventRepository
+            from bridge.identity import get_installation_id
+            self._event_repo = EventRepository(self, installation_id=get_installation_id())
+        return self._event_repo
+
     def get_schema(self, table):
         """Return list of (column_name, type) tuples for a table."""
         with self._lock:
@@ -726,8 +861,24 @@ class SqliteMemory:
                 return 0
 
     def close(self):
-        """Close the thread-local connection."""
-        conn = getattr(self._local, "conn", None)
-        if conn:
-            conn.close()
-            self._local.conn = None
+        """Close ALL tracked thread connections and mark as closed."""
+        self._closed = True
+        # Close the event repository
+        if self._event_repo is not None:
+            self._event_repo.close()
+            self._event_repo = None
+        # Close all tracked connections
+        with self._conn_track_lock:
+            for conn in self._connections:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._connections.clear()
+        # Clear thread-local
+        self._local.conn = None
+        # Remove from singleton registry
+        with self._instance_lock:
+            self._instances.pop(self._db_path, None)
+        if hasattr(self, "_initialized"):
+            del self._initialized

@@ -35,12 +35,12 @@ fail()  { echo -e "${RED}[FAIL]${NC} $*"; }
 check_arch() {
     local arch
     arch=$(uname -m)
-    if [[ "$arch" == "x86_64" || "$arch" == "aarch64" ]]; then
+    if [[ "$arch" == "x86_64" || "$arch" == "aarch64" || "$arch" == "arm64" ]]; then
         ok "Architecture: $arch (supported)"
         return 0
     else
         fail "Architecture: $arch (not supported by Copilot CLI)"
-        echo "    Copilot CLI requires 64-bit (x86_64 or aarch64)."
+        echo "    Copilot CLI requires 64-bit (x86_64 or arm64/aarch64)."
         echo "    You can still run the ACP bridge on a 64-bit machine"
         echo "    and point Eva's Settings → Auth → ACP Bridge URL to it."
         return 1
@@ -54,16 +54,16 @@ check_node() {
         ver=$(node --version | sed 's/v//')
         local major
         major=$(echo "$ver" | cut -d. -f1)
-        if (( major >= 20 )); then
+        if (( major >= 24 )); then
             ok "Node.js: v$ver"
             return 0
         else
-            warn "Node.js v$ver found but v20+ recommended"
-            return 0
+            fail "Node.js v$ver found; Eva requires v24+"
+            return 1
         fi
     else
         fail "Node.js not found"
-        echo "    Install Node.js v20+: https://nodejs.org/"
+        echo "    Install Node.js v24+: https://nodejs.org/"
         return 1
     fi
 }
@@ -102,12 +102,17 @@ check_copilot() {
 # --- Check Copilot authentication ---
 check_auth() {
     info "Testing Copilot authentication..."
-    # Quick non-interactive test
     local result
-    result=$(timeout 15 copilot --acp --stdio </dev/null 2>&1 | head -5 || true)
-    if echo "$result" | grep -qi "auth\|login\|unauthorized"; then
-        warn "Copilot may not be authenticated"
-        echo "    Run: copilot login"
+    if ! result=$(timeout 45 copilot -p \
+        "Reply with exactly EVA_AUTH_OK and nothing else." \
+        --silent --no-color 2>&1); then
+        warn "Copilot authentication probe failed or timed out"
+        echo "    Run: copilot auth login"
+        return 1
+    fi
+    if [[ "$(echo "$result" | tr -d '\r' | xargs)" != "EVA_AUTH_OK" ]]; then
+        warn "Copilot authentication probe returned no affirmative result"
+        echo "    Run: copilot auth login"
         return 1
     fi
     ok "Copilot authentication: looks good"
@@ -117,8 +122,15 @@ check_auth() {
 # --- Check Python ---
 check_python() {
     if command -v python3 &>/dev/null; then
-        ok "Python3: $(python3 --version)"
-        return 0
+        local py_major py_minor
+        py_major=$(python3 -c 'import sys; print(sys.version_info.major)')
+        py_minor=$(python3 -c 'import sys; print(sys.version_info.minor)')
+        if (( py_major > 3 || (py_major == 3 && py_minor >= 12) )); then
+            ok "Python3: $(python3 --version)"
+            return 0
+        fi
+        fail "$(python3 --version) found; Eva requires Python 3.12+"
+        return 1
     else
         fail "Python3 not found"
         return 1
@@ -223,6 +235,7 @@ main() {
             check_arch || exit 1
             check_node || exit 1
             check_copilot || exit 1
+            check_auth || exit 1
             echo ""
             ok "Ready! Start the bridge with:"
             echo "    python3 $BRIDGE_SCRIPT --port $BRIDGE_PORT"
@@ -238,7 +251,11 @@ main() {
     check_arch || exit 1
     check_node || exit 1
     check_copilot || exit 1
-    check_auth || warn "Authenticate later with: copilot login"
+    check_auth || {
+        fail "Copilot authentication is required for cloud ACP setup"
+        echo "    Run: copilot auth login"
+        exit 1
+    }
     echo ""
     install_service
     echo ""
@@ -253,4 +270,6 @@ main() {
     echo ""
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

@@ -36,10 +36,12 @@ def _get_sqlite_mem():
     """Return the global SqliteMemory instance, creating it on first use."""
     # global statement removed — writes go to _st.*
     if _st.sqlite_mem is None:
-        from sqlite_memory import SqliteMemory
-        db_path = os.environ.get("EVA_MEMORY_DB", os.path.expanduser("~/.eva/memory.db"))
-        _st.sqlite_mem = SqliteMemory(db_path)
-        print(f"[Bridge] SQLite memory initialized: {_st.sqlite_mem.db_path}")
+        with _st.sqlite_mem_lock:
+            if _st.sqlite_mem is None:
+                from sqlite_memory import SqliteMemory
+                db_path = os.environ.get("EVA_MEMORY_DB", os.path.expanduser("~/.eva/memory.db"))
+                _st.sqlite_mem = SqliteMemory(db_path)
+                print(f"[Bridge] SQLite memory initialized: {_st.sqlite_mem.db_path}")
     return _st.sqlite_mem
 
 
@@ -154,6 +156,11 @@ def _embed_texts(texts):
             missing.append(t)
 
     if missing:
+        if _st.egress_mode != "cloud":
+            if not _st.embedding_disabled_logged:
+                print(f"[Cognition] {_st.egress_mode} mode: public embeddings disabled; recall uses cached/lexical match only")
+                _st.embedding_disabled_logged = True
+            return result
         if not key:
             if not _st.embedding_disabled_logged:
                 print("[Cognition] No OpenAI key for embeddings; recall uses lexical match only")

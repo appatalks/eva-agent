@@ -4,9 +4,55 @@
 
 var SESSION_INDEX_KEY = 'eva_sessions';
 var SESSION_ACTIVE_KEY = 'eva_active_session';
+var _sessionLoadGeneration = 0;
+var _pendingSessionLoadId = '';
 
 // All provider message keys
 var SESSION_MSG_KEYS = ['messages', 'copilotMessages', 'copilotACPMessages', 'geminiMessages', 'openLLMessages', 'aigMessages'];
+
+function _sessionMessageText(message) {
+  if (!message) return '';
+  var value = message.content;
+  if (value == null && Array.isArray(message.parts)) value = message.parts;
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    return value.map(function(part) {
+      if (!part || part.thought) return '';
+      return typeof part === 'string' ? part : String(part.text || part.content || '');
+    }).filter(Boolean).join('\n');
+  }
+  return '';
+}
+
+function _structuredMessagesFromStores(data, model) {
+  var preferred = model === 'aig' ? 'aigMessages'
+    : model === 'gemini' ? 'geminiMessages'
+    : model === 'lm-studio' ? 'openLLMessages'
+    : model === 'copilot-acp' ? 'copilotACPMessages'
+    : String(model || '').indexOf('copilot-') === 0 ? 'copilotMessages'
+    : 'messages';
+  var keys = [preferred].concat(SESSION_MSG_KEYS.filter(function(key) { return key !== preferred; }));
+  for (var i = 0; i < keys.length; i++) {
+    var raw = data[keys[i]];
+    if (!raw) continue;
+    try {
+      var source = JSON.parse(raw);
+      if (!Array.isArray(source)) continue;
+      var result = [];
+      source.forEach(function(message, index) {
+        if (keys[i] === 'geminiMessages' && index < 2) return;
+        var role = String(message.role || '').toLowerCase();
+        if (role === 'system' || role === 'developer' || role === 'tool') return;
+        if (role === 'model') role = 'assistant';
+        if (role !== 'user' && role !== 'assistant') return;
+        var text = _sessionMessageText(message).trim();
+        if (text) result.push({ role: role, text: text.substring(0, 8000) });
+      });
+      if (result.length) return result;
+    } catch (_) {}
+  }
+  return [];
+}
 
 function _getSessionIndex() {
   try { return JSON.parse(localStorage.getItem(SESSION_INDEX_KEY)) || []; }
@@ -21,6 +67,32 @@ function _activeSessionId() {
   return localStorage.getItem(SESSION_ACTIVE_KEY) || null;
 }
 
+function invalidateSessionLoads() {
+  _sessionLoadGeneration += 1;
+  _pendingSessionLoadId = '';
+}
+
+function _beginSessionLoad(id) {
+  _sessionLoadGeneration += 1;
+  _pendingSessionLoadId = String(id || '');
+  return Object.freeze({
+    generation: _sessionLoadGeneration,
+    sessionId: _pendingSessionLoadId
+  });
+}
+
+function _isCurrentSessionLoad(operation) {
+  return !!(
+    operation &&
+    operation.generation === _sessionLoadGeneration &&
+    operation.sessionId === _pendingSessionLoadId
+  );
+}
+
+function _sessionStillIndexed(id) {
+  return _getSessionIndex().some(function(entry) { return entry.id === id; });
+}
+
 /** Snapshot current conversation state into a session object */
 function _snapshotSession() {
   var data = {};
@@ -30,12 +102,18 @@ function _snapshotSession() {
   });
   data._masterOutput = localStorage.getItem('masterOutput') || '';
   data._model = (document.getElementById('selModel') || {}).value || '';
-  data._htmlSnapshot = (document.getElementById('txtOutput') || {}).innerHTML || '';
+  // Save structured messages instead of raw HTML going forward
+  data._structuredSnapshot = true;
+  data._htmlSnapshot = '';
+  data._messages = _structuredMessagesFromStores(data, data._model);
   return data;
 }
 
 /** Restore a session snapshot into localStorage and DOM */
 function _restoreSession(data) {
+  if (typeof resetTransientConversationState === 'function') {
+    resetTransientConversationState();
+  }
   // Clear existing messages
   SESSION_MSG_KEYS.forEach(function(key) { localStorage.removeItem(key); });
   localStorage.removeItem('masterOutput');
@@ -50,10 +128,36 @@ function _restoreSession(data) {
     if (typeof masterOutput !== 'undefined') masterOutput = data._masterOutput;
   }
 
-  // Restore DOM
+  // Restore DOM — prefer structured messages, sanitize legacy HTML
   var txtOutput = document.getElementById('txtOutput');
-  if (txtOutput && data._htmlSnapshot) {
-    txtOutput.innerHTML = data._htmlSnapshot;
+  if (txtOutput) {
+    if (data._messages && Array.isArray(data._messages)) {
+      // Structured path: build inert DOM from message text.
+      txtOutput.textContent = '';
+      data._messages.forEach(function(m) {
+        var bubble = document.createElement('div');
+        var isUser = m.role === 'user';
+        bubble.className = 'chat-bubble ' + (isUser ? 'user-bubble' : 'eva-bubble');
+        var label = document.createElement('span');
+        label.className = isUser ? 'user' : 'eva';
+        label.textContent = isUser ? 'You: ' : 'Eva: ';
+        bubble.appendChild(label);
+        var text = document.createElement(isUser ? 'span' : 'div');
+        if (!isUser) text.className = 'md';
+        text.style.whiteSpace = 'pre-wrap';
+        text.textContent = String(m.text || '');
+        bubble.appendChild(text);
+        txtOutput.appendChild(bubble);
+      });
+    } else if (data._htmlSnapshot) {
+      // Legacy HTML snapshot: never assign raw HTML for safety
+      txtOutput.textContent = '';
+      var notice = document.createElement('div');
+      notice.textContent = '[Legacy session snapshot cannot be safely restored. Start a new session for structured snapshots.]';
+      txtOutput.appendChild(notice);
+    } else {
+      txtOutput.textContent = '';
+    }
     txtOutput.scrollTop = txtOutput.scrollHeight;
   }
 
@@ -113,7 +217,7 @@ function saveCurrentSession() {
 
   if (!id) {
     // First save — create a new session
-    id = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
+    id = getEnvelopeSessionId();
     localStorage.setItem(SESSION_ACTIVE_KEY, id);
     index.unshift({ id: id, title: _sessionTitle(snapshot), created: Date.now(), updated: Date.now() });
   } else {
@@ -137,15 +241,21 @@ function saveCurrentSession() {
 
 /** Start a brand new session */
 function newSession() {
+  invalidateSessionLoads();
   // Auto-save current first
   saveCurrentSession();
 
   // Clear active
   localStorage.removeItem(SESSION_ACTIVE_KEY);
+  resetEnvelopeSession();
   SESSION_MSG_KEYS.forEach(function(key) { localStorage.removeItem(key); });
   localStorage.removeItem('masterOutput');
-  if (typeof masterOutput !== 'undefined') masterOutput = '';
-  if (typeof lastResponse !== 'undefined') lastResponse = '';
+  if (typeof resetTransientConversationState === 'function') {
+    resetTransientConversationState();
+  } else {
+    if (typeof masterOutput !== 'undefined') masterOutput = '';
+    if (typeof lastResponse !== 'undefined') lastResponse = '';
+  }
 
   var txtOutput = document.getElementById('txtOutput');
   if (txtOutput) {
@@ -160,19 +270,29 @@ function newSession() {
 function loadSession(id) {
   // Save current first
   saveCurrentSession();
+  if (typeof _resetAgentInteractionState === 'function') {
+    _resetAgentInteractionState();
+  }
+  invalidateRequestEnvelopes();
+  var loadOperation = _beginSessionLoad(id);
 
   idbLoadSession(id).then(function(data) {
-    if (!data) return;
+    if (!_isCurrentSessionLoad(loadOperation) || !_sessionStillIndexed(id) || !data) return;
     _restoreSession(data);
     localStorage.setItem(SESSION_ACTIVE_KEY, id);
+    resetEnvelopeSession(id);
+    _pendingSessionLoadId = '';
     renderSessionList();
   }).catch(function(e) {
+    if (!_isCurrentSessionLoad(loadOperation)) return;
+    _pendingSessionLoadId = '';
     console.error('Failed to load session:', e);
   });
 }
 
 /** Delete a session */
 function deleteSession(id) {
+  invalidateSessionLoads();
   var index = _getSessionIndex();
   index = index.filter(function(s) { return s.id !== id; });
   _saveSessionIndex(index);
@@ -183,6 +303,20 @@ function deleteSession(id) {
   // If deleting the active session, start fresh
   if (_activeSessionId() === id) {
     localStorage.removeItem(SESSION_ACTIVE_KEY);
+    SESSION_MSG_KEYS.forEach(function(key) { localStorage.removeItem(key); });
+    localStorage.removeItem('masterOutput');
+    if (typeof resetTransientConversationState === 'function') {
+      resetTransientConversationState();
+    } else {
+      if (typeof masterOutput !== 'undefined') masterOutput = '';
+      if (typeof lastResponse !== 'undefined') lastResponse = '';
+    }
+    resetEnvelopeSession();
+    var txtOutput = document.getElementById('txtOutput');
+    if (txtOutput) {
+      txtOutput.innerHTML = '';
+      if (typeof showWelcome === 'function') showWelcome();
+    }
   }
   renderSessionList();
 }
@@ -288,23 +422,36 @@ function initSessions() {
   var termClose = document.getElementById('terminalPanelClose');
   if (termClose) termClose.addEventListener('click', toggleTerminalPanel);
 
-  // Migrate localStorage sessions to IndexedDB, then restore active session
+  // Migrate localStorage sessions to IndexedDB, then restore active session.
+  // The operation token prevents a late startup callback from overwriting a
+  // new, loaded, cleared, or deleted session selected while migration ran.
+  var startupId = _activeSessionId() || '';
+  var startupLoad = _beginSessionLoad(startupId);
   idbMigrateFromLocalStorage().then(function() {
+    if (!_isCurrentSessionLoad(startupLoad)) return;
     var activeId = _activeSessionId();
-    if (activeId) {
+    if (activeId && activeId === startupLoad.sessionId && _sessionStillIndexed(activeId)) {
       idbLoadSession(activeId).then(function(data) {
-        if (data) _restoreSession(data);
+        if (!_isCurrentSessionLoad(startupLoad)) return;
+        if (data && _activeSessionId() === activeId && _sessionStillIndexed(activeId)) {
+          _restoreSession(data);
+        }
+        _pendingSessionLoadId = '';
       }).catch(function() {});
+    } else {
+      _pendingSessionLoadId = '';
     }
   }).catch(function() {
+    if (!_isCurrentSessionLoad(startupLoad)) return;
     // Fallback: try restoring from active localStorage state
     var activeId = _activeSessionId();
-    if (activeId) {
+    if (activeId && activeId === startupLoad.sessionId && _sessionStillIndexed(activeId)) {
       var raw = localStorage.getItem('session_' + activeId);
       if (raw) {
         try { _restoreSession(JSON.parse(raw)); } catch(e) {}
       }
     }
+    _pendingSessionLoadId = '';
   });
 
   // Auto-save on unload
@@ -582,14 +729,18 @@ function _termPrint(output, cls, text) {
 
 function _termSend(output, base, message) {
   _termPrint(output, 'info', 'Thinking...');
+  if (typeof newEnvelopeTurn === 'function') newEnvelopeTurn();
+  var terminalEnvelope = (typeof captureRequestEnvelope === 'function')
+    ? captureRequestEnvelope() : {};
   fetch(base + '/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+    body: JSON.stringify(Object.assign({}, terminalEnvelope, {
       messages: [{ role: 'user', content: message }],
       model: 'copilot-acp'
-    })
+    }))
   }).then(function(r) { return r.json(); }).then(function(data) {
+    if (!isCurrentRequestEnvelope(terminalEnvelope)) return;
     // Remove "Thinking..." line
     var lines = output.querySelectorAll('.eva-term-info');
     if (lines.length) {
@@ -606,6 +757,7 @@ function _termSend(output, base, message) {
     }
     _termPrint(output, 'eva', text);
   }).catch(function(e) {
+    if (!isCurrentRequestEnvelope(terminalEnvelope)) return;
     var lines = output.querySelectorAll('.eva-term-info');
     if (lines.length) {
       var last = lines[lines.length - 1];
@@ -613,4 +765,149 @@ function _termSend(output, base, message) {
     }
     _termPrint(output, 'error', 'Error: ' + (e.message || e));
   });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Envelope Manager — canonical session/turn/request IDs for all
+//  provider routes and reflection calls.
+// ═══════════════════════════════════════════════════════════════════
+
+var _envelopeState = {
+  sessionId: '',   // canonical UUID, tied to active session explorer ID
+  turnId: '',      // generated per send, reused by cognition subcalls
+  correlationId: '',
+};
+var _envelopeGeneration = 0;
+
+function _uuid4() {
+  // Crypto-safe UUID v4
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    var r = (crypto.getRandomValues(new Uint8Array(1))[0] & 15) >> (c === 'x' ? 0 : 2);
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
+/** Get or generate the canonical session UUID. Tied to the active session explorer entry. */
+function getEnvelopeSessionId() {
+  var activeId = _activeSessionId();
+  if (activeId && _envelopeState._boundTo !== activeId) {
+    _envelopeState.sessionId = activeId;
+    _envelopeState._boundTo = activeId;
+  } else if (!activeId && !_envelopeState.sessionId) {
+    _envelopeState.sessionId = _uuid4();
+    _envelopeState._boundTo = '_new';
+  }
+  return _envelopeState.sessionId;
+}
+
+/** Generate a new turn ID before any provider route. Reuse within cognition subcalls. */
+function newEnvelopeTurn() {
+  if (typeof invalidateSessionLoads === 'function') invalidateSessionLoads();
+  _envelopeState.turnId = _uuid4();
+  _envelopeState.correlationId = _uuid4();
+  return _envelopeState.turnId;
+}
+
+/** Get the current turn ID (for cognition subcalls that reuse the same turn). */
+function getEnvelopeTurnId() {
+  return _envelopeState.turnId || newEnvelopeTurn();
+}
+
+/** Build the envelope object to include in provider payloads and reflection calls. */
+function buildRequestEnvelope() {
+  var requestId = _uuid4();
+  return {
+    session_id: getEnvelopeSessionId(),
+    turn_id: getEnvelopeTurnId(),
+    request_id: requestId,
+    correlation_id: _envelopeState.correlationId || requestId,
+  };
+}
+
+function captureRequestEnvelope() {
+  return _captureEnvelopeGeneration(buildRequestEnvelope());
+}
+
+function buildMutationEnvelope() {
+  return {
+    session_id: getEnvelopeSessionId(),
+    turn_id: _uuid4(),
+    request_id: _uuid4(),
+    correlation_id: _uuid4()
+  };
+}
+
+function captureMutationEnvelope() {
+  return _captureEnvelopeGeneration(buildMutationEnvelope());
+}
+
+// Compatibility name for early Phase 1 callers.
+function captureOperationEnvelope() {
+  return captureMutationEnvelope();
+}
+
+function _captureEnvelopeGeneration(envelope) {
+  var captured = Object.assign({}, envelope || {});
+  Object.defineProperty(captured, '__evaGeneration', {
+    value: _envelopeGeneration,
+    enumerable: false,
+    writable: false,
+    configurable: false
+  });
+  return Object.freeze(captured);
+}
+
+/** True only while an async completion still belongs to its browser session. */
+function isCurrentRequestEnvelope(envelope) {
+  return !!(
+    envelope &&
+    typeof envelope.__evaGeneration === 'number' &&
+    envelope.__evaGeneration === _envelopeGeneration &&
+    envelope.session_id === _envelopeState.sessionId
+  );
+}
+
+function invalidateRequestEnvelopes() {
+  _envelopeGeneration += 1;
+  _envelopeState.turnId = '';
+  _envelopeState.correlationId = '';
+}
+
+/** Reset envelope session when loading a new/different session. */
+function resetEnvelopeSession(sessionId) {
+  invalidateRequestEnvelopes();
+  _envelopeState.sessionId = sessionId || _uuid4();
+  _envelopeState._boundTo = sessionId || _activeSessionId() || '_new';
+}
+
+function hasTrustedBridgeAuthority() {
+  return !!(
+    (typeof isEvaStandalone === 'function' && isEvaStandalone()) ||
+    (typeof window !== 'undefined' && window.__EVA_TRUSTED_BRIDGE__ === true)
+  );
+}
+
+async function finalizeDirectProviderTurn(userMessage, assistantMessage, model, capturedEnvelope) {
+  if (!userMessage || !assistantMessage) return null;
+  if (!hasTrustedBridgeAuthority()) return null;
+  var base = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
+  var envelope = capturedEnvelope || captureRequestEnvelope();
+  if (!isCurrentRequestEnvelope(envelope)) return null;
+  var response = await fetch(base.replace(/\/+$/, '') + '/v1/memory/reflect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign({}, envelope, {
+      user_message: String(userMessage),
+      assistant_message: String(assistantMessage),
+      model: String(model || 'unknown')
+    }))
+  });
+  if (!isCurrentRequestEnvelope(envelope)) return null;
+  if (!response.ok) {
+    var detail = '';
+    try { detail = await response.text(); } catch (_) {}
+    throw new Error('Memory finalization failed (HTTP ' + response.status + ')' + (detail ? ': ' + detail : ''));
+  }
+  return response.json();
 }
