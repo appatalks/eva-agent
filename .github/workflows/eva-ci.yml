@@ -238,6 +238,9 @@ jobs:
       - name: Run Phase 2 consolidation tests
         run: python3 tools/test_phase2_consolidation.py
 
+      - name: Run Phase 3 safe-learning tests
+        run: python3 tools/test_phase3.py
+
   # ── 3. Accessibility (manual trigger only — kept from existing) ───
   accessibility:
     if: github.event_name == 'workflow_dispatch'

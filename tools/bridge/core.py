@@ -32,6 +32,7 @@ import argparse
 import base64
 import copy
 import datetime
+import functools
 import hashlib
 import hmac
 import json
@@ -65,6 +66,11 @@ from bridge.phase2_consolidation import (
     ProposalDecisionConflictError,
     ProposalNotFoundError,
     ProposalValidationError,
+)
+from bridge.phase3_learning import (
+    LearningCollisionError,
+    LearningConflictError,
+    LearningValidationError,
 )
 
 
@@ -309,6 +315,24 @@ def _prepend_memory_context(memory_context, prompt_text):
         return memory_context
     separator = "" if memory_context.endswith("\n\n") else "\n\n"
     return memory_context + separator + prompt_text
+
+
+def _requires_learning_authority(method):
+    @functools.wraps(method)
+    def guarded(handler, *args, **kwargs):
+        with _st.memory_backend_lock:
+            if not handler._learning_enabled():
+                return None
+            return method(handler, *args, **kwargs)
+    return guarded
+
+
+def _serializes_memory_backend(method):
+    @functools.wraps(method)
+    def guarded(handler, *args, **kwargs):
+        with _st.memory_backend_lock:
+            return method(handler, *args, **kwargs)
+    return guarded
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -674,6 +698,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._claim_proposals_list()
         elif re.fullmatch(r"/v1/memory/claim-proposals/[0-9a-f]{64}", parsed_path):
             self._claim_proposal_get(parsed_path.rsplit("/", 1)[1])
+        elif parsed_path == "/v1/learning/candidates":
+            self._learning_candidates_list()
+        elif re.fullmatch(r"/v1/learning/candidates/[0-9a-f]{64}", parsed_path):
+            self._learning_candidate_get(parsed_path.rsplit("/", 1)[1])
         elif parsed_path == "/v1/data/retrieve":
             self._data_retrieve()
         elif parsed_path == "/v1/browser/status":
@@ -725,6 +753,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             r"/v1/memory/claim-proposals/[0-9a-f]{64}/decide", parsed_path
         ):
             self._claim_proposal_decide(parsed_path.split("/")[-2])
+        elif parsed_path == "/v1/learning/executions/report":
+            self._learning_execution_report()
+        elif parsed_path == "/v1/learning/candidates":
+            self._learning_candidate_propose()
+        elif re.fullmatch(
+            r"/v1/learning/candidates/[0-9a-f]{64}/evaluate", parsed_path
+        ):
+            self._learning_candidate_evaluate(parsed_path.split("/")[-2])
         elif parsed_path == "/v1/aig/chat":
             self._aig_chat()
         elif parsed_path == "/v1/telemetry":
@@ -2349,6 +2385,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "auto-learn restricted to loopback"}})
             return
+        if not _cfg.EVA_LEGACY_SKILL_AUTO_LEARN:
+            self._json_response(409, {
+                "error": {"message": "legacy provider-backed skill auto-learn is disabled"}
+            })
+            return
         data, err = self._read_json_body()
         if err:
             self._json_response(400, {"error": {"message": err}})
@@ -3370,6 +3411,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             info["database"] = db or ""
         self._json_response(200, info)
 
+    @_serializes_memory_backend
     def _memory_backend_set(self):
         """Switch the memory backend (POST with {"backend": "sqlite"|"kusto"})."""
         data, error = self._read_json_body()
@@ -3803,6 +3845,232 @@ class BridgeHandler(BaseHTTPRequestHandler):
             })
             return
         self._json_response(200, result)
+
+    def _learning_enabled(self):
+        if not _st.bridge_auth_token:
+            self._json_response(401, {
+                "error": {"message": "learning operations require configured bearer auth"}
+            })
+            return False
+        if not _is_loopback_bind():
+            self._json_response(403, {
+                "error": {"message": "learning operations require loopback bind"}
+            })
+            return False
+        if _resolve_memory_backend() != "sqlite":
+            self._json_response(409, {
+                "error": {"message": "Phase3 learning requires SQLite memory authority"}
+            })
+            return False
+        if not _cfg.phase3_effective_enabled():
+            self._json_response(409, {
+                "error": {"message": "Phase3 shadow learning is disabled"}
+            })
+            return False
+        return True
+
+    @_requires_learning_authority
+    def _learning_candidates_list(self):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        status = str(params.get("status", ["all"])[0] or "all").strip()
+        raw_limit = str(params.get("limit", ["50"])[0] or "50").strip()
+        try:
+            from bridge.phase3_learning import list_learning_candidates
+            rows = list_learning_candidates(
+                _get_sqlite_mem(), status=status, limit=int(raw_limit)
+            )
+        except (TypeError, ValueError, LearningValidationError) as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except Exception as exc:
+            print(f"[Learning] Candidate list failed: {exc}", file=sys.stderr)
+            self._json_response(500, {"error": {"message": "candidate list failed"}})
+            return
+        self._json_response(200, {"candidates": rows})
+
+    @_requires_learning_authority
+    def _learning_candidate_get(self, candidate_id):
+        try:
+            from bridge.phase3_learning import get_learning_candidate
+            candidate = get_learning_candidate(_get_sqlite_mem(), candidate_id)
+        except LearningValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except Exception as exc:
+            print(f"[Learning] Candidate read failed: {exc}", file=sys.stderr)
+            self._json_response(500, {"error": {"message": "candidate read failed"}})
+            return
+        if candidate is None:
+            self._json_response(404, {"error": {"message": "candidate not found"}})
+            return
+        self._json_response(200, {"candidate": candidate})
+
+    @_requires_learning_authority
+    def _learning_execution_report(self):
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        business = {
+            "action_run_id", "skill_id", "skill_version_hash", "outcome",
+            "postcondition", "duration_ms", "evidence_summary", "user_confirmed",
+        }
+        unknown = sorted(set(data) - (business | _cfg.REQUEST_ENVELOPE_FIELDS))
+        if unknown:
+            self._json_response(400, {
+                "error": {"message": "Unsupported field(s): " + ", ".join(unknown)}
+            })
+            return
+        required = business - {"evidence_summary"}
+        if not required.issubset(data):
+            self._json_response(400, {
+                "error": {"message": "Missing required execution-report fields"}
+            })
+            return
+        if data.get("user_confirmed") is not True:
+            self._json_response(400, {
+                "error": {"message": "user_confirmed must be true"}
+            })
+            return
+        envelope = self._build_envelope(data, require_request=True, origin="api")
+        if envelope is None:
+            return
+        try:
+            from bridge.phase3_learning import report_execution_outcome
+            mem = _get_sqlite_mem()
+            headers = getattr(self, "headers", {}) or {}
+            explicit_turn_id = data.get("turn_id") or headers.get("X-Eva-Turn-Id")
+            result = report_execution_outcome(
+                mem,
+                mem.event_repository(),
+                operation_id=envelope.request_id,
+                action_run_id=data.get("action_run_id"),
+                skill_id=data.get("skill_id"),
+                skill_version_hash_value=data.get("skill_version_hash"),
+                outcome=data.get("outcome"),
+                postcondition=data.get("postcondition"),
+                verification_source="user",
+                duration_ms=data.get("duration_ms"),
+                evidence_summary=data.get("evidence_summary", ""),
+                turn_id=str(explicit_turn_id or envelope.request_id),
+                actor_type="user",
+                actor_id=envelope.user_id,
+                origin=envelope.origin,
+                correlation_id=envelope.correlation_id,
+            )
+        except LearningValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except (LearningCollisionError, IdempotencyCollisionError) as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        except Exception as exc:
+            print(f"[Learning] Execution report failed: {exc}", file=sys.stderr)
+            self._json_response(500, {"error": {"message": "execution report failed"}})
+            return
+        self._json_response(200 if result["idempotent"] else 201, result)
+
+    @_requires_learning_authority
+    def _learning_candidate_propose(self):
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        business = {
+            "kind", "target_skill_id", "base_version_hash", "candidate_payload",
+            "evidence",
+        }
+        unknown = sorted(set(data) - (business | _cfg.REQUEST_ENVELOPE_FIELDS))
+        if unknown:
+            self._json_response(400, {
+                "error": {"message": "Unsupported field(s): " + ", ".join(unknown)}
+            })
+            return
+        if not business.issubset(data):
+            self._json_response(400, {
+                "error": {"message": "Missing required candidate fields"}
+            })
+            return
+        envelope = self._build_envelope(data, require_request=True, origin="api")
+        if envelope is None:
+            return
+        try:
+            from bridge.phase3_learning import propose_learning_candidate
+            mem = _get_sqlite_mem()
+            result = propose_learning_candidate(
+                mem,
+                mem.event_repository(),
+                operation_id=envelope.request_id,
+                kind=data.get("kind"),
+                target_skill_id=data.get("target_skill_id"),
+                base_version_hash=data.get("base_version_hash"),
+                candidate_payload=data.get("candidate_payload"),
+                evidence=data.get("evidence"),
+                proposed_by="user",
+                actor_id=envelope.user_id,
+                origin=envelope.origin,
+                correlation_id=envelope.correlation_id,
+            )
+        except LearningValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except (LearningCollisionError, LearningConflictError, IdempotencyCollisionError) as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        except Exception as exc:
+            print(f"[Learning] Candidate proposal failed: {exc}", file=sys.stderr)
+            self._json_response(500, {"error": {"message": "candidate proposal failed"}})
+            return
+        self._json_response(200 if result["idempotent"] else 201, result)
+
+    @_requires_learning_authority
+    def _learning_candidate_evaluate(self, candidate_id):
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        unknown = sorted(set(data) - _cfg.REQUEST_ENVELOPE_FIELDS)
+        if unknown:
+            self._json_response(400, {
+                "error": {"message": "Unsupported field(s): " + ", ".join(unknown)}
+            })
+            return
+        envelope = self._build_envelope(data, require_request=True, origin="api")
+        if envelope is None:
+            return
+        try:
+            from bridge.phase3_learning import evaluate_learning_candidate
+            mem = _get_sqlite_mem()
+            result = evaluate_learning_candidate(
+                mem,
+                mem.event_repository(),
+                operation_id=envelope.request_id,
+                candidate_id=candidate_id,
+                actor_id=envelope.user_id,
+                origin=envelope.origin,
+                correlation_id=envelope.correlation_id,
+            )
+        except LearningValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except (LearningCollisionError, LearningConflictError, IdempotencyCollisionError) as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        except Exception as exc:
+            print(f"[Learning] Candidate evaluation failed: {exc}", file=sys.stderr)
+            self._json_response(500, {"error": {"message": "candidate evaluation failed"}})
+            return
+        self._json_response(200 if result["idempotent"] else 201, result)
 
     def _memory_reflect(self):
         """Trigger post-response reflection for non-ACP models (browser calls this after getting a response)."""
@@ -4785,6 +5053,13 @@ def main():
         print("[Bridge] " + phase2_message)
     print("[Bridge] " + _cfg.phase2_startup_summary())
     if not phase2_ok:
+        sys.exit(2)
+
+    phase3_ok, phase3_message = _cfg.validate_phase3_startup()
+    if phase3_message:
+        print("[Bridge] " + phase3_message)
+    print("[Bridge] " + _cfg.phase3_startup_summary())
+    if not phase3_ok:
         sys.exit(2)
 
     # ── Per-launch bearer auth ──────────────────────────────────────

@@ -427,3 +427,50 @@ def phase2_startup_summary():
         + ", consolidation=" + modes["consolidation"]
         + ", analytics=" + modes["analytics"]
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Phase 3 – Safe continual-learning shadow mode
+# ═══════════════════════════════════════════════════════════════════════
+
+_PHASE3_LEARNING_VALUES = frozenset({"off", "shadow"})
+EVA_PHASE3_LEARNING = _phase2_enum(
+    "EVA_PHASE3_LEARNING", _PHASE3_LEARNING_VALUES, "off"
+)
+_EVA_LEGACY_SKILL_AUTO_LEARN_RESULT = _phase2_bool(
+    "EVA_LEGACY_SKILL_AUTO_LEARN", False
+)
+EVA_LEGACY_SKILL_AUTO_LEARN = _EVA_LEGACY_SKILL_AUTO_LEARN_RESULT[0]
+PHASE3_INVALID_FLAGS = tuple(
+    name for name, valid in (
+        ("EVA_PHASE3_LEARNING", EVA_PHASE3_LEARNING != "INVALID"),
+        ("EVA_LEGACY_SKILL_AUTO_LEARN", _EVA_LEGACY_SKILL_AUTO_LEARN_RESULT[1]),
+    ) if not valid
+)
+
+
+def phase3_config_valid():
+    return not PHASE3_INVALID_FLAGS
+
+
+def phase3_effective_enabled():
+    return phase3_config_valid() and EVA_PHASE3_LEARNING == "shadow"
+
+
+def validate_phase3_startup():
+    if PHASE3_INVALID_FLAGS:
+        return (
+            False,
+            "Phase3 startup FATAL: invalid configuration for flags: "
+            + ", ".join(PHASE3_INVALID_FLAGS),
+        )
+    return (True, None)
+
+
+def phase3_startup_summary():
+    return (
+        "Phase3 learning="
+        + ("shadow" if phase3_effective_enabled() else "disabled")
+        + ", legacy_skill_auto_learn="
+        + ("enabled" if EVA_LEGACY_SKILL_AUTO_LEARN else "disabled")
+    )

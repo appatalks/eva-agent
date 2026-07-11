@@ -557,6 +557,11 @@ class SqliteMemory:
         from bridge.phase2_schema import run_phase2_migrations
         run_phase2_migrations(conn)
 
+        # Phase 3 safe-learning tables are independently versioned and dormant
+        # unless the startup-frozen learning mode is explicitly enabled.
+        from bridge.phase3_schema import run_phase3_migrations
+        run_phase3_migrations(conn)
+
     def _backfill_identity(self, conn):
         """Insert or update Eva identity Knowledge rows from seed data."""
         identity_rows = [r for r in _SEED.get("Knowledge", [])

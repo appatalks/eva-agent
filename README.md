@@ -44,7 +44,8 @@ operation does not require Copilot CLI.
 | **Voice interface** | Full-screen voice orb, wake/barge-in, TTS (OpenAI, Polly, Bark, browser) |
 | **Signal messaging** | Send-only text notifications via signal-cli, keyword-triggered or on-demand |
 | **Persistent memory** | Kusto/ADX or local SQLite, default-off shadow/hybrid claim recall, and human-approved evidence-linked consolidation proposals |
-| **Self-improving skills** | Auto-extracts reusable skills from successful tasks, stored as drafts |
+| **Safe skill learning** | Default-off local shadow pipeline records verified outcomes, proposes restricted immutable candidates, and evaluates them deterministically without activation |
+| **Legacy skill drafts** | Existing provider-backed draft suggestion is separately gated by strict default-off `EVA_LEGACY_SKILL_AUTO_LEARN`; it grants no activation authority |
 | **Cron scheduler** | Standard cron expressions, recurring prompts, morning briefings, alerts |
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |
 | **Multi-provider** | OpenAI, Google Gemini, GitHub Copilot, lm-studio (local) |

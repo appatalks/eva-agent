@@ -1123,6 +1123,56 @@ Phase 2 introduces a sidecar schema for semantic claims, retrieval scoring, and 
 
 **Consolidation tests:** `python3 tools/test_phase2_consolidation.py` (61 deterministic tests, temporary SQLite, no models/providers/external network).
 
+### Phase 3 Safe Continual Learning (iteration 1)
+
+Phase 3 adds a dormant, local shadow-learning pipeline behind startup-frozen
+`EVA_PHASE3_LEARNING=shadow`; the default is `off`, and any other non-empty
+value fails startup. The additive SQLite migration runs while behavior is off
+and uses independent `_phase3_schema_migrations` metadata. Schema v2 upgrades
+the brief rowid-backed v1 layout atomically to `WITHOUT ROWID`; concurrent
+first-start migrations serialize, preserve rows, and converge idempotently.
+
+Authenticated loopback clients with SQLite selected as the active memory
+authority may record explicitly confirmed (`user_confirmed: true`),
+user-attested execution
+outcomes, propose one of three restricted candidate kinds
+(`skill_instructions`, `skill_prompt_template`, or `skill_routing_rule`), and
+run a frozen deterministic evaluator. Outcomes, candidates, evidence links,
+evaluation plans, and results are immutable and event-linked. Every mutation
+requires a UUID operation identity with collision-safe replay semantics.
+Support evidence must attest the exact local skill version and a succeeded,
+observed postcondition; failed or unobserved outcomes can be linked only as
+failure evidence. Missing, disabled, stale, cross-skill, or cross-version
+targets fail closed.
+
+This iteration deliberately has no candidate execution, activation, promotion,
+canary, rollback, background worker, provider/model call, or legacy `Skills`
+write. Evaluation reads the exact current baseline hash, rejects stale
+candidates, detects a versioned fixed policy set and baseline regressions, and
+records detailed fixture results plus a hash of every data-driven evaluator
+rule. `Passed` means only that this frozen local policy found no listed issue;
+it is not a general safety proof. Passing evaluation grants no capability and
+never changes runtime skill selection or prompt context.
+
+The pre-existing browser-triggered skill-draft suggestion flow is legacy and
+separate: it can call the configured agent/model after a successful task. It is
+now blocked before request-body processing or provider dispatch unless the
+startup-frozen strict boolean `EVA_LEGACY_SKILL_AUTO_LEARN` is explicitly set
+to `1`, `true`, or `yes`; the default is off, `0`/`false`/`no` are explicit off
+values, and every other non-empty value fails startup. Its output is not Phase
+3 evidence, evaluation, approval, or activation.
+
+Routes (all require configured bearer auth, loopback bind, SQLite memory
+authority, and shadow mode):
+- `POST /v1/learning/executions/report`
+- `POST /v1/learning/candidates`
+- `GET /v1/learning/candidates`
+- `GET /v1/learning/candidates/<candidate-id>`
+- `POST /v1/learning/candidates/<candidate-id>/evaluate`
+
+**Tests:** `python3 tools/test_phase3.py` (deterministic, temporary SQLite, no
+models/providers/external network, and explicit non-activation checks).
+
 ### ACP Infrastructure Roadmap (tracking)
 
 Current state (2026-06-15):

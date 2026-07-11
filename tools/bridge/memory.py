@@ -50,15 +50,16 @@ def _set_memory_backend(backend):
     # global statement removed — writes go to _st.*
     if backend not in ("kusto", "sqlite"):
         return False
-    _st.memory_backend = backend
-    try:
-        os.makedirs(os.path.dirname(_MEMORY_BACKEND_PREF_PATH), exist_ok=True)
-        with open(_MEMORY_BACKEND_PREF_PATH, "w") as f:
-            f.write(backend)
-    except Exception as e:
-        print(f"[Bridge] Failed to persist memory backend preference: {e}")
-    print(f"[Bridge] Memory backend set to: {backend}")
-    return True
+    with _st.memory_backend_lock:
+        _st.memory_backend = backend
+        try:
+            os.makedirs(os.path.dirname(_MEMORY_BACKEND_PREF_PATH), exist_ok=True)
+            with open(_MEMORY_BACKEND_PREF_PATH, "w") as f:
+                f.write(backend)
+        except Exception as e:
+            print(f"[Bridge] Failed to persist memory backend preference: {e}")
+        print(f"[Bridge] Memory backend set to: {backend}")
+        return True
 
 # Synonyms expand a query term so lexical recall matches differently-worded facts
 # (e.g. "playlist" should surface a fact stored under relation "favorite_songs").

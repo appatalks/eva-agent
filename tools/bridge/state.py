@@ -42,6 +42,7 @@ last_interaction_date = None
 
 # ── Memory backend ──────────────────────────────────────────────────
 memory_backend = os.environ.get("EVA_MEMORY_BACKEND", "").strip().lower() or None
+memory_backend_lock = threading.RLock()
 sqlite_mem = None           # SqliteMemory instance (lazy)
 sqlite_mem_lock = threading.Lock()
 openai_api_key_cache = ""
