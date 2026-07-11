@@ -43,7 +43,7 @@ operation does not require Copilot CLI.
 | **Desktop agent** | PyAutoGUI mouse/keyboard control, optional AT-SPI via computer-use-linux MCP |
 | **Voice interface** | Full-screen voice orb, wake/barge-in, TTS (OpenAI, Polly, Bark, browser) |
 | **Signal messaging** | Send-only text notifications via signal-cli, keyword-triggered or on-demand |
-| **Persistent memory** | Kusto/ADX or local SQLite: conversations, emotion tracking, semantic recall |
+| **Persistent memory** | Kusto/ADX or local SQLite, plus default-off local shadow/hybrid claim recall with validated cache-only semantics |
 | **Self-improving skills** | Auto-extracts reusable skills from successful tasks, stored as drafts |
 | **Cron scheduler** | Standard cron expressions, recurring prompts, morning briefings, alerts |
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |

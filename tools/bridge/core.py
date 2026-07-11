@@ -294,6 +294,17 @@ except Exception as _cam_err:  # pragma: no cover - defensive
 # ACP Client — manages the copilot subprocess and JSON-RPC communication
 # ---------------------------------------------------------------------------
 
+
+def _prepend_memory_context(memory_context, prompt_text):
+    """Prepend memory with an explicit block boundary for direct ACP prompts."""
+    if not memory_context:
+        return prompt_text
+    if not prompt_text:
+        return memory_context
+    separator = "" if memory_context.endswith("\n\n") else "\n\n"
+    return memory_context + separator + prompt_text
+
+
 class BridgeHandler(BaseHTTPRequestHandler):
     """HTTP handler that bridges browser requests to ACP."""
 
@@ -3907,7 +3918,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         memory_context = _build_memory_context(last_user_msg)
         if memory_context:
-            prompt_text = memory_context + prompt_text
+            prompt_text = _prepend_memory_context(memory_context, prompt_text)
             print(f"[Cognition] Injected {len(memory_context)} chars of memory context")
 
         # Send to ACP

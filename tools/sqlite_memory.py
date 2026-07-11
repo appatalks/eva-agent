@@ -464,6 +464,17 @@ class SqliteMemory:
                     conn.rollback()
                 raise
 
+    @contextlib.contextmanager
+    def read_connection(self):
+        """Yield the thread-local connection under the instance read lock.
+
+        Trusted internal helpers must issue SELECT statements only. This keeps
+        multi-row sidecar/cache reads serialized with this process's writes
+        without opening a write transaction or exposing a global connection.
+        """
+        with self._lock:
+            yield self._conn()
+
     def insert_rows(self, conn, table, columns, rows_data):
         """Insert validated legacy projection rows without committing."""
         if table not in _SCHEMA:

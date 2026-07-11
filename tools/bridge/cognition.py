@@ -26,6 +26,31 @@ _SKILLS_LATEST_QUERY = _cfg.SKILLS_LATEST_QUERY
 _SKILL_INJECT_MAX = _cfg.SKILL_INJECT_MAX
 _SKILL_INSTRUCTIONS_INJECT_CAP = _cfg.SKILL_INSTRUCTIONS_INJECT_CAP
 
+
+def _apply_phase2_recall(legacy_context, user_message):
+    """Apply local sidecar recall only for an enabled non-legacy mode."""
+    if not _cfg.phase2_effective_enabled():
+        return legacy_context
+    modes = _cfg.phase2_effective_modes()
+    if modes["recall_mode"] == "legacy":
+        return legacy_context
+    try:
+        from bridge.phase2_recall import augment_memory_context
+        return augment_memory_context(
+            legacy_context,
+            user_message,
+            _get_sqlite_mem(),
+            recall_mode=modes["recall_mode"],
+            semantic_mode=modes["semantic_mode"],
+            analytics_mode=modes["analytics"],
+            query_consent=modes["query_consent"],
+            egress_mode=_st.egress_mode,
+            clock=_cfg.utc_now,
+        )
+    except Exception:
+        # Sidecar recall is fail-safe: preserve the exact Phase 1 context.
+        return legacy_context
+
 def _enable_cognition(mcp_servers, model=None, port=None):
     """Enable cognition hooks and advertise active bridge capabilities."""
     # global statement removed — writes go to _st.*
@@ -799,7 +824,7 @@ def _build_memory_context_sqlite(user_message):
                 context_parts.append(f"[Live Data] {tbl} (latest 5):\n{sample_text}")
             break
 
-    return "\n\n".join(context_parts)
+    return _apply_phase2_recall("\n\n".join(context_parts), user_message)
 
 
 
@@ -1127,7 +1152,7 @@ def _build_memory_context(user_message):
 
     cluster, db = _get_kusto_config()
     if not cluster or not db:
-        return ""
+        return _apply_phase2_recall("", user_message)
 
     context_parts = []
 
@@ -1484,8 +1509,10 @@ def _build_memory_context(user_message):
             break
 
     if context_parts:
-        return "\n\n".join(context_parts) + "\n\n"
-    return ""
+        return _apply_phase2_recall(
+            "\n\n".join(context_parts) + "\n\n", user_message
+        )
+    return _apply_phase2_recall("", user_message)
 
 
 def _post_response_reflection(user_message, assistant_response, model_name,

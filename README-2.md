@@ -1059,7 +1059,7 @@ npm run dist
 
 Host prerequisites: Node.js 24+, Python 3.12+, Copilot CLI authenticated (for cloud mode). LM Studio for local-only mode.
 
-### Phase 2 Memory Foundation (tracking)
+### Phase 2 Memory Foundation and Runtime Recall (tracking)
 
 Phase 2 introduces a sidecar schema for semantic claims, retrieval scoring, and embedding cache alongside the existing Phase 1 event kernel. All Phase 2 runtime behavior is **default-off** via startup-immutable environment flags. The additive sidecar migration still runs at ordinary SQLite startup while runtime behavior is off; it uses independent metadata and does not alter Phase 1 kernel tables or the legacy recall path.
 
@@ -1071,7 +1071,7 @@ Phase 2 introduces a sidecar schema for semantic claims, retrieval scoring, and 
 | `EVA_MEMORY_SEMANTIC_MODE` | `off`/`cache`/`openai` | `off` | Semantic scoring source |
 | `EVA_MEMORY_SEMANTIC_QUERY_CONSENT` | `1`/`true`/`yes`/`0`/`false`/`no` | `0` (no) | Explicit cloud egress consent |
 | `EVA_MEMORY_CONSOLIDATION` | `off` | `off` | Consolidation engine |
-| `EVA_MEMORY_ANALYTICS` | `off` | `off` | Metrics collection |
+| `EVA_MEMORY_ANALYTICS` | `off`/`local` | `off` | Local low-cardinality retrieval metrics |
 
 **Invalid flag handling:** Boolean flags use a strict parser that accepts only `1`/`true`/`yes` and `0`/`false`/`no`. Unrecognized values (e.g. `on`, `maybe`, `2`) record the flag name (not value) in `PHASE2_INVALID_FLAGS`. Enum flags produce an `"INVALID"` sentinel on unrecognized values. At startup, an invalid master value or an enabled master with any invalid dependent flag prints a redacted error and exits with code 2. If the master is explicitly off, invalid dependent flags produce a warning and Phase 2 remains disabled. `phase2_effective_modes()` returns all-legacy/off defaults when the master is off or configuration is invalid.
 
@@ -1080,6 +1080,12 @@ Phase 2 introduces a sidecar schema for semantic claims, retrieval scoring, and 
 **Timestamp and ordering contract:** Input must be an ISO 8601 string. Naive timestamps are treated as UTC; aware timestamps are normalized to UTC; numeric epochs are rejected. A malformed candidate observation rejects that candidate, and malformed `now_iso` fails the ranking operation with `ValueError`. Future timestamps clamp age to zero. Ranking is deterministic by score descending, effective confidence descending, exact integer-microsecond UTC observation instant descending, then normalized `ClaimId` ascending; adjacent instants remain ordered across the full accepted Python datetime range.
 
 **Candidate cap:** Input exceeding 200 candidates raises ValueError (fail closed, not silently truncated). Results capped at 6.
+
+**Runtime recall modes:** Runtime integration remains behind `EVA_PHASE2_MEMORY` and preserves the exact Phase 1 context path when disabled or set to `legacy`. `shadow` reads and ranks eligible local sidecar claims but returns the legacy context byte-for-byte. `hybrid` appends at most six ranked claims as bounded untrusted JSON lines; claim IDs are never rendered and claims are never copied into legacy `Knowledge`. The same local sidecar augments either the SQLite or ADX legacy read path. Direct ACP prompt composition inserts an explicit blank-line boundary so the untrusted-data footer remains a standalone line.
+
+**Claim eligibility:** Terminal `deny`, `supersede`, `retract`, or `merge` resolutions exclude a claim; `confirm` retains it. `deleted` claims are excluded. `session` claims remain excluded until claims carry a session identity that can be matched safely. Offline/local-network hybrid recall may use local and cloud-allowed claims, including locally held secret claims. Cloud-mode prompt augmentation requires explicit query consent, `cloud_allowed` item consent, and non-secret sensitivity. Shadow evaluation remains local and never injects its result.
+
+**No-network semantics:** `off` uses lexical/temporal/confidence/provenance scoring. `cache` may add semantic scores only when a fully matching query and claim vector already exists in `MemoryEmbeddingCache`; misses fall back to lexical scoring. Shadow always uses a `local_only` query-cache consent namespace, even when the bridge process permits cloud egress. Expired or corrupt query rows do not consume the cache work cap; at most the first eight fully valid namespaces in canonical provider/model/version/dimension/encoding order are considered. Iteration 2 performs no embedding writes or provider calls. The reserved `openai` mode is therefore cache-only in this iteration and records zero semantic egress.
 
 **Embedding cache identity:** Cache keys hash sorted canonical JSON containing `ObjectType`, `ObjectId`, `Provider`, `Model`, `ModelVersion`, `Dimensions`, `Encoding`, `ContentHash`, and `ConsentFingerprint`; delimiter-bearing fields cannot collide. Encoding is fixed to `f32le`. Blob length must equal `dimensions * 4`, and every unpacked float must be finite. `lookup_embedding_cache()` requires and verifies the full identity rather than accepting a cache key alone. Invalidation by object or exact SHA-256 consent fingerprint is supported.
 
@@ -1095,11 +1101,15 @@ Phase 2 introduces a sidecar schema for semantic claims, retrieval scoring, and 
 
 **Sidecar tables:** `MemorySemanticClaims`, `MemoryClaimEvidence`, `MemoryClaimResolutions`, `MemoryEmbeddingCache`, `MemoryRetrievalMetrics`, `MemoryConsolidationCheckpoints`.
 
-**Foundation scope:** This iteration establishes and attests the sidecar, pure retrieval/cache/rendering helpers, startup flags, and metrics types. Hybrid runtime recall, consolidation, review UI, and background jobs remain disabled until their later iterations are independently approved.
+**Runtime metrics:** When `EVA_MEMORY_ANALYTICS=local`, shadow/hybrid attempts append only mode, bounded counts, binary cache/egress flags, fallback category, and bounded latency. Query text, claim IDs, entities, values, URLs, and provider payloads are never stored. Metric failure cannot alter recall output. Timer failure returns the exact legacy context; when analytics is off, the runtime does not access a timer. The default remains `off`.
+
+**Iteration scope:** Iterations 1–2 establish and attest the sidecar, pure retrieval/cache/rendering helpers, startup flags, local shadow/hybrid runtime reads, cache-only semantic scoring, and local privacy-safe metrics. Claim writes, consolidation, review UI, provider semantic egress, and background jobs remain disabled until later independently approved iterations.
 
 **Runtime prerequisite:** Phase 2 exact column attestation uses `PRAGMA table_xinfo` and therefore requires SQLite 3.26 or newer (in addition to the project Python 3.12+ baseline). Startup checks this version before creating Phase 2 migration metadata and fails with a clear prerequisite error on older runtimes.
 
-**Tests:** `python3 tools/test_phase2.py` (deterministic, no external network, temporary SQLite, 560 assertions).
+**Tests:** `python3 tools/test_phase2.py` (deterministic, no external network, temporary SQLite, 561 assertions).
+
+**Runtime tests:** `python3 tools/test_phase2_runtime.py` (33 deterministic tests, temporary SQLite, no providers or external network).
 
 ### ACP Infrastructure Roadmap (tracking)
 

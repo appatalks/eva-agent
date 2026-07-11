@@ -135,7 +135,8 @@ def test_python_syntax():
     """All Python files compile without errors."""
     py_files = ["tools/acp_bridge.py", "tools/kusto_mcp.py", "tools/test_eva.py", "tools/eval/run.py",
                  "tools/sqlite_memory.py", "tools/test_phase0.py", "tools/test_phase1.py",
-                 "tools/test_phase2.py", "tools/test_static.py"]
+                 "tools/test_phase2.py", "tools/test_phase2_runtime.py",
+                 "tools/test_static.py"]
     # Include all bridge package files
     bridge_dir = "tools/bridge"
     if os.path.isdir(bridge_dir):

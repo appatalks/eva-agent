@@ -166,16 +166,24 @@ def test_flags_invalid_enum():
 def test_flags_valid_values():
     """Valid enum values pass through."""
     print("\n── Valid Enum Values ──")
-    from bridge.config import _phase2_enum, _PHASE2_RECALL_MODES, _PHASE2_SEMANTIC_MODES
+    from bridge.config import (
+        _phase2_enum, _PHASE2_ANALYTICS_VALUES,
+        _PHASE2_RECALL_MODES, _PHASE2_SEMANTIC_MODES,
+    )
 
     os.environ["_TEST_V_RECALL"] = "shadow"
     os.environ["_TEST_V_SEM"] = "openai"
+    os.environ["_TEST_V_ANALYTICS"] = "local"
     try:
         assert_eq("valid_recall", _phase2_enum("_TEST_V_RECALL", _PHASE2_RECALL_MODES, "legacy"), "shadow")
         assert_eq("valid_sem", _phase2_enum("_TEST_V_SEM", _PHASE2_SEMANTIC_MODES, "off"), "openai")
+        assert_eq("valid_analytics_local",
+                  _phase2_enum("_TEST_V_ANALYTICS", _PHASE2_ANALYTICS_VALUES, "off"),
+                  "local")
     finally:
         del os.environ["_TEST_V_RECALL"]
         del os.environ["_TEST_V_SEM"]
+        del os.environ["_TEST_V_ANALYTICS"]
 
 
 def test_flags_strict_bool():
