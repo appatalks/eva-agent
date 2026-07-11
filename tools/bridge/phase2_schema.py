@@ -20,6 +20,8 @@ import json
 import re
 import sqlite3
 
+from bridge.phase2_consolidation_schema import CONSOLIDATION_SCHEMA_CHECKSUM
+
 
 MIN_SQLITE_VERSION = (3, 26, 0)
 
@@ -527,6 +529,14 @@ _PHASE2_MIGRATION_MANIFESTS = {
         "contract": "phase2 sidecar v1: immutable claims, evidence, resolutions, "
                     "embedding cache (full identity), metrics (cross-field), checkpoints",
     },
+    2: {
+        "tables": [
+            "MemoryClaimProposals", "MemoryClaimProposalConflicts",
+            "MemoryConsolidationReceipts", "MemoryClaimProposalDecisions",
+        ],
+        "contract": "phase2 consolidation v2: immutable evidence-linked claim "
+                    "proposals, conflicts, scan receipts, and terminal decisions",
+    },
 }
 
 
@@ -606,8 +616,16 @@ def _m1_sidecar_tables(conn):
     _create_phase2_tables(conn)
 
 
+def _m2_consolidation_tables(conn):
+    """Migration v2: create proposal-only consolidation sidecars."""
+    from bridge.phase2_consolidation_schema import create_consolidation_schema
+    create_consolidation_schema(conn)
+
+
 _PHASE2_MIGRATIONS = [
     (1, "phase2 sidecar v1", _manifest_hash(1), _m1_sidecar_tables),
+    (2, "phase2 consolidation v2", CONSOLIDATION_SCHEMA_CHECKSUM,
+     _m2_consolidation_tables),
 ]
 
 
@@ -1007,6 +1025,10 @@ def verify_phase2_schema(conn):
 
     _verify_triggers(conn, version)
     _verify_immutability_runtime(conn, version)
+
+    if version >= 2:
+        from bridge.phase2_consolidation_schema import verify_consolidation_schema
+        verify_consolidation_schema(conn, version, Phase2SchemaVerificationError)
 
     return version
 

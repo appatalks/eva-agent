@@ -168,22 +168,29 @@ def test_flags_valid_values():
     print("\n── Valid Enum Values ──")
     from bridge.config import (
         _phase2_enum, _PHASE2_ANALYTICS_VALUES,
-        _PHASE2_RECALL_MODES, _PHASE2_SEMANTIC_MODES,
+        _PHASE2_CONSOLIDATION_VALUES, _PHASE2_RECALL_MODES,
+        _PHASE2_SEMANTIC_MODES,
     )
 
     os.environ["_TEST_V_RECALL"] = "shadow"
     os.environ["_TEST_V_SEM"] = "openai"
     os.environ["_TEST_V_ANALYTICS"] = "local"
+    os.environ["_TEST_V_CONSOLIDATION"] = "proposals"
     try:
         assert_eq("valid_recall", _phase2_enum("_TEST_V_RECALL", _PHASE2_RECALL_MODES, "legacy"), "shadow")
         assert_eq("valid_sem", _phase2_enum("_TEST_V_SEM", _PHASE2_SEMANTIC_MODES, "off"), "openai")
         assert_eq("valid_analytics_local",
                   _phase2_enum("_TEST_V_ANALYTICS", _PHASE2_ANALYTICS_VALUES, "off"),
                   "local")
+        assert_eq("valid_consolidation_proposals",
+              _phase2_enum("_TEST_V_CONSOLIDATION",
+                       _PHASE2_CONSOLIDATION_VALUES, "off"),
+              "proposals")
     finally:
         del os.environ["_TEST_V_RECALL"]
         del os.environ["_TEST_V_SEM"]
         del os.environ["_TEST_V_ANALYTICS"]
+        del os.environ["_TEST_V_CONSOLIDATION"]
 
 
 def test_flags_strict_bool():
@@ -359,8 +366,8 @@ def test_migration_fresh():
         _setup_phase1(conn)
         from bridge.phase2_schema import run_phase2_migrations, _current_version
         result = run_phase2_migrations(conn)
-        assert_eq("migrations_applied", result, 1)
-        assert_eq("current_version", _current_version(conn), 1)
+        assert_eq("migrations_applied", result, 2)
+        assert_eq("current_version", _current_version(conn), 2)
 
         tables = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -368,6 +375,8 @@ def test_migration_fresh():
         for expected in (
             "MemorySemanticClaims", "MemoryClaimEvidence", "MemoryClaimResolutions",
             "MemoryEmbeddingCache", "MemoryRetrievalMetrics", "MemoryConsolidationCheckpoints",
+            "MemoryClaimProposals", "MemoryClaimProposalConflicts",
+            "MemoryConsolidationReceipts", "MemoryClaimProposalDecisions",
         ):
             assert_true(f"table:{expected}", expected in tables)
     finally:

@@ -270,7 +270,7 @@ ENTITY_RESERVED_TERMS = {
 
 _PHASE2_RECALL_MODES = frozenset({"legacy", "shadow", "hybrid"})
 _PHASE2_SEMANTIC_MODES = frozenset({"off", "cache", "openai"})
-_PHASE2_CONSOLIDATION_VALUES = frozenset({"off"})
+_PHASE2_CONSOLIDATION_VALUES = frozenset({"off", "proposals"})
 _PHASE2_ANALYTICS_VALUES = frozenset({"off", "local"})
 _PHASE2_BOOL_TRUTHY = frozenset({"1", "true", "yes"})
 _PHASE2_BOOL_FALSY = frozenset({"0", "false", "no"})

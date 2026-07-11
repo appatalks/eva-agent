@@ -60,6 +60,12 @@ from bridge.finalize import mutate_event
 from bridge.normalization import latest_row_sql, reconciliation_status
 from bridge.sensitive import redact_credentials
 from bridge.events import IdempotencyCollisionError, canonical_json, payload_hash
+from bridge.phase2_consolidation import (
+    ConsolidationCollisionError,
+    ProposalDecisionConflictError,
+    ProposalNotFoundError,
+    ProposalValidationError,
+)
 
 
 # Domain modules
@@ -664,6 +670,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._notifications_list()
         elif parsed_path == "/v1/memory/context":
             self._memory_context()
+        elif parsed_path == "/v1/memory/claim-proposals":
+            self._claim_proposals_list()
+        elif re.fullmatch(r"/v1/memory/claim-proposals/[0-9a-f]{64}", parsed_path):
+            self._claim_proposal_get(parsed_path.rsplit("/", 1)[1])
         elif parsed_path == "/v1/data/retrieve":
             self._data_retrieve()
         elif parsed_path == "/v1/browser/status":
@@ -709,6 +719,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._memory_reflect()
         elif parsed_path == "/v1/memory/backend":
             self._memory_backend_set()
+        elif parsed_path == "/v1/memory/claim-proposals/scan":
+            self._claim_proposals_scan()
+        elif re.fullmatch(
+            r"/v1/memory/claim-proposals/[0-9a-f]{64}/decide", parsed_path
+        ):
+            self._claim_proposal_decide(parsed_path.split("/")[-2])
         elif parsed_path == "/v1/aig/chat":
             self._aig_chat()
         elif parsed_path == "/v1/telemetry":
@@ -3612,6 +3628,181 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "context": context,
             "cognition_enabled": True
         })
+
+    def _claim_proposals_enabled(self):
+        """Require loopback and explicit proposal-only consolidation mode."""
+        if not _st.bridge_auth_token:
+            self._json_response(401, {
+                "error": {
+                    "message": "claim proposal operations require configured bearer auth"
+                }
+            })
+            return False
+        if not _is_loopback_bind():
+            self._json_response(403, {
+                "error": {"message": "claim proposal operations require loopback bind"}
+            })
+            return False
+        modes = _cfg.phase2_effective_modes()
+        if (
+            not _cfg.phase2_effective_enabled()
+            or modes.get("consolidation") != "proposals"
+        ):
+            self._json_response(409, {
+                "error": {
+                    "message": "claim proposal consolidation is disabled"
+                }
+            })
+            return False
+        return True
+
+    def _claim_proposals_list(self):
+        if not self._claim_proposals_enabled():
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        status = str(params.get("status", ["pending"])[0] or "pending").strip()
+        raw_limit = str(params.get("limit", ["50"])[0] or "50").strip()
+        try:
+            limit = int(raw_limit)
+            from bridge.phase2_consolidation import list_claim_proposals
+            proposals = list_claim_proposals(
+                _get_sqlite_mem(), status=status, limit=limit
+            )
+        except (TypeError, ValueError, ProposalValidationError) as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except Exception as exc:
+            print(f"[Memory] Claim proposal list failed: {exc}", file=sys.stderr)
+            self._json_response(500, {
+                "error": {"message": "claim proposal list failed"}
+            })
+            return
+        self._json_response(200, {"proposals": proposals})
+
+    def _claim_proposal_get(self, proposal_id):
+        if not self._claim_proposals_enabled():
+            return
+        from bridge.phase2_consolidation import get_claim_proposal
+        try:
+            proposal = get_claim_proposal(_get_sqlite_mem(), proposal_id)
+        except ProposalValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except ConsolidationCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        except Exception as exc:
+            print(f"[Memory] Claim proposal read failed: {exc}", file=sys.stderr)
+            self._json_response(500, {
+                "error": {"message": "claim proposal read failed"}
+            })
+            return
+        if proposal is None:
+            self._json_response(404, {"error": {"message": "proposal not found"}})
+            return
+        self._json_response(200, {"proposal": proposal})
+
+    def _claim_proposals_scan(self):
+        if not self._claim_proposals_enabled():
+            return
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        allowed = {"limit"} | _cfg.REQUEST_ENVELOPE_FIELDS
+        unknown = sorted(set(data) - allowed) if isinstance(data, dict) else []
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        if unknown:
+            self._json_response(400, {
+                "error": {"message": "Unsupported field(s): " + ", ".join(unknown)}
+            })
+            return
+        envelope = self._build_envelope(data, require_request=True, origin="api")
+        if envelope is None:
+            return
+        try:
+            from bridge.phase2_consolidation import scan_claim_proposals
+            result = scan_claim_proposals(
+                _get_sqlite_mem(), limit=data.get("limit", 50)
+            )
+        except ProposalValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except ConsolidationCollisionError as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        except Exception as exc:
+            print(f"[Memory] Claim proposal scan failed: {exc}", file=sys.stderr)
+            self._json_response(500, {
+                "error": {"message": "claim proposal scan failed"}
+            })
+            return
+        result["request_id"] = envelope.request_id
+        self._json_response(200, result)
+
+    def _claim_proposal_decide(self, proposal_id):
+        if not self._claim_proposals_enabled():
+            return
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        business = {"proposal_digest", "action", "target_claim_ids", "reason"}
+        unknown = sorted(set(data) - (business | _cfg.REQUEST_ENVELOPE_FIELDS))
+        if unknown:
+            self._json_response(400, {
+                "error": {"message": "Unsupported field(s): " + ", ".join(unknown)}
+            })
+            return
+        if not all(field in data for field in ("proposal_digest", "action")):
+            self._json_response(400, {
+                "error": {"message": "proposal_digest and action are required"}
+            })
+            return
+        envelope = self._build_envelope(data, require_request=True, origin="api")
+        if envelope is None:
+            return
+        from bridge.phase2_consolidation import decide_claim_proposal
+        try:
+            mem = _get_sqlite_mem()
+            result = decide_claim_proposal(
+                mem,
+                mem.event_repository(),
+                proposal_id=proposal_id,
+                proposal_digest=data.get("proposal_digest"),
+                operation_id=envelope.request_id,
+                actor_type="user",
+                actor_id=envelope.user_id,
+                origin=envelope.origin,
+                action=data.get("action"),
+                target_claim_ids=data.get("target_claim_ids", ()),
+                reason=data.get("reason", ""),
+                correlation_id=envelope.correlation_id,
+                session_id=envelope.session_id,
+                turn_id=envelope.turn_id,
+            )
+        except ProposalNotFoundError as exc:
+            self._json_response(404, {"error": {"message": str(exc)}})
+            return
+        except ProposalValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except (IdempotencyCollisionError, ProposalDecisionConflictError) as exc:
+            self._json_response(409, {"error": {"message": str(exc)}})
+            return
+        except Exception as exc:
+            print(f"[Memory] Claim proposal decision failed: {exc}", file=sys.stderr)
+            self._json_response(500, {
+                "error": {"message": "claim proposal decision failed"}
+            })
+            return
+        self._json_response(200, result)
 
     def _memory_reflect(self):
         """Trigger post-response reflection for non-ACP models (browser calls this after getting a response)."""
