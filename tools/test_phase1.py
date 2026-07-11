@@ -23,6 +23,7 @@ Usage:
 """
 
 import concurrent.futures
+import contextlib
 import datetime
 import gc
 import json
@@ -2432,6 +2433,753 @@ class TestAtomicTransactions(unittest.TestCase):
             "SELECT * FROM MemoryOutbox WHERE EventId = ?", (ev["EventId"],)
         ).fetchone()
         self.assertIsNone(outbox)
+
+    def test_memory_backed_mutations_use_transaction_before_repository(self):
+        """Appends and both outbox claim paths use memory→repository order."""
+        exact_event = self.repo.append_event(
+            stream_id="lock-order:exact-outbox",
+            event_type="test.lock_order",
+            payload={"path": "exact-outbox"},
+            consent_scope="cloud_allowed",
+            idempotency_key="lock-order-exact-outbox",
+            outbox_destination="lock-order",
+        )
+        self.repo.append_event(
+            stream_id="lock-order:batch-outbox",
+            event_type="test.lock_order",
+            payload={"path": "batch-outbox"},
+            consent_scope="cloud_allowed",
+            idempotency_key="lock-order-batch-outbox",
+            outbox_destination="lock-order",
+        )
+        observed = []
+        original_transaction = self.repo._transaction
+        original_lock = self.repo._lock
+
+        class TrackingLock:
+            def __enter__(inner_self):
+                observed.append("repository")
+                original_lock.acquire()
+                return inner_self
+
+            def __exit__(inner_self, exc_type, exc, traceback):
+                original_lock.release()
+
+        @contextlib.contextmanager
+        def tracking_transaction(connection=None):
+            with original_transaction(connection) as conn:
+                observed.append("transaction")
+                yield conn
+
+        with mock.patch.object(self.repo, "_transaction", tracking_transaction), \
+                mock.patch.object(self.repo, "_lock", TrackingLock()):
+            self.repo.append_event(
+                stream_id="lock-order:ordinary",
+                event_type="test.lock_order",
+                payload={"path": "ordinary"},
+                idempotency_key="lock-order-ordinary",
+            )
+            self.assertEqual(observed[:2], ["transaction", "repository"])
+
+            observed.clear()
+            with self.mem.transaction() as conn:
+                self.repo.append_event(
+                    connection=conn,
+                    stream_id="lock-order:caller",
+                    event_type="test.lock_order",
+                    payload={"path": "caller"},
+                    idempotency_key="lock-order-caller",
+                )
+            self.assertEqual(observed[:2], ["transaction", "repository"])
+
+            observed.clear()
+            claimed = self.repo.claim_outbox_entry(
+                exact_event["EventId"], "lock-order"
+            )
+            self.assertIsNotNone(claimed)
+            self.assertEqual(observed[:2], ["transaction", "repository"])
+
+            observed.clear()
+            claimed_batch = self.repo.claim_outbox(
+                limit=10, destination="lock-order"
+            )
+            self.assertEqual(len(claimed_batch), 1)
+            self.assertEqual(observed[:2], ["transaction", "repository"])
+
+    def test_factory_shared_connection_serializes_transaction_entry(self):
+        """Concurrent factory appends never persist an event while reporting failure."""
+        from bridge.event_store import EventRepositoryV2
+        from bridge.migrations import run_migrations
+
+        path = os.path.join(_TMP_HOME, f"factory_{uuid.uuid4().hex[:8]}.db")
+        conn = sqlite3.connect(path, timeout=10, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.row_factory = sqlite3.Row
+        run_migrations(conn)
+        repo = EventRepositoryV2(lambda: conn, installation_id="factory-shared")
+        barrier = threading.Barrier(8)
+        results = []
+        errors = []
+        result_lock = threading.Lock()
+
+        def worker(index):
+            try:
+                barrier.wait(timeout=5)
+                event = repo.append_event(
+                    stream_id=f"factory:{index}",
+                    event_type="test.factory_shared",
+                    payload={"index": index},
+                    idempotency_key=f"factory-shared-{index}",
+                )
+                with result_lock:
+                    results.append(event["EventId"])
+            except Exception as exc:
+                with result_lock:
+                    errors.append(type(exc).__name__)
+
+        threads = [
+            threading.Thread(target=worker, args=(index,), daemon=True)
+            for index in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        try:
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            self.assertEqual(len(results), 8)
+            durable = conn.execute(
+                "SELECT EventId FROM MemoryEvents "
+                "WHERE EventType='test.factory_shared' ORDER BY EventId"
+            ).fetchall()
+            self.assertEqual(
+                [row[0] for row in durable], sorted(results)
+            )
+        finally:
+            repo.close()
+            conn.close()
+
+    def test_memory_append_cannot_deadlock_with_outbox_claims(self):
+        """Forced former ABBA interleavings complete for exact and batch claims."""
+        for claim_kind in ("exact", "batch"):
+            with self.subTest(claim_kind=claim_kind):
+                mem = _fresh_mem(f"outbox_order_{claim_kind}")
+                repo = mem.event_repository()
+                destination = f"lock-{claim_kind}"
+                claimed_event = repo.append_event(
+                    stream_id=f"outbox-order:{claim_kind}:claimed",
+                    event_type="test.outbox_order",
+                    payload={"claim_kind": claim_kind},
+                    consent_scope="cloud_allowed",
+                    outbox_destination=destination,
+                    idempotency_key=f"outbox-order-{claim_kind}-claimed",
+                )
+                original_transaction = repo._transaction
+                append_holds_memory = threading.Event()
+                claim_attempted_memory = threading.Event()
+                release_append = threading.Event()
+                results = []
+                errors = []
+                result_lock = threading.Lock()
+
+                @contextlib.contextmanager
+                def coordinated_transaction(connection=None):
+                    name = threading.current_thread().name
+                    if name == "claim-thread":
+                        claim_attempted_memory.set()
+                    with original_transaction(connection) as conn:
+                        if name == "append-thread":
+                            append_holds_memory.set()
+                            if not release_append.wait(timeout=5):
+                                raise RuntimeError("append release timeout")
+                        yield conn
+
+                def append_worker():
+                    try:
+                        event = repo.append_event(
+                            stream_id=f"outbox-order:{claim_kind}:append",
+                            event_type="test.outbox_order",
+                            payload={"path": "append"},
+                            idempotency_key=f"outbox-order-{claim_kind}-append",
+                        )
+                        with result_lock:
+                            results.append(("append", event["EventId"]))
+                    except Exception as exc:
+                        with result_lock:
+                            errors.append(("append", type(exc).__name__))
+
+                def claim_worker():
+                    try:
+                        if claim_kind == "exact":
+                            value = repo.claim_outbox_entry(
+                                claimed_event["EventId"], destination
+                            )
+                            count = int(value is not None)
+                        else:
+                            count = len(repo.claim_outbox(
+                                limit=10, destination=destination
+                            ))
+                        with result_lock:
+                            results.append(("claim", count))
+                    except Exception as exc:
+                        with result_lock:
+                            errors.append(("claim", type(exc).__name__))
+
+                with mock.patch.object(repo, "_transaction", coordinated_transaction):
+                    append_thread = threading.Thread(
+                        target=append_worker, name="append-thread", daemon=True
+                    )
+                    append_thread.start()
+                    self.assertTrue(append_holds_memory.wait(timeout=5))
+                    claim_thread = threading.Thread(
+                        target=claim_worker, name="claim-thread", daemon=True
+                    )
+                    claim_thread.start()
+                    self.assertTrue(claim_attempted_memory.wait(timeout=5))
+                    release_append.set()
+                    append_thread.join(timeout=10)
+                    claim_thread.join(timeout=10)
+                try:
+                    self.assertFalse(append_thread.is_alive())
+                    self.assertFalse(claim_thread.is_alive())
+                    self.assertEqual(errors, [])
+                    self.assertEqual({kind for kind, _ in results}, {"append", "claim"})
+                    self.assertEqual(dict(results)["claim"], 1)
+                finally:
+                    release_append.set()
+                    mem.close()
+
+    def test_factory_idempotency_fallback_never_sees_uncommitted_duplicate(self):
+        """A rolled-back competing row cannot produce a false successful return."""
+        from bridge.event_store import EventRepositoryV2
+        from bridge.events import EventStoreError
+        from bridge.migrations import run_migrations
+
+        path = os.path.join(_TMP_HOME, f"fallback_{uuid.uuid4().hex[:8]}.db")
+        conn = sqlite3.connect(path, timeout=10, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        run_migrations(conn)
+        repo = EventRepositoryV2(lambda: conn, installation_id="fallback-shared")
+        original_serialized = repo._serialized_transaction
+        original_append = repo._append_in_transaction
+        first_exited = threading.Event()
+        second_inserted = threading.Event()
+        allow_second_rollback = threading.Event()
+        call_counts = {}
+        counts_lock = threading.Lock()
+        results = []
+        errors = []
+
+        @contextlib.contextmanager
+        def coordinated_serialized(connection=None):
+            name = threading.current_thread().name
+            with counts_lock:
+                call_counts[name] = call_counts.get(name, 0) + 1
+                count = call_counts[name]
+            if name == "fallback-first" and count == 2:
+                allow_second_rollback.set()
+            try:
+                with original_serialized(connection) as active:
+                    yield active
+            finally:
+                if name == "fallback-first" and count == 1:
+                    first_exited.set()
+                    if not second_inserted.wait(timeout=5):
+                        allow_second_rollback.set()
+
+        def coordinated_append(active, **values):
+            name = threading.current_thread().name
+            if name == "fallback-first":
+                raise EventStoreError("injected first failure")
+            value = original_append(active, **values)
+            second_inserted.set()
+            allow_second_rollback.wait(timeout=5)
+            raise EventStoreError("injected competing rollback")
+
+        def worker(name):
+            try:
+                if name == "fallback-second":
+                    first_exited.wait(timeout=5)
+                value = repo.append_event(
+                    stream_id="fallback:shared",
+                    event_type="test.fallback",
+                    payload={"same": True},
+                    idempotency_key="fallback-shared-key",
+                )
+                results.append(value["EventId"])
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+
+        with mock.patch.object(repo, "_serialized_transaction", coordinated_serialized), \
+                mock.patch.object(repo, "_append_in_transaction", coordinated_append):
+            threads = [
+                threading.Thread(target=worker, args=("fallback-first",),
+                                 name="fallback-first", daemon=True),
+                threading.Thread(target=worker, args=("fallback-second",),
+                                 name="fallback-second", daemon=True),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+        try:
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(results, [])
+            self.assertEqual(len(errors), 2)
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM MemoryEvents "
+                    "WHERE IdempotencyKey='fallback-shared-key'"
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            allow_second_rollback.set()
+            repo.close()
+            conn.close()
+
+    def test_factory_legacy_receipt_cannot_commit_inflight_append(self):
+        """Receipt serialization cannot cross-commit an append transaction."""
+        from bridge.event_store import EventRepositoryV2
+        from bridge.events import deterministic_event_id
+        from bridge.migrations import run_migrations
+
+        path = os.path.join(_TMP_HOME, f"receipt_{uuid.uuid4().hex[:8]}.db")
+        conn = sqlite3.connect(path, timeout=10, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        run_migrations(conn)
+        installation = "receipt-shared"
+        key = "receipt-inflight-key"
+        expected_event_id = deterministic_event_id(installation, key)
+        repo = EventRepositoryV2(lambda: conn, installation_id=installation)
+        original_append = repo._append_in_transaction
+        original_lock = repo._factory_connection_lock(conn)
+        append_inserted = threading.Event()
+        receipt_lock_attempt = threading.Event()
+        release_append = threading.Event()
+        results = []
+        errors = []
+
+        class TrackingLock:
+            def __enter__(inner_self):
+                if threading.current_thread().name == "receipt-thread":
+                    receipt_lock_attempt.set()
+                original_lock.acquire()
+                return inner_self
+
+            def __exit__(inner_self, exc_type, exc, traceback):
+                original_lock.release()
+
+        def paused_append(active, **values):
+            result = original_append(active, **values)
+            append_inserted.set()
+            if not release_append.wait(timeout=5):
+                raise RuntimeError("append release timeout")
+            return result
+
+        def append_worker():
+            try:
+                event = repo.append_event(
+                    stream_id="receipt:inflight", event_type="test.receipt",
+                    payload={"value": 1}, idempotency_key=key,
+                )
+                results.append(("append", event["EventId"]))
+            except Exception as exc:
+                errors.append(("append", type(exc).__name__))
+
+        def receipt_worker():
+            try:
+                repo.record_legacy_receipt(
+                    expected_event_id, "test-receipt", row_count=1
+                )
+                results.append(("receipt", expected_event_id))
+            except Exception as exc:
+                errors.append(("receipt", type(exc).__name__))
+
+        with mock.patch.object(repo, "_append_in_transaction", paused_append), \
+            mock.patch.object(
+                repo, "_factory_connection_lock",
+                return_value=TrackingLock(),
+            ):
+            append_thread = threading.Thread(
+                target=append_worker, name="append-thread", daemon=True
+            )
+            append_thread.start()
+            self.assertTrue(append_inserted.wait(timeout=5))
+            receipt_thread = threading.Thread(
+                target=receipt_worker, name="receipt-thread", daemon=True
+            )
+            receipt_thread.start()
+            attempted = receipt_lock_attempt.wait(timeout=5)
+            release_append.set()
+            append_thread.join(timeout=10)
+            receipt_thread.join(timeout=10)
+        try:
+            self.assertTrue(attempted)
+            self.assertFalse(append_thread.is_alive())
+            self.assertFalse(receipt_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual({kind for kind, _ in results}, {"append", "receipt"})
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM MemoryEvents WHERE EventId=?",
+                    (expected_event_id,),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM LegacyProjectionReceipts "
+                    "WHERE EventId=? AND ProjectionName='test-receipt'",
+                    (expected_event_id,),
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            release_append.set()
+            repo.close()
+            conn.close()
+
+    def test_factory_implicit_operations_reject_unknown_caller_transaction(self):
+        """Implicit factory operations cannot join or observe an external transaction."""
+        from bridge.event_store import EventRepositoryV2
+        from bridge.events import EventStoreError
+        from bridge.migrations import run_migrations
+
+        path = os.path.join(_TMP_HOME, f"external_{uuid.uuid4().hex[:8]}.db")
+        conn = sqlite3.connect(path, timeout=10, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        run_migrations(conn)
+        repo = EventRepositoryV2(lambda: conn, installation_id="external-shared")
+        conn.execute("BEGIN IMMEDIATE")
+        event = repo.append_event(
+            connection=conn,
+            stream_id="external:caller",
+            event_type="test.external_transaction",
+            payload={"value": 1},
+            turn_id="external-turn",
+            consent_scope="cloud_allowed",
+            idempotency_key="external-caller-event",
+        )
+        repo.record_legacy_receipt(
+            event["EventId"], "external", 1, connection=conn
+        )
+        conn.execute(
+            "INSERT INTO MemoryProjectionReceipts(EventId,Destination) "
+            "VALUES (?,?)", (event["EventId"], "external"),
+        )
+
+        # Explicit connection reads are intentionally transaction-local.
+        self.assertEqual(
+            repo.get_event(event["EventId"], connection=conn)["EventId"],
+            event["EventId"],
+        )
+        self.assertEqual(len(repo.events_since(connection=conn)), 1)
+        self.assertEqual(len(repo.pending_outbox(connection=conn)), 1)
+        self.assertTrue(repo.has_legacy_receipt(
+            event["EventId"], "external", connection=conn
+        ))
+        self.assertTrue(repo.has_projection_receipt(
+            event["EventId"], "external", connection=conn
+        ))
+
+        implicit_mutations = (
+            lambda: repo.append_event(
+                stream_id="external:implicit", event_type="test.external",
+                payload={}, idempotency_key="external-implicit",
+            ),
+            lambda: repo.ensure_outbox(event["EventId"], "extra"),
+            lambda: repo.claim_outbox_entry(event["EventId"], "adx"),
+            lambda: repo.claim_outbox(limit=10),
+            lambda: repo.complete_outbox(event["EventId"], "adx"),
+            lambda: repo.fail_outbox(event["EventId"], "error", "adx"),
+            lambda: repo.record_legacy_receipt(event["EventId"], "implicit", 1),
+        )
+        implicit_reads = (
+            lambda: repo.get_event(event["EventId"]),
+            lambda: repo.get_by_idempotency_key("external-caller-event"),
+            lambda: repo.events_for_turn("external-turn"),
+            lambda: repo.list_stream("external:caller"),
+            lambda: repo.events_since(),
+            lambda: repo.events_since_timestamp(""),
+            lambda: repo.pending_outbox(),
+            lambda: repo.outbox_status(),
+            lambda: repo.has_legacy_receipt(event["EventId"], "external"),
+            lambda: repo.has_projection_receipt(event["EventId"], "external"),
+        )
+        try:
+            for index, operation in enumerate(implicit_mutations):
+                with self.subTest(kind="mutation", index=index):
+                    with self.assertRaises(EventStoreError):
+                        operation()
+            for index, operation in enumerate(implicit_reads):
+                with self.subTest(kind="read", index=index):
+                    with self.assertRaises(EventStoreError):
+                        operation()
+        finally:
+            conn.rollback()
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM MemoryEvents WHERE EventId=?",
+                (event["EventId"],),
+            ).fetchone()[0],
+            0,
+        )
+        repo.close()
+        conn.close()
+
+    def test_factory_implicit_reads_never_observe_repository_rollback(self):
+        """Every implicit factory read waits for rollback and returns durable state."""
+        from bridge.event_store import EventRepositoryV2
+        from bridge.events import EventStoreError, deterministic_event_id
+        from bridge.migrations import run_migrations
+
+        path = os.path.join(_TMP_HOME, f"reads_{uuid.uuid4().hex[:8]}.db")
+        conn = sqlite3.connect(path, timeout=10, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        run_migrations(conn)
+        installation = "read-rollback"
+        idempotency_key = "read-rollback-event"
+        event_id = deterministic_event_id(installation, idempotency_key)
+        repo = EventRepositoryV2(lambda: conn, installation_id=installation)
+        original_append = repo._append_in_transaction
+        original_lock = repo._factory_connection_lock(conn)
+        inserted = threading.Event()
+        all_readers_attempted = threading.Event()
+        release_rollback = threading.Event()
+        attempt_count = 0
+        attempt_lock = threading.Lock()
+        results = {}
+        errors = []
+
+        class TrackingLock:
+            def __enter__(inner_self):
+                nonlocal attempt_count
+                if threading.current_thread().name.startswith("reader-"):
+                    with attempt_lock:
+                        attempt_count += 1
+                        if attempt_count == 10:
+                            all_readers_attempted.set()
+                original_lock.acquire()
+                return inner_self
+
+            def __exit__(inner_self, exc_type, exc, traceback):
+                original_lock.release()
+
+        def append_then_rollback(active, **values):
+            value = original_append(active, **values)
+            active.execute(
+                "INSERT INTO LegacyProjectionReceipts "
+                "(EventId,ProjectionName,RowCount) VALUES (?,?,?)",
+                (event_id, "rolled-back", 1),
+            )
+            active.execute(
+                "INSERT INTO MemoryProjectionReceipts(EventId,Destination) "
+                "VALUES (?,?)", (event_id, "rolled-back"),
+            )
+            inserted.set()
+            if not release_rollback.wait(timeout=5):
+                raise RuntimeError("rollback release timeout")
+            raise EventStoreError("injected rollback")
+
+        readers = {
+            "get_event": lambda: repo.get_event(event_id),
+            "idempotency": lambda: repo.get_by_idempotency_key(idempotency_key),
+            "turn": lambda: repo.events_for_turn("read-rollback-turn"),
+            "stream": lambda: repo.list_stream("read-rollback:stream"),
+            "since": lambda: repo.events_since(),
+            "timestamp": lambda: repo.events_since_timestamp(""),
+            "pending": lambda: repo.pending_outbox(),
+            "status": lambda: repo.outbox_status(),
+            "legacy_receipt": lambda: repo.has_legacy_receipt(
+                event_id, "rolled-back"
+            ),
+            "projection_receipt": lambda: repo.has_projection_receipt(
+                event_id, "rolled-back"
+            ),
+        }
+
+        def writer():
+            try:
+                repo.append_event(
+                    stream_id="read-rollback:stream",
+                    event_type="test.read_rollback",
+                    payload={"value": 1},
+                    turn_id="read-rollback-turn",
+                    consent_scope="cloud_allowed",
+                    idempotency_key=idempotency_key,
+                )
+            except Exception as exc:
+                errors.append(("writer", type(exc).__name__))
+
+        def reader(name, operation):
+            try:
+                results[name] = operation()
+            except Exception as exc:
+                errors.append((name, type(exc).__name__))
+
+        with mock.patch.object(repo, "_append_in_transaction", append_then_rollback), \
+            mock.patch.object(
+                repo, "_factory_connection_lock",
+                return_value=TrackingLock(),
+            ):
+            writer_thread = threading.Thread(
+                target=writer, name="writer", daemon=True
+            )
+            writer_thread.start()
+            self.assertTrue(inserted.wait(timeout=5))
+            reader_threads = [
+                threading.Thread(
+                    target=reader, args=(name, operation),
+                    name=f"reader-{name}", daemon=True,
+                )
+                for name, operation in readers.items()
+            ]
+            for thread in reader_threads:
+                thread.start()
+            self.assertTrue(all_readers_attempted.wait(timeout=5))
+            release_rollback.set()
+            writer_thread.join(timeout=10)
+            for thread in reader_threads:
+                thread.join(timeout=10)
+        try:
+            self.assertFalse(writer_thread.is_alive())
+            self.assertFalse(any(thread.is_alive() for thread in reader_threads))
+            self.assertEqual(errors, [("writer", "EventStoreError")])
+            self.assertIsNone(results["get_event"])
+            self.assertIsNone(results["idempotency"])
+            for name in ("turn", "stream", "since", "timestamp", "pending"):
+                self.assertEqual(results[name], [])
+            self.assertEqual(results["status"], {})
+            self.assertFalse(results["legacy_receipt"])
+            self.assertFalse(results["projection_receipt"])
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM MemoryEvents WHERE EventId=?", (event_id,)
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            release_rollback.set()
+            repo.close()
+            conn.close()
+
+    def test_per_thread_factory_wait_does_not_block_caller_connection(self):
+        """Distinct factory connections never form transaction↔repository ABBA."""
+        from bridge.event_store import EventRepositoryV2
+        from bridge.migrations import run_migrations
+
+        path = os.path.join(_TMP_HOME, f"perthread_{uuid.uuid4().hex[:8]}.db")
+        setup = sqlite3.connect(path)
+        setup.execute("PRAGMA journal_mode=WAL")
+        setup.execute("PRAGMA foreign_keys=ON")
+        setup.row_factory = sqlite3.Row
+        run_migrations(setup)
+        source_repo = EventRepositoryV2(lambda: setup, installation_id="per-thread")
+        source = source_repo.append_event(
+            stream_id="per-thread:source",
+            event_type="test.per_thread",
+            payload={"source": True},
+            idempotency_key="per-thread-source",
+        )
+        source_repo.close()
+        setup.close()
+
+        caller_raw = sqlite3.connect(path, timeout=5, check_same_thread=False)
+        worker_raw = sqlite3.connect(path, timeout=5, check_same_thread=False)
+        for active in (caller_raw, worker_raw):
+            active.execute("PRAGMA foreign_keys=ON")
+            active.execute("PRAGMA busy_timeout=5000")
+            active.row_factory = sqlite3.Row
+
+        begin_attempted = threading.Event()
+
+        class ConnectionProxy:
+            def __init__(self, active, signal_begin=False):
+                self.active = active
+                self.signal_begin = signal_begin
+
+            @property
+            def in_transaction(self):
+                return self.active.in_transaction
+
+            def execute(self, sql, params=()):
+                if self.signal_begin and sql == "BEGIN IMMEDIATE":
+                    begin_attempted.set()
+                return self.active.execute(sql, params)
+
+            def commit(self):
+                return self.active.commit()
+
+            def rollback(self):
+                return self.active.rollback()
+
+        caller_conn = ConnectionProxy(caller_raw)
+        worker_conn = ConnectionProxy(worker_raw, signal_begin=True)
+        thread_connections = {"implicit-worker": worker_conn}
+
+        def factory():
+            return thread_connections.get(threading.current_thread().name, caller_conn)
+
+        repo = EventRepositoryV2(factory, installation_id="per-thread")
+        results = []
+        errors = []
+
+        def implicit_worker():
+            try:
+                repo.record_legacy_receipt(
+                    source["EventId"], "implicit-worker", 1
+                )
+                results.append("implicit")
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+
+        caller_conn.execute("BEGIN IMMEDIATE")
+        worker = threading.Thread(
+            target=implicit_worker, name="implicit-worker", daemon=True
+        )
+        worker.start()
+        self.assertTrue(begin_attempted.wait(timeout=5))
+        started = datetime.datetime.now(datetime.timezone.utc)
+        repo.record_legacy_receipt(
+            source["EventId"], "caller-explicit", 1,
+            connection=caller_conn,
+        )
+        elapsed = (
+            datetime.datetime.now(datetime.timezone.utc) - started
+        ).total_seconds()
+        caller_conn.commit()
+        worker.join(timeout=10)
+        try:
+            self.assertLess(elapsed, 0.5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(results, ["implicit"])
+            receipts = caller_raw.execute(
+                "SELECT ProjectionName FROM LegacyProjectionReceipts "
+                "WHERE EventId=? ORDER BY ProjectionName",
+                (source["EventId"],),
+            ).fetchall()
+            self.assertEqual(
+                [row[0] for row in receipts],
+                ["caller-explicit", "implicit-worker"],
+            )
+        finally:
+            caller_conn.rollback()
+            repo.close()
+            caller_raw.close()
+            worker_raw.close()
 
     def test_expected_version_conflict(self):
         """Concurrent expected-version conflicts raise ConcurrentStreamError."""

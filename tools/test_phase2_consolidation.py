@@ -856,6 +856,56 @@ class ConsolidationTests(unittest.TestCase):
         self.assertEqual(self.mem.count("MemorySemanticClaims"), 1)
         self.assertEqual(self.mem.count("MemoryClaimProposalDecisions"), 1)
 
+    def test_mixed_ordinary_append_and_decision_do_not_deadlock(self):
+        self._append_event("mixed-lock-order-source")
+        proposal = self._proposal(self._scan()["proposal_ids"][0])
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
+        result_lock = threading.Lock()
+
+        def ordinary_append():
+            try:
+                barrier.wait(timeout=5)
+                event = self.repo.append_event(
+                    stream_id="mixed-lock-order:ordinary",
+                    event_type="test.mixed_append",
+                    payload={"kind": "ordinary"},
+                    actor_type="system", origin="test",
+                    trust=1.0, sensitivity="normal",
+                    consent_scope="local_only",
+                    idempotency_key="mixed-lock-order-ordinary",
+                )
+                with result_lock:
+                    results.append(("event", event["EventId"]))
+            except Exception as exc:
+                with result_lock:
+                    errors.append(("event", type(exc).__name__))
+
+        def approve_proposal():
+            try:
+                barrier.wait(timeout=5)
+                decision = self._decide(proposal)
+                with result_lock:
+                    results.append(("decision", decision["decision_id"]))
+            except Exception as exc:
+                with result_lock:
+                    errors.append(("decision", type(exc).__name__))
+
+        threads = [
+            threading.Thread(target=ordinary_append, daemon=True),
+            threading.Thread(target=approve_proposal, daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual({kind for kind, _value in results}, {"event", "decision"})
+        self.assertEqual(self.mem.count("MemoryClaimProposalDecisions"), 1)
+        self.assertEqual(self.mem.count("MemorySemanticClaims"), 1)
+
     def test_list_and_get_derive_status_from_immutable_decision(self):
         self._append_event("list-a")
         self._append_event("list-b")
