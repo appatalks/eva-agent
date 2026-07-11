@@ -1059,6 +1059,48 @@ npm run dist
 
 Host prerequisites: Node.js 24+, Python 3.12+, Copilot CLI authenticated (for cloud mode). LM Studio for local-only mode.
 
+### Phase 2 Memory Foundation (tracking)
+
+Phase 2 introduces a sidecar schema for semantic claims, retrieval scoring, and embedding cache alongside the existing Phase 1 event kernel. All Phase 2 runtime behavior is **default-off** via startup-immutable environment flags. The additive sidecar migration still runs at ordinary SQLite startup while runtime behavior is off; it uses independent metadata and does not alter Phase 1 kernel tables or the legacy recall path.
+
+**Feature flags** (set before bridge startup, frozen at import):
+| Variable | Values | Default | Purpose |
+|---|---|---|---|
+| `EVA_PHASE2_MEMORY` | `1`/`true`/`yes`/`0`/`false`/`no` | `0` (off) | Master kill switch |
+| `EVA_MEMORY_RECALL_MODE` | `legacy`/`shadow`/`hybrid` | `legacy` | Recall pipeline mode |
+| `EVA_MEMORY_SEMANTIC_MODE` | `off`/`cache`/`openai` | `off` | Semantic scoring source |
+| `EVA_MEMORY_SEMANTIC_QUERY_CONSENT` | `1`/`true`/`yes`/`0`/`false`/`no` | `0` (no) | Explicit cloud egress consent |
+| `EVA_MEMORY_CONSOLIDATION` | `off` | `off` | Consolidation engine |
+| `EVA_MEMORY_ANALYTICS` | `off` | `off` | Metrics collection |
+
+**Invalid flag handling:** Boolean flags use a strict parser that accepts only `1`/`true`/`yes` and `0`/`false`/`no`. Unrecognized values (e.g. `on`, `maybe`, `2`) record the flag name (not value) in `PHASE2_INVALID_FLAGS`. Enum flags produce an `"INVALID"` sentinel on unrecognized values. At startup, an invalid master value or an enabled master with any invalid dependent flag prints a redacted error and exits with code 2. If the master is explicitly off, invalid dependent flags produce a warning and Phase 2 remains disabled. `phase2_effective_modes()` returns all-legacy/off defaults when the master is off or configuration is invalid.
+
+**Scoring formula:** Composite weighted score = `(0.35*lexical + 0.30*semantic + 0.15*temporal + 0.15*confidence + 0.05*provenance) / sum(available weights)`. When a component is unavailable (`None`), its weight is omitted. Explicit measured `0.0` remains available and is not skipped. Missing, non-finite, or out-of-range per-candidate semantic values are unavailable rather than silently clamped.
+
+**Timestamp and ordering contract:** Input must be an ISO 8601 string. Naive timestamps are treated as UTC; aware timestamps are normalized to UTC; numeric epochs are rejected. A malformed candidate observation rejects that candidate, and malformed `now_iso` fails the ranking operation with `ValueError`. Future timestamps clamp age to zero. Ranking is deterministic by score descending, effective confidence descending, exact integer-microsecond UTC observation instant descending, then normalized `ClaimId` ascending; adjacent instants remain ordered across the full accepted Python datetime range.
+
+**Candidate cap:** Input exceeding 200 candidates raises ValueError (fail closed, not silently truncated). Results capped at 6.
+
+**Embedding cache identity:** Cache keys hash sorted canonical JSON containing `ObjectType`, `ObjectId`, `Provider`, `Model`, `ModelVersion`, `Dimensions`, `Encoding`, `ContentHash`, and `ConsentFingerprint`; delimiter-bearing fields cannot collide. Encoding is fixed to `f32le`. Blob length must equal `dimensions * 4`, and every unpacked float must be finite. `lookup_embedding_cache()` requires and verifies the full identity rather than accepting a cache key alone. Invalidation by object or exact SHA-256 consent fingerprint is supported.
+
+**Cache expiry:** Non-null `ExpiresAt` values use canonical UTC `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`. Write and lookup boundaries reject rather than normalize offsets, alternate separators, date-only values, whitespace, and non-six-digit fractions. The schema also rejects invalid calendar dates, embedded NULs, empty values, and out-of-range time fields. Invalid or expired values return no cache hit. Clock injection supports deterministic boundary testing.
+
+**Rollback safety:** Phase 2 tables use a separate `_phase2_schema_migrations` metadata table. Old binaries that only know Phase 1 see no drift. Rolling back to a pre-Phase2 binary leaves the sidecar tables dormant but does not break Phase 1 `verify_schema()`.
+
+**Schema design:** Claims are pure immutable records (no Active/SupersededBy lifecycle fields). Status derives from `MemoryClaimResolutions`: a claim without a retract/supersede resolution is active. Claims, evidence, and resolutions reject updates, deletes, same-key replacement, and UPSERT mutation; guarded `BEFORE INSERT` triggers prevent `INSERT OR REPLACE` bypass even when SQLite recursive triggers are disabled. Every sidecar and migration-metadata text field requires SQLite `typeof(...)='text'` and rejects embedded NUL, preventing affinity/BLOB and NUL-truncated length bypasses. Text identities are explicitly `NOT NULL`, nonempty, and bounded; SHA-256 identities require exactly 64 lowercase hexadecimal text characters. Metrics use SQLite integer-type and cross-field constraints.
+
+**Untrusted recall rendering:** Recalled fields are emitted as bounded canonical JSON lines between explicit untrusted-data markers. IDs are omitted; quotes and controls cannot escape JSON strings; role headers and every case variant of `[[EVA_` are neutralized; source bidi/invisible formatting controls (including deprecated controls), line separators, and paragraph separators are removed before intentional marker neutralizers are inserted. Carriage returns are canonicalized before structural scans, and marker/role scans run again after line flattening so character removal cannot reconstruct control syntax. Recalled text alone never authorizes an action.
+
+**Metrics contract:** Foundation metrics contain only fixed recall/semantic/fallback categories, bounded integer counts, binary `0`/`1` egress/cache flags, and bounded integer latency. They never contain query text, facts, entity values, event/message IDs, or URLs. Metric records are immutable and all slots are revalidated at the write boundary. Application validation and SQLite constraints both enforce result/candidate and semantic-mode cross-field rules. Aggregation skips catalog-corrupted categories/types and parses UTC instants rather than lexically comparing equivalent ISO spellings, including exact fractional boundaries and offsets.
+
+**Sidecar tables:** `MemorySemanticClaims`, `MemoryClaimEvidence`, `MemoryClaimResolutions`, `MemoryEmbeddingCache`, `MemoryRetrievalMetrics`, `MemoryConsolidationCheckpoints`.
+
+**Foundation scope:** This iteration establishes and attests the sidecar, pure retrieval/cache/rendering helpers, startup flags, and metrics types. Hybrid runtime recall, consolidation, review UI, and background jobs remain disabled until their later iterations are independently approved.
+
+**Runtime prerequisite:** Phase 2 exact column attestation uses `PRAGMA table_xinfo` and therefore requires SQLite 3.26 or newer (in addition to the project Python 3.12+ baseline). Startup checks this version before creating Phase 2 migration metadata and fails with a clear prerequisite error on older runtimes.
+
+**Tests:** `python3 tools/test_phase2.py` (deterministic, no external network, temporary SQLite, 560 assertions).
+
 ### ACP Infrastructure Roadmap (tracking)
 
 Current state (2026-06-15):

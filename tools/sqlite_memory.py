@@ -540,6 +540,12 @@ class SqliteMemory:
         from bridge.migrations import run_migrations
         run_migrations(conn)
 
+        # Run Phase 2 sidecar migrations (additive tables, separate metadata).
+        # Always run even when Phase 2 features are off so schema is ready and
+        # old binary rollback remains viable (separate _phase2_schema_migrations).
+        from bridge.phase2_schema import run_phase2_migrations
+        run_phase2_migrations(conn)
+
     def _backfill_identity(self, conn):
         """Insert or update Eva identity Knowledge rows from seed data."""
         identity_rows = [r for r in _SEED.get("Knowledge", [])

@@ -259,3 +259,171 @@ ENTITY_RESERVED_TERMS = {
     "memorysummaries", "selfstate", "heuristicsindex", "emotionbaseline", "backgroundproposals",
     "backgroundactivity",
 }
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Phase 2 – Startup-immutable, fail-closed feature flags
+#
+#  These are frozen at import time. Invalid enum values produce a sentinel
+#  (the string "INVALID") so downstream code can detect misconfiguration
+#  deterministically without crashing on import.
+# ═══════════════════════════════════════════════════════════════════════
+
+_PHASE2_RECALL_MODES = frozenset({"legacy", "shadow", "hybrid"})
+_PHASE2_SEMANTIC_MODES = frozenset({"off", "cache", "openai"})
+_PHASE2_CONSOLIDATION_VALUES = frozenset({"off"})
+_PHASE2_ANALYTICS_VALUES = frozenset({"off"})
+_PHASE2_BOOL_TRUTHY = frozenset({"1", "true", "yes"})
+_PHASE2_BOOL_FALSY = frozenset({"0", "false", "no"})
+
+
+def _phase2_enum(env_name, valid_set, default):
+    """Read an env var as a constrained enum. Returns 'INVALID' on bad value."""
+    raw = os.environ.get(env_name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in valid_set:
+        return raw
+    return "INVALID"
+
+
+def _phase2_bool(env_name, default=False):
+    """Read env var as strict boolean. Returns (value, is_valid).
+
+    Valid values: '1','true','yes' (True); '0','false','no' (False); '' (default).
+    Invalid values (e.g. 'maybe','2','on') return (default, False) — the
+    sentinel records the flag name as invalid rather than silently defaulting.
+    """
+    raw = os.environ.get(env_name, "").strip().lower()
+    if not raw:
+        return (default, True)
+    if raw in _PHASE2_BOOL_TRUTHY:
+        return (True, True)
+    if raw in _PHASE2_BOOL_FALSY:
+        return (False, True)
+    # Invalid: not silently false, records invalidity
+    return (default, False)
+
+
+# ── Frozen flag values ──────────────────────────────────────────────
+
+# Master kill switch (default OFF)
+_EVA_PHASE2_MEMORY_RESULT = _phase2_bool("EVA_PHASE2_MEMORY", False)
+EVA_PHASE2_MEMORY = _EVA_PHASE2_MEMORY_RESULT[0]
+
+# Recall mode
+EVA_MEMORY_RECALL_MODE = _phase2_enum("EVA_MEMORY_RECALL_MODE", _PHASE2_RECALL_MODES, "legacy")
+
+# Semantic mode
+EVA_MEMORY_SEMANTIC_MODE = _phase2_enum("EVA_MEMORY_SEMANTIC_MODE", _PHASE2_SEMANTIC_MODES, "off")
+
+# Explicit consent for semantic queries
+_EVA_MEMORY_SEMANTIC_QUERY_CONSENT_RESULT = _phase2_bool("EVA_MEMORY_SEMANTIC_QUERY_CONSENT", False)
+EVA_MEMORY_SEMANTIC_QUERY_CONSENT = _EVA_MEMORY_SEMANTIC_QUERY_CONSENT_RESULT[0]
+
+# Consolidation engine
+EVA_MEMORY_CONSOLIDATION = _phase2_enum("EVA_MEMORY_CONSOLIDATION", _PHASE2_CONSOLIDATION_VALUES, "off")
+
+# Analytics collection
+EVA_MEMORY_ANALYTICS = _phase2_enum("EVA_MEMORY_ANALYTICS", _PHASE2_ANALYTICS_VALUES, "off")
+
+# ── Invalid flag tracking ───────────────────────────────────────────
+
+def _collect_invalid_flags():
+    """Collect a tuple of flag names with invalid values. No values stored."""
+    invalid = []
+    # Bool flags
+    _bool_flags = [
+        ("EVA_PHASE2_MEMORY", _EVA_PHASE2_MEMORY_RESULT),
+        ("EVA_MEMORY_SEMANTIC_QUERY_CONSENT", _EVA_MEMORY_SEMANTIC_QUERY_CONSENT_RESULT),
+    ]
+    for name, (_, valid) in _bool_flags:
+        if not valid:
+            invalid.append(name)
+    # Enum flags
+    _enum_flags = [
+        ("EVA_MEMORY_RECALL_MODE", EVA_MEMORY_RECALL_MODE),
+        ("EVA_MEMORY_SEMANTIC_MODE", EVA_MEMORY_SEMANTIC_MODE),
+        ("EVA_MEMORY_CONSOLIDATION", EVA_MEMORY_CONSOLIDATION),
+        ("EVA_MEMORY_ANALYTICS", EVA_MEMORY_ANALYTICS),
+    ]
+    for name, value in _enum_flags:
+        if value == "INVALID":
+            invalid.append(name)
+    return tuple(invalid)
+
+
+PHASE2_INVALID_FLAGS = _collect_invalid_flags()
+
+
+def phase2_config_valid():
+    """Return True if all Phase 2 flags are in valid states."""
+    return len(PHASE2_INVALID_FLAGS) == 0
+
+
+def phase2_effective_enabled():
+    """Return True only if master flag is on AND config is valid."""
+    return EVA_PHASE2_MEMORY and phase2_config_valid()
+
+
+def phase2_effective_modes():
+    """Return effective modes when master is off or invalid.
+
+    If master is off or config invalid, returns all-legacy/off/no-consent
+    defaults regardless of what was configured.
+    """
+    if not phase2_effective_enabled():
+        return {
+            "recall_mode": "legacy",
+            "semantic_mode": "off",
+            "query_consent": False,
+            "consolidation": "off",
+            "analytics": "off",
+        }
+    return {
+        "recall_mode": EVA_MEMORY_RECALL_MODE,
+        "semantic_mode": EVA_MEMORY_SEMANTIC_MODE,
+        "query_consent": EVA_MEMORY_SEMANTIC_QUERY_CONSENT,
+        "consolidation": EVA_MEMORY_CONSOLIDATION,
+        "analytics": EVA_MEMORY_ANALYTICS,
+    }
+
+
+def validate_phase2_startup():
+    """Validate Phase 2 configuration at startup. Returns (ok, message).
+
+    - If invalid flags exist AND master requested enabled => (False, error_msg)
+      Caller should print redacted error and exit(2).
+    - If invalid flags exist AND master off => (True, warning_msg)
+      Caller should print warning; effective disabled.
+    - If all valid => (True, None)
+    """
+    if not PHASE2_INVALID_FLAGS:
+        return (True, None)
+
+    flag_list = ", ".join(PHASE2_INVALID_FLAGS)
+
+    if EVA_PHASE2_MEMORY or "EVA_PHASE2_MEMORY" in PHASE2_INVALID_FLAGS:
+        return (
+            False,
+            f"Phase2 startup FATAL: invalid configuration for flags: {flag_list}. "
+            f"Master enabled but config invalid. Fix environment or disable EVA_PHASE2_MEMORY.",
+        )
+    else:
+        return (
+            True,
+            f"Phase2 startup WARNING: invalid configuration for flags: {flag_list}. "
+            f"Master is off so Phase2 remains disabled.",
+        )
+
+
+def phase2_startup_summary():
+    """Return a fixed, credential-free summary of effective Phase 2 modes."""
+    modes = phase2_effective_modes()
+    return (
+        "Phase2 memory=" + ("enabled" if phase2_effective_enabled() else "disabled")
+        + ", recall=" + modes["recall_mode"]
+        + ", semantic=" + modes["semantic_mode"]
+        + ", query_consent=" + ("enabled" if modes["query_consent"] else "disabled")
+        + ", consolidation=" + modes["consolidation"]
+        + ", analytics=" + modes["analytics"]
+    )

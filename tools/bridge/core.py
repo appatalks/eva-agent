@@ -4578,6 +4578,13 @@ def main():
         print("[Bridge] ERROR: EVA_EGRESS_MODE must be offline, local-network, or cloud")
         sys.exit(2)
 
+    phase2_ok, phase2_message = _cfg.validate_phase2_startup()
+    if phase2_message:
+        print("[Bridge] " + phase2_message)
+    print("[Bridge] " + _cfg.phase2_startup_summary())
+    if not phase2_ok:
+        sys.exit(2)
+
     # ── Per-launch bearer auth ──────────────────────────────────────
     env_token = os.environ.get("EVA_BRIDGE_TOKEN", "").strip()
     if env_token:

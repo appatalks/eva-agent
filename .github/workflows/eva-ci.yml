@@ -220,8 +220,17 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run Python unit tests
+      - name: Run static tests
         run: python3 tools/test_static.py
+
+      - name: Run Phase 0 tests
+        run: python3 tools/test_phase0.py
+
+      - name: Run Phase 1 tests
+        run: python3 tools/test_phase1.py
+
+      - name: Run Phase 2 tests
+        run: python3 tools/test_phase2.py
 
   # ── 3. Accessibility (manual trigger only — kept from existing) ───
   accessibility:
