@@ -18,17 +18,45 @@ Playwright is imported lazily so a missing install never breaks bridge import.
 import os
 import re
 import json
-import time
 import base64
 import shutil
-import socket
-import subprocess
 import threading
-import urllib.request
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 
-from bridge import config as _bridge_config
+from bridge.public_egress_proxy import PublicEgressProxy
+from bridge.action_runs import (
+    ActionRunValidationError,
+    ActionRunCancelled,
+    ActionRunTimeout,
+    admit_action_run,
+    begin_effect,
+    begin_startup,
+    bounded_text,
+    cancel_run,
+    effectful_action,
+    finite_int,
+    finish_effect,
+    finish_startup,
+    initialize_run,
+    launch_spec,
+    observation,
+    open_gate,
+    public_snapshot,
+    public_url,
+    resolve_gate,
+    runtime_expired,
+    run_bounded_call,
+    set_postcondition_baseline,
+    terminalize,
+    typed_action_result,
+    update_run,
+    validate_public_url,
+    sha256,
+    strict_json_object,
+    unknown_postcondition,
+)
 
 _TRAJ_DIR = os.path.expanduser("~/.config/eva-standalone/browser_trajectories")
 # Dedicated, persistent Chrome profile for the agent. Logins (e.g. Amazon) made
@@ -36,117 +64,19 @@ _TRAJ_DIR = os.path.expanduser("~/.config/eva-standalone/browser_trajectories")
 # unauthenticated session every time. Kept separate from the user's real Chrome
 # profile so it can run alongside an already-open Chrome.
 _PROFILE_DIR = os.path.expanduser("~/.config/eva-standalone/browser_profile")
-# A long-lived Chrome we launch once with a remote-debugging port and reuse: the
-# agent connects over CDP and opens a NEW TAB in that existing window each run,
-# instead of spawning a fresh browser. The window stays open between runs so the
-# session (and login) persists and the user can watch.
-_CDP_PORT = int(os.environ.get("EVA_BROWSER_CDP_PORT", "9333"))
-_chrome_proc = None          # subprocess.Popen for the long-lived Chrome
-_chrome_lock = threading.Lock()
 _VIEWPORT = {"width": 1280, "height": 800}
-_DEFAULT_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o")
 _MAX_STEPS_DEFAULT = 25
 _DIRECTOR_INTERVAL = 4  # re-consult the director every N executor steps
-
-# Only the FINAL purchase commit requires confirmation. Everything else (search,
-# navigate, add-to-cart, sign-in, fill forms) is auto-approved so the agent
-# flows naturally. The gate is deliberately narrow: it matches the irreversible
-# "spend money now" buttons, not browsing or cart actions.
-_SENSITIVE_RE = re.compile(
-    r"\b(buy\s*now|place\s+(?:your\s+)?order|complete\s+(?:purchase|order)|"
-    r"confirm\s+(?:and\s+)?(?:order|purchase|payment)|submit\s+order|"
-    r"pay\s+now|proceed\s+to\s+(?:buy|pay)|place\s+order)\b",
-    re.I,
-)
+_ARTIFACT_TTL_SECONDS = 600
 
 _ACTION_KINDS = {
-    "click", "double_click", "click_ref", "type", "type_ref", "press", "scroll",
+    "click", "double_click", "click_ref", "type_ref", "scroll",
     "navigate", "wait", "done", "ask",
 }
 
 # run_id -> run record (see _new_run). Guarded by _runs_lock.
 _runs = {}
 _runs_lock = threading.Lock()
-
-
-# ---------------------------------------------------------------------------
-# Long-lived Chrome (CDP) — open a new tab in an existing window each run
-# ---------------------------------------------------------------------------
-
-def _cdp_alive(port):
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1.5) as r:
-            return r.status == 200
-    except Exception:
-        return False
-
-
-def _find_chrome_binary():
-    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
-        path = shutil.which(name)
-        if path:
-            return path
-    return None
-
-
-def _clean_chrome_env():
-    """Strip bundled-runtime variables so the system Chrome uses system libraries.
-
-    When the bridge runs inside the Electron AppImage, the environment carries
-    LD_LIBRARY_PATH / LD_PRELOAD / APPDIR pointing at the AppImage's bundled libs.
-    The system Chrome inherits those and its sandbox helper fails (the "sandbox"
-    launch error). Removing them lets Chrome load its own libraries normally.
-    """
-    env = _bridge_config.child_process_env()
-    for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "APPDIR", "APPIMAGE", "ARGV0",
-                "GTK_PATH", "GDK_PIXBUF_MODULE_FILE", "GIO_MODULE_DIR",
-                "GSETTINGS_SCHEMA_DIR", "FONTCONFIG_PATH", "FONTCONFIG_FILE",
-                "ELECTRON_RUN_AS_NODE", "CHROME_DEVEL_SANDBOX"):
-        env.pop(key, None)
-    return env
-
-
-def _ensure_chrome(port, profile, headless=False):
-    """Ensure a long-lived Chrome with a CDP port is running. Returns True on
-    success. Launches one (detached, with a sanitized env) if not already up."""
-    global _chrome_proc
-    with _chrome_lock:
-        if _cdp_alive(port):
-            return True
-        binary = _find_chrome_binary()
-        if not binary:
-            return False
-        try:
-            os.makedirs(profile, exist_ok=True)
-        except Exception:
-            pass
-        args = [
-            binary,
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={profile}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--restore-last-session=false",
-            "--disable-session-crashed-bubble",
-            "about:blank",
-        ]
-        if headless:
-            args.insert(1, "--headless=new")
-        try:
-            _chrome_proc = subprocess.Popen(
-                args, env=_clean_chrome_env(),
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except Exception as e:
-            print(f"[BrowserAgent] failed to launch Chrome: {e}")
-            return False
-        # Wait for the debugging endpoint to come up.
-        for _ in range(48):
-            if _cdp_alive(port):
-                return True
-            time.sleep(0.25)
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +87,8 @@ def playwright_available():
     """Return (ok, detail). Lazy import so the bridge never fails to load."""
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
-    except Exception as e:
-        return False, f"playwright not installed: {e}"
+    except Exception:
+        return False, "playwright is not installed or could not be loaded"
     return True, "ok"
 
 
@@ -166,7 +96,8 @@ def playwright_available():
 # Run registry
 # ---------------------------------------------------------------------------
 
-def _new_run(goal):
+def _new_run(goal, autonomy="pause", postcondition=None):
+    _scavenge_artifacts()
     run_id = uuid.uuid4().hex[:16]
     rec = {
         "id": run_id,
@@ -190,6 +121,7 @@ def _new_run(goal):
         "_decision": None,           # bool for confirm; str for input
         "_thread": None,
     }
+    initialize_run(rec, "browser", autonomy, postcondition)
     with _runs_lock:
         _runs[run_id] = rec
     return rec
@@ -211,40 +143,29 @@ def public_status(run_id):
         rec = _runs.get(run_id)
         if not rec:
             return None
-        return {
-            k: rec[k] for k in (
-                "id", "goal", "status", "step", "url", "title", "subgoal",
-                "result", "error", "pending_action", "pending_question",
-                "last_screenshot", "started", "finished", "steps",
-            )
-        }
+    return public_snapshot(rec, (
+        "id", "goal", "status", "step", "url", "title", "subgoal",
+        "result", "error", "pending_question", "started", "finished", "steps",
+    ))
 
 
 def cancel(run_id):
     with _runs_lock:
         rec = _runs.get(run_id)
     if not rec:
-        return False
-    rec["_cancel"].set()
-    rec["_gate"].set()  # unblock if parked
-    return True
+        return False, "unknown_run"
+    return cancel_run(rec)
 
 
-def resolve(run_id, approve=True, text=""):
-    """Resolve a parked run. For confirmation, approve gates a sensitive action.
-    For an input request, text supplies the answer."""
+def resolve(run_id, *, gate_id, kind, decision=None, text=None):
+    """Resolve one exact, unexpired approval/input gate at most once."""
     with _runs_lock:
         rec = _runs.get(run_id)
     if not rec:
-        return False
-    if rec["status"] == "awaiting_confirmation":
-        rec["_decision"] = bool(approve)
-    elif rec["status"] == "awaiting_input":
-        rec["_decision"] = text or ""
-    else:
-        return False
-    rec["_gate"].set()
-    return True
+        return False, "unknown_run"
+    return resolve_gate(
+        rec, gate_id=gate_id, kind=kind, decision=decision, text=text
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +182,6 @@ _EXECUTOR_SYSTEM = (
     '  {"action":"type_ref","ref":"<e#>","text":"<text>","reason":"..."}   (focus an element and type into it)\n'
     '  {"action":"click","x":<int>,"y":<int>,"reason":"<intent>"}   (only when no matching ref exists)\n'
     '  {"action":"double_click","x":<int>,"y":<int>,"reason":"..."}\n'
-    '  {"action":"type","text":"<text>","reason":"..."}   (types into the already-focused field)\n'
-    '  {"action":"press","key":"<Enter|Tab|Escape|ArrowDown|...>","reason":"..."}\n'
     '  {"action":"scroll","dy":<int>,"reason":"..."}      (positive scrolls down)\n'
     '  {"action":"navigate","url":"<absolute url>","reason":"..."}\n'
     '  {"action":"wait","ms":<int>,"reason":"..."}\n'
@@ -341,44 +260,37 @@ def _call_executor(api_key, model, goal, subgoal, history, url, title, png_bytes
 
 
 def _parse_action(raw):
-    """Extract the first JSON object from the model output and validate it."""
+    """Parse one complete model JSON object and validate its closed schema."""
     text = raw.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text).strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return {"action": "ask", "question": "Model returned no actionable JSON."}
-    try:
-        action = json.loads(text[start:end + 1])
-    except Exception:
-        return {"action": "ask", "question": "Model returned malformed action JSON."}
-    if action.get("action") not in _ACTION_KINDS:
-        return {"action": "ask", "question": f"Unknown action: {action.get('action')!r}."}
+    if not text.startswith("{") or not text.endswith("}"):
+        raise ActionRunValidationError("model returned no browser action JSON")
+    action = strict_json_object(text)
+    kind = action.get("action")
+    schemas = {
+        "click_ref": ({"action", "ref", "reason"}, {"action", "ref"}),
+        "type_ref": ({"action", "ref", "text", "reason"}, {"action", "ref", "text"}),
+        "click": ({"action", "x", "y", "reason"}, {"action", "x", "y"}),
+        "double_click": ({"action", "x", "y", "reason"}, {"action", "x", "y"}),
+        "scroll": ({"action", "dy", "reason"}, {"action", "dy"}),
+        "navigate": ({"action", "url", "reason"}, {"action", "url"}),
+        "wait": ({"action", "ms", "reason"}, {"action"}),
+        "done": ({"action", "summary"}, {"action"}),
+        "ask": ({"action", "question"}, {"action", "question"}),
+    }
+    if kind not in _ACTION_KINDS or kind not in schemas:
+        raise ActionRunValidationError("model returned an unsupported browser action")
+    allowed, required = schemas[kind]
+    if set(action) - allowed or not required.issubset(action):
+        raise ActionRunValidationError("model browser action fields are invalid")
+    for field in ("reason", "ref", "text", "url", "summary", "question"):
+        if field in action and not isinstance(action[field], str):
+            raise ActionRunValidationError(f"model browser action {field} must be text")
+    for field in ("x", "y", "dy", "ms"):
+        if field in action and (
+            isinstance(action[field], bool) or not isinstance(action[field], int)
+        ):
+            raise ActionRunValidationError(f"model browser action {field} must be an integer")
     return action
-
-
-# ---------------------------------------------------------------------------
-# Sensitivity
-# ---------------------------------------------------------------------------
-
-def _registrable(url):
-    try:
-        from urllib.parse import urlparse
-        host = urlparse(url).hostname or ""
-    except Exception:
-        host = ""
-    parts = host.split(".")
-    return ".".join(parts[-2:]) if len(parts) >= 2 else host
-
-
-def _is_sensitive(action, element_text, current_url):
-    # Only the final purchase commit is gated. Navigation, search, add-to-cart,
-    # and sign-in are auto-approved so the agent flows without interruption.
-    probe = " ".join(str(action.get(k, "")) for k in ("reason", "text", "question"))
-    probe += " " + (element_text or "")
-    return bool(_SENSITIVE_RE.search(probe))
 
 
 # ---------------------------------------------------------------------------
@@ -387,36 +299,69 @@ def _is_sensitive(action, element_text, current_url):
 
 def _run_dir(run_id):
     d = os.path.join(_TRAJ_DIR, run_id)
-    os.makedirs(d, exist_ok=True)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    os.chmod(d, 0o700)
     return d
+
+
+def _scavenge_artifacts(remove_all=False):
+    cutoff = datetime.now(timezone.utc).timestamp() - _ARTIFACT_TTL_SECONDS
+    try:
+        entries = os.scandir(_TRAJ_DIR)
+    except OSError:
+        return
+    with entries:
+        for entry in entries:
+            try:
+                if (
+                    entry.is_dir(follow_symlinks=False)
+                    and re.fullmatch(r"[0-9a-f]{16}", entry.name)
+                    and (
+                        remove_all
+                        or entry.stat(follow_symlinks=False).st_mtime < cutoff
+                    )
+                ):
+                    shutil.rmtree(entry.path, ignore_errors=True)
+            except OSError:
+                continue
+
+
+_scavenge_artifacts(remove_all=True)
 
 
 def _log_step(run_id, record):
     try:
         path = os.path.join(_run_dir(run_id), "trajectory.jsonl")
-        with open(path, "a") as f:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
             f.write(json.dumps(record) + "\n")
-    except Exception as e:
-        print(f"[BrowserAgent] log write failed: {e}")
+    except Exception:
+        print("[BrowserAgent] trajectory write failed")
+
+
+def _schedule_artifact_cleanup(rec):
+    def cleanup():
+        shutil.rmtree(os.path.join(_TRAJ_DIR, rec["id"]), ignore_errors=True)
+        with rec["_record_lock"]:
+            rec["last_screenshot"] = None
+
+    timer = threading.Timer(_ARTIFACT_TTL_SECONDS, cleanup)
+    timer.daemon = True
+    timer.start()
 
 
 # ---------------------------------------------------------------------------
 # Worker
 # ---------------------------------------------------------------------------
 
-def _park(rec, status, **fields):
-    """Park the run and block until resolved or cancelled. Returns the decision."""
-    rec["_gate"].clear()
-    rec["_decision"] = None
-    rec["status"] = status
-    for k, v in fields.items():
-        rec[k] = v
-    rec["_gate"].wait()
-    decision = rec["_decision"]
-    rec["pending_action"] = None
-    rec["pending_question"] = None
-    rec["status"] = "running"
-    return decision
+def _park_approval(rec, action, element_text="", binding=None):
+    return open_gate(
+        rec, "approval", action=action, element_text=element_text, binding=binding
+    )
+
+
+def _park_input(rec, question):
+    return open_gate(rec, "input", question=question)
 
 
 def _element_text_at(page, x, y):
@@ -458,9 +403,10 @@ _DOM_SNAPSHOT_JS = r"""
     // horizontal junk (hidden mega-menus positioned way off to the side).
     if (r.right < -50 || r.left > window.innerWidth + 50) continue;
     const disabled = el.disabled === true || el.getAttribute('aria-disabled') === 'true';
-    let label = (el.innerText || el.value || el.getAttribute('aria-label') ||
+    const labels = Array.from(el.labels || []).map(label => label.innerText || '').join(' ');
+    let label = (labels || el.getAttribute('aria-label') ||
                  el.getAttribute('placeholder') || el.getAttribute('title') ||
-                 el.getAttribute('alt') || '').trim();
+                 el.getAttribute('alt') || el.innerText || '').trim();
     // Fall back to a nested image's alt text (Amazon product links wrap an img
     // with no direct text of their own).
     if (!label) {
@@ -514,237 +460,652 @@ def _dom_list_text(items):
     return "\n".join(lines) if lines else "(no interactive elements detected)"
 
 
-def _execute(page, action):
-    """Run one action against the page. Returns a short result string."""
+def _install_network_policy(context, rec):
+    def enforce(route, request):
+        url = request.url or ""
+        scheme = urllib.parse.urlsplit(url).scheme.lower()
+        if scheme in ("about", "data", "blob"):
+            route.continue_()
+            return
+        try:
+            validate_public_url(url, "browser request", resolve_dns=False)
+        except ActionRunValidationError as exc:
+            update_run(rec, error=f"Browser network policy blocked a request: {exc}")
+            route.abort("blockedbyclient")
+            return
+        route.continue_()
+
+    context.route("**/*", enforce)
+
+
+def _validate_page_destination(page):
+    url = page.url or ""
+    if url == "about:blank":
+        return
+    validate_public_url(url, "browser destination", resolve_dns=False)
+
+
+def _approval_label(value):
+    if not isinstance(value, str):
+        raise ActionRunValidationError("browser target label must be text")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ActionRunValidationError("browser target label is invalid") from exc
+    if "\x00" in value or len(value) > 240:
+        raise ActionRunValidationError("browser target label is too long")
+    return value
+
+
+_ELEMENT_FINGERPRINT_JS = """el => {
+    const form = el.form || null;
+    const rect = el.getBoundingClientRect();
+    return {
+        tag: (el.tagName || '').toLowerCase(),
+        role: el.getAttribute('role') || '',
+        type: el.getAttribute('type') || '',
+        name: el.getAttribute('name') || '',
+        placeholder: el.getAttribute('placeholder') || '',
+        aria: el.getAttribute('aria-label') || '',
+        label: Array.from(el.labels || []).map(label => label.innerText || '').join(' ').trim().slice(0, 240),
+        text: (el.innerText || '').trim().slice(0, 240),
+        href: el.href || '',
+        target: el.getAttribute('target') || '',
+        form_action: el.formAction || (form && form.action) || '',
+        form_method: (el.formMethod || (form && form.method) || '').toLowerCase(),
+        disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true',
+        readonly: el.readOnly === true || el.getAttribute('aria-readonly') === 'true',
+        checked: el.checked === true,
+        selected: el.selected === true,
+        contenteditable: el.isContentEditable === true,
+        rect: [Math.round(rect.left), Math.round(rect.top),
+               Math.round(rect.width), Math.round(rect.height)]
+    };
+}"""
+
+
+def _browser_action_target(page, action):
+    kind = action.get("action")
+    binding = {
+        "url_hash": sha256(page.url or ""),
+        "frame_hash": sha256(getattr(page.main_frame, "url", "") or ""),
+        "kind": kind,
+        "target_valid": True,
+    }
+    label = ""
+    handle = None
+    if kind in ("click_ref", "type_ref"):
+        ref = str(action.get("ref", ""))
+        binding["ref"] = ref
+        try:
+            loc = page.locator(f"[data-eva-ref='{ref}']")
+            if loc.count() != 1:
+                raise ActionRunValidationError("browser ref is not unique")
+            handle = loc.element_handle(timeout=1500)
+            fingerprint = handle.evaluate(_ELEMENT_FINGERPRINT_JS) if handle else None
+        except Exception:
+            fingerprint = None
+            handle = None
+        binding["target_valid"] = isinstance(fingerprint, dict)
+        if kind == "type_ref" and isinstance(fingerprint, dict):
+            input_types = {
+                "text", "email", "search", "tel", "url", "number", "date",
+                "time", "datetime-local", "month", "week",
+            }
+            editable_tag = (
+                fingerprint.get("tag") == "textarea"
+                or (
+                    fingerprint.get("tag") == "input"
+                    and (fingerprint.get("type") or "text").lower() in input_types
+                )
+            )
+            binding["target_valid"] = bool(
+                not fingerprint.get("disabled")
+                and not fingerprint.get("readonly")
+                and (editable_tag or fingerprint.get("contenteditable"))
+            )
+        binding["target_hash"] = sha256(fingerprint or {})
+        if isinstance(fingerprint, dict):
+            label = (
+                fingerprint.get("label") or fingerprint.get("text")
+                or fingerprint.get("aria")
+                or fingerprint.get("placeholder") or fingerprint.get("tag") or ""
+            )
+    elif kind in ("click", "double_click"):
+        x, y = int(action.get("x", 0)), int(action.get("y", 0))
+        try:
+            js_handle = page.evaluate_handle(
+                "([x,y]) => document.elementFromPoint(x,y)", [x, y]
+            )
+            handle = js_handle.as_element()
+            fingerprint = handle.evaluate(_ELEMENT_FINGERPRINT_JS) if handle else None
+        except Exception:
+            fingerprint = None
+            handle = None
+        binding.update({
+            "x": x, "y": y,
+            "target_hash": sha256(fingerprint or {}),
+            "target_valid": isinstance(fingerprint, dict),
+        })
+        if isinstance(fingerprint, dict):
+            label = fingerprint.get("text") or fingerprint.get("aria") or fingerprint.get("tag") or ""
+    elif kind == "navigate":
+        destination = validate_public_url(
+            action.get("url", ""), "action.url", resolve_dns=False
+        )
+        binding["destination_hash"] = sha256(destination)
+        label = public_url(destination)
+    return binding, _approval_label(label), handle
+
+
+def _execute(page, action, target_handle=None):
+    """Run one validated action against the page and return a typed result."""
     kind = action["action"]
     if kind == "click_ref":
         ref = str(action.get("ref", "")).strip()
         if not re.fullmatch(r"e\d{1,3}", ref):
-            return "error: invalid ref"
+            return typed_action_result("rejected", "invalid_ref", "Invalid page control reference.")
         # .first guards against any residual duplicate so a click never fails
         # Playwright strict mode if two nodes briefly share a ref.
-        loc = page.locator(f"[data-eva-ref='{ref}']").first
+        loc = target_handle
+        if loc is None:
+            return typed_action_result("rejected", "target_missing", "Approved target is unavailable.")
         try:
             loc.scroll_into_view_if_needed(timeout=3000)
         except Exception:
             pass
         loc.click(timeout=6000)
-        return f"clicked {ref}"
+        return typed_action_result("executed", "clicked_ref", f"Selected page control {ref}.")
     if kind == "type_ref":
         ref = str(action.get("ref", "")).strip()
         if not re.fullmatch(r"e\d{1,3}", ref):
-            return "error: invalid ref"
-        loc = page.locator(f"[data-eva-ref='{ref}']").first
+            return typed_action_result("rejected", "invalid_ref", "Invalid page control reference.")
+        text = bounded_text(action.get("text", ""), 2000)
+        loc = target_handle
+        if loc is None:
+            return typed_action_result("rejected", "target_missing", "Approved target is unavailable.")
         try:
             loc.scroll_into_view_if_needed(timeout=3000)
         except Exception:
             pass
-        loc.click(timeout=6000)
         try:
-            loc.fill(str(action.get("text", "")), timeout=4000)
+            loc.fill(text, timeout=4000)
         except Exception:
-            page.keyboard.type(str(action.get("text", "")), delay=20)
-        return f"typed into {ref}"
+            return typed_action_result(
+                "failed", "target_fill_failed",
+                "The exact approved page control could not be filled.",
+            )
+        return typed_action_result("executed", "typed_ref", f"Typed redacted text into {ref}.")
     if kind in ("click", "double_click"):
-        x, y = int(action.get("x", 0)), int(action.get("y", 0))
-        if kind == "click":
-            page.mouse.click(x, y)
-        else:
-            page.mouse.dblclick(x, y)
-        return f"{kind} at ({x},{y})"
-    if kind == "type":
-        page.keyboard.type(str(action.get("text", "")), delay=20)
-        return "typed text"
-    if kind == "press":
-        page.keyboard.press(str(action.get("key", "Enter")))
-        return f"pressed {action.get('key')}"
+        finite_int(action.get("x"), "x", 0, _VIEWPORT["width"] - 1)
+        finite_int(action.get("y"), "y", 0, _VIEWPORT["height"] - 1)
+        if target_handle is None:
+            return typed_action_result("rejected", "target_missing", "Approved target is unavailable.")
+        page.mouse.click(
+            action["x"], action["y"],
+            click_count=2 if kind == "double_click" else 1,
+        )
+        return typed_action_result("executed", kind, f"{kind.replace('_', ' ').title()} completed.")
     if kind == "scroll":
-        dy = int(action.get("dy", 400))
+        dy = finite_int(action.get("dy", 400), "dy", -5000, 5000)
         page.mouse.wheel(0, dy)
-        return f"scrolled {dy}"
+        return typed_action_result("executed", "scrolled", "Scrolled the active page.")
     if kind == "navigate":
-        page.goto(action.get("url", ""), wait_until="domcontentloaded", timeout=30000)
-        return f"navigated to {action.get('url')}"
+        url = validate_public_url(action.get("url"), "action.url", resolve_dns=False)
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        _validate_page_destination(page)
+        return typed_action_result("executed", "navigated", "Navigated to a validated public page.")
     if kind == "wait":
-        page.wait_for_timeout(min(int(action.get("ms", 500)), 5000))
-        return "waited"
-    return "noop"
+        ms = finite_int(action.get("ms", 500), "ms", 0, 5000)
+        page.wait_for_timeout(ms)
+        return typed_action_result("executed", "waited", "Waited for the page to settle.")
+    return typed_action_result("rejected", "unsupported_action", "Unsupported browser action.")
 
 
-def _worker(rec, api_key, vision_model, director, autonomy, max_steps, start_url, headless):
+def _verify_postcondition(rec, page, step):
+    spec = rec.get("_postcondition")
+    if not spec:
+        return unknown_postcondition()
+    try:
+        if spec["type"] == "browser.url_match":
+            if page.url == "about:blank":
+                actual_origin = ""
+                path = ""
+            else:
+                validate_public_url(
+                    page.url, "browser postcondition URL", resolve_dns=False
+                )
+                parsed = urllib.parse.urlsplit(page.url)
+                actual_origin = public_url(page.url)
+                path = parsed.path or "/"
+            facts = {"origin": actual_origin, "path": path}
+            matched = actual_origin == spec["origin"] and facts["path"] == spec["path"]
+            check = observation(
+                "browser-url", "browser.url_match",
+                "observed" if matched else "not_observed", facts, step,
+            )
+        else:
+            locator = page.locator(spec["selector"])
+            raw_count = int(locator.count())
+            count = min(max(raw_count, 0), 1000)
+            state = spec["state"]
+            overflow = raw_count > 1000
+            if state in ("visible", "hidden"):
+                visibility_overflow = raw_count > 100
+                visible_count = 0
+                if not visibility_overflow:
+                    for index in range(raw_count):
+                        if locator.nth(index).is_visible():
+                            visible_count += 1
+                facts = {
+                    "matched_count": count,
+                    "count_overflow": overflow,
+                    "visible_count": visible_count,
+                    "visibility_overflow": visibility_overflow,
+                }
+                if visibility_overflow:
+                    verdict = "unknown"
+                    matched = False
+                else:
+                    matched = visible_count > 0 if state == "visible" else visible_count == 0
+                    verdict = "observed" if matched else "not_observed"
+            elif state == "count_equals":
+                facts = {"matched_count": count, "count_overflow": overflow}
+                matched = raw_count == spec["count"]
+                verdict = "observed" if matched else "not_observed"
+            else:
+                if raw_count == 1:
+                    text = bounded_text(locator.first.inner_text(timeout=3000), 8000)
+                    observed_hash = sha256(text)
+                else:
+                    observed_hash = ""
+                facts = {
+                    "matched_count": count,
+                    "count_overflow": overflow,
+                    "text_hash": observed_hash,
+                }
+                matched = raw_count == 1 and observed_hash == spec["text_hash"]
+                verdict = "observed" if matched else "not_observed"
+            check = observation(
+                "browser-element", "browser.element_state",
+                verdict, facts, step,
+            )
+        return {
+            "verdict": check["verdict"],
+            "spec_source": "request",
+            "verified_by": "tool",
+            "spec_hash": sha256(spec),
+            "checks": [check],
+        }
+    except Exception:
+        return unknown_postcondition(spec)
+
+
+def _finish_with_postcondition(rec, page, cause, model_summary=""):
+    postcondition = _verify_postcondition(rec, page, rec.get("step", 0))
+    verdict = postcondition["verdict"]
+    if cause in ("step_limit", "timeout"):
+        terminalize(
+            rec, "aborted", "budget_exhausted" if cause == "step_limit" else "timed_out",
+            cause, result="The browser run stopped before completion could be verified.",
+            model_summary=model_summary, postcondition=postcondition,
+        )
+    elif verdict == "observed":
+        terminalize(
+            rec, "succeeded", "postcondition_observed", cause,
+            result="Verified the requested browser postcondition.",
+            model_summary=model_summary, postcondition=postcondition,
+        )
+    elif verdict == "not_observed":
+        terminalize(
+            rec, "failed", "postcondition_not_observed", cause,
+            error="The requested browser postcondition was not observed.",
+            model_summary=model_summary, postcondition=postcondition,
+        )
+    else:
+        terminalize(
+            rec, "indeterminate", "unverified_completion_claim", cause,
+            result=(
+                "The browser agent stopped after claiming completion, but the "
+                "result was not independently verified."
+            ),
+            model_summary=model_summary, postcondition=postcondition,
+        )
+
+
+def _worker(rec, api_key, vision_model, director, max_steps, start_url, headless):
     from playwright.sync_api import sync_playwright
 
     run_id = rec["id"]
     history = rec["steps"]
     subgoal = ""
+    proxy = None
+    startup_lease = False
     try:
+        if not begin_startup(rec):
+            raise ActionRunCancelled()
+        startup_lease = True
         with sync_playwright() as p:
-            # Preferred: connect to a long-lived Chrome over CDP and open a NEW
-            # TAB in its existing window. The window persists between runs (login
-            # stays), the user can watch, and we avoid relaunching a browser each
-            # time. Fall back to a persistent context, then an ephemeral browser.
-            ctx = None              # persistent-context fallback handle
-            browser = None          # ephemeral-launch fallback handle
-            cdp = None              # CDP connection (leave Chrome running on close)
+            # Each run owns an isolated context whose network stack is forced
+            # through a DNS-pinning loopback proxy. Never attach to an existing
+            # user browser: that would bypass the proxy and affect unrelated tabs.
+            ctx = None
+            browser = None
             page = None
-            close_tab_only = False  # in CDP mode, close just our tab, not Chrome
-
-            if _ensure_chrome(_CDP_PORT, _PROFILE_DIR, headless=headless):
+            if rec["_cancel"].is_set():
+                raise ActionRunCancelled()
+            proxy = PublicEgressProxy().start()
+            for _channel in ("chrome", None):
+                if rec["_cancel"].is_set():
+                    raise ActionRunCancelled()
                 try:
-                    cdp = p.chromium.connect_over_cdp(f"http://127.0.0.1:{_CDP_PORT}")
-                    context = cdp.contexts[0] if cdp.contexts else cdp.new_context()
-                    # Reuse an existing blank/new-tab page if there is one (Chrome
-                    # opens an about:blank home tab on launch); only open a fresh
-                    # tab when none is reusable. Avoids leaving stray blank tabs.
-                    page = None
-                    for _pg in context.pages:
-                        try:
-                            u = _pg.url or ""
-                        except Exception:
-                            u = ""
-                        if u in ("", "about:blank", "chrome://newtab/", "chrome://new-tab-page/"):
-                            page = _pg
-                            break
-                    if page is None:
-                        page = context.new_page()
-                    close_tab_only = True
-                    try:
-                        page.set_viewport_size(_VIEWPORT)
-                    except Exception:
-                        pass
-                except Exception as e:
-                    print(f"[BrowserAgent] CDP connect failed: {e}")
-                    cdp = None
-                    page = None
-
-            if page is None:
-                try:
-                    os.makedirs(_PROFILE_DIR, exist_ok=True)
+                    ctx = p.chromium.launch_persistent_context(
+                        _PROFILE_DIR,
+                        channel=_channel,
+                        headless=headless,
+                        viewport=_VIEWPORT,
+                        proxy={"server": proxy.url},
+                        args=[
+                            "--no-first-run", "--no-default-browser-check",
+                            "--proxy-bypass-list=<-loopback>",
+                            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                        ],
+                    )
+                    break
                 except Exception:
-                    pass
-                for _channel in ("chrome", None):
-                    try:
-                        ctx = p.chromium.launch_persistent_context(
-                            _PROFILE_DIR,
-                            channel=_channel,
-                            headless=headless,
-                            viewport=_VIEWPORT,
-                            args=["--no-first-run", "--no-default-browser-check"],
-                        )
-                        break
-                    except Exception as e:
-                        print(f"[BrowserAgent] persistent context (channel={_channel}) failed: {e}")
-                        ctx = None
-                if ctx is not None:
-                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                    try:
-                        page.set_viewport_size(_VIEWPORT)
-                    except Exception:
-                        pass
-                else:
-                    browser = p.chromium.launch(headless=headless)
-                    page = browser.new_page(viewport=_VIEWPORT)
+                    print(f"[BrowserAgent] isolated context channel {_channel} failed")
+                    ctx = None
+            if ctx is not None:
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            else:
+                browser = p.chromium.launch(
+                    headless=headless, proxy={"server": proxy.url},
+                    args=[
+                        "--proxy-bypass-list=<-loopback>",
+                        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                    ],
+                )
+                page = browser.new_page(viewport=_VIEWPORT)
 
-            page.goto(start_url or "about:blank", wait_until="domcontentloaded", timeout=30000)
-            rec["status"] = "running"
+            _install_network_policy(page.context, rec)
+            page.set_default_timeout(5000)
+            page.set_default_navigation_timeout(30000)
+            if rec["_cancel"].is_set():
+                raise ActionRunCancelled()
+            page.goto("about:blank", wait_until="domcontentloaded", timeout=30000)
+            _validate_page_destination(page)
+            if finish_startup(rec):
+                startup_lease = False
+                raise ActionRunCancelled()
+            startup_lease = False
+            update_run(rec, status="running")
+            set_postcondition_baseline(rec, _verify_postcondition(rec, page, 0))
+
+            if start_url:
+                initial_action = {"action": "navigate", "url": start_url}
+                binding, _label, _handle = _browser_action_target(
+                    page, initial_action
+                )
+                decision = _park_approval(rec, initial_action, "", binding)
+                if rec["_cancel"].is_set():
+                    raise ActionRunCancelled()
+                if decision.get("state") != "approved":
+                    reason = (
+                        "user_denied" if decision.get("state") == "denied"
+                        else "approval_expired"
+                    )
+                    terminalize(
+                        rec, "aborted", reason, "approval_gate",
+                        result=(
+                            "The browser run stopped before its initial "
+                            "navigation was executed."
+                        ),
+                    )
+                    return
+                current_binding, _label, _handle = _browser_action_target(
+                    page, decision.get("action") or initial_action
+                )
+                leased, lease_reason, execution_action = begin_effect(
+                    rec, decision, current_binding
+                )
+                if not leased:
+                    terminalize(
+                        rec, "aborted", lease_reason, "execution_lease",
+                        result="The approved initial navigation changed.",
+                    )
+                    return
+                try:
+                    initial_result = _execute(page, execution_action)
+                    _validate_page_destination(page)
+                except Exception:
+                    initial_result = typed_action_result(
+                        "failed", "action_exception",
+                        "The initial browser navigation failed.",
+                    )
+                _finished, cancellation_pending = finish_effect(
+                    rec, initial_result
+                )
+                if cancellation_pending:
+                    raise ActionRunCancelled()
+                if initial_result["state"] != "executed":
+                    terminalize(
+                        rec, "failed", initial_result["code"],
+                        "initial_navigation", error=initial_result["summary"],
+                    )
+                    return
 
             # Initial plan from the director (Opus), if wired.
             if director:
                 try:
-                    subgoal = director(rec["goal"], f"Just opened {page.url}. Page title: {page.title()}.") or ""
-                except Exception as e:
-                    print(f"[BrowserAgent] director error: {e}")
-            rec["subgoal"] = subgoal
+                    subgoal = run_bounded_call(
+                        rec,
+                        lambda: director(
+                            rec["goal"],
+                            f"Just opened {public_url(page.url)}. Page title is redacted.",
+                        ),
+                        timeout_seconds=30,
+                    ) or ""
+                except (ActionRunCancelled, ActionRunTimeout):
+                    raise
+                except Exception:
+                    print("[BrowserAgent] director request failed")
+            update_run(rec, subgoal=subgoal)
 
             step = 0
             while step < max_steps:
                 if rec["_cancel"].is_set():
-                    rec["status"] = "cancelled"
+                    terminalize(rec, "aborted", "user_cancelled", "cancel")
                     break
-
-                rec["url"], rec["title"] = page.url, page.title()
-                png = page.screenshot(type="png")
+                if runtime_expired(rec):
+                    _finish_with_postcondition(rec, page, "timeout")
+                    break
+                update_run(
+                    rec, url=page.url,
+                    title=bounded_text(page.title(), 160),
+                )
+                png = page.screenshot(type="png", timeout=5000)
+                if rec["_cancel"].is_set():
+                    raise ActionRunCancelled()
+                if runtime_expired(rec):
+                    raise ActionRunTimeout()
                 shot_path = os.path.join(_run_dir(run_id), f"step_{step:02d}.png")
                 try:
                     with open(shot_path, "wb") as f:
                         f.write(png)
+                    os.chmod(shot_path, 0o600)
                 except Exception:
                     shot_path = None
-                rec["last_screenshot"] = shot_path
+                update_run(rec, last_screenshot=shot_path)
 
                 # DOM snapshot: tag interactive elements so the model can click by
                 # ref (DOM-precise) instead of guessing pixels. Falls back to pure
                 # vision if extraction fails.
                 dom_items = _dom_snapshot(page)
+                if rec["_cancel"].is_set():
+                    raise ActionRunCancelled()
+                if runtime_expired(rec):
+                    raise ActionRunTimeout()
                 dom_list = _dom_list_text(dom_items)
 
                 try:
-                    action, raw = _call_executor(
-                        api_key, vision_model, rec["goal"], subgoal,
-                        history, rec["url"], rec["title"], png, dom_list,
+                    action, raw = run_bounded_call(
+                        rec,
+                        lambda: _call_executor(
+                            api_key, vision_model, rec["goal"], subgoal,
+                            history, public_url(rec["url"]), "", png, dom_list,
+                        ),
+                        timeout_seconds=65,
                     )
-                except Exception as e:
-                    rec["status"] = "error"
-                    rec["error"] = str(e)
+                except (ActionRunCancelled, ActionRunTimeout):
+                    raise
+                except Exception:
+                    terminalize(
+                        rec, "failed", "executor_call_failed", "model_error",
+                        error="The browser vision executor request failed.",
+                    )
+                    break
+
+                if rec["_cancel"].is_set():
+                    terminalize(rec, "aborted", "user_cancelled", "cancel")
                     break
 
                 kind = action.get("action")
 
                 if kind == "done":
-                    rec["result"] = action.get("summary", "Task complete.")
-                    rec["status"] = "done"
-                    _record(rec, step, shot_path, subgoal, raw, action, "", "done")
+                    update_run(rec, step=step)
+                    claim = bounded_text(action.get("summary", ""), 300)
+                    _record(
+                        rec, step, shot_path, subgoal, raw, action, "",
+                        typed_action_result(
+                            "skipped", "model_completion_claim",
+                            "Model requested terminal verification."
+                        ),
+                    )
+                    _finish_with_postcondition(rec, page, "model_done", claim)
                     break
 
                 if kind == "ask":
-                    answer = _park(rec, "awaiting_input",
-                                   pending_question=action.get("question", "Need input."))
+                    decision = _park_input(
+                        rec, action.get("question", "Need input.")
+                    )
                     if rec["_cancel"].is_set():
-                        rec["status"] = "cancelled"
+                        terminalize(rec, "aborted", "user_cancelled", "cancel")
                         break
+                    if runtime_expired(rec):
+                        _finish_with_postcondition(rec, page, "timeout")
+                        break
+                    if decision.get("state") != "answered":
+                        reason = (
+                            "user_cancelled" if decision.get("state") == "cancelled"
+                            else "approval_expired"
+                        )
+                        terminalize(
+                            rec, "aborted", reason, "input_gate",
+                            result="The browser run stopped because required input was not received."
+                        )
+                        break
+                    answer = decision["text"]
                     subgoal = (subgoal + f"\nUser said: {answer}").strip()
-                    rec["subgoal"] = subgoal
-                    _record(rec, step, shot_path, subgoal, raw, action, "", "asked user")
+                    update_run(rec, subgoal=subgoal)
+                    _record(
+                        rec, step, shot_path, subgoal, raw, action, "",
+                        typed_action_result("executed", "input_received", "Received bounded user input."),
+                    )
                     step += 1
                     continue
 
-                # Determine target element text for click actions (sensitivity + dataset value).
                 element_text = ""
-                if kind in ("click", "double_click"):
-                    element_text = _element_text_at(page, int(action.get("x", 0)), int(action.get("y", 0)))
-                elif kind in ("click_ref", "type_ref"):
-                    # Use the label from the DOM snapshot for the chosen ref so the
-                    # BUY-gate still sees the button text.
-                    _ref = str(action.get("ref", ""))
-                    for _it in dom_items:
-                        if _it.get("ref") == _ref:
-                            element_text = _it.get("text", "")
-                            break
-
-                sensitive = _is_sensitive(action, element_text, rec["url"])
-                if sensitive and autonomy == "pause":
-                    approved = _park(rec, "awaiting_confirmation", pending_action=action)
+                execution_action = action
+                effect_lease = False
+                target_handle = None
+                if effectful_action(action):
+                    binding, element_text, initial_handle = _browser_action_target(
+                        page, action
+                    )
+                    if initial_handle is not None:
+                        try:
+                            initial_handle.dispose()
+                        except Exception:
+                            pass
+                    if not binding.get("target_valid", False):
+                        terminalize(
+                            rec, "failed", "target_not_attestable", "target_binding",
+                            error="The browser target could not be bound safely.",
+                        )
+                        break
+                    decision = _park_approval(rec, action, element_text, binding)
                     if rec["_cancel"].is_set():
-                        rec["status"] = "cancelled"
+                        terminalize(rec, "aborted", "user_cancelled", "cancel")
                         break
-                    if not approved:
-                        _record(rec, step, shot_path, subgoal, raw, action, element_text, "declined")
-                        rec["result"] = "Stopped: user declined a sensitive action."
-                        rec["status"] = "done"
+                    if runtime_expired(rec):
+                        _finish_with_postcondition(rec, page, "timeout")
                         break
-
+                    if decision.get("state") != "approved":
+                        reason = (
+                            "user_denied" if decision.get("state") == "denied"
+                            else "approval_expired"
+                        )
+                        _record(
+                            rec, step, shot_path, subgoal, raw, action, element_text,
+                            typed_action_result("rejected", reason, "Action was not approved."),
+                        )
+                        terminalize(
+                            rec, "aborted", reason, "approval_gate",
+                            result="The browser run stopped before the action was executed."
+                        )
+                        break
+                    current_binding, _current_label, target_handle = _browser_action_target(
+                        page, decision.get("action") or action
+                    )
+                    if runtime_expired(rec):
+                        _finish_with_postcondition(rec, page, "timeout")
+                        break
+                    leased, lease_reason, execution_action = begin_effect(
+                        rec, decision, current_binding
+                    )
+                    if not leased:
+                        terminalize(
+                            rec, "aborted", lease_reason, "execution_lease",
+                            result="The approved browser target changed before execution.",
+                        )
+                        break
+                    effect_lease = True
                 try:
-                    result = _execute(page, action)
-                except Exception as e:
-                    result = f"error: {e}"
-                _record(rec, step, shot_path, subgoal, raw, action, element_text, result)
+                    result = _execute(page, execution_action, target_handle)
+                    _validate_page_destination(page)
+                except Exception:
+                    result = typed_action_result(
+                        "failed", "action_exception", "The browser action failed."
+                    )
+                finally:
+                    if target_handle is not None:
+                        try:
+                            target_handle.dispose()
+                        except Exception:
+                            pass
+                _record(
+                    rec, step, shot_path, subgoal, raw, execution_action,
+                    element_text, result,
+                )
+                cancellation_pending = False
+                if effect_lease:
+                    _finished, cancellation_pending = finish_effect(rec, result)
+                if cancellation_pending:
+                    terminalize(rec, "aborted", "user_cancelled", "cancel")
+                    break
+                if result["state"] in ("failed", "rejected"):
+                    terminalize(
+                        rec, "failed", result["code"], "action_execution",
+                        error=result["summary"],
+                    )
+                    break
 
                 # Loop guard with self-recovery: a vision agent often re-clicks
                 # the same control because it cannot tell the click landed. On the
                 # first repeat, inject a corrective hint so the model tries a
                 # different element (prefer click_ref) or scrolls, instead of
                 # grinding. Only after several repeats does it stop and ask.
-                sig = json.dumps(action, sort_keys=True)
+                sig = json.dumps(execution_action, sort_keys=True)
                 if sig == rec.get("_last_sig"):
                     rec["_repeat"] = rec.get("_repeat", 0) + 1
                 else:
@@ -760,80 +1121,117 @@ def _worker(rec, api_key, vision_model, director, autonomy, max_steps, start_url
                             "Add to Cart button), or scroll to reveal it.")
                     if hint not in subgoal:
                         subgoal = (subgoal + hint).strip()
-                        rec["subgoal"] = subgoal
+                        update_run(rec, subgoal=subgoal)
                 elif rec["_repeat"] >= 3:
                     rec["_repeat"] = 0
                     rec["_last_sig"] = None
                     q = ("I'm stuck repeating the same step and it isn't changing the "
                          "page. Want me to keep trying, or should I do something else?")
-                    answer = _park(rec, "awaiting_input", pending_question=q)
+                    decision = _park_input(rec, q)
                     if rec["_cancel"].is_set():
-                        rec["status"] = "cancelled"
+                        terminalize(rec, "aborted", "user_cancelled", "cancel")
                         break
+                    if decision.get("state") != "answered":
+                        reason = (
+                            "user_cancelled" if decision.get("state") == "cancelled"
+                            else "approval_expired"
+                        )
+                        terminalize(rec, "aborted", reason, "input_gate")
+                        break
+                    answer = decision["text"]
                     subgoal = (subgoal + f"\nUser said: {answer}").strip()
-                    rec["subgoal"] = subgoal
+                    update_run(rec, subgoal=subgoal)
 
                 page.wait_for_timeout(400)
                 step += 1
-                rec["step"] = step
+                update_run(rec, step=step)
 
                 # Re-consult the director periodically.
                 if director and step % _DIRECTOR_INTERVAL == 0:
                     try:
-                        summary = (f"At {page.url} (title: {page.title()}). "
-                                   f"Last action: {json.dumps(action)} -> {result}.")
-                        new_sub = director(rec["goal"], summary)
+                        summary = (
+                            f"At {public_url(page.url)}. Last action kind: "
+                            f"{action.get('action')} -> {result.get('state')}."
+                        )
+                        new_sub = run_bounded_call(
+                            rec, lambda: director(rec["goal"], summary),
+                            timeout_seconds=30,
+                        )
                         if new_sub:
                             subgoal = new_sub
-                            rec["subgoal"] = subgoal
-                    except Exception as e:
-                        print(f"[BrowserAgent] director error: {e}")
+                            update_run(rec, subgoal=subgoal)
+                    except (ActionRunCancelled, ActionRunTimeout):
+                        raise
+                    except Exception:
+                        print("[BrowserAgent] director request failed")
 
             else:
-                rec["status"] = rec["status"] if rec["status"] in ("error", "cancelled") else "done"
-                if rec["result"] is None:
-                    rec["result"] = f"Reached step limit ({max_steps})."
+                if not rec.get("_terminalized"):
+                    update_run(rec, step=max_steps)
+                    _finish_with_postcondition(rec, page, "step_limit")
 
             try:
-                if cdp is not None:
-                    # CDP mode: leave the result page OPEN on success so the user
-                    # can see the outcome (e.g. the cart) and continue manually.
-                    # Only close our tab when the run errored or was cancelled, so
-                    # a failed attempt does not leave a stray tab behind.
-                    if close_tab_only and page is not None and rec["status"] in ("error", "cancelled"):
-                        try:
-                            page.close()
-                        except Exception:
-                            pass
-                    cdp.close()
-                elif ctx is not None:
+                if ctx is not None:
                     ctx.close()
                 elif browser is not None:
                     browser.close()
             except Exception:
                 pass
-    except Exception as e:
-        rec["status"] = "error"
-        rec["error"] = str(e)
+    except ActionRunCancelled:
+        terminalize(rec, "aborted", "user_cancelled", "cancel")
+    except ActionRunTimeout:
+        if 'page' in locals() and page is not None:
+            _finish_with_postcondition(rec, page, "timeout")
+        else:
+            terminalize(rec, "aborted", "timed_out", "timeout")
+    except Exception:
+        terminalize(
+            rec, "failed", "browser_runtime_error", "runtime_exception",
+            error="The browser runtime failed.",
+        )
     finally:
-        rec["finished"] = datetime.now(timezone.utc).isoformat()
+        if startup_lease:
+            finish_startup(rec)
+        if proxy is not None:
+            proxy.close()
+        if not rec.get("_terminalized"):
+            if rec["_cancel"].is_set():
+                terminalize(rec, "aborted", "user_cancelled", "cancel")
+            else:
+                terminalize(
+                    rec, "indeterminate", "runtime_ended_without_outcome",
+                    "runtime_exit",
+                )
+        _schedule_artifact_cleanup(rec)
 
 
 def _record(rec, step, shot_path, subgoal, raw, action, element_text, result):
+    def private_hash(value):
+        return sha256({"salt": rec["_log_salt"], "value": value})
+    try:
+        with open(shot_path, "rb") as handle:
+            screenshot_hash = sha256(handle.read())
+    except (OSError, TypeError):
+        screenshot_hash = ""
+    action_view = {
+        "kind": action.get("action", "unknown"),
+        "digest": private_hash(action),
+    }
     entry = {
+        "contract_version": "eva.action-step/1",
         "step": step,
         "ts": datetime.now(timezone.utc).isoformat(),
-        "url": rec["url"],
-        "title": rec["title"],
-        "goal": rec["goal"],
-        "subgoal": subgoal,
-        "model_raw": raw[:1000] if isinstance(raw, str) else "",
-        "action": action,
-        "element_text": element_text,
+        "url": public_url(rec["url"]),
+        "goal_hash": private_hash(rec["goal"]),
+        "subgoal_hash": private_hash(subgoal or ""),
+        "model_output_hash": private_hash(raw or ""),
+        "action": action_view,
+        "element_hash": private_hash(element_text or ""),
         "result": result,
-        "screenshot": shot_path,
+        "screenshot_hash": screenshot_hash,
     }
-    rec["steps"].append({"step": step, "action": action, "result": result})
+    with rec["_record_lock"]:
+        rec["steps"].append({"step": step, "action": action_view, "result": result})
     _log_step(rec["id"], entry)
 
 
@@ -842,33 +1240,48 @@ def _record(rec, step, shot_path, subgoal, raw, action, element_text, result):
 # ---------------------------------------------------------------------------
 
 def start_run(goal, api_key, vision_model=None, director=None, autonomy="pause",
-              max_steps=_MAX_STEPS_DEFAULT, start_url="", headless=False):
+              max_steps=_MAX_STEPS_DEFAULT, start_url="", headless=False,
+              postcondition=None, use_director=None):
     """Launch a browser agent run in a background thread. Returns the run record's
     public status (including its id). Raises if Playwright or the key is missing."""
+    raw_spec = {
+        "goal": goal,
+        "use_director": director is not None if use_director is None else use_director,
+        "autonomy": autonomy,
+        "max_steps": max_steps,
+        "start_url": start_url,
+        "headless": headless,
+        "postcondition": postcondition,
+    }
+    if vision_model is not None:
+        raw_spec["vision_model"] = vision_model
+    spec = launch_spec("browser", raw_spec)
+    goal = spec["goal"]
+    requested_autonomy = spec["autonomy"]
+    max_steps = spec["max_steps"]
+    start_url = spec["start_url"]
+    headless = spec["headless"]
+    postcondition = spec["postcondition"]
+    vision_model = spec["vision_model"]
+    if start_url:
+        validate_public_url(start_url, "start_url", resolve_dns=False)
     ok, detail = playwright_available()
     if not ok:
         raise RuntimeError(detail)
     if not api_key:
         raise RuntimeError("OpenAI API key required for the vision executor.")
 
-    goal = (goal or "").strip()
-    if not goal:
-        raise RuntimeError("goal is required.")
-
-    vision_model = vision_model or _DEFAULT_VISION_MODEL
-    try:
-        max_steps = max(1, min(int(max_steps), 60))
-    except Exception:
-        max_steps = _MAX_STEPS_DEFAULT
-    if autonomy not in ("pause", "confirm_all", "auto"):
-        autonomy = "pause"
-
-    rec = _new_run(goal)
+    rec = _new_run(goal, requested_autonomy, postcondition)
+    admit_action_run(rec)
     t = threading.Thread(
         target=_worker,
-        args=(rec, api_key, vision_model, director, autonomy, max_steps, start_url, headless),
+          args=(rec, api_key, vision_model, director, max_steps, start_url, headless),
         daemon=True,
     )
     rec["_thread"] = t
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        terminalize(rec, "failed", "worker_start_failed", "runtime_start")
+        raise
     return public_status(rec["id"])

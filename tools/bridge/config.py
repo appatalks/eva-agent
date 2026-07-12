@@ -8,8 +8,10 @@ a future phase extracts it into ``state.py``.
 
 import datetime
 import os
+import pwd
 import re
 import sys
+import urllib.parse
 
 
 def env_truthy(name):
@@ -70,6 +72,53 @@ SENSITIVE_ENV_SUFFIXES = (
     "APIKEY", "ACCESSKEY", "PRIVATEKEY", "TOKEN", "SECRET", "PASSWORD",
     "CREDENTIAL", "CREDENTIALS", "AUTH", "AUTHORIZATION", "PAT",
 )
+_MCP_CONFIG_FIELDS = frozenset({"command", "args", "env"})
+_SQLITE_MCP_NAMES = frozenset({"sqlite", "sqlite-mcp-server", "eva-sqlite"})
+_KUSTO_SUFFIXES = (".kusto.windows.net", ".kusto.data.microsoft.com")
+_COMMON_CHILD_ENV = frozenset({
+    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LOGNAME", "TZ", "USER",
+})
+_GUI_CHILD_ENV = frozenset({
+    "DBUS_SESSION_BUS_ADDRESS", "DESKTOP_SESSION", "DISPLAY", "WAYLAND_DISPLAY",
+    "XAUTHORITY", "XDG_CURRENT_DESKTOP", "XDG_RUNTIME_DIR", "XDG_SESSION_TYPE",
+})
+_CHILD_ENV_PROFILES = {
+    "base": _COMMON_CHILD_ENV,
+    "acp": _COMMON_CHILD_ENV | frozenset({
+        "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR",
+    }),
+    "camera": _COMMON_CHILD_ENV,
+    "gui": _COMMON_CHILD_ENV | _GUI_CHILD_ENV,
+    "mcp": _COMMON_CHILD_ENV,
+    "notification": _COMMON_CHILD_ENV | _GUI_CHILD_ENV,
+}
+_BLOCKED_CHILD_ENV = frozenset({
+    "BASH_ENV", "CDPATH", "COPILOT_ALLOW_ALL", "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH", "ELECTRON_RUN_AS_NODE", "ENV", "GIT_CONFIG",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
+    "LD_AUDIT", "LD_LIBRARY_PATH", "LD_PRELOAD", "NODE_EXTRA_CA_CERTS",
+    "NODE_OPTIONS", "NODE_PATH", "PYTHONHOME", "PYTHONPATH", "RUBYOPT",
+})
+_BLOCKED_CHILD_ENV_PREFIXES = (
+    "COPILOT_", "CURL_", "DYLD_", "GIT_CONFIG_", "HTTPS_PROXY", "HTTP_PROXY",
+    "LD_", "NODE_", "NPM_CONFIG_", "OTEL_", "PIP_", "PYTHON", "REQUESTS_",
+    "SSL_CERT_", "ALL_PROXY", "NO_PROXY",
+)
+
+
+def _fixed_child_path():
+    candidates = (
+        "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin",
+        "/usr/local/sbin", "/usr/bin", "/usr/sbin", "/bin", "/sbin",
+    )
+    return os.pathsep.join(path for path in candidates if os.path.isdir(path))
+
+
+def _account_home():
+    try:
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (AttributeError, KeyError, OSError):
+        return os.path.expanduser("~")
 
 
 def is_sensitive_env_name(name):
@@ -83,51 +132,224 @@ def is_sensitive_env_name(name):
     return compact != "PATH" and any(compact.endswith(suffix) for suffix in SENSITIVE_ENV_SUFFIXES)
 
 
-def child_process_env(explicit=None):
-    """Build a child environment without ambient credentials.
-
-    Callers may add credentials explicitly when a particular configured child
-    requires them. The bridge bearer token is never permitted across a child
-    boundary.
-    """
-    result = {}
-    for name, value in os.environ.items():
-        if is_sensitive_env_name(name):
-            continue
-        result[name] = value
+def child_process_env(explicit=None, *, profile="base"):
+    """Build a minimal, profile-specific environment for one child process."""
+    allowed = _CHILD_ENV_PROFILES.get(profile)
+    if allowed is None:
+        raise ValueError(f"unknown child environment profile: {profile}")
+    result = {
+        "HOME": _account_home(),
+        "PATH": _fixed_child_path(),
+    }
+    for name in allowed:
+        value = os.environ.get(name)
+        if isinstance(value, str) and "\x00" not in value and len(value) <= 4096:
+            result[name] = value
+    if explicit and profile != "mcp":
+        raise ValueError("explicit child environment is restricted to MCP children")
     for name, value in (explicit or {}).items():
-        if name != "EVA_BRIDGE_TOKEN":
-            result[str(name)] = str(value)
+        key = str(name)
+        upper = key.upper()
+        if (
+            key == "EVA_BRIDGE_TOKEN"
+            or upper in _BLOCKED_CHILD_ENV
+            or any(upper.startswith(prefix) for prefix in _BLOCKED_CHILD_ENV_PREFIXES)
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+        ):
+            raise ValueError(f"unsafe child environment variable: {key}")
+        text = str(value)
+        if "\x00" in text or len(text) > 16384:
+            raise ValueError(f"invalid child environment value: {key}")
+        result[key] = text
     return result
+
+
+def normalize_kusto_origin(value):
+    """Return one exact Microsoft Kusto HTTPS origin or raise ``ValueError``."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError("Kusto cluster must be a non-empty HTTPS origin")
+    text = value if "://" in value else "https://" + value
+    try:
+        parsed = urllib.parse.urlsplit(text)
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Kusto cluster URL is invalid") from exc
+    hostname = (parsed.hostname or "").lower()
+    if hostname.endswith("."):
+        hostname = hostname[:-1]
+    try:
+        hostname.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("Kusto cluster host must be ASCII") from exc
+    labels = hostname.split(".")
+    valid_labels = bool(labels) and all(
+        label
+        and len(label) <= 63
+        and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+        for label in labels
+    )
+    allowed_host = any(
+        hostname.endswith(suffix) and hostname != suffix[1:]
+        for suffix in _KUSTO_SUFFIXES
+    )
+    if (
+        parsed.scheme != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or port not in (None, 443)
+        or not valid_labels
+        or not allowed_host
+    ):
+        raise ValueError("Kusto cluster must be an exact Microsoft HTTPS origin")
+    return "https://" + hostname
+
+
+def _mcp_env(raw, allowed, *, strip_unknown=False):
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        return None
+    safe = {}
+    for key, value in raw.items():
+        if key not in allowed:
+            if strip_unknown:
+                continue
+            return None
+        if key == "_useGitHubPAT":
+            if value is not True:
+                return None
+            safe[key] = True
+            continue
+        if not isinstance(value, str) or "\x00" in value or len(value) > 16384:
+            return None
+        safe[str(key)] = value
+    return safe
+
+
+def _trusted_mcp_script(value, basename):
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return None
+    candidate = os.path.expanduser(value)
+    if not os.path.isabs(candidate):
+        candidate = os.path.join(PROJECT_ROOT, candidate)
+    real = os.path.realpath(candidate)
+    expected = os.path.realpath(os.path.join(TOOLS_DIR, basename))
+    return expected if real == expected else None
+
+
+def _trusted_python_command(value):
+    if value == "python3":
+        return True
+    return (
+        isinstance(value, str)
+        and os.path.realpath(os.path.expanduser(value))
+        == os.path.realpath(sys.executable)
+    )
+
+
+def _canonical_mcp_server(name, raw, mode):
+    """Return one exact release-approved MCP process shape, else ``None``."""
+    if (
+        not isinstance(name, str)
+        or not isinstance(raw, dict)
+        or set(raw) - _MCP_CONFIG_FIELDS
+        or not isinstance(raw.get("command"), str)
+        or not isinstance(raw.get("args"), list)
+        or not all(isinstance(arg, str) for arg in raw["args"])
+    ):
+        return None
+    command = raw["command"]
+    args = raw["args"]
+
+    if name in _SQLITE_MCP_NAMES and _trusted_python_command(command):
+        script = _trusted_mcp_script(args[0], "sqlite_mcp.py") if len(args) == 1 else None
+        env = _mcp_env(
+            raw.get("env"), {"EVA_MEMORY_DB"}, strip_unknown=True
+        )
+        if script and env is not None:
+            if env.get("KUSTO_CLUSTER_URL"):
+                try:
+                    env["KUSTO_CLUSTER_URL"] = normalize_kusto_origin(
+                        env["KUSTO_CLUSTER_URL"]
+                    )
+                except ValueError:
+                    return None
+            return {"command": sys.executable, "args": [script], "env": env}
+
+    if mode != "cloud":
+        return None
+
+    if name == "kusto-mcp-server" and _trusted_python_command(command):
+        script = _trusted_mcp_script(args[0], "kusto_mcp.py") if len(args) == 1 else None
+        env = _mcp_env(
+            raw.get("env"), {
+                "KUSTO_ACCESS_TOKEN", "KUSTO_CLUSTER_URL", "KUSTO_DATABASE",
+                "KUSTO_DATABASE_LOCKED",
+            },
+            strip_unknown=True,
+        )
+        if script and env is not None:
+            return {"command": sys.executable, "args": [script], "env": env}
+
+    if name == "eva-web-search" and _trusted_python_command(command):
+        script = _trusted_mcp_script(args[0], "web_search_mcp.py") if len(args) == 1 else None
+        env = _mcp_env(raw.get("env"), set(), strip_unknown=True)
+        if script and env is not None:
+            return {"command": sys.executable, "args": [script], "env": env}
+
+    if (
+        name == "azure-mcp-server"
+        and command == "npx"
+        and args == ["-y", "@azure/mcp@latest", "server", "start"]
+    ):
+        env = _mcp_env(raw.get("env"), {"AZURE_MCP_COLLECT_TELEMETRY"})
+        if env is not None and env.get("AZURE_MCP_COLLECT_TELEMETRY", "false") == "false":
+            return {
+                "command": "npx", "args": list(args),
+                "env": {"AZURE_MCP_COLLECT_TELEMETRY": "false"},
+            }
+
+    if (
+        name == "github-mcp-server"
+        and command == "docker"
+        and args == [
+            "run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "ghcr.io/github/github-mcp-server",
+        ]
+    ):
+        env = _mcp_env(
+            raw.get("env"), {"_useGitHubPAT", "GITHUB_PERSONAL_ACCESS_TOKEN"}
+        )
+        if env is not None:
+            return {"command": "docker", "args": list(args), "env": env}
+    return None
+
+
+def _release_disabled_mcp(name, raw):
+    """True unless the server is an exact release-approved cloud shape."""
+    return _canonical_mcp_server(name, raw, "cloud") is None
 
 
 def mcp_config_for_egress(mcp_config, mode):
     """Return the MCP subset permitted by an egress policy.
 
-    Cloud mode preserves configured servers. Offline and local-network modes
-    are deliberately fail-closed: only Eva's bundled SQLite MCP process is
-    allowed. This prevents persisted or HTTP-supplied commands from bypassing
-    the selected network boundary.
+    Every mode is fail-closed over exact process shapes. Cloud permits only the
+    release presets plus trusted bundled servers. Offline and local-network
+    permit only Eva's bundled SQLite MCP. Unknown, aliased, wrapped, or
+    pointer/keyboard-capable servers are rejected before process startup.
     """
-    if mode == "cloud":
-        return dict(mcp_config or {}), []
-
+    source = dict(mcp_config or {}) if isinstance(mcp_config, dict) else {}
     allowed = {}
     rejected = []
-    sqlite_mcp = os.path.realpath(os.path.join(TOOLS_DIR, "sqlite_mcp.py"))
-    python_executable = os.path.realpath(sys.executable)
-    for name, raw in (mcp_config or {}).items():
-        cfg = raw if isinstance(raw, dict) else {}
-        command = str(cfg.get("command", "") or "")
-        args = cfg.get("args") if isinstance(cfg.get("args"), list) else []
-        first_arg = os.path.realpath(os.path.expanduser(str(args[0]))) if args else ""
-        command_path = os.path.realpath(os.path.expanduser(command)) if command else ""
-        env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
-        safe_env = {"EVA_MEMORY_DB": str(env["EVA_MEMORY_DB"])} if "EVA_MEMORY_DB" in env else {}
-        if command_path == python_executable and len(args) == 1 and first_arg == sqlite_mcp:
-            allowed[str(name)] = {"command": sys.executable, "args": [sqlite_mcp], "env": safe_env}
-        else:
+    for name, raw in source.items():
+        canonical = _canonical_mcp_server(name, raw, mode)
+        if canonical is None:
             rejected.append(str(name))
+        else:
+            allowed[name] = canonical
     return allowed, rejected
 
 # ── ACP pool ────────────────────────────────────────────────────────

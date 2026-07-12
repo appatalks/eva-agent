@@ -1995,6 +1995,7 @@ vm.runInThisContext(source);
     def test_agent_callbacks_cannot_cross_session_generation(self):
         sessions_path = os.path.join(PROJECT_ROOT, "core/js/sessions.js")
         options_path = os.path.join(PROJECT_ROOT, "core/js/options.js")
+        markers_path = os.path.join(PROJECT_ROOT, "core/js/agent-markers.js")
         script = r"""
 const fs=require('fs'),vm=require('vm'),crypto=require('crypto').webcrypto;
 global.crypto=crypto;
@@ -2020,12 +2021,13 @@ global.speakText=()=>{throw new Error('stale speech')};
 global._lastUserAskedImage=false;
 global._lastUserAskedGenerate=false;
 global._lastUserImageSubject='';
-let browserOpts,desktopOpts;
+let browserOpts;
 global.EvaBrowser={launch:(_goal,opts)=>{browserOpts=opts},isActive:()=>false};
-global.EvaDesktop={launch:(_goal,opts)=>{desktopOpts=opts},isActive:()=>false};
+global.EvaDesktop={launch:()=>{throw new Error('unexpected desktop launch')},isActive:()=>false};
 let sessions=fs.readFileSync(process.argv[1],'utf8');
 vm.runInThisContext(sessions);
-let options=fs.readFileSync(process.argv[2],'utf8');
+vm.runInThisContext(fs.readFileSync(process.argv[2],'utf8'));
+let options=fs.readFileSync(process.argv[3],'utf8');
 const feedback=options.slice(options.indexOf('function _agentEnvelopeCurrent'),
     options.indexOf('async function pollNotifications'));
 vm.runInThisContext(feedback);
@@ -2040,10 +2042,9 @@ storageAssistant='';retryCount=0;
 (async()=>{
     resetEnvelopeSession(sid);newEnvelopeTurn();
     const envelope=captureRequestEnvelope();
-    const content='[[EVA_BROWSER]]{"goal":"old browser"}[[/EVA_BROWSER]]\n'+
-        '[[EVA_DESKTOP]]{"goal":"old desktop"}[[/EVA_DESKTOP]]';
+    const content='[[EVA_BROWSER]]{"goal":"old browser"}[[/EVA_BROWSER]]';
     const rendered=await renderEvaResponse(content,output,envelope);
-    if(!rendered||!browserOpts||!desktopOpts) throw new Error('agents not launched');
+    if(!rendered||!browserOpts) throw new Error('agent not launched');
     resetEnvelopeSession();
     resetTransientConversationState();
     output.innerHTML='';output.innerText='';
@@ -2051,16 +2052,13 @@ storageAssistant='';retryCount=0;
     browserOpts.onProgress('STALE_AGENT_PROGRESS',status);
     browserOpts.onConfirm('STALE_AGENT_CONFIRM',false,status);
     browserOpts.onComplete(status,'/v1/browser','Browser Agent');
-    desktopOpts.onProgress('STALE_DESKTOP_PROGRESS',status);
-    desktopOpts.onConfirm('STALE_DESKTOP_CONFIRM',false,status);
-    desktopOpts.onComplete(status,'/v1/desktop','Desktop Agent');
     await new Promise(resolve=>setTimeout(resolve,0));
     console.log(JSON.stringify({html:output.innerHTML,text:output.innerText,store,
         lastResponse,confirm:_agentConfirm,progress:_agentProgress}));
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         result = subprocess.run(
-            ["node", "-e", script, sessions_path, options_path],
+            ["node", "-e", script, sessions_path, markers_path, options_path],
             capture_output=True, text=True, check=True,
         )
         data = json.loads(result.stdout)
@@ -2169,7 +2167,10 @@ global.document={
     querySelector:selector=>selector==='#evaBrowserPopup .ebp-title'?(elements.ebpTitlebar||null):null,
     addEventListener:()=>{}
 };
-global.window={innerWidth:1200,innerHeight:800};
+global.window={innerWidth:1200,innerHeight:800,
+    evaStandalone:{authorizeAgentLaunch:async(agent,specification)=>({
+        authorized:true,capability:'synthetic.capability',specification
+    })}};
 global.setInterval=()=>1;global.clearInterval=()=>{};
 global.setTimeout=setTimeout;global.clearTimeout=clearTimeout;
 global.AbortSignal={timeout:()=>({})};
@@ -2247,13 +2248,23 @@ global.fetch=async(url,opts)=>{
         cancelIds.push(JSON.parse(opts.body).run_id);cancelUrls.push(url);
         return {ok:true,json:async()=>({})}
     }
-    if(url.includes('/status?'))return new Promise(()=>{});
+    if(url.includes('/status?')){
+        const id=new URL(url).searchParams.get('run_id');
+        return {ok:true,json:async()=>({id,status:cancelIds.includes(id)?'cancelled':'running',goal:id})};
+    }
     return {ok:true,json:async()=>({})};
 };
 let source=fs.readFileSync(process.argv[1],'utf8');vm.runInThisContext(source);
 const EvaBrowser=window.EvaBrowser,EvaDesktop=window.EvaDesktop;
+async function waitResolver(number){
+    for(let i=0;i<100&&typeof runResolvers[number]!=='function';i++){
+        await new Promise(resolve=>setTimeout(resolve,0));
+    }
+    if(typeof runResolvers[number]!=='function')throw new Error('run resolver not reached '+number);
+}
 (async()=>{
     const first=EvaBrowser.launch('pending one',{});
+    await waitResolver(1);
     activeBase='http://bridge-two';
     EvaBrowser.cancel();
     runResolvers[1]({ok:true,json:async()=>({id:'late-pending',status:'starting',goal:'pending one'})});
@@ -2261,10 +2272,12 @@ const EvaBrowser=window.EvaBrowser,EvaDesktop=window.EvaDesktop;
 
     activeBase='http://known-origin';
     const second=EvaBrowser.launch('replacement old',{});
+    await waitResolver(2);
     runResolvers[2]({ok:true,json:async()=>({id:'known-old',status:'starting',goal:'replacement old'})});
     await second;
     activeBase='http://replacement-origin';
     const third=EvaDesktop.launch('replacement new',{});
+    await waitResolver(3);
     runResolvers[3]({ok:true,json:async()=>({id:'known-new',status:'starting',goal:'replacement new'})});
     await third;await new Promise(resolve=>setTimeout(resolve,0));
     console.log(JSON.stringify({cancelIds,cancelUrls,active:EvaBrowser.isActive()}));
@@ -2272,8 +2285,9 @@ const EvaBrowser=window.EvaBrowser,EvaDesktop=window.EvaDesktop;
 """
         result = subprocess.run(
             ["node", "-e", script, browser_path],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True,
         )
+        self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
         self.assertIn("late-pending", data["cancelIds"])
         self.assertIn("known-old", data["cancelIds"])
@@ -2291,7 +2305,7 @@ let oldShotResolve,cancelIds=[];
 global.fetch=async(url,opts)=>{
     if(url.endsWith('/browser/run'))return {ok:true,json:async()=>({id:'old-run',status:'starting',goal:'old'})};
     if(url.endsWith('/desktop/run'))return {ok:true,json:async()=>({id:'new-run',status:'starting',goal:'new'})};
-    if(url.includes('/status?run_id=old-run'))return {ok:true,json:async()=>({id:'old-run',status:'running',step:1,goal:'old'})};
+    if(url.includes('/status?run_id=old-run'))return {ok:true,json:async()=>({id:'old-run',status:cancelIds.includes('old-run')?'cancelled':'running',step:1,goal:'old'})};
     if(url.includes('/status?run_id=new-run'))return {ok:true,json:async()=>({id:'new-run',status:'running',step:1,goal:'new'})};
     if(url.includes('/browser/screenshot'))return new Promise(resolve=>{oldShotResolve=()=>resolve({ok:true,blob:async()=>({data:'OLD_SCREENSHOT'})})});
     if(url.includes('/desktop/screenshot'))return {ok:true,blob:async()=>({data:'NEW_SCREENSHOT'})};

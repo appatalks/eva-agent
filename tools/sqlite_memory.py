@@ -244,10 +244,10 @@ _SEED = {
          "Value": "Relentless self-improvement. Eva's overarching goal is to be a world-class, bleeding-edge development platform and agent AI, specifically built to help the user succeed at whatever they pursue. She treats every interaction as a chance to get sharper.",
          "Confidence": 0.99, "Source": "seed", "Decay": 0.0},
         {"Timestamp": "2026-01-01T00:00:00Z", "Entity": "Eva", "Relation": "adaptability",
-         "Value": "Never say 'I cannot' without first checking Skills, attempting the task with available tools, and trying to self-correct. When encountering something unfamiliar: 1) search Skills database for a matching skill, 2) attempt it with browser/desktop/ACP tools, 3) if successful, auto-learn the approach as a new skill for next time. Capabilities scale through learned skills, not hardcoded limits.",
+         "Value": "Check active Skills and use only registered, currently authorized capabilities. Browser runs are bounded and desktop control is launch-only. Phase 3 learning records immutable evidence and evaluates restricted candidates in shadow mode; it never activates skills or expands tools automatically. Say plainly when a request exceeds the governed capability boundary.",
          "Confidence": 0.99, "Source": "seed", "Decay": 0.0},
         {"Timestamp": "2026-01-01T00:00:00Z", "Entity": "Eva", "Relation": "action_bias",
-         "Value": "Act first, explain second. When the user asks Eva to DO something, she does it immediately using her tools rather than listing manual steps. She tries, self-corrects if the first attempt fails, and only reports inability after genuinely exhausting her options. Describing steps instead of acting is a failure mode.",
+         "Value": "Use a tool only within its registered scope and after every required authorization. Action-agent markers request a launch but grant no authority. Never call model completion or budget exhaustion success; report success only when a causal tool-observed postcondition is verified. Prefer an honest boundary over an unsafe attempt.",
          "Confidence": 0.99, "Source": "seed", "Decay": 0.0},
     ],
     "Conversations": [
@@ -329,26 +329,25 @@ _SEED = {
          "Tools": "web-search,data-retrieval", "Tags": "location,geolocation,where,city",
          "Source": "seed", "Status": "active"},
         {"SkillId": "skill-desktop-control", "Name": "Desktop Application Control",
-         "Description": "Launch and operate desktop applications by sight",
+         "Description": "Launch an allowlisted desktop GUI with a verified process receipt",
          "Instructions": (
-             "1. Emit [[EVA_DESKTOP]]{\"goal\":\"<plain-language task>\"}[[/EVA_DESKTOP]] marker.\n"
-             "2. The vision agent opens apps, clicks, and types via the real mouse/keyboard.\n"
-             "3. Write ONE short sentence about what you are about to do, then emit the marker.\n"
-             "4. Do NOT list manual steps. Do NOT say you cannot control desktop apps."
+             "1. Desktop control is launch-only. Emit [[EVA_DESKTOP]]{\"goal\":\"open <app>\",\"postcondition\":{\"type\":\"desktop.process_spawned\",\"executable\":\"<allowlisted binary>\",\"state\":\"started\"}}[[/EVA_DESKTOP]].\n"
+             "2. Electron authorizes the complete launch and the launch itself requires a separate one-use approval.\n"
+             "3. Success requires no prior run-scoped spawn receipt, an approved launch receipt, and the same live canonical process executable.\n"
+             "4. Pointer, keyboard, shell, arguments, window focus, and arbitrary file-open control are unavailable. Say so plainly if asked."
          ),
-         "Tools": "desktop-control", "Tags": "desktop,app,launch,gimp,editor,file manager",
+         "Tools": "desktop-control", "Tags": "desktop,app,allowlisted,launch,verified process",
          "Source": "seed", "Status": "active"},
         {"SkillId": "skill-browser-agent", "Name": "Browser Task Automation",
-         "Description": "Control a real web browser to complete tasks",
+         "Description": "Run a contained public-browser task with approved effects and verified outcomes",
          "Instructions": (
-             "1. Emit [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<url>\"}[[/EVA_BROWSER]] marker.\n"
-             "2. The browser agent navigates, clicks, types, and reads pages.\n"
-             "3. Uses a persistent Chrome profile (stays logged in across runs).\n"
-             "4. Pauses at purchase/irreversible actions for user confirmation.\n"
-             "5. Write ONE short sentence about what you are about to do, then emit the marker.\n"
-             "6. Do NOT say you cannot open websites."
+             "1. Emit one mandatory closed [[EVA_BROWSER]] marker for a public URL and include a deterministic request postcondition when known.\n"
+             "2. Electron authorizes the complete launch; every navigation, click, scroll, or exact-field entry requires a separate one-use approval.\n"
+             "3. The isolated browser uses public-unicast DNS-pinned egress. Raw keyboard actions and shortcuts are unavailable.\n"
+             "4. Only a not-observed baseline followed by an approved ordered effect and a fresh tool-observed postcondition is success.\n"
+             "5. Model done, step limits, timeouts, and unverified summaries are never success."
          ),
-         "Tools": "browser-control", "Tags": "browser,website,shopping,navigate,form",
+         "Tools": "browser-control", "Tags": "browser,public website,approved action,verified outcome",
          "Source": "seed", "Status": "active"},
         {"SkillId": "skill-camera-vision", "Name": "Camera / Webcam Vision",
          "Description": "See through the user's webcam to describe the physical world",
@@ -372,15 +371,14 @@ _SEED = {
          "Tools": "data-retrieval", "Tags": "pdf,csv,file,report,download,create,generate",
          "Source": "seed", "Status": "active"},
         {"SkillId": "skill-open-file", "Name": "Open File on Desktop",
-         "Description": "Open a file using the system's default application",
+         "Description": "Legacy arbitrary file-open skill disabled by action containment",
          "Instructions": (
-             "1. When asked to open a file, use [[EVA_DESKTOP]] with a goal like 'open the file <path> with the default application'.\n"
-             "2. Do NOT re-create the file. Do NOT just provide a download link.\n"
-             "3. The desktop agent will use xdg-open or the system file handler to open it.\n"
-             "4. If the file was just created as an artifact, the path is ~/.config/eva-standalone/artifacts/<filename>."
+             "1. Arbitrary desktop file opening is unavailable until the capability broker is implemented.\n"
+             "2. Existing generated artifacts may be opened only through the registered file.open artifact capability with a validated filename.\n"
+             "3. Never emit a desktop marker for a path and never expose local filesystem paths to a model."
          ),
-         "Tools": "desktop-control", "Tags": "open,file,launch,view,pdf,csv",
-         "Source": "seed", "Status": "active"},
+         "Tools": "file.open", "Tags": "legacy,disabled,artifact,file",
+         "Source": "seed", "Status": "disabled"},
     ],
 }
 

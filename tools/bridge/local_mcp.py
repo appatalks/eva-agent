@@ -10,11 +10,8 @@ over stdio, exactly like the Copilot CLI does internally.
 import json
 import os
 import subprocess
-import sys
 import threading
 import time
-import urllib.request
-import urllib.error
 
 from bridge import config as _cfg
 
@@ -49,7 +46,7 @@ class MCPServer:
             if k != "EVA_BRIDGE_TOKEN":
                 explicit_env[k] = str(v) if not isinstance(v, str) else v
         explicit_env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
-        process_env = _cfg.child_process_env(explicit_env)
+        process_env = _cfg.child_process_env(explicit_env, profile="mcp")
         try:
             self.process = subprocess.Popen(
                 cmd,
@@ -204,7 +201,17 @@ class LocalMCPManager:
 
     def start_servers(self, mcp_config):
         """Start MCP servers from config dict (same format as mcp.json mcpServers)."""
-        for name, cfg in mcp_config.items():
+        from bridge import state as _st
+
+        safe_config, rejected = _cfg.mcp_config_for_egress(
+            mcp_config, _st.egress_mode
+        )
+        if rejected:
+            raise RuntimeError(
+                "MCP process policy rejected server(s): "
+                + ", ".join(sorted(rejected))
+            )
+        for name, cfg in safe_config.items():
             cmd = cfg.get("command", "")
             args = cfg.get("args", [])
             env = cfg.get("env", {})

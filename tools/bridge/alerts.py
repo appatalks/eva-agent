@@ -46,7 +46,7 @@ def _signal_send(message):
             [_SIGNAL_CLI_PATH, "-u", sender, "send",
              "-m", message, recipient],
             capture_output=True, text=True, timeout=_SIGNAL_SEND_TIMEOUT,
-            check=True, env=_cfg.child_process_env(),
+            check=True, env=_cfg.child_process_env(profile="notification"),
         )
         print(f"[Signal] Sent to {recipient[:4]}...")
         return True

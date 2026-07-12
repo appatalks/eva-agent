@@ -22,13 +22,21 @@ import os
 import sys
 import threading
 
+from bridge import config as _bridge_config
+
 # --- Azure Identity + Kusto SDK ---
 try:
-    from azure.identity import DeviceCodeCredential, SharedTokenCacheCredential
+    from azure.identity import DeviceCodeCredential
     import requests as _requests
     HAS_AZURE = True
 except ImportError:
     HAS_AZURE = False
+
+def _normalize_kusto_origin(value):
+    try:
+        return _bridge_config.normalize_kusto_origin(value), None
+    except ValueError as exc:
+        return None, f"Error: {exc}."
 
 # --- MCP Protocol (NDJSON over stdio) ---
 
@@ -240,13 +248,22 @@ class KustoMCPServer:
     TOOLS = [tool for tool in TOOLS if tool.get("name") != "kusto_ingest_inline"]
 
     def __init__(self):
-        self.cluster_url = os.environ.get("KUSTO_CLUSTER_URL", "")
+        raw_cluster = os.environ.get("KUSTO_CLUSTER_URL", "")
+        if raw_cluster:
+            self.cluster_url, self._cluster_error = _normalize_kusto_origin(
+                raw_cluster
+            )
+        else:
+            self.cluster_url, self._cluster_error = "", None
         self.default_database = os.environ.get("KUSTO_DATABASE", "")
         database_locked = os.environ.get("KUSTO_DATABASE_LOCKED", "").strip().lower()
         self.database_locked = database_locked in ("1", "true", "yes")
         self._credential = None
         self._token = None
         self._lock = threading.Lock()
+        self._http = _requests.Session() if HAS_AZURE else None
+        if self._http is not None:
+            self._http.trust_env = False
 
     def _get_credential(self):
         """Get or create Azure credential."""
@@ -356,16 +373,20 @@ class KustoMCPServer:
 
     def _resolve_cluster(self, args):
         """Resolve cluster URL from args or environment."""
-        url = args.get("cluster_url", "") or self.cluster_url
-        if not url:
+        if self._cluster_error:
+            return None, self._cluster_error
+        requested = args.get("cluster_url", "")
+        if requested and not isinstance(requested, str):
+            return None, "Error: Kusto cluster URL must be text."
+        if self.cluster_url:
+            if requested:
+                normalized, error = _normalize_kusto_origin(requested)
+                if error or normalized != self.cluster_url:
+                    return None, "Error: Kusto cluster is locked to the configured origin."
+            return self.cluster_url, None
+        if not requested:
             return None, "No cluster URL provided. Set KUSTO_CLUSTER_URL or pass cluster_url parameter."
-        # Ensure https://
-        if not url.startswith("https://"):
-            url = "https://" + url
-        # Ensure .kusto.windows.net suffix
-        if ".kusto.windows.net" not in url and ".kusto.data.microsoft.com" not in url:
-            url = url.rstrip("/") + ".kusto.windows.net"
-        return url.rstrip("/"), None
+        return _normalize_kusto_origin(requested)
 
     def _resolve_database(self, args):
         """Resolve database name from args or environment."""
@@ -395,7 +416,10 @@ class KustoMCPServer:
         if database:
             body["db"] = database
 
-        resp = _requests.post(url, json=body, headers=headers, timeout=60)
+        resp = self._http.post(
+            url, json=body, headers=headers, timeout=60,
+            allow_redirects=False,
+        )
 
         if resp.status_code != 200:
             return f"Kusto API error {resp.status_code}: {resp.text[:500]}"
@@ -555,10 +579,10 @@ class KustoMCPServer:
         try:
             # Extract column names from the schema JSON
             token = self._get_token()
-            resp = _requests.post(f"{cluster_url}/v1/rest/mgmt",
+            resp = self._http.post(f"{cluster_url}/v1/rest/mgmt",
                 json={"csl": f".show table {table} schema as json", "db": database},
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                timeout=15)
+                timeout=15, allow_redirects=False)
             if resp.status_code != 200:
                 return f"Error getting schema: {resp.status_code}"
             schema_data = resp.json()

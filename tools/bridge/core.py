@@ -72,6 +72,11 @@ from bridge.phase3_learning import (
     LearningConflictError,
     LearningValidationError,
 )
+from bridge.action_runs import (
+    ActionRunValidationError,
+    launch_spec,
+    validate_launch_capability,
+)
 
 
 # Domain modules
@@ -593,31 +598,60 @@ class BridgeHandler(BaseHTTPRequestHandler):
     ))
 
     # ── Content-Type / body enforcement ─────────────────────────────
+    def _header_values(self, name):
+        getter = getattr(self.headers, "get_all", None)
+        if callable(getter):
+            return list(getter(name) or [])
+        value = self.headers.get(name)
+        return [] if value is None else [value]
+
+    def _validated_content_lengths(self, *, required):
+        values = self._header_values("Content-Length")
+        if not values:
+            if required:
+                self._send_simple_error(411, "Content-Length required")
+                return None
+            return [0]
+        if len(values) != 1:
+            self._send_simple_error(400, "Exactly one Content-Length is required")
+            return None
+        raw = str(values[0])
+        if re.fullmatch(r"[0-9]+", raw) is None:
+            self._send_simple_error(400, "Content-Length must contain decimal digits only")
+            return None
+        if len(raw) > 16:
+            self._send_simple_error(413, "Content-Length is too large")
+            return None
+        try:
+            return [int(raw)]
+        except ValueError:
+            self._send_simple_error(400, "Content-Length is invalid")
+            return None
+
     def _enforce_json_content(self):
         """Enforce application/json content-type and body size cap.
         Rejects Transfer-Encoding, non-integer or out-of-range Content-Length,
         and non-JSON media types (including application/jsonp).
         Returns True if OK, False if a 4xx was sent."""
-        if self.headers.get("Transfer-Encoding"):
+        if self._header_values("Transfer-Encoding"):
             self._send_simple_error(400, "Transfer-Encoding is not supported")
             return False
-        ct = self.headers.get("Content-Type", "")
-        media_type = ct.split(";")[0].strip().lower()
-        if media_type != "application/json":
+        content_types = self._header_values("Content-Type")
+        if len(content_types) != 1:
             self._send_simple_error(415, "Content-Type must be application/json")
             return False
-        cl_raw = self.headers.get("Content-Length", "")
-        if not cl_raw:
-            self._send_simple_error(411, "Content-Length required")
+        content_type = str(content_types[0]).strip()
+        if re.fullmatch(
+            r"application/json(?:\s*;\s*charset\s*=\s*(?:utf-8|\"utf-8\"))?",
+            content_type,
+            re.IGNORECASE,
+        ) is None:
+            self._send_simple_error(415, "Content-Type must be application/json")
             return False
-        try:
-            cl = int(cl_raw)
-        except ValueError:
-            self._send_simple_error(400, "Content-Length must be a non-negative integer")
+        lengths = self._validated_content_lengths(required=True)
+        if lengths is None:
             return False
-        if cl < 0:
-            self._send_simple_error(400, "Content-Length must be a non-negative integer")
-            return False
+        cl = lengths[0]
         if cl > _cfg.MAX_JSON_BODY_BYTES:
             self._send_simple_error(413, "Request body too large")
             return False
@@ -627,19 +661,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
         """Route-aware body enforcement for POST routes.
         Bodyless action routes skip content checks; JSON-required routes
         delegate to _enforce_json_content.  Returns True if OK."""
-        if self.headers.get("Transfer-Encoding"):
+        if self._header_values("Transfer-Encoding"):
             self._send_simple_error(400, "Transfer-Encoding is not supported")
             return False
         bodyless = parsed_path in self._BODYLESS_POST_ROUTES or bool(
             re.fullmatch(r"/v1/background/proposals/[^/]+/(approve|reject)", parsed_path)
         )
         if bodyless:
-            raw = self.headers.get("Content-Length", "0") or "0"
-            try:
-                length = int(raw)
-            except ValueError:
-                self._send_simple_error(400, "Content-Length must be a non-negative integer")
+            lengths = self._validated_content_lengths(required=False)
+            if lengths is None:
                 return False
+            length = lengths[0]
             if length != 0:
                 self._send_simple_error(400, "This action does not accept a request body")
                 return False
@@ -863,14 +895,34 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._cached_json = result
             return result
         try:
-            body = self.rfile.read(content_length).decode("utf-8")
+            raw_body = self.rfile.read(content_length)
+            if len(raw_body) != content_length:
+                result = (None, "Request body ended before Content-Length")
+                self._cached_json = result
+                return result
+            body = raw_body.decode("utf-8")
         except UnicodeDecodeError:
             result = (None, "Request body must be UTF-8 JSON")
             self._cached_json = result
             return result
         try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
+            def strict_object(pairs):
+                output = {}
+                for key, value in pairs:
+                    if key in output:
+                        raise ValueError("duplicate JSON member")
+                    output[key] = value
+                return output
+
+            def reject_constant(_value):
+                raise ValueError("non-standard JSON constant")
+
+            data = json.loads(
+                body,
+                object_pairs_hook=strict_object,
+                parse_constant=reject_constant,
+            )
+        except (json.JSONDecodeError, ValueError, RecursionError):
             result = (None, "Invalid JSON")
             self._cached_json = result
             return result
@@ -1939,7 +1991,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             subprocess.Popen(
                 ["xdg-open", target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                env=_cfg.child_process_env(),
+                env=_cfg.child_process_env(profile="gui"),
             )
             self._json_response(200, {"opened": True, "file": requested_name})
         except Exception as e:
@@ -2198,14 +2250,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 da_pyautogui = True
             except ImportError:
                 pass
-        da_ydotool = shutil.which("ydotool") is not None
-        da_computer_use = shutil.which("computer-use-linux") is not None
         report["subsystems"]["desktop_agent"] = {
             "module_loaded": da_module,
             "pyautogui_available": da_pyautogui,
             "display_available": da_display,
-            "ydotool_available": da_ydotool,
-            "computer_use_linux_available": da_computer_use,
+            "capability": "allowlisted_gui_launch_only",
         }
         if da_module and not da_display:
             report["blockers"].append("No DISPLAY or WAYLAND_DISPLAY set. Desktop agent requires a graphical session.")
@@ -2268,7 +2317,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             node_version = subprocess.check_output(
                 ["node", "--version"], stderr=subprocess.DEVNULL, timeout=5,
-                env=_cfg.child_process_env(),
+                env=_cfg.child_process_env(profile="base"),
             ).decode().strip()
         except Exception:
             pass
@@ -2555,7 +2604,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         """Return the persisted front-end MCP selection (secrets stripped) so the
         UI can restore its configuration when the Electron file:// localStorage
         has been cleared across an app rebuild or restart."""
-        self._json_response(200, {"mcp_servers": _load_persisted_mcp_config()})
+        mcp_servers, _rejected = _cfg.mcp_config_for_egress(
+            _load_persisted_mcp_config(), _st.egress_mode
+        )
+        self._json_response(200, {"mcp_servers": mcp_servers})
 
     def _telemetry_report(self):
         """Return recent telemetry events plus aggregate latency/behavior stats.
@@ -2605,14 +2657,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         """Accept a privacy-safe cognition timing record from the front end and
         fold it into the same telemetry log. Only known numeric/label fields are
         kept; any unexpected or oversized values are dropped/clipped."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
-            self._json_response(400, {"error": {"message": "Empty request body"}})
-            return
-        try:
-            data = json.loads(self.rfile.read(content_length).decode("utf-8"))
-        except (json.JSONDecodeError, ValueError):
-            self._json_response(400, {"error": {"message": "Invalid JSON"}})
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
             return
         if not isinstance(data, dict):
             self._json_response(400, {"error": {"message": "Body must be an object"}})
@@ -2954,19 +3001,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "- When the user shares something worth remembering, acknowledge it. The system saves it automatically.\n"
             "- Do NOT call any save/ingest tool — the reflection system handles persistence.\n\n"
             "TOOLS:\n"
-            "- Browser agent: emit [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<url>\"}[[/EVA_BROWSER]]\n"
+            "- Browser agent: request one isolated public-browser run with a mandatory closed marker and deterministic postcondition when known: [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<public url>\",\"postcondition\":{\"type\":\"browser.url_match\",\"origin\":\"<public origin>\",\"path\":\"/expected\"}}[[/EVA_BROWSER]]\n"
             "- Webcam vision: emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]\n"
-            "- Desktop control: emit [[EVA_DESKTOP]]{\"goal\":\"<task>\"}[[/EVA_DESKTOP]]\n"
+            "- Desktop control is launch-only: [[EVA_DESKTOP]]{\"goal\":\"open <app>\",\"postcondition\":{\"type\":\"desktop.process_spawned\",\"executable\":\"<allowlisted binary>\",\"state\":\"started\"}}[[/EVA_DESKTOP]]\n"
             "- Signal message: emit [[EVA_SIGNAL]]{\"message\":\"<text>\"}[[/EVA_SIGNAL]]\n"
             "- Image placeholder: write [Image of <description>] on its own line (up to 3 per response)\n"
             "- Downloadable file: write the file, then end with [[EVA_FILE]] <filename.ext>\n\n"
             "RULES:\n"
-            "- Act first, explain second. Do the task — don't list manual steps for the user.\n"
-            "- Write ONE short sentence announcing what you're about to do before emitting a marker.\n"
-            "- Only confirm an action after it actually ran and returned.\n"
+            "- A marker requests a run; Electron displays and authorizes the complete launch spec, then every effect requires a separate approval.\n"
+            "- Emit at most one browser or desktop marker per response, always with its closing marker.\n"
+            "- Only claim success for a typed causal tool-verified postcondition outcome. Model done and step limits are not success.\n"
             "- Never fabricate news, stock prices, weather, or events. Use [Data Retrieved] or say you don't have it.\n"
             "- Screenshot vs camera: [[EVA_DESKTOP]] sees the monitor; [[EVA_LOOK]] sees the physical world.\n"
-            "- For purchases or irreversible actions, stop at the final step and ask the user to confirm.\n"
+            "- Browser raw keyboard/shortcuts and all desktop pointer, keyboard, shell, arguments, window focus, and arbitrary file-open control are unavailable.\n"
             "- When asked your model: check [Runtime] and answer from there only.\n"
             "- Use the context below naturally as your own knowledge.\n\n"
         )
@@ -4074,16 +4121,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _memory_reflect(self):
         """Trigger post-response reflection for non-ACP models (browser calls this after getting a response)."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
-            self._json_response(400, {"error": {"message": "Empty request body"}})
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
             return
-
-        body = self.rfile.read(content_length).decode("utf-8")
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            self._json_response(400, {"error": {"message": "Invalid JSON"}})
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Body must be an object"}})
             return
 
         user_msg = data.get("user_message", "")
@@ -4119,16 +4162,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(403, {"error": {"message": "/v1/kusto/seed is only available on localhost-bound bridges"}})
             return
 
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
-            self._json_response(400, {"error": {"message": "Empty request body"}})
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
             return
-
-        body = self.rfile.read(content_length).decode("utf-8")
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            self._json_response(400, {"error": {"message": "Invalid JSON"}})
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Body must be an object"}})
             return
 
         cluster_url = str(data.get("cluster_url", "")).strip()
@@ -4464,6 +4503,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if err:
             self._json_response(400, {"error": {"message": err}})
             return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        allowed = {
+            "goal", "openai_api_key", "vision_model", "use_director", "autonomy",
+            "max_steps", "start_url", "headless", "postcondition", "launch_capability",
+        }
+        unknown = sorted(set(data) - allowed)
+        if unknown:
+            self._json_response(400, {
+                "error": {"message": "Unsupported field(s): " + ", ".join(unknown)}
+            })
+            return
+        if "use_director" in data and not isinstance(data["use_director"], bool):
+            self._json_response(400, {"error": {"message": "use_director must be a boolean"}})
+            return
+        if "headless" in data and not isinstance(data["headless"], bool):
+            self._json_response(400, {"error": {"message": "headless must be a boolean"}})
+            return
         if _BROWSER_AGENT is None:
             self._json_response(503, {"error": {"message": "Browser agent module not loaded"}})
             return
@@ -4473,19 +4531,30 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 detail + ". Install with: python3 -m pip install --user --break-system-packages "
                 "playwright && python3 -m playwright install chromium"}})
             return
+        try:
+            validate_launch_capability(
+                data.get("launch_capability"), "browser", data,
+                _st.bridge_auth_token,
+            )
+            signed_spec = launch_spec("browser", data)
+        except ActionRunValidationError as exc:
+            self._json_response(403, {"error": {"message": str(exc)}})
+            return
         api_key = _set_openai_key_from(data)
-        use_director = data.get("use_director", True)
+        use_director = signed_spec["use_director"]
         director = self._make_director() if use_director else None
         try:
             status = _BROWSER_AGENT.start_run(
-                goal=(data.get("goal") or "").strip(),
+                goal=signed_spec["goal"],
                 api_key=api_key,
-                vision_model=(data.get("vision_model") or None),
+                vision_model=signed_spec["vision_model"],
                 director=director,
-                autonomy=(data.get("autonomy") or "pause"),
-                max_steps=data.get("max_steps", 25),
-                start_url=(data.get("start_url") or ""),
-                headless=bool(data.get("headless", False)),
+                use_director=signed_spec["use_director"],
+                autonomy=signed_spec["autonomy"],
+                max_steps=signed_spec["max_steps"],
+                start_url=signed_spec["start_url"],
+                headless=signed_spec["headless"],
+                postcondition=signed_spec["postcondition"],
             )
         except Exception as e:
             self._json_response(400, {"error": {"message": str(e)}})
@@ -4530,19 +4599,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if err:
             self._json_response(400, {"error": {"message": err}})
             return
-        run_id = (data.get("run_id") or "").strip()
-        ok = bool(_BROWSER_AGENT) and _BROWSER_AGENT.resolve(
-            run_id, approve=bool(data.get("approve", True)), text=(data.get("text") or ""))
-        self._json_response(200 if ok else 404, {"ok": ok})
+        self._agent_gate_resolve(_BROWSER_AGENT, data)
 
     def _browser_cancel(self):
         data, err = self._read_json_body()
         if err:
             self._json_response(400, {"error": {"message": err}})
             return
-        run_id = (data.get("run_id") or "").strip()
-        ok = bool(_BROWSER_AGENT) and _BROWSER_AGENT.cancel(run_id)
-        self._json_response(200 if ok else 404, {"ok": ok})
+        self._agent_cancel(_BROWSER_AGENT, data)
 
     # ── Desktop agent (computer use) ──────────────────────────────────
     def _make_desktop_director(self):
@@ -4554,8 +4618,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         def director(goal, state):
             prompt = (
                 "You are the director for a desktop automation agent. You plan; a "
-                "separate vision model looks at the screen, launches apps, clicks, "
-                "and types.\n"
+                "separate vision model may launch one allowlisted GUI application and "
+                "verify its exact live process. Pointer, keyboard, shell, arguments, "
+                "window focus, and arbitrary file opening are unavailable.\n"
                 f"User goal: {goal}\n"
                 f"Current state: {state}\n"
                 "Reply with ONE short imperative subgoal (a single sentence) for the "
@@ -4579,6 +4644,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if err:
             self._json_response(400, {"error": {"message": err}})
             return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        allowed = {
+            "goal", "openai_api_key", "vision_model", "use_director", "autonomy",
+            "max_steps", "postcondition", "launch_capability",
+        }
+        unknown = sorted(set(data) - allowed)
+        if unknown:
+            self._json_response(400, {
+                "error": {"message": "Unsupported field(s): " + ", ".join(unknown)}
+            })
+            return
+        if "use_director" in data and not isinstance(data["use_director"], bool):
+            self._json_response(400, {"error": {"message": "use_director must be a boolean"}})
+            return
         if _DESKTOP_AGENT is None:
             self._json_response(503, {"error": {"message": "Desktop agent module not loaded"}})
             return
@@ -4587,17 +4668,28 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(503, {"error": {"message":
                 detail + ". Install with: python3 -m pip install --user --break-system-packages pyautogui"}})
             return
+        try:
+            validate_launch_capability(
+                data.get("launch_capability"), "desktop", data,
+                _st.bridge_auth_token,
+            )
+            signed_spec = launch_spec("desktop", data)
+        except ActionRunValidationError as exc:
+            self._json_response(403, {"error": {"message": str(exc)}})
+            return
         api_key = _set_openai_key_from(data)
-        use_director = data.get("use_director", True)
+        use_director = signed_spec["use_director"]
         director = self._make_desktop_director() if use_director else None
         try:
             status = _DESKTOP_AGENT.start_run(
-                goal=(data.get("goal") or "").strip(),
+                goal=signed_spec["goal"],
                 api_key=api_key,
-                vision_model=(data.get("vision_model") or None),
+                vision_model=signed_spec["vision_model"],
                 director=director,
-                autonomy=(data.get("autonomy") or "pause"),
-                max_steps=data.get("max_steps", 25),
+                use_director=signed_spec["use_director"],
+                autonomy=signed_spec["autonomy"],
+                max_steps=signed_spec["max_steps"],
+                postcondition=signed_spec["postcondition"],
             )
         except Exception as e:
             self._json_response(400, {"error": {"message": str(e)}})
@@ -4642,19 +4734,81 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if err:
             self._json_response(400, {"error": {"message": err}})
             return
-        run_id = (data.get("run_id") or "").strip()
-        ok = bool(_DESKTOP_AGENT) and _DESKTOP_AGENT.resolve(
-            run_id, approve=bool(data.get("approve", True)), text=(data.get("text") or ""))
-        self._json_response(200 if ok else 404, {"ok": ok})
+        self._agent_gate_resolve(_DESKTOP_AGENT, data)
+
+    def _agent_gate_resolve(self, agent, data):
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        kind = data.get("kind")
+        allowed = (
+            {"run_id", "gate_id", "kind", "decision"}
+            if kind == "approval" else
+            {"run_id", "gate_id", "kind", "decision"}
+            if kind == "input" and "decision" in data else
+            {"run_id", "gate_id", "kind", "text"}
+            if kind == "input" else set()
+        )
+        if not allowed or set(data) != allowed:
+            self._json_response(400, {
+                "error": {"message": "A complete approval or input gate decision is required"}
+            })
+            return
+        run_id = data.get("run_id")
+        gate_id = data.get("gate_id")
+        if (
+            not isinstance(run_id, str)
+            or re.fullmatch(r"[0-9a-f]{16}", run_id) is None
+            or not isinstance(gate_id, str)
+            or re.fullmatch(r"[0-9a-f]{32}", gate_id) is None
+        ):
+            self._json_response(400, {"error": {"message": "run_id or gate_id is invalid"}})
+            return
+        if agent is None:
+            self._json_response(503, {"error": {"message": "Agent module not loaded"}})
+            return
+        ok, reason = agent.resolve(
+            run_id,
+            gate_id=gate_id,
+            kind=kind,
+            decision=data.get("decision") if "decision" in data else None,
+            text=data.get("text") if kind == "input" and "text" in data else None,
+        )
+        if ok:
+            self._json_response(200, {"ok": True})
+            return
+        status = 404 if reason == "unknown_run" else 400 if reason.startswith("invalid") else 409
+        self._json_response(status, {"ok": False, "error": {"message": reason}})
 
     def _desktop_cancel(self):
         data, err = self._read_json_body()
         if err:
             self._json_response(400, {"error": {"message": err}})
             return
-        run_id = (data.get("run_id") or "").strip()
-        ok = bool(_DESKTOP_AGENT) and _DESKTOP_AGENT.cancel(run_id)
-        self._json_response(200 if ok else 404, {"ok": ok})
+        self._agent_cancel(_DESKTOP_AGENT, data)
+
+    def _agent_cancel(self, agent, data):
+        if not isinstance(data, dict) or set(data) != {"run_id"}:
+            self._json_response(400, {
+                "error": {"message": "Cancellation requires exactly one run_id"}
+            })
+            return
+        run_id = data.get("run_id")
+        if not isinstance(run_id, str) or re.fullmatch(r"[0-9a-f]{16}", run_id) is None:
+            self._json_response(400, {"error": {"message": "run_id is invalid"}})
+            return
+        if agent is None:
+            self._json_response(503, {"error": {"message": "Agent module not loaded"}})
+            return
+        ok, state = agent.cancel(run_id)
+        if not ok:
+            self._json_response(404 if state == "unknown_run" else 409, {
+                "ok": False, "state": state,
+            })
+            return
+        self._json_response(202 if state == "cancellation_pending" else 200, {
+            "ok": True, "state": state,
+        })
 
     # -- Camera presence sensor ("Eva's eyes") -----------------------------
     def _camera_start(self):
@@ -5103,7 +5257,10 @@ def main():
     parser.add_argument("--copilot-path", default="copilot", help="Path to copilot CLI binary")
     parser.add_argument("--cwd", default=os.getcwd(), help="Working directory for ACP session")
     parser.add_argument("--model", default=None, help="Default AI model (e.g. claude-sonnet-4.6, gpt-5.2)")
-    parser.add_argument("--mcp-config", default=None, help="Path to MCP config JSON file or inline JSON")
+    parser.add_argument(
+        "--mcp-config", default=None,
+        help="Approved-preset MCP config JSON path or inline JSON",
+    )
     parser.add_argument("--enable-azure-mcp", action="store_true", help="Enable Azure MCP Server (requires az login)")
     parser.add_argument("--enable-github-mcp", action="store_true", help="Enable GitHub MCP Server (requires GITHUB_PERSONAL_ACCESS_TOKEN env)")
     parser.add_argument("--enable-kusto-mcp", action="store_true", help="Enable Kusto MCP Server (DeviceCodeCredential, no subscription needed)")
@@ -5125,12 +5282,6 @@ def main():
     # Build MCP config
     mcp_config = {}
     mcp_config_source = args.mcp_config
-    # Auto-discover mcp.json from project root when no explicit --mcp-config
-    if not mcp_config_source:
-        auto_path = os.path.join(_cfg.PROJECT_ROOT, "mcp.json")
-        if os.path.isfile(auto_path):
-            mcp_config_source = auto_path
-            print(f"[Bridge] Auto-discovered MCP config: {auto_path}")
     if mcp_config_source:
         try:
             if os.path.isfile(mcp_config_source):
@@ -5241,11 +5392,13 @@ def main():
                 cached_cluster = _load_cached_kusto_cluster()
                 if cached_cluster:
                     # Validate the cached cluster URL with a lightweight query
+                    _st.active_kusto_cluster = cached_cluster
                     test_rows = _kusto_query_direct(cached_cluster, "Eva", ".show databases", is_mgmt=True)
                     if test_rows is not None:
                         kusto_env["KUSTO_CLUSTER_URL"] = cached_cluster
                         print(f"[Bridge] Kusto cluster restored and validated from cache")
                     else:
+                        _st.active_kusto_cluster = ""
                         print(f"[Bridge] Cached Kusto cluster failed validation, ignoring")
                 else:
                     print(f"[Bridge] No cached Kusto cluster URL (pass --kusto-cluster once to seed)")
@@ -5357,8 +5510,14 @@ def main():
     print(f"  POST /v1/kusto/seed         - Apply Eva Kusto schema seed")
     print(f"  POST /v1/browser/run        - Start a vision browser agent run")
     print(f"  GET  /v1/browser/status     - Poll a browser agent run")
+    print(f"  GET  /v1/browser/screenshot - Fetch retained browser screenshot")
     print(f"  POST /v1/browser/confirm    - Approve/answer a parked browser run")
     print(f"  POST /v1/browser/cancel     - Cancel a browser agent run")
+    print(f"  POST /v1/desktop/run        - Start a bounded desktop agent run")
+    print(f"  GET  /v1/desktop/status     - Poll a desktop agent run")
+    print(f"  GET  /v1/desktop/screenshot - Fetch retained desktop screenshot")
+    print(f"  POST /v1/desktop/confirm    - Approve/answer a parked desktop run")
+    print(f"  POST /v1/desktop/cancel     - Cancel a desktop agent run")
     print(f"  GET  /v1/files/<name>       - Download a generated artifact")
     print(f"  POST /v1/files/purge        - Delete all artifacts")
     print(f"  GET  /v1/doctor             - Structured readiness report")

@@ -2,11 +2,7 @@
 
 import json
 import os
-import re
-import sys
-import threading
 import time
-import urllib.parse
 from bridge import config as _cfg
 from bridge import state as _st
 
@@ -152,12 +148,34 @@ def _is_kusto_schema_block(block):
 
 def _normalize_kusto_cluster_url(cluster_url):
     """Normalize a Kusto cluster URL for policy comparisons."""
-    return str(cluster_url or "").strip().rstrip("/").lower()
+    try:
+        return _cfg.normalize_kusto_origin(cluster_url)
+    except ValueError:
+        return ""
 
 
 
 def _same_kusto_cluster(left, right):
-    return _normalize_kusto_cluster_url(left) == _normalize_kusto_cluster_url(right)
+    normalized_left = _normalize_kusto_cluster_url(left)
+    normalized_right = _normalize_kusto_cluster_url(right)
+    return bool(normalized_left and normalized_left == normalized_right)
+
+
+def _locked_kusto_origin(cluster_url):
+    try:
+        normalized = _cfg.normalize_kusto_origin(cluster_url)
+    except ValueError:
+        return ""
+    active = _normalize_kusto_cluster_url(_st.active_kusto_cluster)
+    if not active or normalized != active:
+        return ""
+    return normalized
+
+
+def _direct_kusto_session(requests_module):
+    session = requests_module.Session()
+    session.trust_env = False
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +277,11 @@ class _MSALSilentCredential:
 def _kusto_query_direct(cluster_url, database, query, is_mgmt=False):
     """Execute a Kusto query directly (bypasses MCP). Returns text result or None on error."""
     # global statement removed — writes go to _st.*
-    if _st.egress_mode != "cloud" or not _st.kusto_token_cache:
+    cluster_url = _locked_kusto_origin(cluster_url)
+    if (
+        _st.egress_mode != "cloud" or not _st.kusto_token_cache
+        or not cluster_url
+    ):
         return None
     import requests as _requests_mod
     endpoint = "mgmt" if is_mgmt else "query"
@@ -270,9 +292,14 @@ def _kusto_query_direct(cluster_url, database, query, is_mgmt=False):
     # Retry up to 3 times with fresh sessions for transient SSL errors
     for attempt in range(3):
         try:
-            session = _requests_mod.Session()
-            resp = session.post(url, json=payload, headers=headers, timeout=15)
-            session.close()
+            session = _direct_kusto_session(_requests_mod)
+            try:
+                resp = session.post(
+                    url, json=payload, headers=headers, timeout=15,
+                    allow_redirects=False,
+                )
+            finally:
+                session.close()
             if resp.status_code == 200:
                 data = resp.json()
                 tables = data.get("Tables", [])
@@ -319,8 +346,11 @@ def _short_kusto_error(value):
 def _kusto_query_with_error(cluster_url, database, query, is_mgmt=False):
     """Execute a Kusto query and return (rows, error_text) for seed diagnostics."""
     # global statement removed — writes go to _st.*
+    cluster_url = _locked_kusto_origin(cluster_url)
     if _st.egress_mode != "cloud":
         return None, f"Kusto disabled by EVA_EGRESS_MODE={_st.egress_mode}"
+    if not cluster_url:
+        return None, "Kusto cluster origin is invalid or not active"
     if not _st.kusto_token_cache:
         return None, "Kusto token is not available"
     import requests as _requests_mod
@@ -331,9 +361,14 @@ def _kusto_query_with_error(cluster_url, database, query, is_mgmt=False):
 
     for attempt in range(3):
         try:
-            session = _requests_mod.Session()
-            resp = session.post(url, json=payload, headers=headers, timeout=15)
-            session.close()
+            session = _direct_kusto_session(_requests_mod)
+            try:
+                resp = session.post(
+                    url, json=payload, headers=headers, timeout=15,
+                    allow_redirects=False,
+                )
+            finally:
+                session.close()
             if resp.status_code == 200:
                 try:
                     data = resp.json()
@@ -412,7 +447,11 @@ def _canonical_kusto_ingest_string(value):
 def _kusto_ingest_direct(cluster_url, database, table, columns, rows_data):
     """Ingest data directly into Kusto via .ingest inline."""
     # global statement removed — writes go to _st.*
-    if _st.egress_mode != "cloud" or not _st.kusto_token_cache:
+    cluster_url = _locked_kusto_origin(cluster_url)
+    if (
+        _st.egress_mode != "cloud" or not _st.kusto_token_cache
+        or not cluster_url
+    ):
         return False
 
     table_columns = _get_table_columns(cluster_url, database, table)
@@ -461,9 +500,14 @@ def _kusto_ingest_direct(cluster_url, database, table, columns, rows_data):
 
     for attempt in range(3):
         try:
-            session = _requests_mod.Session()
-            resp = session.post(url, json={"csl": cmd, "db": database}, headers=headers, timeout=15)
-            session.close()
+            session = _direct_kusto_session(_requests_mod)
+            try:
+                resp = session.post(
+                    url, json={"csl": cmd, "db": database}, headers=headers,
+                    timeout=15, allow_redirects=False,
+                )
+            finally:
+                session.close()
             if resp.status_code == 200:
                 # Check for errors in the response body (Kusto returns 200 even on ingest parse errors)
                 try:
@@ -511,14 +555,16 @@ def _get_kusto_config():
         return None, None
     kusto_cfg = _st.acp_client.mcp_config.get("kusto-mcp-server", {})
     env = kusto_cfg.get("env", {})
-    cluster = env.get("KUSTO_CLUSTER_URL", "") or _st.active_kusto_cluster
+    cluster = _normalize_kusto_cluster_url(
+        env.get("KUSTO_CLUSTER_URL", "") or _st.active_kusto_cluster
+    )
     if _kusto_database_locked:
         db = _get_locked_kusto_database()
     else:
         db = env.get("KUSTO_DATABASE", "") or _st.active_kusto_db
     if not db and not _kusto_database_locked:
         db = "Eva"
-    return cluster, db
+    return (cluster or None), db
 
 
 
@@ -535,7 +581,13 @@ def _capture_active_kusto_env(mcp_config):
     kusto_cfg = (mcp_config or {}).get("kusto-mcp-server", {})
     env = kusto_cfg.get("env", {}) if isinstance(kusto_cfg, dict) else {}
     _st.active_kusto_db = str(env.get("KUSTO_DATABASE", "") or os.environ.get("KUSTO_DATABASE", "")).strip()
-    _st.active_kusto_cluster = str(env.get("KUSTO_CLUSTER_URL", "") or os.environ.get("KUSTO_CLUSTER_URL", "")).strip()
+    raw_cluster = str(
+        env.get("KUSTO_CLUSTER_URL", "")
+        or os.environ.get("KUSTO_CLUSTER_URL", "")
+    ).strip()
+    _st.active_kusto_cluster = _normalize_kusto_cluster_url(raw_cluster)
+    if raw_cluster and not _st.active_kusto_cluster:
+        print("[Bridge] Ignoring invalid Kusto cluster origin")
     # Persist / restore cluster URL from local cache file
     if _st.active_kusto_cluster:
         _persist_kusto_cluster(_st.active_kusto_cluster)
@@ -550,11 +602,18 @@ def _capture_active_kusto_env(mcp_config):
 def _persist_kusto_cluster(cluster_url):
     """Save the Kusto cluster URL to a local cache file for future startups."""
     try:
+        normalized = _cfg.normalize_kusto_origin(cluster_url)
         os.makedirs(os.path.dirname(_KUSTO_CLUSTER_CACHE_PATH), exist_ok=True)
-        with open(_KUSTO_CLUSTER_CACHE_PATH, "w") as f:
-            f.write(cluster_url.strip())
-    except OSError:
-        pass
+        descriptor = os.open(
+            _KUSTO_CLUSTER_CACHE_PATH,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(normalized)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 
@@ -564,9 +623,8 @@ def _load_cached_kusto_cluster():
         if os.path.isfile(_KUSTO_CLUSTER_CACHE_PATH):
             with open(_KUSTO_CLUSTER_CACHE_PATH) as f:
                 url = f.read().strip()
-            if url and url.startswith("https://"):
-                return url
-    except OSError:
+            return _cfg.normalize_kusto_origin(url)
+    except (OSError, ValueError):
         pass
     return ""
 

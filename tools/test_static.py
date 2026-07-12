@@ -10,6 +10,7 @@ Usage:
 import json
 import os
 import re
+import subprocess
 import sys
 import importlib.util
 
@@ -138,6 +139,7 @@ def test_python_syntax():
                  "tools/test_phase2.py", "tools/test_phase2_runtime.py",
                  "tools/test_phase2_consolidation.py",
                  "tools/test_phase3.py",
+                 "tools/test_action_plane.py",
                  "tools/test_static.py"]
     # Include all bridge package files
     bridge_dir = "tools/bridge"
@@ -156,6 +158,67 @@ def test_python_syntax():
         except SyntaxError as e:
             report(f"python_syntax:{py}", False, str(e))
 
+def test_no_tracked_runtime_data_or_bytecode():
+    """Runtime snapshots and Python caches must never enter source control/package."""
+    result = subprocess.run(
+        ["git", "ls-files", "*.data", "*/__pycache__/*", "*.pyc", "*.pyo"],
+        capture_output=True, text=True, check=True,
+    )
+    tracked = [
+        line for line in result.stdout.splitlines()
+        if line.strip() and os.path.lexists(line)
+    ]
+    report(
+        "no_tracked_runtime_data_or_bytecode", not tracked,
+        "tracked forbidden runtime files: " + ", ".join(tracked) if tracked else "",
+    )
+    with open("standalone/package.json") as handle:
+        package = json.load(handle)
+    filters = package["build"]["extraResources"][0]["filter"]
+    for pattern in ("!**/__pycache__/**", "!**/*.pyc", "!**/*.pyo"):
+        report(
+            f"package_excludes:{pattern}", pattern in filters,
+            f"missing package exclusion {pattern}" if pattern not in filters else "",
+        )
+
+
+def test_action_capability_guidance_current():
+    paths = (
+        "core/js/cognition.js", "tools/bridge/cognition.py",
+        "tools/bridge/core.py", "tools/sqlite_memory.py", "tools/eva_seed.kql",
+        "docs/index.html", "README.md", "README-2.md",
+    )
+    stale = re.compile(
+        r"mouse/keyboard|mouse and keyboard|drives the real mouse|clicks, and types|"
+        r"focus that Chrome|xdg-open or the system file handler|purchase/irreversible|"
+        r"opens apps automatically|only pauses for|auto-learns|"
+        r"pauses for confirmation on purchases|operate any application|"
+        r"pointer actions are advertised|Autonomous browser control \(Playwright \+ CDP\)",
+        re.IGNORECASE,
+    )
+    for path in paths:
+        with open(path) as handle:
+            content = handle.read()
+        match = stale.search(content)
+        report(
+            f"action_guidance_no_stale_authority:{path}", match is None,
+            f"stale phrase: {match.group(0)}" if match else "",
+        )
+    required = {
+        "core/js/cognition.js": ("launch-only", "postcondition", "every click"),
+        "tools/bridge/cognition.py": ("desktop-control: launch-only", "postcondition"),
+        "tools/bridge/core.py": ("Desktop control is launch-only", "postcondition"),
+        "tools/sqlite_memory.py": ("Desktop control is launch-only", '"Status": "disabled"'),
+        "tools/eva_seed.kql": ("Desktop control is launch-only", "seed,disabled"),
+    }
+    for path, needles in required.items():
+        with open(path) as handle:
+            content = handle.read()
+        for needle in needles:
+            report(
+                f"action_guidance_required:{path}:{needle}", needle in content,
+                f"missing current guidance: {needle}" if needle not in content else "",
+            )
 
 def test_artifact_filename_validation():
     """Generated artifact filenames accept only safe local names."""
@@ -521,7 +584,11 @@ def main():
     sections = [
         ("File Integrity", [test_required_files, test_no_secrets_committed]),
         ("Config Safety", [test_config_example_clean, test_no_hardcoded_keys]),
-        ("Python Integrity", [test_python_syntax, test_artifact_filename_validation]),
+        ("Python Integrity", [
+            test_python_syntax, test_no_tracked_runtime_data_or_bytecode,
+            test_artifact_filename_validation,
+        ]),
+        ("Action Capability Guidance", [test_action_capability_guidance_current]),
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
         ("HTML Model Selector", [test_model_selector]),
         ("JS Routing Functions", [test_js_routing_functions]),

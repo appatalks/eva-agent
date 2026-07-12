@@ -1,19 +1,306 @@
 """Bridge domain: acp_client."""
 
 import json
+import math
 import os
+import platform
 import re
+import shutil
+import stat
 import subprocess
-import sys
+import tempfile
 import threading
 import time
 from bridge import config as _cfg
 from bridge import state as _st
 from bridge.kusto import _inject_kusto_token
+from bridge.sensitive import redact_credentials
 from bridge.telemetry import _telemetry_emit
 
 _ACP_POOL_MAX = _cfg.ACP_POOL_MAX
 _ARTIFACTS_DIR = _cfg.ARTIFACTS_DIR
+_COPILOT_PREFLIGHT = {}
+_COPILOT_PREFLIGHT_LOCK = threading.Lock()
+_COPILOT_REQUIRED_FLAGS = (
+    "--acp", "--disable-builtin-mcps", "--no-bash-env",
+    "--no-custom-instructions", "--no-remote", "--no-remote-export",
+)
+
+
+def _parse_jsonc(text):
+    if not isinstance(text, str) or len(text) > 2 * 1024 * 1024:
+        raise RuntimeError("Copilot auth config is invalid")
+    output = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            output.append(char)
+            index += 1
+            continue
+        if char == "/" and next_char == "/":
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            continue
+        if char == "/" and next_char == "*":
+            index += 2
+            while index + 1 < len(text) and text[index:index + 2] != "*/":
+                if text[index] in "\r\n":
+                    output.append(text[index])
+                index += 1
+            if index + 1 >= len(text):
+                raise RuntimeError("Copilot auth config has an unterminated comment")
+            index += 2
+            continue
+        output.append(char)
+        index += 1
+    if in_string:
+        raise RuntimeError("Copilot auth config has an unterminated string")
+
+    stripped = "".join(output)
+    output = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(stripped):
+        char = stripped[index]
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            output.append(char)
+            index += 1
+            continue
+        if char == ",":
+            lookahead = index + 1
+            while lookahead < len(stripped) and stripped[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(stripped) and stripped[lookahead] in "}]":
+                index += 1
+                continue
+        output.append(char)
+        index += 1
+    try:
+        value = json.loads("".join(output))
+    except (json.JSONDecodeError, RecursionError) as exc:
+        raise RuntimeError("Copilot auth config is invalid") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("Copilot auth config must be an object")
+    return value
+
+
+def _safe_auth_value(value, *, depth=0, budget=None):
+    if budget is None:
+        budget = [0]
+    budget[0] += 1
+    if depth > 8 or budget[0] > 2048:
+        raise RuntimeError("Copilot auth state is too complex")
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise RuntimeError("Copilot auth state contains a non-finite number")
+        return value
+    if isinstance(value, str):
+        if "\x00" in value or len(value) > 16384:
+            raise RuntimeError("Copilot auth state contains invalid text")
+        return value
+    if isinstance(value, list):
+        if len(value) > 128:
+            raise RuntimeError("Copilot auth state list is too large")
+        return [
+            _safe_auth_value(item, depth=depth + 1, budget=budget)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        if len(value) > 128:
+            raise RuntimeError("Copilot auth state object is too large")
+        result = {}
+        for key, item in value.items():
+            if (
+                not isinstance(key, str) or not key or "\x00" in key
+                or len(key) > 256 or key in ("__proto__", "constructor", "prototype")
+            ):
+                raise RuntimeError("Copilot auth state key is invalid")
+            result[key] = _safe_auth_value(
+                item, depth=depth + 1, budget=budget
+            )
+        return result
+    raise RuntimeError("Copilot auth state contains unsupported data")
+
+
+def _auth_projection(source_path):
+    try:
+        info = os.stat(source_path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RuntimeError("Copilot authentication config is unavailable") from exc
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_mode & 0o077
+        or hasattr(os, "getuid") and info.st_uid != os.getuid()
+    ):
+        raise RuntimeError("Copilot authentication config is not owner-only")
+    try:
+        with open(source_path, encoding="utf-8") as handle:
+            source = _parse_jsonc(handle.read())
+    except OSError as exc:
+        raise RuntimeError("Copilot authentication config is unreadable") from exc
+    projection = {
+        "disableAllHooks": True,
+        "trustedFolders": [],
+        "ide": {"autoConnect": False},
+        "bashEnv": False,
+    }
+    for key in ("lastLoggedInUser", "loggedInUsers", "schemaVersion"):
+        if key in source:
+            projection[key] = _safe_auth_value(source[key])
+    return projection
+
+
+def _trusted_executable(path):
+    candidate = path
+    if not os.path.isabs(candidate):
+        candidate = shutil.which(candidate, path=_cfg._fixed_child_path()) or ""
+    candidate = os.path.realpath(candidate) if candidate else ""
+    if not candidate:
+        raise RuntimeError("Copilot CLI executable was not found on the trusted path")
+    try:
+        info = os.stat(candidate)
+    except OSError as exc:
+        raise RuntimeError("Copilot CLI executable is unavailable") from exc
+    owners = {0}
+    if hasattr(os, "getuid"):
+        owners.add(os.getuid())
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid not in owners
+        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or not info.st_mode & stat.S_IXUSR
+    ):
+        raise RuntimeError("Copilot CLI executable is not trusted")
+    parent = os.path.dirname(candidate)
+    while parent and parent != "/":
+        parent_info = os.stat(parent)
+        if parent_info.st_uid not in owners or parent_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise RuntimeError("Copilot CLI executable parent is not trusted")
+        parent = os.path.dirname(parent)
+    return candidate
+
+
+def _platform_copilot_candidate(loader):
+    if os.path.basename(loader) != "npm-loader.js":
+        return loader
+    system = {"Linux": "linux", "Darwin": "darwin"}.get(platform.system())
+    machine = {"x86_64": "x64", "AMD64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine())
+    if not system or not machine:
+        raise RuntimeError("Copilot CLI platform is unsupported")
+    return os.path.join(
+        os.path.dirname(loader), "node_modules",
+        f"@github/copilot-{system}-{machine}", "copilot",
+    )
+
+
+def _resolve_and_preflight_copilot(path):
+    loader = _trusted_executable(path)
+    executable = _trusted_executable(_platform_copilot_candidate(loader))
+    try:
+        identity = (executable, os.stat(executable).st_mtime_ns, os.stat(executable).st_size)
+    except OSError as exc:
+        raise RuntimeError("Copilot CLI executable changed during validation") from exc
+    with _COPILOT_PREFLIGHT_LOCK:
+        if _COPILOT_PREFLIGHT.get(identity):
+            return executable
+    env = _cfg.child_process_env(profile="acp")
+    try:
+        version = subprocess.run(
+            [executable, "--version"], capture_output=True, text=True,
+            timeout=10, env=env, cwd="/",
+        )
+        help_result = subprocess.run(
+            [executable, "--help"], capture_output=True, text=True,
+            timeout=10, env=env, cwd="/",
+        )
+        contained_help = subprocess.run(
+            [
+                executable, "--acp", "--stdio", "--disable-builtin-mcps",
+                "--no-bash-env", "--no-custom-instructions", "--no-remote",
+                "--no-remote-export", "--help",
+            ],
+            capture_output=True, text=True, timeout=10, env=env, cwd="/",
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("Copilot CLI preflight failed") from exc
+    help_text = (help_result.stdout or "") + (help_result.stderr or "")
+    version_text = (version.stdout or "") + (version.stderr or "")
+    match = re.search(r"\b(\d+)\.(\d+)\.(\d+)(?:[-.]\d+)?\b", version_text)
+    if (
+        version.returncode != 0 or help_result.returncode != 0
+        or contained_help.returncode != 0 or not match
+        or tuple(int(part) for part in match.groups()) < (1, 0, 0)
+        or any(flag not in help_text for flag in _COPILOT_REQUIRED_FLAGS)
+    ):
+        raise RuntimeError("Copilot CLI does not satisfy the ACP containment contract")
+    with _COPILOT_PREFLIGHT_LOCK:
+        _COPILOT_PREFLIGHT[identity] = True
+    return executable
+
+
+def _inherited_disabled_mcp_names(home=None):
+    names = {"computer-use-linux"}
+    home = home or os.environ.get("COPILOT_HOME") or os.path.expanduser("~/.copilot")
+    path = os.path.join(home, "mcp-config.json")
+    try:
+        size = os.path.getsize(path)
+    except FileNotFoundError:
+        return tuple(sorted(names))
+    except OSError as exc:
+        raise RuntimeError(
+            "Copilot MCP config could not be inspected safely"
+        ) from exc
+    if size > 1024 * 1024:
+        raise RuntimeError("Copilot MCP config is too large to inspect safely")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError, TypeError, RecursionError) as exc:
+        raise RuntimeError(
+            "Copilot MCP config could not be inspected safely"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise RuntimeError("Copilot MCP config must be an object")
+    servers = raw.get("mcpServers", raw)
+    if not isinstance(servers, dict):
+        raise RuntimeError("Copilot MCP server config must be an object")
+    for name in servers:
+        names.add(str(name))
+    return tuple(sorted(names))
 
 class ACPClient:
     """Manages the copilot --acp --stdio subprocess and ACP JSON-RPC protocol."""
@@ -40,38 +327,111 @@ class ACPClient:
         # Terminal authority remains disabled until the complete ACP terminal
         # contract is implemented behind Eva's capability broker.
         self._terminal_allowed = False
+        self._source_copilot_home = (
+            os.environ.get("COPILOT_HOME") or os.path.expanduser("~/.copilot")
+        )
+        self._runtime_dir = None
+        self._runtime_home = None
+        self._runtime_os_home = None
+        self._runtime_cwd = None
+
+    def _prepare_isolated_runtime(self):
+        if self._runtime_dir:
+            return
+        os.makedirs(_ARTIFACTS_DIR, mode=0o700, exist_ok=True)
+        root = tempfile.mkdtemp(prefix="copilot-acp-", dir=_ARTIFACTS_DIR)
+        os.chmod(root, 0o700)
+        runtime_home = os.path.join(root, "home")
+        runtime_os_home = os.path.join(root, "os-home")
+        runtime_cwd = os.path.join(root, "workspace")
+        os.mkdir(runtime_home, 0o700)
+        os.mkdir(runtime_os_home, 0o700)
+        os.mkdir(runtime_cwd, 0o700)
+
+        auth_config = os.path.join(self._source_copilot_home, "config.json")
+        try:
+            projection = _auth_projection(auth_config)
+            if projection is not None:
+                output_path = os.path.join(runtime_home, "config.json")
+                descriptor = os.open(
+                    output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    json.dump(projection, handle, sort_keys=True, separators=(",", ":"))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+        except Exception:
+            shutil.rmtree(root, ignore_errors=True)
+            raise
+
+        self._runtime_dir = root
+        self._runtime_home = runtime_home
+        self._runtime_os_home = runtime_os_home
+        self._runtime_cwd = runtime_cwd
+
+    def _cleanup_isolated_runtime(self):
+        root = self._runtime_dir
+        self._runtime_dir = None
+        self._runtime_home = None
+        self._runtime_os_home = None
+        self._runtime_cwd = None
+        if root:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def _session_mcp_servers(self):
+        servers = []
+        for name, cfg in self.mcp_config.items():
+            env = []
+            for key, value in sorted((cfg.get("env") or {}).items()):
+                if str(key).startswith("_"):
+                    continue
+                if not isinstance(value, str):
+                    raise RuntimeError("MCP environment values must be strings")
+                env.append({"name": str(key), "value": value})
+            servers.append({
+                "name": name,
+                "command": cfg["command"],
+                "args": list(cfg["args"]),
+                "env": env,
+            })
+        return servers
 
     # --- Lifecycle ---
 
     def start(self):
         """Spawn copilot subprocess, initialize ACP, create session."""
-        cmd = [self.copilot_path, "--acp", "--stdio"]
+        safe_mcp, rejected_mcp = _cfg.mcp_config_for_egress(
+            self.mcp_config, _st.egress_mode
+        )
+        if rejected_mcp:
+            raise RuntimeError(
+                "MCP process policy rejected server(s): "
+                + ", ".join(sorted(rejected_mcp))
+            )
+        self.mcp_config = safe_mcp
+        if os.name == "nt":
+            raise RuntimeError(
+                "ACP MCP isolation is unavailable on Windows in this release"
+            )
+        inherited_names = _inherited_disabled_mcp_names(
+            self._source_copilot_home
+        )
+        executable = _resolve_and_preflight_copilot(self.copilot_path)
+        self._prepare_isolated_runtime()
+        cmd = [
+            executable, "--acp", "--stdio", "--disable-builtin-mcps",
+            "--no-bash-env",
+            "--no-custom-instructions", "--no-remote", "--no-remote-export",
+        ]
+        for server_name in inherited_names:
+            cmd.extend(["--disable-mcp-server", server_name])
         if self.model:
             cmd.extend(["--model", self.model])
-        # Pass MCP server config via --additional-mcp-config
-        if self.mcp_config:
-            # Secrets are inherited through the scrubbed child environment, not
-            # serialized into argv where process listings can expose them.
-            cli_config = {}
-            for name, raw in self.mcp_config.items():
-                cfg = dict(raw) if isinstance(raw, dict) else {}
-                cfg.pop("env", None)
-                cli_config[name] = cfg
-            mcp_json = json.dumps({"mcpServers": cli_config})
-            cmd.extend(["--additional-mcp-config", mcp_json])
         try:
-            # Pass env vars from MCP config to the copilot process itself
-            # (copilot spawns MCP servers as children, inheriting the env)
-            os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
-            explicit_env = {}
-            for srv_name, srv_cfg in self.mcp_config.items():
-                for k, v in srv_cfg.get('env', {}).items():
-                    if k == "EVA_BRIDGE_TOKEN":
-                        continue
-                    # subprocess.Popen env requires all values to be strings
-                    explicit_env[k] = str(v) if not isinstance(v, str) else v
-            process_env = _cfg.child_process_env(explicit_env)
+            process_env = _cfg.child_process_env(profile="acp")
             process_env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
+            process_env["COPILOT_HOME"] = self._runtime_home
+            process_env["HOME"] = self._runtime_os_home
 
             self.process = subprocess.Popen(
                 cmd,
@@ -79,13 +439,18 @@ class ACPClient:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,
-                env=process_env
+                env=process_env,
+                cwd=self._runtime_cwd,
             )
         except FileNotFoundError:
+            self._cleanup_isolated_runtime()
             raise RuntimeError(
                 f"Copilot CLI not found at '{self.copilot_path}'. "
                 "Install it (https://github.com/github/copilot-cli) and authenticate with 'copilot auth login'."
             )
+        except Exception:
+            self._cleanup_isolated_runtime()
+            raise
 
         self.alive = True
 
@@ -117,14 +482,13 @@ class ACPClient:
                   f"(protocol v{init_result.get('protocolVersion', '?')})")
             print(f"[ACP] Capabilities: {json.dumps(caps, indent=2)}")
         else:
-            print(f"[ACP] Warning: initialize returned: {init_result}")
+            self.stop()
+            raise RuntimeError("Copilot ACP initialize failed")
 
         # Create session — pass MCP servers via ACP session/new if configured
-        mcp_servers_for_session = []
-        # Note: MCP servers are typically passed via CLI --additional-mcp-config
-        # but we also pass them in session/new for full ACP compliance
+        mcp_servers_for_session = self._session_mcp_servers()
         session_result = self._send_request("session/new", {
-            "cwd": self.cwd,
+            "cwd": self._runtime_cwd,
             "mcpServers": mcp_servers_for_session
         }, timeout=30)
 
@@ -132,7 +496,8 @@ class ACPClient:
             self.session_id = session_result["sessionId"]
             print(f"[ACP] Session created: {self.session_id}")
         else:
-            print(f"[ACP] Warning: session/new returned: {session_result}")
+            self.stop()
+            raise RuntimeError("Copilot ACP session creation failed")
 
     def stop(self):
         """Shut down the copilot subprocess."""
@@ -146,6 +511,7 @@ class ACPClient:
                 self.process.wait(timeout=5)
             except Exception:
                 self.process.kill()
+        self._cleanup_isolated_runtime()
 
     # --- JSON-RPC Communication ---
 
@@ -257,7 +623,7 @@ class ACPClient:
                     msg = json.loads(line)
                     self._handle_message(msg)
                 except json.JSONDecodeError:
-                    print(f"[ACP] Non-JSON line: {line[:200]}")
+                    print(f"[ACP] Non-JSON line: {redact_credentials(line[:200])}")
             except Exception as e:
                 print(f"[ACP] Reader error: {e}")
                 break
@@ -269,7 +635,8 @@ class ACPClient:
                 line = self.process.stderr.readline()
                 if not line:
                     break
-                print(f"[Copilot stderr] {line.decode('utf-8', errors='replace').rstrip()}")
+                text = line.decode("utf-8", errors="replace").rstrip()
+                print(f"[Copilot stderr] {redact_credentials(text)}")
             except Exception:
                 break
 
@@ -378,110 +745,16 @@ class ACPClient:
     # --- Terminal handlers (for ACP tool execution) ---
 
     def _handle_terminal_create(self, rid, params):
-        """Execute a command requested by the agent (shell=False, cwd-constrained)."""
-        command = params.get("command", "")
-        args = params.get("args", [])
-        cwd = params.get("cwd") or self.cwd
-        env_vars = params.get("env", [])
-
-        # Validate command and args are strings
-        if not isinstance(command, str) or not command.strip():
-            self._send_response(rid, {"error": {"code": -32602, "message": "command must be a non-empty string"}})
-            return
-        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-            self._send_response(rid, {"error": {"code": -32602, "message": "args must be a list of strings"}})
-            return
-
-        # Constrain cwd under the configured ACP cwd
-        if not isinstance(cwd, str):
-            cwd = self.cwd
-        real_cwd = os.path.realpath(cwd)
-        allowed_base = os.path.realpath(self.cwd)
-        if not (real_cwd == allowed_base or real_cwd.startswith(allowed_base + os.sep)):
-            print(f"[ACP Terminal] DENIED: cwd {cwd!r} outside allowed base {self.cwd!r}")
-            self._send_response(rid, {"error": {"code": -32602, "message": "cwd outside allowed base directory"}})
-            return
-
-        argv = [command] + args
-        print(f"[ACP Terminal] Creating executable={os.path.basename(command)!r} argc={len(args)}")
-
-        # Build environment
-        explicit_env = {}
-        for ev in env_vars:
-            if isinstance(ev, dict) and "name" in ev and "value" in ev:
-                name = str(ev["name"])
-                if name != "EVA_BRIDGE_TOKEN":
-                    explicit_env[name] = str(ev["value"])
-        env = _cfg.child_process_env(explicit_env)
-        os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
-        env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
-
-        import uuid
-        terminal_id = str(uuid.uuid4())
-
-        try:
-            proc = subprocess.Popen(
-                argv,
-                shell=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                cwd=real_cwd,
-                env=env
-            )
-            self.terminals[terminal_id] = {"process": proc, "output": ""}
-
-            # Read output in background
-            def read_output():
-                try:
-                    out, _ = proc.communicate(timeout=60)
-                    self.terminals[terminal_id]["output"] = out.decode("utf-8", errors="replace")
-                    self.terminals[terminal_id]["exit_code"] = proc.returncode
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    out, _ = proc.communicate()
-                    self.terminals[terminal_id]["output"] = out.decode("utf-8", errors="replace") + "\n[TIMEOUT]"
-                    self.terminals[terminal_id]["exit_code"] = -1
-
-            t = threading.Thread(target=read_output, daemon=True)
-            t.start()
-
-            self._send_response(rid, {"terminalId": terminal_id})
-            print(f"[ACP Terminal] Started: {terminal_id}")
-
-        except Exception as e:
-            print(f"[ACP Terminal] Error: {e}")
-            self._send_response(rid, {"error": {"code": -32000, "message": str(e)}})
+        """Terminal execution is unavailable until brokered."""
+        self._send_error_response(rid, -32601, "Terminal capability is disabled")
 
     def _handle_terminal_output(self, rid, params):
-        """Return terminal output and exit status."""
-        terminal_id = params.get("terminalId", "")
-        term = self.terminals.get(terminal_id)
-
-        if not term:
-            self._send_response(rid, {"error": {"code": -32000, "message": "Unknown terminal"}})
-            return
-
-        proc = term["process"]
-        # Never block the sole ACP reader; the output worker updates the record.
-        output = term.get("output", "")
-        exit_code = term.get("exit_code", proc.returncode)
-
-        print(f"[ACP Terminal] Output ({terminal_id[:8]}): exit={exit_code}, len={len(output)}")
-
-        self._send_response(rid, {
-            "output": output,
-            "exitCode": exit_code if exit_code is not None else -1,
-            "isRunning": proc.poll() is None
-        })
+        """Terminal output is unavailable until brokered."""
+        self._send_error_response(rid, -32601, "Terminal capability is disabled")
 
     def _handle_terminal_release(self, rid, params):
-        """Release a terminal."""
-        terminal_id = params.get("terminalId", "")
-        term = self.terminals.pop(terminal_id, None)
-        if term and term["process"].poll() is None:
-            term["process"].kill()
-        print(f"[ACP Terminal] Released: {terminal_id[:8] if terminal_id else '?'}")
-        self._send_response(rid, {})
+        """Terminal release is unavailable until brokered."""
+        self._send_error_response(rid, -32601, "Terminal capability is disabled")
 
     # --- Public API ---
 

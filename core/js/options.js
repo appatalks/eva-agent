@@ -897,8 +897,6 @@ async function runDoctor() {
       lines.push('MCP servers: ' + (ss.mcp.configured || []).join(', ') || 'none');
     }
     if (ss.desktop_agent) {
-      if (ss.desktop_agent.computer_use_linux_available) lines.push('computer-use-linux: installed');
-      if (ss.desktop_agent.ydotool_available) lines.push('ydotool: available');
     }
     if (b.length) {
       lines.push('');
@@ -1203,6 +1201,11 @@ function _agentEnvelopeCurrent(capturedEnvelope) {
   );
 }
 
+function _isVerifiedAgentSuccess(status) {
+  return typeof EvaActionOutcomes !== 'undefined' &&
+    EvaActionOutcomes.isVerifiedSuccess(status);
+}
+
 function _evaAgentFeedback(status, endpoint, title, capturedEnvelope) {
   if (!_agentEnvelopeCurrent(capturedEnvelope) || !status) return;
   // Clear the progress-narration throttle so the completion line is never
@@ -1210,30 +1213,48 @@ function _evaAgentFeedback(status, endpoint, title, capturedEnvelope) {
   try { if (typeof _agentProgress !== 'undefined') { _agentProgress.last = 0; _agentProgress.lastText = ''; } } catch (_) {}
   var label = (title || 'task').replace(/ Agent$/, '').toLowerCase();
   var goal = String(status.goal || '').trim();
-  var state = status.status;
+  var outcome = (status.outcome && typeof status.outcome === 'object')
+    ? status.outcome : null;
+  var state = (typeof EvaActionOutcomes !== 'undefined')
+    ? EvaActionOutcomes.displayState(status)
+    : (outcome && outcome.state);
+  if (state === 'indeterminate' && outcome && outcome.state === 'succeeded') {
+    outcome = { state: state, reason: 'invalid_success_proof' };
+  }
+  if (!state) {
+    // Legacy lifecycle status is not evidence. Preserve accurate failure/abort
+    // wording, but never infer success from legacy `done`.
+    if (status.status === 'error') state = 'failed';
+    else if (status.status === 'cancelled') state = 'aborted';
+    else if (status.status === 'done') state = 'indeterminate';
+    else return;
+    outcome = { state: state, reason: 'legacy_unverified_status' };
+  }
   var spoken;     // natural, spoken/chat-facing sentence
   var memory;     // factual note for the conversation history
 
-  if (state === 'done') {
+  if (state === 'succeeded') {
     var res = String(status.result || '').trim();
-    // Distinguish a real completion from a user-declined sensitive action.
-    if (/^Stopped: user declined/i.test(res)) {
+    var detail = res || 'The requested postcondition was verified.';
+    spoken = /^(done|finished|all done|okay)/i.test(detail) ? detail : ('Verified. ' + detail);
+    memory = 'Desktop/browser agent verified success' + (goal ? ' for "' + goal + '"' : '') + '. Result: ' + detail + '.';
+  } else if (state === 'aborted') {
+    var why = String(outcome.reason || 'aborted');
+    if (why === 'budget_exhausted') {
+      spoken = 'I reached the action limit and stopped without claiming success' + (goal ? ' on ' + goal : '') + '.';
+    } else if (why === 'user_denied' || why === 'launch_not_authorized') {
       spoken = 'Okay, I held off' + (goal ? ' on ' + goal : '') + '.';
-      memory = 'Desktop/browser agent stopped: the user declined the action' + (goal ? ' for "' + goal + '"' : '') + '.';
     } else {
-      // Lead with a clear completion signal so the user knows she is finished,
-      // then the specifics from the agent's summary.
-      var detail = res || ('I finished' + (goal ? ' ' + goal : '') + '.');
-      spoken = /^(done|finished|all done|okay)/i.test(detail) ? detail : ('All done. ' + detail);
-      memory = 'Desktop/browser agent finished' + (goal ? ' "' + goal + '"' : '') + '. Result: ' + (res || 'completed') + '.';
+      spoken = 'I stopped the ' + label + ' before completion was verified' + (goal ? ' for ' + goal : '') + '.';
     }
-  } else if (state === 'cancelled') {
-    spoken = 'I stopped the ' + label + ' before finishing' + (goal ? ' ' + goal : '') + '.';
-    memory = 'Desktop/browser agent was cancelled' + (goal ? ' for "' + goal + '"' : '') + ' before completing.';
-  } else if (state === 'error') {
+    memory = 'Desktop/browser agent aborted' + (goal ? ' for "' + goal + '"' : '') + '. Reason: ' + why + '.';
+  } else if (state === 'failed') {
     var err = String(status.error || 'an unknown error').trim();
     spoken = 'I ran into a problem and could not finish' + (goal ? ' ' + goal : '') + ': ' + err + '.';
     memory = 'Desktop/browser agent failed' + (goal ? ' on "' + goal + '"' : '') + '. Error: ' + err + '.';
+  } else if (state === 'indeterminate') {
+    spoken = 'I stopped the ' + label + ', but I could not independently verify the result' + (goal ? ' for ' + goal : '') + '.';
+    memory = 'Desktop/browser agent ended with an indeterminate outcome' + (goal ? ' for "' + goal + '"' : '') + '. No verified success was recorded.';
   } else {
     return;
   }
@@ -1289,15 +1310,8 @@ function _evaAgentFeedback(status, endpoint, title, capturedEnvelope) {
     }
   } catch (_) {}
 
-  // 5) Auto-learn: when a complex task completes successfully, extract a reusable skill.
-  if (state === 'done' && goal && typeof autoLearnSkill === 'function') {
-    if (!_agentEnvelopeCurrent(capturedEnvelope)) return;
-    try {
-      var hist = JSON.parse(localStorage.getItem('aigMessages') || '[]');
-      var recent = Array.isArray(hist) ? hist.slice(-10) : [];
-      autoLearnSkill(recent, goal, capturedEnvelope);
-    } catch (_) {}
-  }
+  // Learning remains an explicit, separately user-attested Phase 3 boundary.
+  // Agent completion never invokes legacy auto-learning or Phase 3 reporting.
 }
 
 // Render + speak the result of an Eva "look" (webcam vision). Mirrors the agent
@@ -1338,7 +1352,10 @@ function _evaCameraLookResult(desc) {
 // it), and _agentConfirm is armed so the user's next message is interpreted as
 // the answer (yes/no, or free text) and routed to the agent rather than sent as
 // a normal turn.
-var _agentConfirm = { pending: false, needsText: false, envelope: null, _timeout: null };
+var _agentConfirm = {
+  pending: false, needsText: false, gateId: null, expiresAt: null,
+  envelope: null, _timeout: null
+};
 
 // Narrate agent progress so the user knows Eva is working and not stuck. Eva
 // speaks/prints a short status when the plan changes, throttled so it does not
@@ -1348,6 +1365,8 @@ function _resetAgentInteractionState() {
   if (_agentConfirm._timeout) clearTimeout(_agentConfirm._timeout);
   _agentConfirm.pending = false;
   _agentConfirm.needsText = false;
+  _agentConfirm.gateId = null;
+  _agentConfirm.expiresAt = null;
   _agentConfirm.envelope = null;
   _agentConfirm._timeout = null;
   _agentProgress.last = 0;
@@ -1391,9 +1410,15 @@ function _evaAgentConfirmAsk(question, needsText, status, capturedEnvelope) {
   if (!_agentEnvelopeCurrent(capturedEnvelope)) return;
   _agentConfirm.pending = true;
   _agentConfirm.needsText = !!needsText;
+  _agentConfirm.gateId = status && status.approval_request && status.approval_request.gate_id;
+  _agentConfirm.expiresAt = status && status.approval_request && status.approval_request.expires_at;
   _agentConfirm.envelope = capturedEnvelope;
   // Auto-cancel after 60s so a stale confirm doesn't block voice forever.
   if (_agentConfirm._timeout) clearTimeout(_agentConfirm._timeout);
+  var expiryMs = Date.parse(_agentConfirm.expiresAt || '');
+  var timeoutMs = Number.isFinite(expiryMs)
+    ? Math.max(0, Math.min(60000, expiryMs - Date.now() - 250))
+    : 0;
   _agentConfirm._timeout = setTimeout(function() {
     if (!_agentEnvelopeCurrent(capturedEnvelope)) {
       _resetAgentInteractionState();
@@ -1403,21 +1428,15 @@ function _evaAgentConfirmAsk(question, needsText, status, capturedEnvelope) {
       console.warn('[AgentConfirm] Auto-cancelling after 60s timeout');
       _agentConfirm.pending = false;
       _agentConfirm.needsText = false;
-      // Best-effort decline the parked agent. Ignore errors (run may be stale).
+      // Browser and desktop share one controller; send exactly one bound answer.
       try {
         if (typeof EvaBrowser !== 'undefined' && EvaBrowser &&
             typeof EvaBrowser.isAwaitingConfirm === 'function' && EvaBrowser.isAwaitingConfirm()) {
-          EvaBrowser.answerConfirm(false, '');
-        }
-      } catch (_) {}
-      try {
-        if (typeof EvaDesktop !== 'undefined' && EvaDesktop &&
-            typeof EvaDesktop.isAwaitingConfirm === 'function' && EvaDesktop.isAwaitingConfirm()) {
-          EvaDesktop.answerConfirm(false, '');
+          EvaBrowser.answerConfirm(false, '', _agentConfirm.gateId);
         }
       } catch (_) {}
     }
-  }, 60000);
+  }, timeoutMs);
   var q = String(question || 'Should I continue?').trim();
   var txtOutput = document.getElementById('txtOutput');
   if (txtOutput) {
@@ -1436,10 +1455,6 @@ function _evaAgentConfirmAsk(question, needsText, status, capturedEnvelope) {
   if (typeof lastResponse === 'string') lastResponse = q;
 }
 
-// Affirmative / negative phrase detection for the natural confirmation reply.
-var _AFFIRM_RE = /\b(yes|yep|yeah|yup|sure|ok|okay|confirm|confirmed|go ahead|do it|place (the )?order|buy it|proceed|approve|affirmative|please do)\b/i;
-var _NEGATE_RE = /\b(no|nope|nah|stop|cancel|don'?t|do not|decline|abort|never mind|nevermind|hold on|wait)\b/i;
-
 // If an agent confirmation is pending, interpret `text` as the answer and route
 // it to the agent. Returns true when the message was consumed (so the caller
 // should NOT send it as a normal chat turn).
@@ -1450,6 +1465,7 @@ function _maybeAnswerAgentConfirm(text) {
     return false;
   }
   var confirmationEnvelope = _agentConfirm.envelope;
+  var confirmationGateId = _agentConfirm.gateId;
   var active = (typeof EvaBrowser !== 'undefined' && EvaBrowser &&
                 typeof EvaBrowser.isAwaitingConfirm === 'function' && EvaBrowser.isAwaitingConfirm());
   if (!active) { _agentConfirm.pending = false; return false; }
@@ -1458,23 +1474,30 @@ function _maybeAnswerAgentConfirm(text) {
 
   // Free-text input request: pass the message straight through.
   if (_agentConfirm.needsText) {
+    if (/^\s*(cancel|stop|abort|never\s*mind|nevermind)\s*[.!]?\s*$/i.test(msg)) {
+      _agentConfirm.pending = false;
+      _agentConfirm.needsText = false;
+      EvaBrowser.answerConfirm(false, '', confirmationGateId);
+      _agentConfirmEcho(msg, 'no', confirmationEnvelope);
+      return true;
+    }
     _agentConfirm.pending = false;
     _agentConfirm.needsText = false;
-    EvaBrowser.answerConfirm(true, msg);
+    EvaBrowser.answerConfirm(true, msg, confirmationGateId);
     _agentConfirmEcho(msg, null, confirmationEnvelope);
     return true;
   }
 
-  var yes = _AFFIRM_RE.test(msg);
-  var no = _NEGATE_RE.test(msg);
-  // Ambiguous (neither or both): ask once more, keep the gate armed.
-  if (yes === no) {
+  var decision = (typeof EvaActionOutcomes !== 'undefined')
+    ? EvaActionOutcomes.classifyApprovalReply(msg) : 'ambiguous';
+  if (decision === 'ambiguous') {
     _agentConfirmEcho(msg, 'ambiguous', confirmationEnvelope);
     return true;
   }
   _agentConfirm.pending = false;
-  EvaBrowser.answerConfirm(yes, '');
-  _agentConfirmEcho(msg, yes ? 'yes' : 'no', confirmationEnvelope);
+  var approved = decision === 'approve';
+  EvaBrowser.answerConfirm(approved, '', confirmationGateId);
+  _agentConfirmEcho(msg, approved ? 'yes' : 'no', confirmationEnvelope);
   return true;
 }
 
@@ -1913,9 +1936,9 @@ function toggleAuthVis(btn) {
 
 // --- System Prompt Management ---
 var PERSONALITY_PRESETS = {
-  'default': "You are Eva, a personal AI assistant with persistent memory.\n\nIDENTITY:\n- Warm, curious, genuine. Speak like a thoughtful friend, not a corporate chatbot.\n- First person. Concise by default, detailed when asked.\n- Never open with \"Certainly!\", \"Of course!\", \"Absolutely!\", or \"Great question!\"\n- Never close with \"Let me know if you need anything else.\"\n\nMEMORY:\n- You have a persistent Knowledge database. Facts about the user are loaded in [Memory].\n- When the user shares something worth remembering, acknowledge it. The system saves it automatically.\n\nTOOLS:\n- Browser agent: emit [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<url>\"}[[/EVA_BROWSER]]\n- Webcam vision: emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]\n- Desktop control: emit [[EVA_DESKTOP]]{\"goal\":\"<task>\"}[[/EVA_DESKTOP]]\n- Signal message: emit [[EVA_SIGNAL]]{\"message\":\"<text>\"}[[/EVA_SIGNAL]]\n- Image placeholder: write [Image of <description>] on its own line\n- Downloadable file: write the file, then end with [[EVA_FILE]] <filename.ext>\n\nRULES:\n- Act first, explain second. Do the task, don't describe manual steps.\n- Never fabricate news, stock prices, or weather. Use [Data Retrieved] or say you don't have it.\n- Only confirm an action happened after it actually ran.\n- When asked about your model: check [Runtime] and answer from there only.",
-  'concise': "You are Eva, a personal AI assistant. Be brief. Answer directly without preamble.\n\nCAPABILITIES:\n- Persistent memory (facts in [Memory])\n- Live data via [Data Retrieved] (stocks, weather, news, markets)\n- Browser: [[EVA_BROWSER]]{\"goal\":\"...\",\"start_url\":\"...\"}[[/EVA_BROWSER]]\n- Webcam: [[EVA_LOOK]]{\"question\":\"...\"}[[/EVA_LOOK]]\n- Desktop: [[EVA_DESKTOP]]{\"goal\":\"...\"}[[/EVA_DESKTOP]]\n- Signal: [[EVA_SIGNAL]]{\"message\":\"...\"}[[/EVA_SIGNAL]]\n- Images: [Image of <description>]\n\nRULES:\n- Never fabricate data not in [Data Retrieved].\n- Act, don't describe steps.\n- One or two sentences unless detail is needed.",
-  'advanced': "You are Eva, a personal AI assistant with persistent memory, real-time data access, and full agent capabilities.\n\nIDENTITY:\n- Warm, curious, direct. Speak like a knowledgeable friend.\n- Never open with affirmations (\"Certainly!\", \"Of course!\", \"Absolutely!\").\n- Provide detailed, well-structured responses. Use lists where helpful.\n\nMEMORY:\n- Persistent Knowledge database. Tables: Knowledge, Conversations, EmotionState, MemorySummaries, SelfState, HeuristicsIndex, Reflections, EmotionBaseline, Goals.\n- Facts about the user are in [User Profile] and [Memory]. Cite what you actually remember.\n- The reflection system saves new facts automatically — do not call any save tool.\n\nTOOLS:\n- Browser agent: [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<url>\"}[[/EVA_BROWSER]]\n- Webcam vision: [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]\n- Desktop control: [[EVA_DESKTOP]]{\"goal\":\"<task>\"}[[/EVA_DESKTOP]]\n- Signal message: [[EVA_SIGNAL]]{\"message\":\"<text>\"}[[/EVA_SIGNAL]]\n- Images: write [Image of <description>] on its own line (up to 3 per response)\n- Downloadable file: write the file then end with [[EVA_FILE]] <filename.ext>\n\nRULES:\n- Never fabricate news, prices, weather, or events not in [Data Retrieved].\n- Act immediately — emit the marker, don't list manual steps.\n- Only confirm an action after the tool has run and returned.\n- When asked your model: check [Runtime] and answer from there only.\n- Screenshot vs camera: [[EVA_DESKTOP]] sees the monitor; [[EVA_LOOK]] sees the physical world. Never confuse them.",
+  'default': "You are Eva, a warm, concise personal AI assistant with persistent memory. Use [Memory], [User Profile], and [Data Retrieved] honestly. For one bounded public-browser task, emit one mandatory closed [[EVA_BROWSER]] marker and include a deterministic request postcondition when known. For desktop control, only an allowlisted GUI launch is available: use one mandatory closed [[EVA_DESKTOP]] marker with a desktop.process_spawned started postcondition. Electron authorizes the complete launch, and every browser effect or desktop launch requires a separate approval. Model done and step limits are not success; only a typed causal tool-verified postcondition outcome is success. Desktop pointer, keyboard, shell, arguments, window focus, and arbitrary file-open control are unavailable. Never emit browser and desktop markers together. Use [[EVA_LOOK]] for webcam vision, [[EVA_SIGNAL]] for requested Signal text, [Image of <description>] for images, and [[EVA_FILE]] <filename.ext> for a file that was actually created. Never fabricate live data or claim an action completed without the verified outcome. When asked your model, answer only from [Runtime].",
+  'concise': "You are Eva. Be direct and brief. Use memory and retrieved data accurately. Browser runs require one closed marker, native launch authorization, per-effect approval, and a deterministic postcondition for verified success. Desktop is allowlisted GUI launch-only with a process-start postcondition; pointer, keyboard, shell, arguments, window focus, and arbitrary file-open control are unavailable. Never treat model done or a step limit as success, and never emit multiple control markers.",
+  'advanced': "You are Eva, a detailed personal AI assistant with persistent memory and real-time data access. Use only registered capabilities. A browser marker requests one isolated public-browser run; include a deterministic URL or bounded element-state postcondition when known. A desktop marker requests only an allowlisted GUI launch with a desktop.process_spawned started postcondition. Electron displays and authorizes the exact launch specification, and every effect requires a separate one-use approval. Only a typed causal baseline-to-effect-to-tool-observation outcome is success. Model done, step limits, and unverified claims are not success. Desktop pointer, keyboard, shell, arguments, window focus, and arbitrary file-open control are unavailable. Never emit browser and desktop markers together. Never fabricate live data or report an action before its verified outcome.",
   'terminal': "I want you to act as a linux terminal. I will type commands and you will reply with what the terminal should show. I want you to only reply with the terminal output inside one unique code block, and nothing else. do not write explanations. do not type commands unless I instruct you to do so. when i need to tell you something in english, i will do so by putting text inside curly brackets {like this}. my first command is pwd"
 };
 
@@ -1947,6 +1970,7 @@ var _STALE_PRESETS = {
   'concise': "You are Eva. Capabilities: persistent memory, real-time data (stocks, weather, news, markets), web search, image generation, Kusto database queries, webcam vision (emit [[EVA_LOOK]]{\"question\":\"...\"}[[/EVA_LOOK]] to capture and describe a frame). Answer factual questions concisely. Use your tools to fetch live data when asked.",
   'advanced': "You are Eva, an intelligent AI assistant with full tool access. You can: retrieve live stock quotes and financial data, fetch weather/news/market/space weather feeds, search the web and retrieve information, generate and find images, query your Kusto persistent memory database (tables: Knowledge, Conversations, EmotionState, MemorySummaries, SelfState, HeuristicsIndex, Reflections, EmotionBaseline), and SEE through the user's webcam by emitting [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] to capture a frame and describe it. Do NOT claim you cannot access the camera. You remember the user across sessions. Provide detailed, well-structured responses with lists where applicable. Always attempt to use your tools before claiming inability."
 };
+var _STALE_ACTION_PROMPT_RE = /Browser agent:\s*emit|Desktop control:\s*emit|full agent capabilities|Act immediately\s*[—-]\s*emit the marker/i;
 
 function initSystemPrompt() {
   var txt = document.getElementById('txtSystemPrompt');
@@ -1964,6 +1988,10 @@ function initSystemPrompt() {
         migrated = true;
       }
     });
+    if (!migrated && /^You are Eva\b/i.test(trimmed) && _STALE_ACTION_PROMPT_RE.test(trimmed)) {
+      saved = PERSONALITY_PRESETS['default'];
+      localStorage.setItem('systemPrompt', saved);
+    }
     txt.value = saved;
     // Sync preset selector
     var sel = document.getElementById('selPers');
@@ -3403,9 +3431,6 @@ function _vvHideAssets() {
 // --- Voice recognition ---
 
 function _vvToggleListening() {
-  // Note: the desktop agent guard was removed because it also blocked the real
-  // user from clicking the orb after an agent task completed. The agent's
-  // pyautogui clicks are distinguished by EvaDesktop._isAgentClick() instead.
   if (_vv.recognition || _vv.whisperMode) {
     _vvStopListening();
   } else {
@@ -5726,35 +5751,12 @@ async function renderEvaResponse(content, txtOutput, capturedEnvelope) {
 
   // Detect Eva browser-agent launch marker:
   // [[EVA_BROWSER]]{"goal":"...","start_url":"..."}[[/EVA_BROWSER]]
-  var browserLaunch = null;
-  text = text.replace(/\[\[EVA_BROWSER\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_BROWSER\]\])?/g, function (full, json) {
-    if (!browserLaunch) {
-      try {
-        var parsed = JSON.parse(json);
-        if (parsed && parsed.goal) browserLaunch = parsed;
-      } catch (e) { /* ignore malformed block */ }
-    }
-    return browserLaunch ? '\n_Opening the browser agent…_\n' : '';
-  });
-  if (browserLaunch) {
-    text = text.replace(/\n{3,}/g, '\n\n').trim();
-  }
-
-  // Detect Eva desktop-agent launch marker:
-  // [[EVA_DESKTOP]]{"goal":"..."}[[/EVA_DESKTOP]]
-  var desktopLaunch = null;
-  text = text.replace(/\[\[EVA_DESKTOP\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_DESKTOP\]\])?/g, function (full, json) {
-    if (!desktopLaunch) {
-      try {
-        var parsed = JSON.parse(json);
-        if (parsed && parsed.goal) desktopLaunch = parsed;
-      } catch (e) { /* ignore malformed block */ }
-    }
-    return desktopLaunch ? '\n_Opening the desktop agent…_\n' : '';
-  });
-  if (desktopLaunch) {
-    text = text.replace(/\n{3,}/g, '\n\n').trim();
-  }
+  var controlMarkers = (typeof EvaAgentMarkers !== 'undefined')
+    ? EvaAgentMarkers.extractControlMarkers(text)
+    : { text: text, browser: null, desktop: null, conflict: false };
+  var browserLaunch = controlMarkers.browser;
+  var desktopLaunch = controlMarkers.desktop;
+  text = controlMarkers.text.replace(/\n{3,}/g, '\n\n').trim();
 
   // Detect Eva camera "look" marker:
   // [[EVA_LOOK]]{"question":"..."}[[/EVA_LOOK]]  (question optional)
@@ -6041,6 +6043,7 @@ async function renderEvaResponse(content, txtOutput, capturedEnvelope) {
       start_url: browserLaunch.start_url,
       vision_model: browserLaunch.vision_model,
       max_steps: browserLaunch.max_steps,
+      postcondition: browserLaunch.postcondition,
       onComplete: browserComplete,
       onConfirm: browserConfirm,
       onProgress: browserProgress
@@ -6064,6 +6067,7 @@ async function renderEvaResponse(content, txtOutput, capturedEnvelope) {
     EvaDesktop.launch(desktopLaunch.goal, {
       vision_model: desktopLaunch.vision_model,
       max_steps: desktopLaunch.max_steps,
+      postcondition: desktopLaunch.postcondition,
       onComplete: desktopComplete,
       onConfirm: desktopConfirm,
       onProgress: desktopProgress

@@ -7,6 +7,7 @@ const { pathToFileURL } = require('url');
 const { spawn } = require('child_process');
 const securityPolicy = require('./security-policy');
 const bridgeReadiness = require('./bridge-readiness');
+const launchCapability = require('./launch-capability');
 
 // Per-launch bearer token for bridge auth
 const bridgeToken = crypto.randomBytes(32).toString('base64url');
@@ -361,6 +362,40 @@ function createWindow(acpBaseUrl) {
     else { mainWindow.maximize(); }
   });
   ipcMain.on('win-close', function() { mainWindow.close(); });
+  ipcMain.removeHandler('eva-authorize-agent-launch');
+  ipcMain.handle('eva-authorize-agent-launch', async function(event, request) {
+    if (
+      event.sender !== mainWindow.webContents
+      || !request || typeof request !== 'object'
+      || (request.agent !== 'browser' && request.agent !== 'desktop')
+    ) {
+      return { authorized: false, error: 'invalid launch authorization request' };
+    }
+    let spec;
+    try {
+      spec = launchCapability.buildSpec(request.agent, request.specification, {
+        vision_model: process.env.OPENAI_VISION_MODEL || 'gpt-4o'
+      });
+    } catch (_) {
+      return { authorized: false, error: 'invalid launch specification' };
+    }
+    const choice = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: 'Authorize Eva agent run',
+      message: 'Start this bounded agent run?',
+      detail: launchCapability.displaySummary(request.agent, spec),
+      buttons: ['Cancel', 'Authorize run'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    });
+    if (choice.response !== 1) return { authorized: false };
+    return {
+      authorized: true,
+      capability: launchCapability.issue(bridgeToken, request.agent, spec),
+      specification: spec
+    };
+  });
 
   mainWindow.once('ready-to-show', function() {
     mainWindow.show();

@@ -12,6 +12,8 @@
   <!-- Optional local config override (prevents file:// fetch issues) -->
   <script src="config.local.js"></script>
   <!-- Scripts -->
+  <script src="core/js/agent-markers.js"></script>
+  <script src="core/js/action-outcomes.js"></script>
   <script src="core/js/options.js"></script> 
   <script src="core/js/external.js"></script>
   <script src="core/js/gpt-core.js"></script>
@@ -886,15 +888,6 @@
             <button type="button" id="mcpEnsureTablesButton" class="auth-toggle" style="margin-top:6px;width:100%;text-align:center" disabled>Create missing tables</button>
             <div id="mcpSeedStatus" class="mcp-status" aria-live="polite" style="margin-top:8px"></div>
           </div>
-        </div>
-
-        <div class="mcp-preset">
-          <label>
-            <input type="checkbox" id="mcpComputerUse"> <strong>Computer Use Linux (Desktop MCP)</strong>
-          </label>
-          <p class="prompt-hint">AT-SPI accessibility trees, screenshots, clicks, scrolls, keystrokes. Wayland-first, X11 fallback.<br>
-            Semantic selectors (role/name) instead of pixel coordinates. Replaces PyAutoGUI for desktop control.<br>
-            Install: <code>npm install -g @agent-sh/computer-use-linux</code> then <code>computer-use-linux setup</code></p>
         </div>
 
         <div id="mcpStatus" class="mcp-status"></div>

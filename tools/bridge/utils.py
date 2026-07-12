@@ -172,6 +172,7 @@ def _load_persisted_mcp_config():
                 data = json.load(f)
             if isinstance(data, dict):
                 safe = _sanitize_mcp_for_persist(data)
+                safe, _rejected = _cfg.mcp_config_for_egress(safe, "cloud")
                 if safe != data:
                     _persist_mcp_config(safe)
                 return safe

@@ -15,7 +15,6 @@ Runs as a stdio MCP server (JSON-RPC over stdin/stdout).
 
 import html
 import json
-import os
 import re
 import sys
 import urllib.error
@@ -26,6 +25,9 @@ _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+_SEARCH_HOSTS = frozenset({
+    "html.duckduckgo.com", "lite.duckduckgo.com", "www.google.com",
+})
 
 TOOLS = [
     {
@@ -93,35 +95,48 @@ TOOLS = [
         },
     },
 ]
+TOOLS = [tool for tool in TOOLS if tool.get("name") != "web_fetch"]
 
 
 # ---------------------------------------------------------------------------
 # DuckDuckGo search (HTML scraping, no API key)
 # ---------------------------------------------------------------------------
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _http_get(url, timeout=15):
-    """Fetch a URL and return (status, body_text)."""
+    """Fetch one fixed search-provider HTTPS URL without redirects."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return 0, "Error: invalid search URL"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _SEARCH_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.fragment
+    ):
+        return 0, "Error: search destination is not allowed"
     req = urllib.request.Request(url, headers={
         "User-Agent": _USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     })
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(req, timeout=timeout) as resp:
             # Read up to 512KB
             body = resp.read(512 * 1024)
             charset = resp.headers.get_content_charset() or "utf-8"
             # DuckDuckGo sometimes returns 202 with valid content
             return 200, body.decode(charset, errors="replace")
     except urllib.error.HTTPError as e:
-        # Some "errors" still have useful bodies (e.g. 202)
-        try:
-            body = e.read(512 * 1024)
-            charset = e.headers.get_content_charset() or "utf-8"
-            if len(body) > 500:
-                return 200, body.decode(charset, errors="replace")
-        except Exception:
-            pass
         return e.code, f"HTTP {e.code}: {e.reason}"
     except Exception as e:
         return 0, f"Error: {e}"
@@ -161,7 +176,7 @@ def _extract_readable(html_text, max_length=6000):
     text = _strip_html(html_text)
     # Remove nav-like short lines
     lines = text.split("\n")
-    content_lines = [l for l in lines if len(l.strip()) > 40]
+    content_lines = [line for line in lines if len(line.strip()) > 40]
     result = "\n".join(content_lines)
     return result[:max_length] if result else text[:max_length]
 
@@ -268,25 +283,8 @@ def ddg_news(query, max_results=8):
 
 
 def web_fetch(url, max_length=6000):
-    """Fetch a URL and return extracted text."""
-    max_length = min(max(100, max_length), 20000)
-    # Basic URL validation
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return {"error": "Only http/https URLs are supported"}
-    if not parsed.hostname:
-        return {"error": "Invalid URL"}
-
-    status, body = _http_get(url, timeout=20)
-    if status != 200:
-        return {"error": f"HTTP {status}", "body": body[:500]}
-
-    text = _extract_readable(body, max_length)
-    return {
-        "url": url,
-        "length": len(text),
-        "content": text,
-    }
+    """Arbitrary page retrieval is disabled until brokered DNS pinning exists."""
+    return {"error": "web_fetch is disabled by Eva's public-egress policy"}
 
 
 # ---------------------------------------------------------------------------

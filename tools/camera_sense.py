@@ -108,7 +108,7 @@ def start(device=None):
             [sys.executable, os.path.abspath(__file__),
              "--worker", "--device", str(dev), "--dir", _CAM_DIR],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=_bridge_config.child_process_env(),
+            env=_bridge_config.child_process_env(profile="camera"),
         )
         _proc_device = dev
         return _read_status()

@@ -39,8 +39,8 @@ operation does not require Copilot CLI.
 | | |
 |---|---|
 | **Camera vision** | Webcam presence sensing, face-detection auto-wake, on-demand "look" with gpt-4o |
-| **Browser agent** | Playwright-based DOM control, persistent Chrome login, hybrid vision fallback |
-| **Desktop agent** | PyAutoGUI mouse/keyboard control, optional AT-SPI via computer-use-linux MCP |
+| **Browser agent** | Isolated Playwright DOM/vision loop with DNS-pinned public egress, native launch authorization, per-action approval, and verified outcomes |
+| **Desktop agent** | Launch-only containment for curated root-owned GUI binaries; pointer, keyboard, shell, arguments, and window helpers remain broker-disabled |
 | **Voice interface** | Full-screen voice orb, wake/barge-in, TTS (OpenAI, Polly, Bark, browser) |
 | **Signal messaging** | Send-only text notifications via signal-cli, keyword-triggered or on-demand |
 | **Persistent memory** | Kusto/ADX or local SQLite, default-off shadow/hybrid claim recall, and human-approved evidence-linked consolidation proposals |
@@ -50,7 +50,7 @@ operation does not require Copilot CLI.
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |
 | **Multi-provider** | OpenAI, Google Gemini, GitHub Copilot, lm-studio (local) |
 | **Doctor diagnostics** | Structured readiness probe for every subsystem with actionable fixes |
-| **MCP ecosystem** | Azure, GitHub, Kusto, computer-use-linux desktop control |
+| **MCP ecosystem** | Azure, GitHub, and Kusto integrations; desktop-control MCP servers are release-disabled |
 | **Cognitive layer** | Eva + Reviewer dual-agent pipeline with configurable models |
 | **Explicit egress policy** | Cloud, local-network, or air-gapped offline operation with fail-closed routing |
 

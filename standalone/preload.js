@@ -15,5 +15,11 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   egressMode: readArg('eva-egress-mode') || 'cloud',
   minimize: function() { ipcRenderer.send('win-minimize'); },
   maximize: function() { ipcRenderer.send('win-maximize'); },
-  close: function() { ipcRenderer.send('win-close'); }
+  close: function() { ipcRenderer.send('win-close'); },
+  authorizeAgentLaunch: function(agent, specification) {
+    return ipcRenderer.invoke('eva-authorize-agent-launch', {
+      agent: agent,
+      specification: specification
+    });
+  }
 }));

@@ -424,8 +424,82 @@ function populateMCPForm(cfg) {
   if (kustoCheckL && kustoConfig) {
     kustoConfig.style.display = kustoCheckL.checked ? 'block' : 'none';
   }
-  var cuCheck = document.getElementById('mcpComputerUse');
-  if (cuCheck) cuCheck.checked = !!cfg['computer-use-linux'];
+}
+
+function sanitizeMCPConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return {};
+  function exactArray(actual, expected) {
+    return Array.isArray(actual) && actual.length === expected.length &&
+      actual.every(function(value, index) { return value === expected[index]; });
+  }
+  function safeEnv(raw, allowed) {
+    if (raw === undefined) return {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    var output = {};
+    var keys = Object.keys(raw);
+    for (var i = 0; i < keys.length; i += 1) {
+      var key = keys[i];
+      var value = raw[key];
+      if (allowed.indexOf(key) === -1) return null;
+      if (key === '_useGitHubPAT') {
+        if (value !== true) return null;
+      } else if (typeof value !== 'string' || value.indexOf('\0') !== -1 ||
+                 value.length > 16384) return null;
+      output[key] = value;
+    }
+    return output;
+  }
+  function exactServer(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) &&
+      Object.keys(value).every(function(key) {
+        return key === 'command' || key === 'args' || key === 'env';
+      }) && typeof value.command === 'string' && Array.isArray(value.args) &&
+      value.args.every(function(arg) { return typeof arg === 'string'; });
+  }
+  function pythonScript(value, basename) {
+    if (!exactServer(value)) return false;
+    var command = value.command.split(/[\\/]/).pop();
+    var script = value.args.length === 1
+      ? value.args[0].replace(/\\/g, '/') : '';
+    return /^python3(?:\.\d+)?$/.test(command) &&
+      (script === 'tools/' + basename || script.endsWith('/tools/' + basename));
+  }
+  var clean = {};
+  Object.keys(cfg).forEach(function(name) {
+    var value = cfg[name];
+    if (!exactServer(value)) return;
+    if (name === 'azure-mcp-server' && value.command === 'npx' &&
+        exactArray(value.args, ['-y', '@azure/mcp@latest', 'server', 'start'])) {
+      var azureEnv = safeEnv(value.env, ['AZURE_MCP_COLLECT_TELEMETRY']);
+      if (azureEnv !== null &&
+          (azureEnv.AZURE_MCP_COLLECT_TELEMETRY || 'false') === 'false') {
+        clean[name] = value;
+      }
+      return;
+    }
+    if (name === 'github-mcp-server' && value.command === 'docker' &&
+        exactArray(value.args, [
+          'run', '-i', '--rm', '-e', 'GITHUB_PERSONAL_ACCESS_TOKEN',
+          'ghcr.io/github/github-mcp-server'
+        ]) && safeEnv(value.env, [
+          '_useGitHubPAT', 'GITHUB_PERSONAL_ACCESS_TOKEN'
+        ]) !== null) {
+      clean[name] = value;
+      return;
+    }
+    if (name === 'kusto-mcp-server' && pythonScript(value, 'kusto_mcp.py') &&
+        safeEnv(value.env, [
+          'KUSTO_ACCESS_TOKEN', 'KUSTO_CLUSTER_URL', 'KUSTO_DATABASE',
+          'KUSTO_DATABASE_LOCKED'
+        ]) !== null) {
+      clean[name] = value;
+      return;
+    }
+    if ((name === 'sqlite' || name === 'sqlite-mcp-server' ||
+         name === 'eva-sqlite') && pythonScript(value, 'sqlite_mcp.py') &&
+        safeEnv(value.env, ['EVA_MEMORY_DB']) !== null) clean[name] = value;
+  });
+  return clean;
 }
 
 // Re-apply the saved MCP config to a freshly started bridge.
@@ -440,6 +514,8 @@ async function autoApplySavedMCPConfig() {
   } catch (e) {
     saved = null;
   }
+  saved = sanitizeMCPConfig(saved);
+  localStorage.setItem('mcp_config', JSON.stringify(saved));
 
   // localStorage lives under the Electron file:// origin and is wiped across some
   // app rebuilds/restarts. When it is empty, restore from the bridge's persisted
@@ -452,7 +528,7 @@ async function autoApplySavedMCPConfig() {
         var cfgData = await cfgResp.json();
         var restored = cfgData && cfgData.mcp_servers;
         if (restored && typeof restored === 'object' && Object.keys(restored).length > 0) {
-          saved = restored;
+          saved = sanitizeMCPConfig(restored);
           localStorage.setItem('mcp_config', JSON.stringify(saved));
           populateMCPForm(saved);
           try {
@@ -533,15 +609,6 @@ async function applyMCPConfig() {
       command: 'python3',
       args: ['tools/kusto_mcp.py'],
       env: kustoEnv
-    };
-  }
-
-  // Computer Use Linux MCP (AT-SPI desktop control)
-  var cuCheck = document.getElementById('mcpComputerUse');
-  if (cuCheck && cuCheck.checked) {
-    mcpServers['computer-use-linux'] = {
-      command: 'computer-use-linux',
-      args: ['mcp']
     };
   }
 

@@ -26,7 +26,7 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 - MCP tool access (Kusto, GitHub, Azure, web search) hot-reloadable at runtime
 - Persistent memory via Azure Data Explorer (Kusto) or local SQLite
 - Signal text messaging (send-only via signal-cli, keyword-triggered fallback for local models)
-- Autonomous browser control (Playwright + CDP) and desktop control (pyautogui)
+- Bounded browser control (isolated Playwright + DNS-pinned egress) and launch-only desktop containment
 - Webcam presence detection (OpenCV face + motion)
 - Inline image search (Wikimedia) and generation (gpt-image-1)
 - Downloadable artifact creation (PDF, text, CSV, markdown) with auto-open
@@ -163,7 +163,7 @@ index.html                 Main UI: chat, settings modal, LCARS sidebar,
 config.json                API keys (not committed, gitignored)
 config.example.json        Template for config.json
 config.local.example.js    Template for file:// usage (inlined config)
-mcp.json                   MCP server configuration (gitignored)
+mcp.json                   Optional local MCP presets (gitignored; never auto-loaded)
 
 core/
   style.css                All styling: base theme, settings panel,
@@ -172,6 +172,8 @@ core/
     eva.css                Eva dark theme overrides
     lcars.css              LCARS (Star Trek) theme overrides
   js/
+    agent-markers.js       Strict closed-marker parser for nested browser/desktop launch specs
+    action-outcomes.js     Exact public eva.action-run/1 proof validator shared by UI consumers
     options.js             Core application logic (5000+ lines):
                            - Config loading (auth(), applyConfig())
                            - Auth key management (getAuthKey, saveAuthKeys)
@@ -242,18 +244,21 @@ tools/
     alerts.py              Alert/notification system (SEC, weather, space weather)
                            Signal messaging via signal-cli
     telemetry.py           Structured event logging (latency, routing decisions)
+    action_runs.py         Typed outcomes, causal proof, launch/gate capabilities, execution leases
+    public_egress_proxy.py Per-run public-unicast DNS-pinning HTTP CONNECT proxy
     utils.py               URL validation, LM Studio validation, config persistence
   web_search_mcp.py        MCP server: DuckDuckGo + Google fallback (no API key)
   sqlite_memory.py         SQLite memory backend (SqliteMemory class)
   kusto_mcp.py             MCP server for Azure Data Explorer (10 tools)
-  browser_agent.py         Autonomous web browsing (Playwright + CDP)
-  desktop_agent.py         Autonomous desktop control (pyautogui + vision)
+  browser_agent.py         Bounded isolated browsing (Playwright + DNS-pinned proxy)
+  desktop_agent.py         Launch-only GUI containment (pyautogui screenshot + process proof)
   camera_sense.py          Webcam presence detection (OpenCV face + motion)
   barkTTS_server.py        Suno Bark TTS engine server (GPU)
   eva_seed.kql             Sanitized database seed (public-safe)
   acp_bridge.service       Systemd unit file
   acp_setup.sh             One-command installer
   test_static.py           CI-safe static tests
+  test_action_plane.py     No-network action containment, proof, gate, proxy, and UI tests
   test_eva.py              Integration tests (64 checks)
   test_latency.py          Latency benchmarks
   test_skills_e2e.py       Skill import end-to-end tests
@@ -262,6 +267,7 @@ tools/
 standalone/
   main.js                  Electron shell: port allocation, bridge spawn, health polling
   preload.js               Context bridge (exposes evaStandalone API to renderer)
+  launch-capability.js     Native-dialog one-use launch capability issuer
   package.json             Electron + electron-builder config (v5.3.0)
 ```
 
@@ -365,8 +371,13 @@ Options:
   --kusto-database NAME    Default Kusto database
   --enable-azure-mcp       Enable Azure MCP server (requires az login)
   --enable-github-mcp      Enable GitHub MCP server (requires Docker + PAT)
-  --mcp-config PATH        Custom MCP config JSON file
+  --mcp-config PATH        Explicit approved-preset MCP config JSON file
 ```
+
+MCP process startup is fail-closed. Only the exact Azure, GitHub, Kusto,
+bundled SQLite, and bundled web-search release shapes are accepted. Unknown,
+wrapped, Playwright, pointer/keyboard, or aliased servers are rejected, and a
+project `mcp.json` is never auto-discovered.
 
 ### HTTP Endpoints
 
@@ -458,11 +469,16 @@ Options:
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/v1/browser/launch` | POST | Start autonomous browser task |
-| `/v1/browser/<id>/status` | GET | Run status + latest screenshot |
-| `/v1/browser/<id>/confirm` | POST | Answer confirmation prompt |
-| `/v1/desktop/launch` | POST | Start autonomous desktop task |
-| `/v1/desktop/<id>/status` | GET | Run status + latest screenshot |
+| `/v1/browser/run` | POST | Consume a native one-use capability and start a bounded browser run |
+| `/v1/browser/status?run_id=<id>` | GET | Typed lifecycle/outcome status |
+| `/v1/browser/screenshot?run_id=<id>` | GET | Latest private screenshot while retained |
+| `/v1/browser/confirm` | POST | Resolve one exact approval/input gate |
+| `/v1/browser/cancel` | POST | Request run cancellation; reports pending in-flight effects |
+| `/v1/desktop/run` | POST | Consume a native one-use capability and start a bounded desktop run |
+| `/v1/desktop/status?run_id=<id>` | GET | Typed lifecycle/outcome status |
+| `/v1/desktop/screenshot?run_id=<id>` | GET | Latest private screenshot while retained |
+| `/v1/desktop/confirm` | POST | Resolve one exact approval/input gate |
+| `/v1/desktop/cancel` | POST | Request run cancellation; reports pending in-flight effects |
 
 **Camera:**
 
@@ -801,37 +817,68 @@ Eva uses marker blocks for agent capabilities:
 
 | Marker | Purpose | Example |
 |---|---|---|
-| `[[EVA_BROWSER]]` | Launch Playwright browser agent | `[[EVA_BROWSER]]{"goal":"search for cats","start_url":"https://example.com"}[[/EVA_BROWSER]]` |
-| `[[EVA_DESKTOP]]` | Launch desktop vision agent | `[[EVA_DESKTOP]]{"goal":"open GIMP and create canvas"}[[/EVA_DESKTOP]]` |
+| `[[EVA_BROWSER]]` | Request a bounded Playwright browser run | `[[EVA_BROWSER]]{"goal":"open the result page","start_url":"https://example.com","postcondition":{"type":"browser.url_match","origin":"https://example.com","path":"/done"}}[[/EVA_BROWSER]]` |
+| `[[EVA_DESKTOP]]` | Request a bounded desktop run | `[[EVA_DESKTOP]]{"goal":"open GIMP","postcondition":{"type":"desktop.process_spawned","executable":"gimp","state":"started"}}[[/EVA_DESKTOP]]` |
 | `[[EVA_LOOK]]` | Capture webcam frame | `[[EVA_LOOK]]{"question":"what am I holding?"}[[/EVA_LOOK]]` |
 | `[[EVA_SIGNAL]]` | Send Signal text message | `[[EVA_SIGNAL]]{"message":"hello world"}[[/EVA_SIGNAL]]` |
 | `[[EVA_FILE]]` | Artifact download/open links | `[[EVA_FILE]] report.pdf` (rendered by `renderEvaResponse`) |
 
-## Autonomous Agents
+Browser and desktop closing markers are mandatory. Model markers request a
+launch but grant no authority: Electron main displays the complete launch spec
+and mints a one-use, 60-second HMAC capability only after an explicit native
+dialog decision. Every later effect requires a distinct one-use approval gate.
+
+## Bounded Action Agents
 
 ### Browser Agent (`tools/browser_agent.py`)
 
-Autonomous web browsing via Playwright with a persistent Chrome profile.
+Playwright browsing in an isolated persistent profile. Each run is forced
+through a loopback DNS-pinning proxy that accepts only public-unicast A/AAAA
+answers, rewrites HTTP authority, rejects ambiguous framing, and disables
+non-proxied WebRTC UDP. The agent never attaches to an existing user browser.
 
 **Architecture:**
 - Director agent (Claude via ACP): text-only, high-level planning
 - Executor agent (GPT-4o via OpenAI): vision-based, concrete actions
 - Re-consult director every 4 executor steps
-- Long-lived Chrome via CDP on port 9333, persistent profile at `~/.config/eva-standalone/browser_profile`
+- Per-run isolated context with persistent profile at `~/.config/eva-standalone/browser_profile`
 
-**Action types:** click, double_click, click_ref, type, type_ref, press, scroll, navigate, wait, done, ask
+**Action types:** click, double_click, click_ref, type_ref, scroll, navigate,
+wait, done, ask. Raw keyboard actions are unavailable until the capability
+broker can authorize their semantics.
 
-**Safety:** Sensitive actions (buy, purchase, payment, checkout) require user confirmation before execution. The run parks and waits for approval via `/v1/browser/<id>/confirm`.
+**Safety:** `auto` is rejected. `pause` and `confirm_all` both confirm every
+effectful action. A gate binds a frozen action digest and fresh semantic target
+fingerprint, expires after 60 seconds, and is consumed once. Cancellation uses
+an execution lease: an in-flight effect is recorded before terminalization.
 
-**Trajectories:** Each step logged as JSONL + PNG screenshot to `~/.config/eva-standalone/browser_trajectories/` for fine-tuning.
+**Outcomes:** lifecycle `status=done` is not success. A model `done` claim is
+`indeterminate` unless a user-authorized request postcondition changed from a
+fresh tool-observed `not_observed` baseline to an `observed` final state after
+at least one approved, ordered effect receipt. Step/runtime exhaustion aborts.
+Supported browser checks are exact URL origin/path and bounded element state.
+
+**Artifacts:** Trajectories contain salted hashes and typed results rather than
+raw goals, model output, action text, or URL paths. Screenshots and JSONL use
+private permissions and are removed after ten minutes; abandoned prior-process
+directories are scavenged at startup.
 
 ### Desktop Agent (`tools/desktop_agent.py`)
 
-Autonomous desktop control via pyautogui screenshot-and-act loop.
+Launch-only desktop containment via a pyautogui screenshot-and-verify loop.
 
-**Architecture:** Same director/executor pattern as browser agent. `pyautogui.FAILSAFE = True` (mouse to corner = emergency stop).
+**Architecture:** Same director/executor pattern as browser agent. PyAutoGUI is
+used only for private screenshots. GUI launch is limited to root-owned,
+non-writable native binaries in a curated allowlist;
+model-supplied arguments, pointer actions, keyboard actions, terminal helpers,
+and arbitrary window helpers are structurally unavailable until the capability
+broker is implemented.
 
-**Safety:** Broader sensitive action set includes delete, sudo, rm, shutdown, reboot, transfer money, send email/message. All require user confirmation.
+**Verified outcome:** the run must have no prior spawn receipt; an approved
+launch records the exact canonical binary and PID; success requires that same
+live `/proc/<pid>/exe` to be observed after the effect. This is explicitly a
+run-scoped spawn attestation, not a claim that no matching process existed
+elsewhere on the system.
 
 ### Camera Presence (`tools/camera_sense.py`)
 
@@ -1203,7 +1250,10 @@ Current state (2026-06-15):
 - Skill import treats source text as untrusted data (explicit anti-injection prompt)
 - LM Studio base URL is restricted to loopback in `offline`, and loopback/private IP literals in `local-network`, on whitelisted ports (1234, 8000, 8080, 11434); redirects are rejected
 - Camera off by default, subprocess-isolated, state read-only from bridge
-- Sensitive browser/desktop actions require user confirmation
+- Browser/desktop launches require native Electron authorization; every effectful action then requires an exact, expiring, one-use approval
+- Browser egress uses a per-run public-unicast DNS-pinning proxy; local/private/multicast targets, URL credentials, ambiguous HTTP framing, and non-proxied WebRTC UDP are blocked
+- Model completion and step exhaustion never imply success; only a causal baseline → approved effect receipt → fresh tool observation can produce `succeeded`
+- Desktop keyboard, shell, arbitrary arguments, and window-helper paths remain unavailable until the capability broker is implemented
 - `pyautogui.FAILSAFE = True` (mouse to corner = emergency stop)
 - Background proposals honor per-job governance: review-required outputs remain pending; explicit auto-apply maintenance outputs are audited
 
@@ -1217,6 +1267,11 @@ Runs on every PR to `main`:
 |---|---|
 | **static-checks** | Secret scanning, HTML structure, JS syntax, Python syntax, model routing, config templates, .gitignore |
 | **python-tests** | `tools/test_static.py`: file integrity, config safety, CSV logic, model selector, seed validation |
+
+The Python 3.12 job also runs Phase 0–3 plus
+`tools/test_action_plane.py` (deterministic, no providers/GUI/network), covering
+launch capabilities, one-use gates, causal proofs, cancellation leases,
+public-egress pinning, strict model actions, frontend outcomes, and privacy.
 
 ### Test Files
 

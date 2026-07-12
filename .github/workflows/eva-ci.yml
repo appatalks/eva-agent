@@ -59,6 +59,14 @@ jobs:
             FAIL=1
           fi
 
+          # Runtime snapshots and Python bytecode must never be tracked.
+          tracked_runtime=$(git ls-files '*.data' '*/__pycache__/*' '*.pyc' '*.pyo')
+          if [ -n "$tracked_runtime" ]; then
+            echo "$tracked_runtime"
+            echo "::error::Runtime data or Python bytecode is tracked"
+            FAIL=1
+          fi
+
           if [ $FAIL -eq 1 ]; then exit 1; fi
           echo "✓ No secrets detected"
 
@@ -240,6 +248,9 @@ jobs:
 
       - name: Run Phase 3 safe-learning tests
         run: python3 tools/test_phase3.py
+
+      - name: Run action-plane containment tests
+        run: python3 tools/test_action_plane.py
 
   # ── 3. Accessibility (manual trigger only — kept from existing) ───
   accessibility:

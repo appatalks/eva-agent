@@ -838,27 +838,31 @@ class TestACPContainment(unittest.TestCase):
         finally:
             os.environ.pop("EVA_ALLOW_ACP_TERMINAL", None)
 
-    def test_command_must_be_string(self):
+    def test_terminal_create_helper_is_always_disabled(self):
         from bridge.acp_client import ACPClient
         client = ACPClient.__new__(ACPClient)
         client.__init__()
         client._terminal_allowed = True
         responses = []
-        client._send_response = lambda rid, result: responses.append((rid, result))
+        client._send_error_response = lambda rid, code, message: responses.append(
+            (rid, code, message)
+        )
         client._handle_terminal_create(99, {"command": 123, "args": []})
         self.assertEqual(len(responses), 1)
-        self.assertIn("error", responses[0][1])
+        self.assertEqual(responses[0][1], -32601)
 
-    def test_cwd_outside_base_rejected(self):
+    def test_terminal_create_cannot_be_enabled_by_valid_arguments(self):
         from bridge.acp_client import ACPClient
         client = ACPClient.__new__(ACPClient)
         client.__init__(cwd="/tmp/safe")
         client._terminal_allowed = True
         responses = []
-        client._send_response = lambda rid, result: responses.append((rid, result))
+        client._send_error_response = lambda rid, code, message: responses.append(
+            (rid, code, message)
+        )
         client._handle_terminal_create(99, {"command": "ls", "args": [], "cwd": "/etc"})
         self.assertEqual(len(responses), 1)
-        self.assertIn("error", responses[0][1])
+        self.assertEqual(responses[0][1], -32601)
 
     def test_default_deny_permission(self):
         from bridge.acp_client import ACPClient
@@ -1097,12 +1101,65 @@ class TestOfflinePolicy(unittest.TestCase):
         self.assertEqual(safe, {})
         self.assertEqual(rejected, ["playwright"])
 
-    def test_cloud_preserves_config(self):
+    def test_cloud_rejects_unbrokered_mcp(self):
         from bridge.config import mcp_config_for_egress
         source = {"playwright": {"command": "npx", "args": ["@playwright/mcp"]}}
         safe, rejected = mcp_config_for_egress(source, "cloud")
-        self.assertEqual(safe, source)
+        self.assertEqual(safe, {})
+        self.assertEqual(rejected, ["playwright"])
+
+    def test_cloud_allows_only_exact_release_presets(self):
+        from bridge import config as cfg
+        source = {
+            "azure-mcp-server": {
+                "command": "npx",
+                "args": ["-y", "@azure/mcp@latest", "server", "start"],
+                "env": {"AZURE_MCP_COLLECT_TELEMETRY": "false"},
+            },
+            "github-mcp-server": {
+                "command": "docker",
+                "args": [
+                    "run", "-i", "--rm", "-e",
+                    "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "ghcr.io/github/github-mcp-server",
+                ],
+                "env": {"_useGitHubPAT": True},
+            },
+            "kusto-mcp-server": {
+                "command": "python3",
+                "args": ["tools/kusto_mcp.py"],
+                "env": {"KUSTO_DATABASE_LOCKED": "1"},
+            },
+            "eva-web-search": {
+                "command": sys.executable,
+                "args": [os.path.join(TOOLS_DIR, "web_search_mcp.py")],
+            },
+        }
+        safe, rejected = cfg.mcp_config_for_egress(source, "cloud")
         self.assertEqual(rejected, [])
+        self.assertEqual(set(safe), set(source))
+        self.assertEqual(safe["kusto-mcp-server"]["command"], sys.executable)
+        self.assertEqual(
+            safe["kusto-mcp-server"]["args"],
+            [os.path.realpath(os.path.join(TOOLS_DIR, "kusto_mcp.py"))],
+        )
+
+    def test_cloud_rejects_wrappers_even_under_approved_names(self):
+        from bridge.config import mcp_config_for_egress
+        source = {
+            "azure-mcp-server": {
+                "command": "npx", "args": ["-c", "computer-use-linux mcp"],
+            },
+            "kusto-mcp-server": {
+                "command": "python3.12", "args": ["-c", "print('unsafe')"],
+            },
+            "github-mcp-server": {
+                "command": "busybox", "args": ["sh", "-c", "unsafe"],
+            },
+        }
+        safe, rejected = mcp_config_for_egress(source, "cloud")
+        self.assertEqual(safe, {})
+        self.assertEqual(set(rejected), set(source))
 
     def test_restricted_mode_blocks_kusto_below_http_layer(self):
         from bridge import state as _st
@@ -1193,15 +1250,27 @@ class TestOfflinePolicy(unittest.TestCase):
             os.environ["NPM_CONFIG__AUTH"] = "npm-secret"
             os.environ["SERVICE_APIKEY"] = "compact-secret"
             os.environ["ORDINARY_SETTING"] = "kept"
-            os.environ["PATH"] = "/usr/local/bin:/usr/bin"
-            child = child_process_env()
+            os.environ["PATH"] = "/tmp/attacker:/usr/bin"
+            for name in (
+                "NODE_OPTIONS", "LD_PRELOAD", "PYTHONPATH", "BASH_ENV",
+                "COPILOT_ALLOW_ALL", "COPILOT_PROVIDER_BASE_URL",
+                "HTTP_PROXY", "REQUESTS_CA_BUNDLE", "OTEL_EXPORTER_OTLP_ENDPOINT",
+            ):
+                os.environ[name] = "unsafe"
+            child = child_process_env(profile="acp")
             self.assertNotIn("EVA_BRIDGE_TOKEN", child)
             self.assertNotIn("OPENAI_API_KEY", child)
             self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", child)
             self.assertNotIn("NPM_CONFIG__AUTH", child)
             self.assertNotIn("SERVICE_APIKEY", child)
-            self.assertEqual(child.get("ORDINARY_SETTING"), "kept")
-            self.assertEqual(child.get("PATH"), "/usr/local/bin:/usr/bin")
+            self.assertNotIn("ORDINARY_SETTING", child)
+            self.assertNotIn("/tmp/attacker", child.get("PATH", ""))
+            for name in (
+                "NODE_OPTIONS", "LD_PRELOAD", "PYTHONPATH", "BASH_ENV",
+                "COPILOT_ALLOW_ALL", "COPILOT_PROVIDER_BASE_URL",
+                "HTTP_PROXY", "REQUESTS_CA_BUNDLE", "OTEL_EXPORTER_OTLP_ENDPOINT",
+            ):
+                self.assertNotIn(name, child)
             self.assertFalse(is_sensitive_env_name("PATH"))
             for name in ("GOOGLE_APPLICATION_CREDENTIALS", "NPM_CONFIG__AUTH", "SERVICE_APIKEY", "GITHUB_PAT"):
                 self.assertTrue(is_sensitive_env_name(name), name)
@@ -1269,7 +1338,7 @@ class TestOfflinePolicy(unittest.TestCase):
             }, handle)
         with mock.patch("bridge.utils._MCP_CONFIG_CACHE_PATH", stale_path):
             loaded = _load_persisted_mcp_config()
-        self.assertNotIn("GITHUBPAT", loaded["server"]["env"])
+        self.assertNotIn("server", loaded)
         with open(stale_path, encoding="utf-8") as handle:
             rewritten = handle.read()
         self.assertNotIn(segmented, rewritten)
@@ -1313,8 +1382,13 @@ class TestOfflinePolicy(unittest.TestCase):
             responses = []
             handler._read_json_body = lambda: ({
                 "mcp_servers": {
-                    "server": {
-                        "command": "tool",
+                    "github-mcp-server": {
+                        "command": "docker",
+                        "args": [
+                            "run", "-i", "--rm", "-e",
+                            "GITHUB_PERSONAL_ACCESS_TOKEN",
+                            "ghcr.io/github/github-mcp-server",
+                        ],
                         "env": {"_useGitHubPAT": "false"},
                     }
                 }
@@ -1324,9 +1398,8 @@ class TestOfflinePolicy(unittest.TestCase):
                     mock.patch.object(core, "_persist_mcp_config"), \
                     mock.patch.object(core, "_reset_acp_pool"):
                 handler._mcp_configure()
-            self.assertEqual(responses[-1][0], 200)
-            self.assertEqual(captured[-1]["server"]["env"], {})
-            self.assertNotIn(ambient, json.dumps(captured[-1]))
+            self.assertEqual(responses[-1][0], 403)
+            self.assertEqual(captured, [])
         finally:
             st.egress_mode, st.acp_client, st.cognition_enabled = saved[:3]
             if saved[3] is None:
@@ -1414,10 +1487,13 @@ class TestPackagePaths(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(cfg.TOOLS_DIR, "eva_seed.kql")))
         self.assertTrue(os.path.isfile(os.path.join(cfg.TOOLS_DIR, "kusto_mcp.py")))
 
-    def test_project_mcp_discovery_path(self):
+    def test_project_mcp_is_not_auto_discovered(self):
         from bridge import config as cfg
         self.assertEqual(os.path.realpath(cfg.PROJECT_ROOT), os.path.realpath(PROJECT_ROOT))
-        self.assertTrue(os.path.isfile(os.path.join(cfg.PROJECT_ROOT, "mcp.json")))
+        self.assertFalse(os.path.isfile(os.path.join(cfg.PROJECT_ROOT, "mcp.json")))
+        with open(os.path.join(TOOLS_DIR, "bridge", "core.py")) as f:
+            source = f.read()
+        self.assertNotIn("Auto-discovered MCP config", source)
 
     def test_packaged_runtime_helpers_are_declared(self):
         package_path = os.path.join(PROJECT_ROOT, "standalone", "package.json")
