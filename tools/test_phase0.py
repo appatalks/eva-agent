@@ -1710,11 +1710,12 @@ function proofLine(){return readiness.READY_PREFIX+JSON.stringify({version:1,
         script = (
             "const p=require(process.argv[1]);"
             "const lan=[192,168,1,2].join('.');"
+            "const lan10=[10,0,0,2].join('.');"
             "const out={"
             "offlineLoop:p.requestAllowedByEgress('http://127.0.0.1:1234/v1','offline'),"
             "offlineLan:p.requestAllowedByEgress('http://'+lan+':1234/v1','offline'),"
             "offlineCloud:p.requestAllowedByEgress('https://api.openai.com/v1','offline'),"
-            "lanPrivate:p.requestAllowedByEgress('http://10.0.0.2:1234/v1','local-network'),"
+            "lanPrivate:p.requestAllowedByEgress('http://'+lan10+':1234/v1','local-network'),"
             "lanCloud:p.requestAllowedByEgress('https://api.openai.com/v1','local-network'),"
             "cloudPublic:p.requestAllowedByEgress('https://api.openai.com/v1','cloud')};"
             "try{p.normalizeEgressMode('invalid');out.invalid=false}catch(e){out.invalid=true}"
