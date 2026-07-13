@@ -256,10 +256,7 @@ class SqliteMCPServer:
                 count = args.get("count", 10)
                 if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 100:
                     return "Error: 'count' must be an integer from 1 to 100."
-                rows = self._mem.query(
-                    f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT ?",
-                    (count,),
-                )
+                rows = self._mem.sample_rows(table, count)
                 return self._format_rows(rows)
 
             elif name == "eva_recall_knowledge":

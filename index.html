@@ -166,29 +166,19 @@
       <button id="skillsPanelClose" aria-label="Close skills">&times;</button>
     </div>
     <div class="skills-panel-body">
-      <p class="cog-help">Import a skill from any source. Eva normalizes ("Eva'rises") it into her own format and stores it through canonical SQLite, with optional ADX projection. Reviewed active skills may be matched into later context.</p>
+      <p class="cog-help">Import a locally supplied skill by pasting text or uploading a file. Eva normalizes ("Eva'rises") it into her own format and stores it through canonical SQLite, with optional ADX projection. Reviewed active skills may be matched into later context.</p>
 
       <div class="skills-import">
         <div class="auth-field">
           <label for="skillSourceType">Source</label>
           <select id="skillSourceType">
             <option value="paste" selected>Paste text / markdown</option>
-            <option value="url">Fetch from URL</option>
-            <option value="github">GitHub repo or SKILL.md</option>
             <option value="file">Upload a file</option>
           </select>
         </div>
         <div class="auth-field" id="skillPasteWrap">
           <label for="skillPasteInput">Skill content</label>
           <textarea id="skillPasteInput" rows="5" placeholder="Paste a SKILL.md, instructions, or any document describing the skill..."></textarea>
-        </div>
-        <div class="auth-field" id="skillUrlWrap" style="display:none;">
-          <label for="skillUrlInput">URL</label>
-          <input type="text" id="skillUrlInput" placeholder="https://example.com/skill.md">
-        </div>
-        <div class="auth-field" id="skillRepoWrap" style="display:none;">
-          <label for="skillRepoInput">GitHub reference</label>
-          <input type="text" id="skillRepoInput" placeholder="owner/repo, a subdir (owner/repo/skills/pdf), or a github.com tree/blob URL">
         </div>
         <div class="auth-field" id="skillFileWrap" style="display:none;">
           <label for="skillFileInput">File (.md, .txt, .json)</label>

@@ -336,10 +336,17 @@ def _explicit_user_fact_covers_candidate(classified_relation, entity, explicit_u
 
 def _normalize_entity_candidate(raw_entity):
     """Normalize an extracted entity candidate before validation."""
-    import re
-    candidate = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", raw_entity or "")
-    candidate = re.sub(r"\s+", " ", candidate).strip()
-    return candidate
+    candidate = str(raw_entity or "")
+    start, end = 0, len(candidate)
+    while start < end and not (
+        candidate[start].isascii() and candidate[start].isalnum()
+    ):
+        start += 1
+    while end > start and not (
+        candidate[end - 1].isascii() and candidate[end - 1].isalnum()
+    ):
+        end -= 1
+    return " ".join(candidate[start:end].split())
 
 
 
@@ -404,10 +411,10 @@ def _load_candidate_history(entity):
     backend = _resolve_memory_backend()
     if backend == "sqlite":
         mem = _get_sqlite_mem()
-        safe_entity = (entity or "").strip().replace("'", "''")
         rows = mem.query(
-            f"SELECT COUNT(*) AS Mentions, MAX(Confidence) AS MaxConfidence "
-            f"FROM Knowledge WHERE Entity = '{safe_entity}' COLLATE NOCASE"
+            "SELECT COUNT(*) AS Mentions, MAX(Confidence) AS MaxConfidence "
+            "FROM Knowledge WHERE Entity = ? COLLATE NOCASE",
+            ((entity or "").strip(),),
         )
     else:
         cluster, db = _get_kusto_config()

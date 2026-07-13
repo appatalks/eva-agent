@@ -229,9 +229,6 @@ from bridge.cron import (  # noqa: F401
     _push_notification,
 )
 from bridge.skills import (  # noqa: F401
-    _safe_external_url,
-    _http_get_text,
-    _github_raw_candidates,
     _skill_source_label,
     _fetch_skill_source,
     _parse_evarise_json,
@@ -753,57 +750,79 @@ class BridgeHandler(BaseHTTPRequestHandler):
         return allowed
 
     @classmethod
-    def _origin_allowed(cls, origin):
-        """Return True only for file://, exact loopback http origins (any port),
-        or no Origin (same-origin).  Validates that the value is a serialized
-        origin: scheme + host + optional port, with no credentials, path,
-        query, or fragment.  Rejects the literal string ``null``."""
+    def _canonical_http_origin(cls, value, *, allow_external=False):
+        """Return one exact safe serialized HTTP origin or an empty string.
+
+        The result is rebuilt from validated components rather than reflecting
+        an HTTP request header. This prevents control characters, credentials,
+        paths, and ambiguous host spellings from reaching a response header.
+        """
+        if not isinstance(value, str) or not value or any(
+            char in value for char in ("\r", "\n", "\x00")
+        ):
+            return ""
+        try:
+            parsed = urllib.parse.urlsplit(value)
+            port = parsed.port
+        except (TypeError, ValueError):
+            return ""
+        if (
+            parsed.scheme not in ("http", "https")
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            return ""
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if not host or (host not in cls._LOOPBACK_HOSTS and not allow_external):
+            return ""
+        if host not in cls._LOOPBACK_HOSTS:
+            labels = host.split(".")
+            if not all(
+                re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                for label in labels
+            ):
+                return ""
+        if port is not None and not 1 <= port <= 65535:
+            return ""
+        authority = f"[{host}]" if ":" in host else host
+        default_port = 443 if parsed.scheme == "https" else 80
+        if port is not None and port != default_port:
+            authority += ":" + str(port)
+        canonical = parsed.scheme + "://" + authority
+        return canonical if hmac.compare_digest(value, canonical) else ""
+
+    @classmethod
+    def _allowed_cors_origin(cls, origin):
+        """Return a trusted CORS response value, ``*`` for same-origin, or None."""
         if not origin:
-            return True  # same-origin requests have no Origin header
-        # Reject opaque "null" origin
-        if origin == "null":
-            return False
-        # Electron file:// sends the exact string "file://"
+            return "*"
         if origin == "file://":
-            return True
-        try:
-            parsed = urllib.parse.urlparse(origin)
-        except ValueError:
-            return False
-        if parsed.scheme not in ("http", "https"):
-            return False
-        # Serialized origins must not carry credentials, path, query, or fragment
-        if parsed.username or parsed.password:
-            return False
-        if parsed.path:
-            return False
-        if parsed.query or parsed.fragment:
-            return False
-        host = (parsed.hostname or "").lower()
-        # Validate port when present
-        try:
-            if parsed.port is not None:
-                p = int(parsed.port)
-                if p < 1 or p > 65535:
-                    return False
-        except (ValueError, TypeError):
-            return False
-        if host in cls._LOOPBACK_HOSTS:
-            return True
-        configured = {
-            item.strip().rstrip("/")
-            for item in os.environ.get("EVA_ALLOWED_ORIGINS", "").split(",")
-            if item.strip()
-        }
-        return origin in configured
+            return "file://"
+        candidate = cls._canonical_http_origin(origin)
+        if candidate:
+            return candidate
+        for configured in os.environ.get("EVA_ALLOWED_ORIGINS", "").split(","):
+            configured = configured.strip()
+            canonical = cls._canonical_http_origin(
+                configured, allow_external=True
+            )
+            if canonical and hmac.compare_digest(canonical, origin):
+                # Return the configuration value, never the request header.
+                return configured
+        return None
+
+    @classmethod
+    def _origin_allowed(cls, origin):
+        """Return whether an origin has a safe, exact CORS response value."""
+        return cls._allowed_cors_origin(origin) is not None
 
     def _cors_headers(self):
-        origin = self.headers.get("Origin", "")
-        # Reject any origin containing CRLF or null bytes to prevent HTTP response splitting
-        if "\r" in origin or "\n" in origin or "\x00" in origin:
-            origin = ""
-        if self._origin_allowed(origin):
-            self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
+        allowed_origin = self._allowed_cors_origin(self.headers.get("Origin", ""))
+        if allowed_origin is not None:
+            self.send_header("Access-Control-Allow-Origin", allowed_origin)
         # Else: do not set ACAO at all (browser blocks the response).
         self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
@@ -1523,15 +1542,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
         return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     def _goal_latest_by_id(self, cluster, db, goal_id):
-        safe_goal_id = goal_id.replace("'", "''")
         backend = _resolve_memory_backend()
         if backend == "sqlite":
             mem = _get_sqlite_mem()
             rows = mem.query(
-                f"SELECT * FROM Goals WHERE GoalId = '{safe_goal_id}' "
-                f"ORDER BY UpdatedAt DESC, rowid DESC LIMIT 1"
+                "SELECT * FROM Goals WHERE GoalId = ? "
+                "ORDER BY UpdatedAt DESC, rowid DESC LIMIT 1",
+                (goal_id,),
             )
         else:
+            safe_goal_id = goal_id.replace("'", "''")
             query = _GOALS_LATEST_QUERY + f" | where GoalId == '{safe_goal_id}' | take 1"
             rows = _kusto_query_direct(cluster, db, query)
         if rows is None:
@@ -2073,15 +2093,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     # ── Skills ────────────────────────────────────────────────────────
     def _skill_latest_by_id(self, cluster, db, skill_id):
-        safe = skill_id.replace("'", "''")
         backend = _resolve_memory_backend()
         if backend == "sqlite":
             mem = _get_sqlite_mem()
             rows = mem.query(
-                f"SELECT * FROM Skills WHERE SkillId = '{safe}' "
-                f"ORDER BY UpdatedAt DESC, rowid DESC LIMIT 1"
+                "SELECT * FROM Skills WHERE SkillId = ? "
+                "ORDER BY UpdatedAt DESC, rowid DESC LIMIT 1",
+                (skill_id,),
             )
         else:
+            safe = skill_id.replace("'", "''")
             rows = _kusto_query_direct(cluster, db, _SKILLS_LATEST_QUERY + f" | where SkillId == '{safe}' | take 1")
         if rows is None:
             return None, "Skills query failed"
@@ -2705,9 +2726,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self._cors_headers()
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(content_length))
-        # Filename is regex-validated; quote and CRLF stripping defend against future relaxation.
-        quoted_name = urllib.parse.quote(requested_name, safe="").replace("\r", "").replace("\n", "")
-        self.send_header("Content-Disposition", 'attachment; filename="' + quoted_name + '"')
+        # The trusted UI supplies the verified artifact name through its
+        # download attribute. Keep this HTTP header static so request text can
+        # never become header syntax, even if filename policy changes later.
+        self.send_header("Content-Disposition", "attachment")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         try:

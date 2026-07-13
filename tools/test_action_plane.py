@@ -4816,6 +4816,15 @@ wrong:trustedAudioPermission(wrong,'media',{mediaTypes:['audio']})
         ))
         self.assertIsNone(eof._process_group_id)
 
+    def test_local_mcp_revalidates_argv_immediately_before_spawn(self):
+        server = local_mcp.MCPServer(
+            "sqlite", "/bin/sh", ["-c", "unsafe"], allowed_tools=()
+        )
+        with mock.patch.object(local_mcp.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(RuntimeError, "process policy rejected"):
+                server.start()
+        popen.assert_not_called()
+
     def test_bundled_mcp_servers_share_closed_protocol_contracts(self):
         from bridge import mcp_protocol
 

@@ -1,6 +1,39 @@
 // lm-studio.js
 // Function to send data to local OpenAI-like endpoint
 
+function _lmsInputText(element) {
+  if (!element) return '';
+  if (typeof element.innerText === 'string') return element.innerText.trim();
+  if (typeof element.textContent === 'string') return element.textContent.trim();
+  return String(element.innerHTML || '')
+    .replace(/<br\s*\/?\s*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .trim();
+}
+
+function _lmsAppendTextBubble(output, className, label, text) {
+  if (!output || !document.createElement) return;
+  var bubble = document.createElement('div');
+  bubble.className = 'chat-bubble ' + className;
+  var labelNode = document.createElement('span');
+  labelNode.className = className === 'user-bubble' ? 'user' : 'error';
+  labelNode.textContent = label;
+  var textNode = document.createElement('span');
+  textNode.className = 'eva-safe-text';
+  textNode.textContent = ' ' + String(text || '');
+  textNode.style.whiteSpace = 'pre-wrap';
+  bubble.appendChild(labelNode);
+  bubble.appendChild(textNode);
+  output.appendChild(bubble);
+  output.scrollTop = output.scrollHeight;
+}
+
+function _lmsAppendError(error) {
+  var output = document.getElementById('txtOutput');
+  var message = error && error.message ? error.message : String(error || 'Request failed');
+  _lmsAppendTextBubble(output, 'error-bubble', 'Error:', message);
+}
+
 function lmsSend(capturedEnvelope) {
     capturedEnvelope = capturedEnvelope || ((typeof captureRequestEnvelope === 'function')
       ? captureRequestEnvelope() : null);
@@ -9,9 +42,6 @@ function lmsSend(capturedEnvelope) {
         isCurrentRequestEnvelope(capturedEnvelope));
     }
     if (!requestIsCurrent()) return;
-    // Remove occurrences of specific syntax from the txtMsg element
-    txtMsg.innerHTML = txtMsg.innerHTML.replace(/<div[^>]*>.*<\/div>/g, '');
-
     const _lmsStaticSystem = ((typeof getSystemPrompt === 'function') ? getSystemPrompt() : '') + " Images can be shown with this tag: [Image of <Description>]. " + dateContents +
               "\n\nCRITICAL DATA ACCURACY RULES:\n" +
               "- NEVER fabricate news headlines, stock prices, weather forecasts, locations, or current events.\n" +
@@ -65,7 +95,7 @@ function lmsSend(capturedEnvelope) {
         } catch (_) {}
     }
 
-    const sQuestion = document.getElementById("txtMsg").innerHTML.replace(/<br>/g, "\n").replace(/<[^>]+>/g, "").trim();
+    const sQuestion = _lmsInputText(document.getElementById("txtMsg"));
     if (!sQuestion) {
         alert("Type in your question!");
         txtMsg.focus();
@@ -111,21 +141,11 @@ function lmsSend(capturedEnvelope) {
       var _lmsSystemPrompt = _extraCtx + _lmsStaticSystem;
 
                 // Document the user's message (match chat-bubble UI and sanitize)
-                document.getElementById("txtMsg").innerHTML = "";
-                (function appendUserBubble(raw){
-                    const safe = (function escapeHtmlLite(str){
-                        return String(str)
-                            .replace(/&/g, '&amp;')
-                            .replace(/</g, '&lt;')
-                            .replace(/>/g, '&gt;')
-                            .replace(/"/g, '&quot;')
-                            .replace(/'/g, '&#39;');
-                    })(raw).replace(/\n/g, '<br>');
-                    const wrap = '<div class="chat-bubble user-bubble">' + '<span class="user">You:</span> ' + safe + '</div>';
-                    const out = document.getElementById("txtOutput");
-                    out.innerHTML += wrap;
-                    out.scrollTop = out.scrollHeight;
-                })(sQuestion);
+                document.getElementById("txtMsg").textContent = "";
+                _lmsAppendTextBubble(
+                  document.getElementById("txtOutput"),
+                  'user-bubble', 'You:', sQuestion
+                );
 
     var _lmsBaseUrl = (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : 'http://localhost:1234/v1';
     var _lmsModel = (typeof getLmStudioModel === 'function') ? getLmStudioModel() : 'granite-3.1-8b-instruct';
@@ -227,11 +247,11 @@ function lmsSend(capturedEnvelope) {
         .catch(error => {
                           if (!requestIsCurrent()) return;
             console.error("Error:", error);
-            document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + escapeHtml(error.message || String(error)) + "<br>\n";
+            _lmsAppendError(error);
         });
     }).catch(function(error) {
       if (!requestIsCurrent()) return;
       console.error("Error:", error);
-      document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + escapeHtml(error.message || String(error)) + "<br>\n";
+      _lmsAppendError(error);
     }); // end Promise.all
 }

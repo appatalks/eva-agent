@@ -925,15 +925,24 @@ function _downloadAsset(base, artifact) {
   });
 }
 
+function _setAssetsListMessage(list, message) {
+  if (!list || !document.createElement) return;
+  list.textContent = '';
+  var item = document.createElement('li');
+  item.className = 'session-empty';
+  item.textContent = String(message || '');
+  list.appendChild(item);
+}
+
 function loadAssetsList() {
   var ul = document.getElementById('assetsList');
   if (!ul) return;
-  ul.innerHTML = '<li class="session-empty">Loading...</li>';
+  _setAssetsListMessage(ul, 'Loading...');
   var base = (typeof getSafeBridgeBaseUrl === 'function') ? getSafeBridgeBaseUrl() : 'http://localhost:8888';
   fetch(base + '/v1/files').then(function(r) { return r.json(); }).then(function(data) {
-    ul.innerHTML = '';
+    ul.textContent = '';
     if (!data.files || data.files.length === 0) {
-      ul.innerHTML = '<li class="session-empty">No assets yet</li>';
+      _setAssetsListMessage(ul, 'No assets yet');
       return;
     }
     data.files.forEach(function(f) {
@@ -978,7 +987,7 @@ function loadAssetsList() {
       ul.appendChild(li);
     });
   }).catch(function(e) {
-    ul.innerHTML = '<li class="session-empty">Could not load assets: ' + (e.message || e) + '</li>';
+    _setAssetsListMessage(ul, 'Could not load assets: ' + (e.message || e));
   });
 }
 
@@ -1125,11 +1134,9 @@ function _buildSimpleTerminal(frame, bridgeBase) {
 function _termPrint(output, cls, text) {
   var line = document.createElement('div');
   line.className = 'eva-term-line eva-term-' + cls;
-  if (cls === 'eva' && typeof renderMarkdown === 'function') {
-    line.innerHTML = renderMarkdown(text);
-  } else {
-    line.textContent = text;
-  }
+  // Terminal output is an untrusted ACP/model boundary. Preserve it as text
+  // rather than rendering model-supplied markdown as browser HTML.
+  line.textContent = text;
   output.appendChild(line);
   output.scrollTop = output.scrollHeight;
 }

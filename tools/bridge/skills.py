@@ -1,175 +1,11 @@
 """Bridge domain: skills."""
 
 import json
-import os
 import re
-import socket
-import urllib.parse
 from bridge import config as _cfg
 from bridge import state as _st
 
 _SKILL_SOURCE_MAX_BYTES = _cfg.SKILL_SOURCE_MAX_BYTES
-
-def _safe_external_url(url):
-    """Validate a user-supplied URL for server-side fetch.
-    Returns (ok, error, pinned_ip). pinned_ip is a validated public IP the
-    caller MUST connect to directly (closing the DNS-rebinding TOCTOU where the
-    hostname re-resolves to an internal address between this check and the
-    fetch). Blocks non-http(s) schemes and any host that resolves to a loopback,
-    private, link-local, reserved, multicast, or cloud-metadata address."""
-    try:
-        parsed = urllib.parse.urlparse(url)
-    except (ValueError, TypeError):
-        return False, "invalid URL", None
-    if parsed.scheme not in ("http", "https"):
-        return False, "only http(s) URLs are allowed", None
-    host = parsed.hostname
-    if not host:
-        return False, "URL has no host", None
-    if host.lower() in ("metadata.google.internal",):
-        return False, "blocked host", None
-    try:
-        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
-        return False, "could not resolve host", None
-    import ipaddress
-    pinned = None
-    for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        # Every resolved address must be public; reject if ANY is internal so a
-        # multi-record DNS answer cannot smuggle in a private target.
-        if (ip.is_loopback or ip.is_private or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-            return False, "host resolves to a non-public address", None
-        if pinned is None:
-            pinned = addr
-    if pinned is None:
-        return False, "could not resolve host", None
-    return True, "", pinned
-
-
-
-def _http_get_text(url, max_bytes=_SKILL_SOURCE_MAX_BYTES):
-    """Fetch a URL's body as text with SSRF protection. Returns (text, error).
-
-    Defenses:
-      - Redirects are followed MANUALLY (max 5 hops); every hop is re-validated.
-      - Each fetch connects to the exact IP that validation resolved (IP pinning
-        via urllib3), so the hostname is never re-resolved at connect time. This
-        closes both the redirect-based bypass and DNS rebinding, where a host
-        validated as public re-resolves to an internal/metadata address.
-      - TLS still verifies against the real hostname (SNI + cert check)."""
-    import urllib3
-    current = url
-    for _hop in range(6):
-        ok, err, pinned_ip = _safe_external_url(current)
-        if not ok:
-            return None, err
-        parsed = urllib.parse.urlparse(current)
-        host = parsed.hostname
-        is_https = (parsed.scheme == "https")
-        port = parsed.port or (443 if is_https else 80)
-        path = parsed.path or "/"
-        if parsed.query:
-            path += "?" + parsed.query
-        host_header = host if port in (80, 443) else f"{host}:{port}"
-        headers = {"Host": host_header, "User-Agent": "Eva-Skills-Importer/1.0"}
-        try:
-            if is_https:
-                pool = urllib3.HTTPSConnectionPool(
-                    pinned_ip, port=port, server_hostname=host,
-                    assert_hostname=host, cert_reqs="CERT_REQUIRED",
-                    timeout=15, retries=False)
-            else:
-                pool = urllib3.HTTPConnectionPool(
-                    pinned_ip, port=port, timeout=15, retries=False)
-            resp = pool.request("GET", path, headers=headers,
-                                redirect=False, preload_content=False)
-        except Exception as exc:
-            return None, "fetch failed: " + str(exc)[:160]
-        status = resp.status
-        if status in (301, 302, 303, 307, 308):
-            location = resp.headers.get("Location")
-            try:
-                resp.release_conn()
-            except Exception:
-                pass
-            if not location:
-                return None, "redirect without a location"
-            current = urllib.parse.urljoin(current, location)
-            continue
-        if status != 200:
-            try:
-                resp.release_conn()
-            except Exception:
-                pass
-            return None, f"fetch returned HTTP {status}"
-        chunks = []
-        total = 0
-        for chunk in resp.stream(8192, decode_content=True):
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > max_bytes:
-                break
-            chunks.append(chunk)
-        try:
-            resp.release_conn()
-        except Exception:
-            pass
-        raw = b"".join(chunks)
-        return raw.decode("utf-8", errors="replace"), ""
-    return None, "too many redirects"
-    return None, "too many redirects"
-
-
-
-def _github_raw_candidates(ref):
-    """Turn a GitHub repo/file/directory reference into candidate
-    raw.githubusercontent URLs. Accepts:
-      - owner/repo                         (repo root)
-      - owner/repo/path/to/dir             (subdirectory)
-      - https://github.com/o/r/blob/<branch>/<path>   (a file)
-      - https://github.com/o/r/tree/<branch>/<path>   (a directory)
-      - a raw.githubusercontent.com URL    (used as-is)
-    For a directory or bare repo, common skill filenames are appended so
-    subdirectory skills (e.g. anthropics/skills -> skills/pdf/SKILL.md) resolve."""
-    ref = (ref or "").strip()
-    if ref.startswith("https://raw.githubusercontent.com/"):
-        return [ref]
-    owner = repo = path = branch = ""
-    m = re.match(
-        r"^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/(?:blob|tree)/([^/]+)/(.+?))?/?$",
-        ref)
-    if m:
-        owner, repo = m.group(1), m.group(2)
-        branch = m.group(3) or ""
-        path = (m.group(4) or "").strip("/")
-    else:
-        sm = re.match(r"^([\w.-]+)/([\w.-]+?)(?:\.git)?(?:/(.+))?$", ref)
-        if not sm:
-            return []
-        owner, repo = sm.group(1), sm.group(2)
-        path = (sm.group(3) or "").strip("/")
-
-    branches = [branch] if branch else ["main", "master"]
-    skill_names = ["SKILL.md", "skill.md", "README.md", "readme.md"]
-    out = []
-    # A direct file reference (path ends in a filename with an extension).
-    if path and re.search(r"\.[A-Za-z0-9]{1,8}$", path):
-        for b in branches:
-            out.append(f"https://raw.githubusercontent.com/{owner}/{repo}/{b}/{path}")
-        return out
-    # A directory (or bare repo): try skill files under the optional subpath.
-    for b in branches:
-        for n in skill_names:
-            sub = (path + "/" + n) if path else n
-            out.append(f"https://raw.githubusercontent.com/{owner}/{repo}/{b}/{sub}")
-    return out
 
 
 
@@ -187,33 +23,21 @@ def _skill_source_label(source_type, data):
 
 
 def _fetch_skill_source(source_type, data):
-    """Resolve an import request to raw source text. Returns (text, error).
-    File uploads are read client-side and arrive as source_type 'paste'."""
+    """Resolve a local import request to raw source text.
+
+    Skill ingestion intentionally accepts only text the user supplied to the
+    local UI. The bridge is not a general-purpose server-side URL fetcher:
+    remote URLs add SSRF and redirect/DNS-rebinding attack surface outside
+    Eva's configured provider routes.
+    """
     source_type = (source_type or "").strip().lower()
     if source_type in ("paste", "text", "file"):
         content = data.get("content")
         if not isinstance(content, str) or not content.strip():
             return None, "no content provided"
         return content[:_SKILL_SOURCE_MAX_BYTES], ""
-    if _st.egress_mode != "cloud":
-        return None, f"external skill imports are disabled by EVA_EGRESS_MODE={_st.egress_mode}"
-    if source_type == "url":
-        url = str(data.get("url", "")).strip()
-        if not url:
-            return None, "no url provided"
-        return _http_get_text(url)
-    if source_type == "github":
-        ref = str(data.get("repo", "") or data.get("url", "")).strip()
-        candidates = _github_raw_candidates(ref)
-        if not candidates:
-            return None, "could not parse GitHub reference (use owner/repo or a github.com URL)"
-        last_err = "no candidate file found"
-        for cand in candidates:
-            text, err = _http_get_text(cand)
-            if text and text.strip():
-                return text, ""
-            last_err = err or last_err
-        return None, last_err
+    if source_type in ("url", "github"):
+        return None, "remote skill imports are disabled; paste or upload the skill content instead"
     return None, "unknown source type"
 
 

@@ -199,6 +199,22 @@ def _extract_readable(html_text, max_length=6000):
     return result[:max_length] if result else text[:max_length]
 
 
+def _is_google_control_url(raw_url):
+    """Return True for Google-owned navigation/challenge URLs, not by substring."""
+    try:
+        parsed = urllib.parse.urlsplit(raw_url)
+    except (TypeError, ValueError):
+        return True
+    if parsed.scheme not in ("http", "https"):
+        return True
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        return True
+    is_google = host == "google.com" or host.endswith(".google.com")
+    is_youtube = host == "youtube.com" or host.endswith(".youtube.com")
+    return is_google or (is_youtube and parsed.path.startswith("/sorry"))
+
+
 def _google_fallback(query, max_results=5):
     """Last-resort search via Google's HTML. Used when DDG rate-limits."""
     encoded = urllib.parse.quote_plus(query)
@@ -220,7 +236,7 @@ def _google_fallback(query, max_results=5):
         title = _strip_html(title_html).strip()
         if not title or len(title) < 5 or raw_url in seen:
             continue
-        if "google.com" in raw_url or "youtube.com/sorry" in raw_url:
+        if _is_google_control_url(raw_url):
             continue
         seen.add(raw_url)
         results.append({"title": title, "url": raw_url, "snippet": ""})

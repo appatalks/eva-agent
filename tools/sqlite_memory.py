@@ -206,6 +206,21 @@ _SCHEMA = {
     },
 }
 
+_READ_ONLY_SAMPLE_QUERIES = {
+    "SelfState": "SELECT * FROM SelfState ORDER BY rowid DESC LIMIT ?",
+    "Knowledge": "SELECT * FROM Knowledge ORDER BY rowid DESC LIMIT ?",
+    "Conversations": "SELECT * FROM Conversations ORDER BY rowid DESC LIMIT ?",
+    "EmotionState": "SELECT * FROM EmotionState ORDER BY rowid DESC LIMIT ?",
+    "EmotionBaseline": "SELECT * FROM EmotionBaseline ORDER BY rowid DESC LIMIT ?",
+    "MemorySummaries": "SELECT * FROM MemorySummaries ORDER BY rowid DESC LIMIT ?",
+    "Reflections": "SELECT * FROM Reflections ORDER BY rowid DESC LIMIT ?",
+    "HeuristicsIndex": "SELECT * FROM HeuristicsIndex ORDER BY rowid DESC LIMIT ?",
+    "Goals": "SELECT * FROM Goals ORDER BY rowid DESC LIMIT ?",
+    "BackgroundProposals": "SELECT * FROM BackgroundProposals ORDER BY rowid DESC LIMIT ?",
+    "BackgroundActivity": "SELECT * FROM BackgroundActivity ORDER BY rowid DESC LIMIT ?",
+    "Skills": "SELECT * FROM Skills ORDER BY rowid DESC LIMIT ?",
+}
+
 # Seed data matching eva_seed.kql (sanitized).
 _SEED = {
     "EmotionBaseline": [
@@ -731,10 +746,9 @@ class SqliteMemory:
         """
         if params is None:
             params = ()
-        # Shortcut: bare table name becomes SELECT *
-        stripped = sql.strip()
-        if stripped and " " not in stripped and not stripped.startswith("SELECT"):
-            sql = f"SELECT * FROM {stripped}"
+        if not isinstance(sql, str) or not sql or len(sql) > 65536:
+            print("[SQLite] Query rejected")
+            return []
 
         # Guard: prevent writes via query()
         from bridge.events import guard_read_only, ReadOnlyViolationError
@@ -759,14 +773,13 @@ class SqliteMemory:
 
         Guards against write statements on journal tables.
         """
+        from bridge.events import guard_read_only, ReadOnlyViolationError, MemoryQueryError
         if params is None:
             params = ()
-        stripped = sql.strip()
-        if stripped and " " not in stripped and not stripped.startswith("SELECT"):
-            sql = f"SELECT * FROM {stripped}"
+        if not isinstance(sql, str) or not sql or len(sql) > 65536:
+            raise MemoryQueryError(str(sql)[:200], "query is invalid")
 
         # Guard: prevent writes via query_strict()
-        from bridge.events import guard_read_only, ReadOnlyViolationError, MemoryQueryError
         try:
             guard_read_only(sql)
         except ReadOnlyViolationError as e:
@@ -818,12 +831,21 @@ class SqliteMemory:
             print("[SQLite] Ingest failed")
             return False
 
+    def sample_rows(self, table, limit):
+        """Return a bounded sample from one schema-owned table only."""
+        query = _READ_ONLY_SAMPLE_QUERIES.get(table)
+        if query is None or isinstance(limit, bool) or not isinstance(limit, int):
+            return []
+        return self.query(query, (max(1, min(limit, 100)),))
+
     def fts_search(self, table, terms, limit=20):
         """Full-text search on a table that has an FTS5 index.
 
         Currently only Knowledge_fts exists. Returns list of dicts from the
         base table, ranked by relevance.
         """
+        if table not in _SCHEMA:
+            return []
         fts_table = f"{table}_fts"
         # Check FTS table exists
         with self._lock:

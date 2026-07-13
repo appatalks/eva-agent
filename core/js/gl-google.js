@@ -3,6 +3,33 @@
 
 // Google Gemini
 
+function _geminiInputText(element) {
+    if (!element) return '';
+    if (typeof element.innerText === 'string') return element.innerText.trim();
+    if (typeof element.textContent === 'string') return element.textContent.trim();
+    return String(element.innerHTML || '')
+        .replace(/<br\s*\/?\s*>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .trim();
+}
+
+function _geminiAppendText(output, className, label, text) {
+    if (!output || !document.createElement) return;
+    var line = document.createElement('div');
+    line.className = className;
+    var labelNode = document.createElement('span');
+    labelNode.className = className;
+    labelNode.textContent = label;
+    var textNode = document.createElement('span');
+    textNode.className = 'eva-safe-text';
+    textNode.textContent = ' ' + String(text || '');
+    textNode.style.whiteSpace = 'pre-wrap';
+    line.appendChild(labelNode);
+    line.appendChild(textNode);
+    output.appendChild(line);
+    output.scrollTop = output.scrollHeight;
+}
+
 function geminiSend(capturedEnvelope) {
     capturedEnvelope = capturedEnvelope || ((typeof captureRequestEnvelope === 'function')
         ? captureRequestEnvelope() : null);
@@ -11,9 +38,6 @@ function geminiSend(capturedEnvelope) {
             isCurrentRequestEnvelope(capturedEnvelope));
     }
     if (!requestIsCurrent()) return;
-    // Remove occurrences of specific syntax from the txtMsg element
-    txtMsg.innerHTML = txtMsg.innerHTML.replace(/<div[^>]*>.*<\/div>/g, '');
-
     function getGoogleGlKey() {
         // Prefer local inline config if present
         if (typeof window !== 'undefined' && window.__LOCAL_CONFIG__ && window.__LOCAL_CONFIG__.GOOGLE_GL_KEY) {
@@ -54,7 +78,7 @@ function geminiSend(capturedEnvelope) {
         geminiMessages = JSON.parse(storedGeminiMessages);
     }
 
-    const sQuestion = document.getElementById("txtMsg").innerHTML.replace(/<br>/g, "\n").replace(/<[^>]+>/g, "").trim();
+    const sQuestion = _geminiInputText(document.getElementById("txtMsg"));
     if (!sQuestion) {
         alert("Type in your question!");
         txtMsg.focus();
@@ -63,8 +87,8 @@ function geminiSend(capturedEnvelope) {
 
     getGoogleGlKey().then(GOOGLE_GL_KEY => {
         if (!requestIsCurrent()) return;
-        document.getElementById("txtMsg").innerHTML = "";
-        document.getElementById("txtOutput").innerHTML += '<span class="user">You: </span>' + escapeHtml(sQuestion) + "<br>\n";
+        document.getElementById("txtMsg").textContent = "";
+        _geminiAppendText(document.getElementById("txtOutput"), 'user', 'You:', sQuestion);
 
     const geminiUrl = `https://generativelanguage.googleapis.com/v1alpha/models/gemini-2.0-flash-thinking-exp:generateContent?key=${GOOGLE_GL_KEY}`;
 
@@ -90,7 +114,10 @@ function geminiSend(capturedEnvelope) {
             .then(result => {
                 if (!requestIsCurrent()) return;
                 if (result.candidates[0].finishReason === "RECITATION") {
-                    document.getElementById("txtOutput").innerHTML += '<span class="eva">Eva: Sorry, please ask me another way.</span><br>\n';
+                    _geminiAppendText(
+                        document.getElementById("txtOutput"), 'eva', 'Eva:',
+                        'Sorry, please ask me another way.'
+                    );
                 } else { 
                     const candidate = result.candidates[0].content.parts;
 
@@ -115,7 +142,10 @@ function geminiSend(capturedEnvelope) {
                                                         if (!requestIsCurrent()) return;
                                                 }
                                                 if (thoughts) {
-                                                        document.getElementById("txtOutput").innerHTML += '<span class="eva-thoughts">Eva\'s Thoughts:</span><br>' + escapeHtml(thoughts) + "<br><br>\n";
+                                                        _geminiAppendText(
+                                                            document.getElementById("txtOutput"),
+                                                            'eva-thoughts', "Eva's Thoughts:", thoughts
+                                                        );
                                                 }
                         const out = document.getElementById("txtOutput");
                                                 if (!await renderEvaResponse(
@@ -132,11 +162,17 @@ function geminiSend(capturedEnvelope) {
             .catch(error => {
                 if (!requestIsCurrent()) return;
                 console.error("Error:", error);
-                document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + escapeHtml(error.message) + "<br>\n";
+                _geminiAppendText(
+                    document.getElementById("txtOutput"), 'error', 'Error:',
+                    error && error.message ? error.message : String(error || 'Request failed')
+                );
             });
     }).catch(error => {
         if (!requestIsCurrent()) return;
         console.error("Error:", error);
-        document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + escapeHtml(error.message) + "<br>\n";
+        _geminiAppendText(
+            document.getElementById("txtOutput"), 'error', 'Error:',
+            error && error.message ? error.message : String(error || 'Request failed')
+        );
     });
 }

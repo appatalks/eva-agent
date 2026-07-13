@@ -243,11 +243,40 @@ class MCPServer:
         self._process_group_id = None
         self._stop_lock = threading.Lock()
 
+    def _canonical_spawn_spec(self):
+        """Revalidate an exact release-approved process shape at the sink."""
+        from bridge import state as _st
+
+        source = {
+            self.name: {
+                "command": self.command,
+                "args": list(self.args),
+                "env": dict(self.env),
+            }
+        }
+        allowed, rejected = _cfg.mcp_config_for_local_execution(
+            source, _st.egress_mode
+        )
+        spec = allowed.get(self.name)
+        if rejected or spec is None or set(allowed) != {self.name}:
+            raise RuntimeError("MCP process policy rejected server")
+        command = spec.get("command")
+        args = spec.get("args")
+        env = spec.get("env")
+        if (
+            not isinstance(command, str)
+            or not isinstance(args, list)
+            or not all(isinstance(item, str) for item in args)
+            or not isinstance(env, dict)
+        ):
+            raise RuntimeError("MCP process specification is invalid")
+        return [command, *args], env
+
     def start(self):
         """Spawn the MCP server process and initialize."""
-        cmd = [self.command] + self.args
+        cmd, canonical_env = self._canonical_spawn_spec()
         explicit_env = {}
-        for k, v in self.env.items():
+        for k, v in canonical_env.items():
             if k != "EVA_BRIDGE_TOKEN":
                 explicit_env[k] = str(v) if not isinstance(v, str) else v
         process_env = _cfg.child_process_env(explicit_env, profile="mcp")

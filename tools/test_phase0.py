@@ -383,6 +383,17 @@ class TestCORSOriginValidation(unittest.TestCase):
             else:
                 os.environ["EVA_ALLOWED_ORIGINS"] = saved
 
+    def test_cors_header_uses_a_canonical_origin_value(self):
+        self.assertEqual(
+            self.handler._allowed_cors_origin("http://127.0.0.1:8888"),
+            "http://127.0.0.1:8888",
+        )
+        self.assertIsNone(
+            self.handler._allowed_cors_origin(
+                "http://127.0.0.1:8888\r\nX-Injected: true"
+            )
+        )
+
     def test_vary_origin_present(self):
         headers = self._options_origin("http://127.0.0.1:8888")
         self.assertIn("Origin", headers.get("Vary", ""))
@@ -1249,17 +1260,16 @@ class TestOfflinePolicy(unittest.TestCase):
                 _st.embedding_cache, _st.embedding_disabled_logged,
             ) = saved
 
-    def test_restricted_mode_blocks_external_skill_fetch(self):
-        from bridge import state as _st
+    def test_skill_import_never_fetches_external_urls(self):
         from bridge.skills import _fetch_skill_source
-        saved_mode = _st.egress_mode
-        try:
-            _st.egress_mode = "offline"
-            text, error = _fetch_skill_source("url", {"url": "https://example.invalid/skill"})
-            self.assertIsNone(text)
-            self.assertIn("EVA_EGRESS_MODE", error)
-        finally:
-            _st.egress_mode = saved_mode
+        for source_type, data in (
+            ("url", {"url": "https://example.invalid/skill"}),
+            ("github", {"repo": "owner/repo"}),
+        ):
+            with self.subTest(source_type=source_type):
+                text, error = _fetch_skill_source(source_type, data)
+                self.assertIsNone(text)
+                self.assertIn("remote skill imports are disabled", error)
 
     def test_restricted_mode_blocks_signal_before_subprocess(self):
         from bridge import state as _st
