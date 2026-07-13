@@ -18,6 +18,26 @@ VALID_SENSITIVITY = ("public", "normal", "private", "secret")
 VALID_CONSENT_SCOPE = ("local_only", "session", "cloud_allowed", "deleted")
 DEFAULT_SENSITIVITY = "normal"
 DEFAULT_CONSENT_SCOPE = "local_only"
+_SYNTHETIC_MEMORY_PREFIX_RE = re.compile(
+    r"^(?:test|tmp|dummy|sample|foo|bar)"
+    r"(?:[0-9]+|(?:[\s_\-]+(?:test|tmp|dummy|sample|foo|bar|user|person|place|value|data|name|entity|item|[0-9]+))*)$",
+    re.IGNORECASE,
+)
+_SYNTHETIC_MEMORY_COMPACT_RE = re.compile(
+    r"^(?:test|tmp|dummy|sample|foo|bar)"
+    r"(?:user|person|place|value|data|name|entity|item|bar)[0-9]*$",
+    re.IGNORECASE,
+)
+
+
+def is_synthetic_memory_value(value):
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return True
+    return (
+        _SYNTHETIC_MEMORY_PREFIX_RE.fullmatch(text) is not None
+        or _SYNTHETIC_MEMORY_COMPACT_RE.fullmatch(text) is not None
+    )
 
 # ── Credential patterns (synthetic/obvious only) ────────────────────
 

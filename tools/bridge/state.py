@@ -13,11 +13,17 @@ import threading
 
 from bridge.config import (
     DEFAULT_ALERT_SETTINGS,
+    artifact_namespace_blocked as load_artifact_namespace_blocked,
     env_truthy,
+    load_runtime_state_document_status,
 )
 
 # ── ACP client pool ────────────────────────────────────────────────
 acp_client = None           # Global ACP client instance (most-recently-used)
+acp_copilot_path = "copilot"
+acp_cwd = os.getcwd()
+acp_model = None
+mcp_github_pat = ""
 acp_pool = {}               # model_key -> ACPClient
 acp_pool_order = []         # model_key list, LRU first
 acp_pool_lock = threading.RLock()
@@ -32,6 +38,7 @@ active_kusto_cluster = os.environ.get("KUSTO_CLUSTER_URL", "").strip()
 
 # ── Cognition ───────────────────────────────────────────────────────
 cognition_enabled = False
+cognition_initialization_lock = threading.RLock()
 cognition_launch_iso = None
 cognition_launch_id = None
 session_exchange_count = 0
@@ -87,19 +94,35 @@ alerts_lock = threading.RLock()
 notify_lock = threading.Lock()
 notify_ring = []
 
+# ── One-shot camera capture authority ──────────────────────────────
+camera_capture_lock = threading.RLock()
+camera_captures = {}
+
+# ── Immutable artifacts ────────────────────────────────────────────
+artifact_lock = threading.RLock()
+artifact_generation = "0"
+artifact_turn_counts = {}
+artifact_namespace_blocked = load_artifact_namespace_blocked()
+
 # ── Local MCP (no-cloud mode) ──────────────────────────────────────
 local_mcp_manager = None    # LocalMCPManager instance (lazy)
-# Restore persisted mode preference (local vs cloud).
-_mode_pref_path = os.path.join(
-    os.path.expanduser("~/.config/eva-standalone"), "mode.txt")
-try:
-    _saved_mode = open(_mode_pref_path).read().strip().lower() if os.path.isfile(_mode_pref_path) else ""
-except OSError:
-    _saved_mode = ""
-local_mode = (_saved_mode == "local")
+mode_mcp_transition_lock = threading.RLock()
+mode_mcp_generation = 0
+provider_leases = {}
+# Restore mode only from the same exact document that owns the MCP selection.
+_runtime_state_status, _runtime_state = load_runtime_state_document_status()
+runtime_state_invalid = _runtime_state_status == "invalid"
+_saved_mode = _runtime_state["mode"] if _runtime_state is not None else ""
+local_mode = (_saved_mode == "local") or runtime_state_invalid
+local_mode_state = (
+    "invalid" if runtime_state_invalid
+    else "selected" if local_mode
+    else "inactive"
+)
 
 # ── Per-launch auth ────────────────────────────────────────────────
 bridge_auth_token = ""      # Set at startup; empty = auth disabled
+launch_capability_secret = ""  # Separate Electron-only launch authority
 
 # ── Proposal review lock ───────────────────────────────────────────
 proposal_review_lock = threading.Lock()

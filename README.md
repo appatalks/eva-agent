@@ -4,7 +4,7 @@
 
 [Website](https://appatalks.github.io/eva-agent/) | [Documentation](README-2.md) | [Issues](https://github.com/appatalks/eva-agent/issues) | License: MIT
 
-A voice-first AI assistant that sees through your camera, controls your browser and desktop, remembers everything, learns from experience, and runs tasks on a schedule. No build step. No framework. Open source.
+A voice-first AI assistant with authorized camera vision, bounded browser actions, launch-only desktop integration, persistent memory, governed learning experiments, and scheduled tasks. No framework. Open source.
 
 ## Quick install
 
@@ -27,7 +27,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh            # install dependencies
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.3.0.AppImage'
+./dist/'Eva Standalone-5.4.0.AppImage'
 ```
 
 Prereqs: Node.js 24+ and Python 3.12+. GitHub Copilot CLI plus
@@ -38,12 +38,13 @@ operation does not require Copilot CLI.
 
 | | |
 |---|---|
-| **Camera vision** | Webcam presence sensing, face-detection auto-wake, on-demand "look" with gpt-4o |
+| **Camera vision** | Webcam presence sensing, face-detection auto-wake, and on-demand one-frame vision with an Electron-native one-use authorization and fresh-frame receipt |
 | **Browser agent** | Isolated Playwright DOM/vision loop with DNS-pinned public egress, native launch authorization, per-action approval, and verified outcomes |
 | **Desktop agent** | Launch-only containment for curated root-owned GUI binaries; pointer, keyboard, shell, arguments, and window helpers remain broker-disabled |
 | **Voice interface** | Full-screen voice orb, wake/barge-in, TTS (OpenAI, Polly, Bark, browser) |
-| **Signal messaging** | Send-only text notifications via signal-cli, keyword-triggered or on-demand |
-| **Persistent memory** | Kusto/ADX or local SQLite, default-off shadow/hybrid claim recall, and human-approved evidence-linked consolidation proposals |
+| **Signal messaging** | Send-only delivery for configured trusted alerts via signal-cli; model text cannot dispatch messages |
+| **Persistent memory** | Canonical local SQLite with optional consent-aware Kusto/ADX projection, default-off shadow/hybrid claim recall, and human-approved evidence-linked consolidation proposals |
+| **Verified artifacts** | Session-scoped immutable identities, SHA-256-verified downloads, and no server-side file opening |
 | **Safe skill learning** | Default-off local shadow pipeline records verified outcomes, proposes restricted immutable candidates, and evaluates them deterministically without activation |
 | **Legacy skill drafts** | Existing provider-backed draft suggestion is separately gated by strict default-off `EVA_LEGACY_SKILL_AUTO_LEARN`; it grants no activation authority |
 | **Cron scheduler** | Standard cron expressions, recurring prompts, morning briefings, alerts |
@@ -62,7 +63,7 @@ For persistent memory, point Settings > MCP at an Azure Data Explorer cluster, o
 
 For Signal notifications, install [signal-cli](https://github.com/AsamK/signal-cli) and link it to your Signal account (`signal-cli link -n "Eva"`). Enter sender and recipient numbers in Settings > Auth.
 
-Import skills from text, URLs, GitHub repos, or files in Settings. Eva normalizes them into her format, stores in ADX, and applies matching skills automatically.
+Import skills from text, URLs, GitHub repos, or files in Settings. Eva normalizes them into her format and stores them through the active memory backend (canonical SQLite by default, with optional ADX projection). Reviewed active skills may be matched into later context.
 
 ## Security and egress modes
 
@@ -88,7 +89,7 @@ LAN or the internet.
 
 ## Documentation
 
-- [README-2.md](README-2.md): architecture, MCP, ACP, browser-only setup, roadmap
+- [README-2.md](README-2.md): architecture, MCP, ACP, Standalone deployment, roadmap
 - [standalone/README.md](standalone/README.md): AppImage build and runtime
 - [Website](https://appatalks.github.io/eva-agent/): features, comparison, install guide
 

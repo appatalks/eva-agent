@@ -23,7 +23,7 @@ import time
 import unicodedata
 import urllib.parse
 
-from bridge.events import canonical_json
+from bridge.events import ValidationError as EventValidationError, canonical_json
 from bridge.sensitive import redact_credentials
 
 
@@ -344,8 +344,19 @@ def _normalize_launch_value(value):
 
 
 def launch_spec(agent, data):
-    if agent not in ("browser", "desktop") or not isinstance(data, dict):
+    if agent not in ("browser", "desktop", "camera") or not isinstance(data, dict):
         raise ActionRunValidationError("invalid launch specification")
+
+    if agent == "camera":
+        if set(data) - {"question", "device", "launch_capability", "purpose"}:
+            raise ActionRunValidationError("invalid camera launch specification")
+        question = _launch_text(
+            data.get("question"), "question", 1000, allow_empty=False
+        )
+        device = data.get("device")
+        if isinstance(device, bool) or not isinstance(device, int) or not 0 <= device <= 32:
+            raise ActionRunValidationError("camera device is invalid")
+        return _normalize_launch_value({"question": question, "device": device})
 
     goal = _launch_text(data.get("goal"), "goal", 2000, allow_empty=False)
     default_vision_model = os.environ.get("OPENAI_VISION_MODEL") or "gpt-4o"
@@ -578,7 +589,24 @@ def observation(check_id, kind, verdict, facts, step):
 
 
 def action_digest(action):
-    return sha256(action if isinstance(action, dict) else {})
+    _normalized, canonical = canonical_effect_object(
+        action if isinstance(action, dict) else {}, "action"
+    )
+    return sha256(canonical)
+
+
+def canonical_effect_object(value, field):
+    """Return one normalized object and the exact canonical JSON representing it."""
+    if not isinstance(value, dict):
+        raise ActionRunValidationError(f"{field} must be an object")
+    try:
+        canonical = canonical_json(value)
+        normalized = json.loads(canonical)
+    except (EventValidationError, TypeError, ValueError, RecursionError) as exc:
+        raise ActionRunValidationError(f"{field} is not canonicalizable") from exc
+    if not isinstance(normalized, dict) or len(canonical) > 16384:
+        raise ActionRunValidationError(f"{field} is invalid or too large")
+    return normalized, canonical
 
 
 def action_description(agent, action, element_text="", binding=None):
@@ -586,26 +614,23 @@ def action_description(agent, action, element_text="", binding=None):
     if not isinstance(action, dict) or not isinstance(binding, dict):
         raise ActionRunValidationError("approval effect or binding is invalid")
     try:
-        effect_json = json.dumps(
-            action, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-            allow_nan=False,
-        )
-        binding_json = json.dumps(
-            binding, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-            allow_nan=False,
+        _normalized_action, effect_json = canonical_effect_object(action, "action")
+        _normalized_binding, binding_json = canonical_effect_object(
+            binding, "binding"
         )
         label_json = json.dumps(
-            str(element_text or ""), ensure_ascii=True, allow_nan=False
+            unicodedata.normalize("NFC", str(element_text or "")),
+            ensure_ascii=True, allow_nan=False,
         )
     except (TypeError, ValueError, RecursionError) as exc:
         raise ActionRunValidationError("approval display is invalid") from exc
     description = (
         f"execute this exact frozen {agent} effect:\n"
         f"Effect: {effect_json}\n"
-        f"Effect SHA-256: {action_digest(action)}\n"
+        f"Effect SHA-256: {sha256(effect_json)}\n"
         f"Target label: {label_json}\n"
         f"Binding: {binding_json}\n"
-        f"Binding SHA-256: {sha256(binding)}"
+        f"Binding SHA-256: {sha256(binding_json)}"
     )
     if len(description) > 16384:
         raise ActionRunValidationError("approval display is too large")
@@ -642,6 +667,8 @@ def initialize_run(rec, agent, requested_autonomy, postcondition=None):
         "_effect_count": 0,
         "_active_effect": None,
         "_effect_receipts": [],
+        "_approved_effects": {},
+        "_bounded_operations": 0,
         "_baseline_postcondition": None,
         "_log_salt": secrets.token_hex(16),
     })
@@ -692,16 +719,32 @@ def run_bounded_call(rec, callback, *, timeout_seconds):
     complete = threading.Event()
     box = {}
 
+    with rec["_record_lock"]:
+        rec["_bounded_operations"] = int(
+            rec.get("_bounded_operations", 0)
+        ) + 1
+
     def invoke():
         try:
             box["value"] = callback()
         except BaseException as exc:  # propagate on the owning worker only
             box["error"] = exc
         finally:
+            with rec["_record_lock"]:
+                rec["_bounded_operations"] = max(
+                    0, int(rec.get("_bounded_operations", 1)) - 1
+                )
             complete.set()
 
     thread = threading.Thread(target=invoke, name="eva-bounded-operation", daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except Exception:
+        with rec["_record_lock"]:
+            rec["_bounded_operations"] = max(
+                0, int(rec.get("_bounded_operations", 1)) - 1
+            )
+        raise
     deadline = time.monotonic() + timeout
     while not complete.wait(0.05):
         if rec["_cancel"].is_set():
@@ -734,10 +777,14 @@ def open_gate(
     expires_monotonic = time.monotonic() + ttl
     expires_at = utc_iso(utc_now() + datetime.timedelta(seconds=ttl))
     if kind == "approval":
-        frozen_action = copy.deepcopy(action if isinstance(action, dict) else {})
-        frozen_binding = copy.deepcopy(binding if isinstance(binding, dict) else {})
-        digest = action_digest(frozen_action)
-        binding_digest = sha256(frozen_binding)
+        frozen_action, action_json = canonical_effect_object(
+            action if isinstance(action, dict) else {}, "action"
+        )
+        frozen_binding, binding_json = canonical_effect_object(
+            binding if isinstance(binding, dict) else {}, "binding"
+        )
+        digest = sha256(action_json)
+        binding_digest = sha256(binding_json)
         description = action_description(
             rec["agent"], frozen_action, element_text, frozen_binding
         )
@@ -762,6 +809,7 @@ def open_gate(
         "_decision": None,
         "_action": frozen_action,
         "_binding": frozen_binding,
+        "_approval_token": secrets.token_hex(32) if kind == "approval" else "",
     }
     with rec["_record_lock"]:
         if rec.get("_terminalized") or rec["_cancel"].is_set():
@@ -786,12 +834,18 @@ def open_gate(
         else:
             decision = gate.get("_decision") or {"state": "expired"}
             if decision.get("state") == "approved":
+                approval_token = gate["_approval_token"]
+                rec["_approved_effects"][approval_token] = {
+                    "action_digest": gate["action_digest"],
+                    "binding_digest": gate["binding_digest"],
+                }
                 decision = {
                     **decision,
                     "action": copy.deepcopy(gate["_action"]),
                     "action_digest": gate["action_digest"],
                     "binding": copy.deepcopy(gate["_binding"]),
                     "binding_digest": gate["binding_digest"],
+                    "_approval_token": approval_token,
                 }
         if rec.get("_gate_state") is gate:
             rec["_gate_state"] = None
@@ -881,15 +935,40 @@ def finish_startup(rec):
 def begin_effect(rec, approval, current_binding=None):
     if not isinstance(approval, dict) or approval.get("state") != "approved":
         return False, "not_approved", None
-    action = copy.deepcopy(approval.get("action"))
-    binding = copy.deepcopy(current_binding if isinstance(current_binding, dict) else {})
+    approval_token = approval.get("_approval_token")
     if (
-        not isinstance(action, dict)
-        or action_digest(action) != approval.get("action_digest")
-        or sha256(binding) != approval.get("binding_digest")
+        not isinstance(approval_token, str)
+        or re.fullmatch(r"[0-9a-f]{64}", approval_token) is None
     ):
-        return False, "approved_target_changed", None
+        return False, "approval_consumed", None
+    try:
+        action, action_json = canonical_effect_object(
+            approval.get("action"), "approved action"
+        )
+        binding, binding_json = canonical_effect_object(
+            current_binding if isinstance(current_binding, dict) else {},
+            "current binding",
+        )
+        parsed = True
+    except ActionRunValidationError:
+        action = None
+        action_json = ""
+        binding_json = ""
+        parsed = False
     with rec["_record_lock"]:
+        authorized = rec.get("_approved_effects", {}).pop(
+            approval_token, None
+        )
+        if authorized is None:
+            return False, "approval_consumed", None
+        if (
+            not parsed
+            or authorized.get("action_digest") != approval.get("action_digest")
+            or authorized.get("binding_digest") != approval.get("binding_digest")
+            or sha256(action_json) != authorized.get("action_digest")
+            or sha256(binding_json) != authorized.get("binding_digest")
+        ):
+            return False, "approved_target_changed", None
         if rec.get("_terminalized") or rec["_cancel"].is_set():
             return False, "cancelled", None
         if runtime_expired(rec):

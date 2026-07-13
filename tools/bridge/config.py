@@ -7,9 +7,14 @@ a future phase extracts it into ``state.py``.
 """
 
 import datetime
+import fcntl
+import json
+import math
 import os
 import pwd
 import re
+import secrets
+import stat
 import sys
 import urllib.parse
 
@@ -41,14 +46,871 @@ TOOLS_DIR = os.path.dirname(BRIDGE_DIR)
 PROJECT_ROOT = os.path.dirname(TOOLS_DIR)
 EVA_CONFIG_DIR = os.path.expanduser("~/.config/eva-standalone")
 ARTIFACTS_DIR = os.path.join(EVA_CONFIG_DIR, "artifacts")
+ACP_RUNTIME_DIR = os.path.join(EVA_CONFIG_DIR, "acp_runtime")
 KUSTO_CLUSTER_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "kusto_cluster.txt")
 MCP_CONFIG_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "mcp_config.json")
+RUNTIME_STATE_PATH = os.path.join(EVA_CONFIG_DIR, "runtime_state.json")
+ARTIFACT_EPOCH_PATH = os.path.join(EVA_CONFIG_DIR, "artifact_epoch.txt")
+ARTIFACT_EPOCH_LOCK_PATH = os.path.join(
+    EVA_CONFIG_DIR, "artifact_epoch.lock"
+)
+ARTIFACT_STORE_MARKER_PATH = os.path.join(
+    EVA_CONFIG_DIR, "artifact_store.marker"
+)
+ARTIFACT_NAMESPACE_BLOCK_PATH = os.path.join(
+    EVA_CONFIG_DIR, "artifact_namespace.blocked"
+)
 ALERTS_CONFIG_PATH = os.path.join(EVA_CONFIG_DIR, "alerts.json")
 NOTIFY_PATH = os.path.join(EVA_CONFIG_DIR, "notifications.jsonl")
 EMBEDDING_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "embeddings_cache.json")
 MEMORY_BACKEND_PREF_PATH = os.path.join(EVA_CONFIG_DIR, "memory_backend.txt")
 MODE_PREF_PATH = os.path.join(EVA_CONFIG_DIR, "mode.txt")
 TELEMETRY_PATH = os.path.join(EVA_CONFIG_DIR, "telemetry.jsonl")
+BRIDGE_DEBUG_LOG_PATH = os.path.join(EVA_CONFIG_DIR, "bridge_debug.log")
+
+
+def artifact_namespace_blocked():
+    try:
+        with open_private_file(
+            ARTIFACT_NAMESPACE_BLOCK_PATH, "r", encoding="utf-8"
+        ) as handle:
+            handle.read(64)
+            return True
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError, PrivateStorageError):
+        return True
+
+
+def set_artifact_namespace_blocked(blocked):
+    ensure_private_directory(EVA_CONFIG_DIR)
+    if blocked:
+        with open_private_file(
+            ARTIFACT_NAMESPACE_BLOCK_PATH, "w", encoding="utf-8"
+        ) as handle:
+            handle.write("blocked-v1\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return True
+    _display, parent_fd = _open_private_directory(EVA_CONFIG_DIR)
+    try:
+        try:
+            os.unlink(
+                os.path.basename(ARTIFACT_NAMESPACE_BLOCK_PATH),
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            pass
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    return True
+
+
+def load_runtime_state_document_status(path=None):
+    """Return (absent|invalid|valid, document) for the atomic runtime state."""
+    target = path or RUNTIME_STATE_PATH
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate runtime-state member")
+            result[key] = value
+        return result
+
+    def finite_float(value):
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("non-finite runtime-state number")
+        return parsed
+
+    try:
+        with open_private_file(target, "r", encoding="utf-8") as handle:
+            raw = handle.read(1024 * 1024 + 1)
+        if len(raw.encode("utf-8")) > 1024 * 1024:
+            return "invalid", None
+        data = json.loads(
+            raw, object_pairs_hook=unique_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(
+                ValueError("non-standard runtime-state number")
+            ),
+            parse_float=finite_float,
+        )
+    except FileNotFoundError:
+        return "absent", None
+    except (
+        OSError, UnicodeError, ValueError, json.JSONDecodeError,
+        PrivateStorageError,
+    ):
+        return "invalid", None
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"version", "mode", "mcp_servers"}
+        or data.get("version") != 1
+        or isinstance(data.get("version"), bool)
+        or data.get("mode") not in ("local", "cloud")
+        or not isinstance(data.get("mcp_servers"), dict)
+    ):
+        return "invalid", None
+    if len(data["mcp_servers"]) > 16:
+        return "invalid", None
+    canonical_servers = {}
+    for name, server in data["mcp_servers"].items():
+        canonical = _canonical_mcp_server(name, server, "cloud")
+        if canonical is None:
+            return "invalid", None
+        canonical_servers[name] = canonical
+    return "valid", {
+        "version": 1, "mode": data["mode"],
+        "mcp_servers": canonical_servers,
+    }
+
+
+def load_runtime_state_document(path=None):
+    """Load one exact versioned mode/MCP document or return None."""
+    status, data = load_runtime_state_document_status(path)
+    return data if status == "valid" else None
+
+
+class PrivateStorageError(RuntimeError):
+    """A sensitive runtime path cannot be accessed without weakening policy."""
+
+
+def _open_private_directory(path, *, create=True):
+    target = os.path.abspath(os.path.expanduser(path))
+    if target == os.path.sep:
+        raise PrivateStorageError("the filesystem root cannot be a private directory")
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise PrivateStorageError("descriptor-safe private directories are unavailable")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    descriptor = os.open(os.path.sep, flags)
+    try:
+        for component in [part for part in target.split(os.path.sep) if part]:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o700, dir_fd=descriptor)
+                child = os.open(component, flags, dir_fd=descriptor)
+                os.fchmod(child, 0o700)
+            except OSError as exc:
+                raise PrivateStorageError(
+                    f"private directory component is unsafe: {component}"
+                ) from exc
+            os.close(descriptor)
+            descriptor = child
+        return target, descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def ensure_private_directory(path, *, create=True):
+    """Create/repair one owner-only directory without following path links."""
+    target, descriptor = _open_private_directory(path, create=create)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            raise PrivateStorageError(f"private runtime path is not a directory: {target}")
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            raise PrivateStorageError(f"private runtime path has the wrong owner: {target}")
+        os.fchmod(descriptor, 0o700)
+        if os.fstat(descriptor).st_mode & 0o077:
+            raise PrivateStorageError(f"private runtime path is not owner-only: {target}")
+        return target
+    finally:
+        os.close(descriptor)
+
+
+def secure_private_tree(path):
+    """Repair one private tree using only descriptor-relative traversal."""
+    root, descriptor = _open_private_directory(path)
+
+    def secure_dir(directory_fd, display_path):
+        os.fchmod(directory_fd, 0o700)
+        for name in os.listdir(directory_fd):
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            child_display = os.path.join(display_path, name)
+            if stat.S_ISLNK(info.st_mode):
+                raise PrivateStorageError(
+                    f"private runtime entry is a symlink: {child_display}"
+                )
+            if hasattr(os, "getuid") and info.st_uid != os.getuid():
+                raise PrivateStorageError(
+                    f"private runtime entry has wrong owner: {child_display}"
+                )
+            if stat.S_ISDIR(info.st_mode):
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                if hasattr(os, "O_CLOEXEC"):
+                    flags |= os.O_CLOEXEC
+                child_fd = os.open(name, flags, dir_fd=directory_fd)
+                try:
+                    secure_dir(child_fd, child_display)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(info.st_mode):
+                if info.st_nlink != 1:
+                    raise PrivateStorageError(
+                        f"private runtime file has multiple links: {child_display}"
+                    )
+                flags = os.O_RDONLY | os.O_NOFOLLOW
+                if hasattr(os, "O_CLOEXEC"):
+                    flags |= os.O_CLOEXEC
+                child_fd = os.open(name, flags, dir_fd=directory_fd)
+                try:
+                    current = os.fstat(child_fd)
+                    if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+                        raise PrivateStorageError(
+                            f"private runtime file changed identity: {child_display}"
+                        )
+                    os.fchmod(child_fd, 0o600)
+                finally:
+                    os.close(child_fd)
+            else:
+                raise PrivateStorageError(
+                    f"invalid private runtime entry: {child_display}"
+                )
+
+    try:
+        secure_dir(descriptor, root)
+        return root
+    finally:
+        os.close(descriptor)
+
+
+def visit_private_files(root, visitor):
+    """Visit regular files beneath *root* through pinned directory descriptors."""
+    if not callable(visitor):
+        raise TypeError("private file visitor must be callable")
+    display, root_fd = _open_private_directory(root)
+    results = []
+
+    def visit_dir(directory_fd, relative_parts):
+        for name in os.listdir(directory_fd):
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            child_display = os.path.join(display, *relative_parts, name)
+            if stat.S_ISLNK(before.st_mode):
+                raise PrivateStorageError(
+                    f"private scan encountered symlink: {child_display}"
+                )
+            if hasattr(os, "getuid") and before.st_uid != os.getuid():
+                raise PrivateStorageError(
+                    f"private scan entry has wrong owner: {child_display}"
+                )
+            flags = os.O_RDONLY | os.O_NOFOLLOW
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            if stat.S_ISDIR(before.st_mode):
+                child_fd = os.open(
+                    name, flags | os.O_DIRECTORY, dir_fd=directory_fd
+                )
+                try:
+                    current = os.fstat(child_fd)
+                    if (
+                        not stat.S_ISDIR(current.st_mode)
+                        or current.st_dev != before.st_dev
+                        or current.st_ino != before.st_ino
+                    ):
+                        raise PrivateStorageError(
+                            f"private scan directory changed identity: {child_display}"
+                        )
+                    os.fchmod(child_fd, 0o700)
+                    visit_dir(child_fd, relative_parts + (name,))
+                finally:
+                    os.close(child_fd)
+                continue
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise PrivateStorageError(
+                    f"private scan entry is invalid: {child_display}"
+                )
+            child_fd = os.open(name, flags, dir_fd=directory_fd)
+            try:
+                current = os.fstat(child_fd)
+                if (
+                    not stat.S_ISREG(current.st_mode)
+                    or current.st_nlink != 1
+                    or current.st_dev != before.st_dev
+                    or current.st_ino != before.st_ino
+                ):
+                    raise PrivateStorageError(
+                        f"private scan file changed identity: {child_display}"
+                    )
+                os.fchmod(child_fd, 0o600)
+                with os.fdopen(child_fd, "rb") as handle:
+                    child_fd = -1
+                    results.append(
+                        visitor(relative_parts + (name,), handle, current)
+                    )
+            finally:
+                if child_fd >= 0:
+                    os.close(child_fd)
+
+    try:
+        root_info = os.fstat(root_fd)
+        if hasattr(os, "getuid") and root_info.st_uid != os.getuid():
+            raise PrivateStorageError(
+                f"private scan root has wrong owner: {display}"
+            )
+        os.fchmod(root_fd, 0o700)
+        visit_dir(root_fd, ())
+        return results
+    finally:
+        os.close(root_fd)
+
+
+def _remove_private_entry(parent_fd, name, display_path):
+    info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if stat.S_ISLNK(info.st_mode):
+        raise PrivateStorageError(f"private cleanup encountered symlink: {display_path}")
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise PrivateStorageError(f"private cleanup entry has wrong owner: {display_path}")
+    if stat.S_ISREG(info.st_mode):
+        if info.st_nlink != 1:
+            raise PrivateStorageError(f"private cleanup file has multiple links: {display_path}")
+        os.unlink(name, dir_fd=parent_fd)
+        return 1
+    if not stat.S_ISDIR(info.st_mode):
+        raise PrivateStorageError(f"private cleanup entry is invalid: {display_path}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    child_fd = os.open(name, flags, dir_fd=parent_fd)
+    removed = 0
+    try:
+        current = os.fstat(child_fd)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or current.st_dev != info.st_dev
+            or current.st_ino != info.st_ino
+        ):
+            raise PrivateStorageError(
+                f"private cleanup directory changed identity: {display_path}"
+            )
+        for child_name in os.listdir(child_fd):
+            removed += _remove_private_entry(
+                child_fd, child_name, os.path.join(display_path, child_name)
+            )
+    finally:
+        os.close(child_fd)
+    os.rmdir(name, dir_fd=parent_fd)
+    return removed
+
+
+def remove_private_subdirectory(root, name):
+    if not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", name) is None:
+        raise PrivateStorageError("private cleanup name is invalid")
+    display, root_fd = _open_private_directory(root, create=False)
+    try:
+        return _remove_private_entry(root_fd, name, os.path.join(display, name))
+    finally:
+        os.close(root_fd)
+
+
+def clear_private_directory(root):
+    """Remove all entries beneath one pinned private directory."""
+    display, root_fd = _open_private_directory(root)
+    removed = 0
+    try:
+        for name in os.listdir(root_fd):
+            removed += _remove_private_entry(
+                root_fd, name, os.path.join(display, name)
+            )
+        return removed
+    finally:
+        os.close(root_fd)
+
+
+def fsync_private_directory(path):
+    """Fsync one owner-only directory without following symbolic links."""
+    _display, directory_fd = _open_private_directory(path, create=False)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def detach_private_directory(path, prefix=".revoked-"):
+    """Atomically replace one private directory with a new empty directory."""
+    target = os.path.abspath(os.path.expanduser(path))
+    parent_path = os.path.dirname(target)
+    name = os.path.basename(target)
+    if (
+        not name or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", name) is None
+        or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", prefix) is None
+    ):
+        raise PrivateStorageError("private rotation path is invalid")
+    display, parent_fd = _open_private_directory(parent_path)
+    quarantine = prefix + secrets.token_hex(16)
+    try:
+        try:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            return display, None
+        if (
+            stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode)
+            or hasattr(os, "getuid") and before.st_uid != os.getuid()
+        ):
+            raise PrivateStorageError("private rotation target is unsafe")
+        os.rename(name, quarantine, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+            replacement_fd = os.open(
+                name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+            try:
+                os.fchmod(replacement_fd, 0o700)
+            finally:
+                os.close(replacement_fd)
+            os.fsync(parent_fd)
+        except Exception:
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            os.rename(
+                quarantine, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd
+            )
+            os.fsync(parent_fd)
+            raise
+        return display, quarantine
+    finally:
+        os.close(parent_fd)
+
+
+def detach_private_subdirectory(root, name, prefix=".revoked-"):
+    """Atomically remove one named subtree from an active private namespace."""
+    if (
+        not isinstance(name, str)
+        or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", name) is None
+        or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", prefix) is None
+    ):
+        raise PrivateStorageError("private detachment name is invalid")
+    display, root_fd = _open_private_directory(root)
+    quarantine = prefix + secrets.token_hex(16)
+    try:
+        try:
+            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return display, None
+        if (
+            stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+            or hasattr(os, "getuid") and info.st_uid != os.getuid()
+        ):
+            raise PrivateStorageError("private detachment target is unsafe")
+        os.rename(name, quarantine, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.fsync(root_fd)
+        return display, quarantine
+    finally:
+        os.close(root_fd)
+
+
+def list_private_subdirectories(root, prefix):
+    """List exact private child directories matching a bounded prefix."""
+    if (
+        not isinstance(prefix, str)
+        or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", prefix) is None
+    ):
+        raise PrivateStorageError("private listing prefix is invalid")
+    display, root_fd = _open_private_directory(root)
+    names = []
+    try:
+        for name in os.listdir(root_fd):
+            if not name.startswith(prefix) or re.fullmatch(
+                re.escape(prefix) + r"[0-9a-f]{32}", name
+            ) is None:
+                continue
+            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if (
+                stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                or hasattr(os, "getuid") and info.st_uid != os.getuid()
+            ):
+                raise PrivateStorageError(
+                    "private quarantine entry is unsafe: "
+                    + os.path.join(display, name)
+                )
+            names.append(name)
+        return sorted(names)
+    finally:
+        os.close(root_fd)
+
+
+def _remove_detached_entry(parent_fd, name):
+    """Delete a detached entry without following links or mutating link targets."""
+    info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        os.unlink(name, dir_fd=parent_fd)
+        return 1
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    child_fd = os.open(name, flags, dir_fd=parent_fd)
+    removed = 0
+    try:
+        current = os.fstat(child_fd)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or current.st_dev != info.st_dev or current.st_ino != info.st_ino
+        ):
+            raise PrivateStorageError("detached directory changed identity")
+        for child_name in os.listdir(child_fd):
+            removed += _remove_detached_entry(child_fd, child_name)
+    finally:
+        os.close(child_fd)
+    os.rmdir(name, dir_fd=parent_fd)
+    return removed
+
+
+def remove_detached_subdirectory(root, name):
+    if not isinstance(name, str) or re.fullmatch(
+        r"\.(?:revoked|artifact-revoked|session-revoked)-[0-9a-f]{32}",
+        name,
+    ) is None:
+        raise PrivateStorageError("detached cleanup name is invalid")
+    _display, root_fd = _open_private_directory(root, create=False)
+    try:
+        removed = _remove_detached_entry(root_fd, name)
+        os.fsync(root_fd)
+        return removed
+    finally:
+        os.close(root_fd)
+
+
+def scavenge_private_directories(root, name_pattern, cutoff, *, remove_all=False):
+    display, root_fd = _open_private_directory(root)
+    removed = 0
+    try:
+        for name in os.listdir(root_fd):
+            if re.fullmatch(name_pattern, name) is None:
+                continue
+            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise PrivateStorageError(
+                    f"private scavenger found invalid entry: {os.path.join(display, name)}"
+                )
+            if remove_all or info.st_mtime < cutoff:
+                _remove_private_entry(
+                    root_fd, name, os.path.join(display, name)
+                )
+                removed += 1
+        return removed
+    finally:
+        os.close(root_fd)
+
+
+def scavenge_private_process_directories(root, name_pattern):
+    """Remove owner-controlled runtime directories whose encoded PID is gone."""
+    display, root_fd = _open_private_directory(root)
+    removed = 0
+    try:
+        for name in os.listdir(root_fd):
+            match = re.fullmatch(name_pattern, name)
+            if match is None:
+                continue
+            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise PrivateStorageError(
+                    f"private process scavenger found invalid entry: {os.path.join(display, name)}"
+                )
+            try:
+                pid = int(match.group("pid"))
+            except (TypeError, ValueError, IndexError) as exc:
+                raise PrivateStorageError("private runtime PID is invalid") from exc
+            alive = pid > 0
+            if alive:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    alive = False
+                except PermissionError:
+                    alive = True
+            if not alive:
+                _remove_private_entry(
+                    root_fd, name, os.path.join(display, name)
+                )
+                removed += 1
+        return removed
+    finally:
+        os.close(root_fd)
+
+
+class _AtomicPrivateFile:
+    def __init__(self, handle, parent_fd, temp_name, final_name, *, exclusive=False):
+        self._handle = handle
+        self._parent_fd = parent_fd
+        self._temp_name = temp_name
+        self._final_name = final_name
+        self._exclusive = exclusive
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+    def __enter__(self):
+        return self
+
+    def close(self, *, commit=True):
+        if self._closed:
+            return
+        published_exclusive = False
+        try:
+            if not self._handle.closed:
+                self._handle.flush()
+                os.fsync(self._handle.fileno())
+                self._handle.close()
+            if commit:
+                if self._exclusive:
+                    os.link(
+                        self._temp_name, self._final_name,
+                        src_dir_fd=self._parent_fd,
+                        dst_dir_fd=self._parent_fd,
+                        follow_symlinks=False,
+                    )
+                    published_exclusive = True
+                    os.unlink(self._temp_name, dir_fd=self._parent_fd)
+                else:
+                    os.replace(
+                        self._temp_name, self._final_name,
+                        src_dir_fd=self._parent_fd, dst_dir_fd=self._parent_fd,
+                    )
+                os.fsync(self._parent_fd)
+            else:
+                os.unlink(self._temp_name, dir_fd=self._parent_fd)
+        except Exception:
+            try:
+                if not self._handle.closed:
+                    self._handle.close()
+            except Exception:
+                pass
+            if published_exclusive:
+                try:
+                    os.unlink(self._final_name, dir_fd=self._parent_fd)
+                except OSError:
+                    pass
+            try:
+                os.unlink(self._temp_name, dir_fd=self._parent_fd)
+            except OSError:
+                pass
+            raise
+        finally:
+            os.close(self._parent_fd)
+            self._closed = True
+
+    def __exit__(self, exc_type, _exc, _tb):
+        self.close(commit=exc_type is None)
+        return False
+
+
+class _DurablePrivateFile:
+    def __init__(self, handle, parent_fd):
+        self._handle = handle
+        self._parent_fd = parent_fd
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+    def __enter__(self):
+        return self
+
+    def close(self):
+        if self._closed:
+            return
+        try:
+            if not self._handle.closed:
+                self._handle.flush()
+                os.fsync(self._handle.fileno())
+                self._handle.close()
+            os.fsync(self._parent_fd)
+        finally:
+            if not self._handle.closed:
+                try:
+                    self._handle.close()
+                except Exception:
+                    pass
+            os.close(self._parent_fd)
+            self._closed = True
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        self.close()
+        return False
+
+
+def open_private_file(path, mode, *, encoding=None, buffering=-1):
+    """Open a sensitive regular file as 0600 without following its final link."""
+    if mode not in ("r", "rb", "w", "a", "x", "wb", "ab", "xb"):
+        raise ValueError("unsupported private file mode")
+    target = os.path.abspath(os.path.expanduser(path))
+    _parent, parent_fd = _open_private_directory(os.path.dirname(target))
+    name = os.path.basename(target)
+    try:
+        try:
+            existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode):
+                raise PrivateStorageError(f"private file is not a regular file: {target}")
+            if hasattr(os, "getuid") and existing.st_uid != os.getuid():
+                raise PrivateStorageError(f"private file has the wrong owner: {target}")
+            if existing.st_nlink != 1:
+                raise PrivateStorageError(f"private file has multiple links: {target}")
+
+        if mode in ("w", "wb", "x", "xb"):
+            if mode in ("x", "xb") and existing is not None:
+                raise FileExistsError(target)
+            temp_name = "." + name + ".tmp-" + secrets.token_hex(16)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            descriptor = os.open(temp_name, flags, 0o600, dir_fd=parent_fd)
+            os.fchmod(descriptor, 0o600)
+            fdopen_mode = "wb" if "b" in mode else "w"
+            if "b" in mode:
+                handle = os.fdopen(descriptor, fdopen_mode, buffering=buffering)
+            else:
+                handle = os.fdopen(
+                    descriptor, fdopen_mode, encoding=encoding or "utf-8",
+                    buffering=buffering,
+                )
+            return _AtomicPrivateFile(
+                handle, parent_fd, temp_name, name,
+                exclusive=mode in ("x", "xb"),
+            )
+
+        if mode in ("r", "rb"):
+            flags = os.O_RDONLY
+        else:
+            flags = os.O_WRONLY | os.O_CREAT
+        if "a" in mode:
+            flags |= os.O_APPEND
+        elif "x" in mode:
+            flags |= os.O_EXCL
+        elif mode not in ("r", "rb"):
+            flags |= os.O_TRUNC
+        flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
+    except Exception:
+        os.close(parent_fd)
+        raise
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or (
+            hasattr(os, "getuid") and info.st_uid != os.getuid()
+        ) or info.st_nlink != 1:
+            raise PrivateStorageError(
+                f"private file validation failed: {target}"
+            )
+        os.fchmod(descriptor, 0o600)
+    except Exception:
+        os.close(descriptor)
+        os.close(parent_fd)
+        raise
+    if mode in ("r", "rb"):
+        os.close(parent_fd)
+        if "b" in mode:
+            return os.fdopen(descriptor, mode, buffering=buffering)
+        return os.fdopen(
+            descriptor, mode, encoding=encoding or "utf-8", buffering=buffering
+        )
+    if "b" in mode:
+        handle = os.fdopen(descriptor, mode, buffering=buffering)
+    else:
+        handle = os.fdopen(
+            descriptor, mode, encoding=encoding or "utf-8", buffering=buffering
+        )
+    return _DurablePrivateFile(
+        handle, parent_fd
+    )
+
+
+def ensure_private_runtime_storage():
+    root = secure_private_tree(EVA_CONFIG_DIR)
+    for name in (
+        "artifacts", "browser_trajectories", "desktop_trajectories",
+        "browser_profile", "camera", "acp_runtime",
+    ):
+        secure_private_tree(os.path.join(root, name))
+    scavenge_private_process_directories(
+        ACP_RUNTIME_DIR, r"copilot-acp-(?P<pid>[1-9][0-9]*)-[0-9a-f]{32}"
+    )
+    # Legacy notification JSONL contained private title/body text. Content is
+    # transient-only now, so revoke any retained legacy records at startup.
+    with open_private_file(NOTIFY_PATH, "w"):
+        pass
+    with open_private_file(TELEMETRY_PATH, "w"):
+        pass
+    with open_private_file(BRIDGE_DEBUG_LOG_PATH, "w"):
+        pass
+    return root
+
+
+def advance_artifact_epoch():
+    """Atomically advance and return a durable non-reusable decimal epoch."""
+    with open_private_file(ARTIFACT_EPOCH_LOCK_PATH, "a") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            initialized = os.fstat(lock_handle.fileno()).st_size > 0
+            current = 0
+            epoch_exists = False
+            try:
+                with open_private_file(ARTIFACT_EPOCH_PATH, "r") as handle:
+                    raw = handle.read().strip()
+                if re.fullmatch(r"0|[1-9][0-9]{0,39}", raw) is None:
+                    raise PrivateStorageError("artifact epoch is malformed")
+                current = int(raw)
+                epoch_exists = True
+            except FileNotFoundError:
+                pass
+
+            marker_exists = False
+            try:
+                with open_private_file(
+                    ARTIFACT_STORE_MARKER_PATH, "r"
+                ) as marker_handle:
+                    marker = marker_handle.read().strip()
+                if re.fullmatch(r"[0-9a-f]{64}", marker) is None:
+                    raise PrivateStorageError("artifact store marker is malformed")
+                marker_exists = True
+            except FileNotFoundError:
+                pass
+
+            if not epoch_exists:
+                retained_artifacts = False
+                try:
+                    retained_artifacts = bool(visit_private_files(
+                        ARTIFACTS_DIR, lambda _parts, _handle, _info: True
+                    ))
+                except FileNotFoundError:
+                    pass
+                if initialized or marker_exists or retained_artifacts:
+                    raise PrivateStorageError("artifact epoch is missing")
+
+            if not marker_exists:
+                with open_private_file(
+                    ARTIFACT_STORE_MARKER_PATH, "x"
+                ) as marker_handle:
+                    marker_handle.write(secrets.token_hex(32))
+            next_epoch = current + 1
+            if next_epoch >= 10 ** 40:
+                raise PrivateStorageError("artifact epoch exhausted")
+            with open_private_file(ARTIFACT_EPOCH_PATH, "w") as handle:
+                handle.write(str(next_epoch))
+            if not initialized:
+                lock_handle.write("initialized\n")
+                lock_handle.flush()
+                os.fsync(lock_handle.fileno())
+            return str(next_epoch)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 # ── Networking / validation ─────────────────────────────────────────
 LMSTUDIO_ALLOWED_PORTS = {1234, 8000, 8080, 11434}
@@ -74,6 +936,19 @@ SENSITIVE_ENV_SUFFIXES = (
 )
 _MCP_CONFIG_FIELDS = frozenset({"command", "args", "env"})
 _SQLITE_MCP_NAMES = frozenset({"sqlite", "sqlite-mcp-server", "eva-sqlite"})
+_READ_ONLY_MEMORY_MCP_TOOLS = frozenset({
+    "kusto_list_databases", "kusto_show_tables",
+    "kusto_show_schema", "kusto_sample_data", "eva_recall_knowledge",
+    "eva_get_emotion_state", "eva_get_recent_reflections",
+    "eva_get_active_goals", "eva_get_memory_summary",
+})
+_LOCAL_MCP_READ_ONLY_TOOLS = {
+    "sqlite": _READ_ONLY_MEMORY_MCP_TOOLS,
+    "sqlite-mcp-server": _READ_ONLY_MEMORY_MCP_TOOLS,
+    "eva-sqlite": _READ_ONLY_MEMORY_MCP_TOOLS,
+    "kusto-mcp-server": _READ_ONLY_MEMORY_MCP_TOOLS,
+    "eva-web-search": frozenset({"web_search", "web_search_news"}),
+}
 _KUSTO_SUFFIXES = (".kusto.windows.net", ".kusto.data.microsoft.com")
 _COMMON_CHILD_ENV = frozenset({
     "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LOGNAME", "TZ", "USER",
@@ -250,6 +1125,24 @@ def _trusted_python_command(value):
     )
 
 
+def configured_memory_db_path():
+    """Return the operator-configured SQLite path; request data cannot alter it."""
+    raw = os.environ.get("EVA_MEMORY_DB", "").strip()
+    if not raw:
+        raw = os.path.expanduser("~/.eva/memory.db")
+    if "\x00" in raw:
+        raise PrivateStorageError("configured memory database path is invalid")
+    target = os.path.abspath(os.path.expanduser(raw))
+    if target == os.path.sep or not os.path.basename(target):
+        raise PrivateStorageError("configured memory database path is invalid")
+    return target
+
+
+def local_mcp_tool_allowlist(server_name):
+    """Return an immutable read-only tool set for direct local-model execution."""
+    return _LOCAL_MCP_READ_ONLY_TOOLS.get(server_name)
+
+
 def _canonical_mcp_server(name, raw, mode):
     """Return one exact release-approved MCP process shape, else ``None``."""
     if (
@@ -270,14 +1163,19 @@ def _canonical_mcp_server(name, raw, mode):
             raw.get("env"), {"EVA_MEMORY_DB"}, strip_unknown=True
         )
         if script and env is not None:
-            if env.get("KUSTO_CLUSTER_URL"):
-                try:
-                    env["KUSTO_CLUSTER_URL"] = normalize_kusto_origin(
-                        env["KUSTO_CLUSTER_URL"]
-                    )
-                except ValueError:
-                    return None
-            return {"command": sys.executable, "args": [script], "env": env}
+            try:
+                expected_db = configured_memory_db_path()
+            except PrivateStorageError:
+                return None
+            requested_db = env.get("EVA_MEMORY_DB", "")
+            if requested_db and os.path.abspath(
+                os.path.expanduser(requested_db)
+            ) != expected_db:
+                return None
+            return {
+                "command": sys.executable, "args": [script],
+                "env": {"EVA_MEMORY_DB": expected_db},
+            }
 
     if mode != "cloud":
         return None
@@ -289,9 +1187,26 @@ def _canonical_mcp_server(name, raw, mode):
                 "KUSTO_ACCESS_TOKEN", "KUSTO_CLUSTER_URL", "KUSTO_DATABASE",
                 "KUSTO_DATABASE_LOCKED",
             },
-            strip_unknown=True,
+            strip_unknown=False,
         )
         if script and env is not None:
+            if env.get("KUSTO_CLUSTER_URL"):
+                try:
+                    env["KUSTO_CLUSTER_URL"] = normalize_kusto_origin(
+                        env["KUSTO_CLUSTER_URL"]
+                    )
+                except ValueError:
+                    return None
+            if (
+                not env.get("KUSTO_CLUSTER_URL")
+                or not isinstance(env.get("KUSTO_DATABASE"), str)
+                or re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_-]{0,127}", env["KUSTO_DATABASE"]
+                ) is None
+                or str(env.get("KUSTO_DATABASE_LOCKED", "")).lower()
+                not in ("1", "true", "yes")
+            ):
+                return None
             return {"command": sys.executable, "args": [script], "env": env}
 
     if name == "eva-web-search" and _trusted_python_command(command):
@@ -351,6 +1266,32 @@ def mcp_config_for_egress(mcp_config, mode):
         else:
             allowed[name] = canonical
     return allowed, rejected
+
+
+def mcp_config_for_local_execution(mcp_config, mode):
+    """Return only exact MCP servers with fixed read-only local tool profiles."""
+    canonical, rejected = mcp_config_for_egress(mcp_config, mode)
+    allowed = {}
+    blocked = list(rejected)
+    for name, server in canonical.items():
+        if local_mcp_tool_allowlist(name) is None:
+            blocked.append(name)
+        elif name == "kusto-mcp-server":
+            env = server.get("env", {})
+            if (
+                not env.get("KUSTO_CLUSTER_URL")
+                or not isinstance(env.get("KUSTO_DATABASE"), str)
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,127}", env["KUSTO_DATABASE"])
+                is None
+                or str(env.get("KUSTO_DATABASE_LOCKED", "")).lower()
+                not in ("1", "true", "yes")
+            ):
+                blocked.append(name)
+            else:
+                allowed[name] = server
+        else:
+            allowed[name] = server
+    return allowed, sorted(set(blocked))
 
 # ── ACP pool ────────────────────────────────────────────────────────
 ACP_POOL_MAX = 4

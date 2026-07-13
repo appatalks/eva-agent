@@ -25,7 +25,9 @@ import urllib.parse
 import uuid
 from datetime import datetime, timezone
 
+from bridge import config as _bridge_config
 from bridge.public_egress_proxy import PublicEgressProxy
+from bridge.sensitive import redact_credentials
 from bridge.action_runs import (
     ActionRunValidationError,
     ActionRunCancelled,
@@ -132,9 +134,7 @@ def latest_screenshot_path(run_id):
     with _runs_lock:
         rec = _runs.get(run_id)
         shot = rec.get("last_screenshot") if rec else None
-    if shot and os.path.isfile(shot):
-        return shot
-    return None
+    return shot if isinstance(shot, str) and shot else None
 
 
 def public_status(run_id):
@@ -157,6 +157,19 @@ def cancel(run_id):
     return cancel_run(rec)
 
 
+def has_active_runs():
+    with _runs_lock:
+        return any(
+            int(rec.get("_bounded_operations", 0)) > 0
+            or (
+                not rec.get("_terminalized")
+                and rec.get("_thread") is not None
+                and rec["_thread"].is_alive()
+            )
+            for rec in _runs.values()
+        )
+
+
 def resolve(run_id, *, gate_id, kind, decision=None, text=None):
     """Resolve one exact, unexpired approval/input gate at most once."""
     with _runs_lock:
@@ -171,6 +184,8 @@ def resolve(run_id, *, gate_id, kind, decision=None, text=None):
 # ---------------------------------------------------------------------------
 # Vision executor (OpenAI multimodal)
 # ---------------------------------------------------------------------------
+
+_OPENAI_VISION_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 
 _EXECUTOR_SYSTEM = (
     "You are the executor for a web browsing agent. You see a screenshot of a "
@@ -215,6 +230,31 @@ def _b64_png(data):
     return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
 
 
+def _post_vision_request(requests_module, api_key, payload, *, endpoint=None):
+    target = endpoint or _OPENAI_VISION_ENDPOINT
+    if target != _OPENAI_VISION_ENDPOINT:
+        raise ActionRunValidationError("vision endpoint is not allowed")
+    session = requests_module.Session()
+    session.trust_env = False
+    try:
+        response = session.post(
+            target,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=60,
+            allow_redirects=False,
+            verify=True,
+        )
+    finally:
+        session.close()
+    if 300 <= response.status_code < 400:
+        raise RuntimeError("vision endpoint redirect was blocked")
+    return response
+
+
 def _call_executor(api_key, model, goal, subgoal, history, url, title, png_bytes, dom_list=""):
     """Ask the vision model for the next action. Returns (action_dict, raw_text)."""
     import requests as _req
@@ -247,14 +287,11 @@ def _call_executor(api_key, model, goal, subgoal, history, url, title, png_bytes
             ]},
         ],
     }
-    resp = _req.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=60,
-    )
+    resp = _post_vision_request(_req, api_key, payload)
     if resp.status_code != 200:
-        raise RuntimeError(f"vision model {resp.status_code}: {resp.text[:200]}")
+        raise RuntimeError(
+            f"vision model request failed (HTTP {resp.status_code})"
+        )
     raw = resp.json()["choices"][0]["message"]["content"] or ""
     return _parse_action(raw), raw
 
@@ -290,7 +327,25 @@ def _parse_action(raw):
             isinstance(action[field], bool) or not isinstance(action[field], int)
         ):
             raise ActionRunValidationError(f"model browser action {field} must be an integer")
+    if kind == "type_ref":
+        _validate_type_effect_text(action["text"])
     return action
+
+
+def _validate_type_effect_text(value):
+    if not isinstance(value, str):
+        raise ActionRunValidationError("type_ref text must be text")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ActionRunValidationError("type_ref text must be valid UTF-8") from exc
+    if "\x00" in value or len(value) > 2000:
+        raise ActionRunValidationError("type_ref text is invalid or too long")
+    if redact_credentials(value) != value:
+        raise ActionRunValidationError(
+            "credential-bearing type_ref text requires a separate secure input path"
+        )
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -298,42 +353,25 @@ def _parse_action(raw):
 # ---------------------------------------------------------------------------
 
 def _run_dir(run_id):
+    _bridge_config.ensure_private_directory(_TRAJ_DIR)
     d = os.path.join(_TRAJ_DIR, run_id)
-    os.makedirs(d, mode=0o700, exist_ok=True)
-    os.chmod(d, 0o700)
-    return d
+    return _bridge_config.ensure_private_directory(d)
 
 
 def _scavenge_artifacts(remove_all=False):
     cutoff = datetime.now(timezone.utc).timestamp() - _ARTIFACT_TTL_SECONDS
     try:
-        entries = os.scandir(_TRAJ_DIR)
-    except OSError:
-        return
-    with entries:
-        for entry in entries:
-            try:
-                if (
-                    entry.is_dir(follow_symlinks=False)
-                    and re.fullmatch(r"[0-9a-f]{16}", entry.name)
-                    and (
-                        remove_all
-                        or entry.stat(follow_symlinks=False).st_mtime < cutoff
-                    )
-                ):
-                    shutil.rmtree(entry.path, ignore_errors=True)
-            except OSError:
-                continue
-
-
-_scavenge_artifacts(remove_all=True)
+        return _bridge_config.scavenge_private_directories(
+            _TRAJ_DIR, r"[0-9a-f]{16}", cutoff, remove_all=remove_all
+        )
+    except (OSError, _bridge_config.PrivateStorageError):
+        return 0
 
 
 def _log_step(run_id, record):
     try:
         path = os.path.join(_run_dir(run_id), "trajectory.jsonl")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a") as f:
+        with _bridge_config.open_private_file(path, "a") as f:
             f.write(json.dumps(record) + "\n")
     except Exception:
         print("[BrowserAgent] trajectory write failed")
@@ -341,7 +379,10 @@ def _log_step(run_id, record):
 
 def _schedule_artifact_cleanup(rec):
     def cleanup():
-        shutil.rmtree(os.path.join(_TRAJ_DIR, rec["id"]), ignore_errors=True)
+        try:
+            _bridge_config.remove_private_subdirectory(_TRAJ_DIR, rec["id"])
+        except (FileNotFoundError, OSError, _bridge_config.PrivateStorageError):
+            pass
         with rec["_record_lock"]:
             rec["last_screenshot"] = None
 
@@ -548,6 +589,7 @@ def _browser_action_target(page, action):
             handle = None
         binding["target_valid"] = isinstance(fingerprint, dict)
         if kind == "type_ref" and isinstance(fingerprint, dict):
+            _validate_type_effect_text(action.get("text"))
             input_types = {
                 "text", "email", "search", "tel", "url", "number", "date",
                 "time", "datetime-local", "month", "week",
@@ -620,7 +662,7 @@ def _execute(page, action, target_handle=None):
         ref = str(action.get("ref", "")).strip()
         if not re.fullmatch(r"e\d{1,3}", ref):
             return typed_action_result("rejected", "invalid_ref", "Invalid page control reference.")
-        text = bounded_text(action.get("text", ""), 2000)
+        text = _validate_type_effect_text(action.get("text"))
         loc = target_handle
         if loc is None:
             return typed_action_result("rejected", "target_missing", "Approved target is unavailable.")
@@ -782,6 +824,8 @@ def _worker(rec, api_key, vision_model, director, max_steps, start_url, headless
     proxy = None
     startup_lease = False
     try:
+        _bridge_config.secure_private_tree(_PROFILE_DIR)
+        _bridge_config.ensure_private_directory(_TRAJ_DIR)
         if not begin_startup(rec):
             raise ActionRunCancelled()
         startup_lease = True
@@ -930,9 +974,8 @@ def _worker(rec, api_key, vision_model, director, max_steps, start_url, headless
                     raise ActionRunTimeout()
                 shot_path = os.path.join(_run_dir(run_id), f"step_{step:02d}.png")
                 try:
-                    with open(shot_path, "wb") as f:
+                    with _bridge_config.open_private_file(shot_path, "wb") as f:
                         f.write(png)
-                    os.chmod(shot_path, 0o600)
                 except Exception:
                     shot_path = None
                 update_run(rec, last_screenshot=shot_path)
@@ -1209,9 +1252,9 @@ def _record(rec, step, shot_path, subgoal, raw, action, element_text, result):
     def private_hash(value):
         return sha256({"salt": rec["_log_salt"], "value": value})
     try:
-        with open(shot_path, "rb") as handle:
+        with _bridge_config.open_private_file(shot_path, "rb") as handle:
             screenshot_hash = sha256(handle.read())
-    except (OSError, TypeError):
+    except (OSError, TypeError, _bridge_config.PrivateStorageError):
         screenshot_hash = ""
     action_view = {
         "kind": action.get("action", "unknown"),

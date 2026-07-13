@@ -826,6 +826,7 @@ class TestACPContainment(unittest.TestCase):
         from bridge.acp_client import ACPClient
         client = ACPClient.__new__(ACPClient)
         client.__init__()
+        client.session_id = "session-test"
         self.assertFalse(client._terminal_allowed)
 
     def test_terminal_enabled_by_env(self):
@@ -868,13 +869,16 @@ class TestACPContainment(unittest.TestCase):
         from bridge.acp_client import ACPClient
         client = ACPClient.__new__(ACPClient)
         client.__init__()
+        client.session_id = "session-test"
         client._terminal_allowed = False
         responses = []
         client._send_response = lambda rid, result: responses.append((rid, result))
         msg = {
+            "jsonrpc": "2.0",
             "id": 42,
             "method": "session/request_permission",
             "params": {
+                "sessionId": "session-test",
                 "toolCall": {"toolCallId": "tool-42", "kind": "other", "status": "pending"},
                 "options": [
                     {"optionId": "option-allow", "name": "Allow once", "kind": "allow_once"},
@@ -891,13 +895,16 @@ class TestACPContainment(unittest.TestCase):
         from bridge.acp_client import ACPClient
         client = ACPClient.__new__(ACPClient)
         client.__init__()
+        client.session_id = "session-test"
         client._terminal_allowed = False
         responses = []
         client._send_response = lambda rid, result: responses.append((rid, result))
         msg = {
+            "jsonrpc": "2.0",
             "id": 43,
             "method": "session/request_permission",
             "params": {
+                "sessionId": "session-test",
                 "toolCall": {"toolCallId": "tool-43", "kind": "execute", "status": "pending"},
                 "options": [
                     {"optionId": "option-allow", "name": "Allow once", "kind": "allow_once"},
@@ -915,13 +922,16 @@ class TestACPContainment(unittest.TestCase):
         from bridge.acp_client import ACPClient
         client = ACPClient.__new__(ACPClient)
         client.__init__()
+        client.session_id = "session-test"
         client._terminal_allowed = True
         responses = []
         client._send_response = lambda rid, result: responses.append((rid, result))
         msg = {
+            "jsonrpc": "2.0",
             "id": 44,
             "method": "session/request_permission",
             "params": {
+                "sessionId": "session-test",
                 "toolCall": {"toolCallId": "tool-44", "kind": "execute", "status": "pending"},
                 "options": [{"optionId": "option-reject", "name": "Reject", "kind": "reject_once"}]
             }
@@ -934,12 +944,15 @@ class TestACPContainment(unittest.TestCase):
     def test_permission_without_reject_option_is_cancelled(self):
         from bridge.acp_client import ACPClient
         client = ACPClient()
+        client.session_id = "session-test"
         responses = []
         client._send_response = lambda rid, result: responses.append((rid, result))
         client._handle_message({
+            "jsonrpc": "2.0",
             "id": 45,
             "method": "session/request_permission",
             "params": {
+                "sessionId": "session-test",
                 "toolCall": {"toolCallId": "tool-45", "kind": "other", "status": "pending"},
                 "options": [{"optionId": "option-allow", "name": "Allow", "kind": "allow_once"}],
             },
@@ -955,12 +968,15 @@ class TestACPContainment(unittest.TestCase):
             "terminal/create", "terminal/output", "terminal/wait_for_exit",
             "terminal/kill", "terminal/release",
         ), start=1):
-            client._handle_message({"id": index, "method": method, "params": {}})
+            client._handle_message({
+                "jsonrpc": "2.0", "id": index,
+                "method": method, "params": {},
+            })
         self.assertEqual(len(errors), 5)
         self.assertTrue(all(item[1] == -32601 for item in errors))
 
     def test_request_timeout_quarantines_session(self):
-        from bridge.acp_client import ACPClient
+        from bridge.acp_client import ACPClient, ACPRequestError
 
         class FakeStdin:
             def __init__(self):
@@ -987,8 +1003,10 @@ class TestACPContainment(unittest.TestCase):
         client.process = FakeProcess()
         client.alive = True
         client.session_id = "session-timeout"
-        result = client._send_request("session/prompt", {"sessionId": client.session_id}, timeout=0.01)
-        self.assertIn("timed out", result.get("error", ""))
+        with self.assertRaisesRegex(ACPRequestError, "timed out"):
+            client._send_request(
+                "session/prompt", {"sessionId": client.session_id}, timeout=0.01
+            )
         self.assertFalse(client.alive)
         self.assertIsNone(client.session_id)
         self.assertTrue(client.process.terminated)
@@ -1081,6 +1099,7 @@ class TestOfflinePolicy(unittest.TestCase):
 
     def test_restricted_mcp_strips_unapproved_environment(self):
         from bridge import config as cfg
+        canonical_db = os.path.join(_TMP_HOME, "memory.db")
         source = {
             "sqlite": {
                 "command": sys.executable,
@@ -1088,9 +1107,14 @@ class TestOfflinePolicy(unittest.TestCase):
                 "env": {"EVA_MEMORY_DB": "/tmp/test.db", "PYTHONPATH": "/tmp/attacker"},
             }
         }
-        safe, rejected = cfg.mcp_config_for_egress(source, "offline")
+        with mock.patch.dict(os.environ, {"EVA_MEMORY_DB": canonical_db}):
+            safe, rejected = cfg.mcp_config_for_egress(source, "offline")
+            self.assertEqual(safe, {})
+            self.assertEqual(rejected, ["sqlite"])
+            source["sqlite"]["env"]["EVA_MEMORY_DB"] = canonical_db
+            safe, rejected = cfg.mcp_config_for_egress(source, "offline")
         self.assertEqual(rejected, [])
-        self.assertEqual(safe["sqlite"]["env"], {"EVA_MEMORY_DB": "/tmp/test.db"})
+        self.assertEqual(safe["sqlite"]["env"], {"EVA_MEMORY_DB": canonical_db})
 
     def test_local_network_does_not_enable_cloud_mcp(self):
         from bridge.config import mcp_config_for_egress
@@ -1128,7 +1152,12 @@ class TestOfflinePolicy(unittest.TestCase):
             "kusto-mcp-server": {
                 "command": "python3",
                 "args": ["tools/kusto_mcp.py"],
-                "env": {"KUSTO_DATABASE_LOCKED": "1"},
+                "env": {
+                    "KUSTO_DATABASE_LOCKED": "1",
+                    "KUSTO_DATABASE": "Eva",
+                    "KUSTO_CLUSTER_URL":
+                        "HTTPS://CLUSTER.REGION.KUSTO.WINDOWS.NET:443/",
+                },
             },
             "eva-web-search": {
                 "command": sys.executable,
@@ -1143,6 +1172,30 @@ class TestOfflinePolicy(unittest.TestCase):
             safe["kusto-mcp-server"]["args"],
             [os.path.realpath(os.path.join(TOOLS_DIR, "kusto_mcp.py"))],
         )
+        self.assertEqual(
+            safe["kusto-mcp-server"]["env"]["KUSTO_CLUSTER_URL"],
+            "https://cluster.region.kusto.windows.net",
+        )
+
+    def test_cloud_rejects_invalid_kusto_origin_and_unknown_env(self):
+        from bridge.config import mcp_config_for_egress
+
+        base = {"command": "python3", "args": ["tools/kusto_mcp.py"]}
+        variants = (
+            {**base, "env": {"KUSTO_CLUSTER_URL": "https://evil.example/path"}},
+            {**base, "env": {"KUSTO_CLUSTER_URL": "file:///tmp/socket"}},
+            {**base, "env": {
+                "KUSTO_CLUSTER_URL": "https://cluster.kusto.windows.net",
+                "PYTHONPATH": "/tmp/inject",
+            }},
+        )
+        for config in variants:
+            with self.subTest(config=config):
+                safe, rejected = mcp_config_for_egress(
+                    {"kusto-mcp-server": config}, "cloud"
+                )
+                self.assertEqual(safe, {})
+                self.assertEqual(rejected, ["kusto-mcp-server"])
 
     def test_cloud_rejects_wrappers_even_under_approved_names(self):
         from bridge.config import mcp_config_for_egress
@@ -1316,7 +1369,7 @@ class TestOfflinePolicy(unittest.TestCase):
         self.assertIn("[REDACTED]", json.dumps(sanitized, sort_keys=True))
 
         path = os.path.join(_TMP_HOME, "mcp-sanitized.json")
-        with mock.patch("bridge.utils._MCP_CONFIG_CACHE_PATH", path):
+        with mock.patch("bridge.utils._RUNTIME_STATE_PATH", path):
             _persist_mcp_config({
                 segmented: {
                     "command": "tool", "args": [segmented],
@@ -1461,7 +1514,7 @@ class TestOfflinePolicy(unittest.TestCase):
             with mock.patch("bridge.core._load_client_prefs", return_value={
                 "lmstudio_base_url": "https://public.example/v1", "lmstudio_model": "test"
             }), mock.patch("requests.Session") as session_factory:
-                self.assertEqual(BridgeHandler._retrieve_local_data("retrieve a fact"), ("", "local"))
+                self.assertEqual(BridgeHandler._retrieve_local_data("retrieve a fact"), ("", ""))
                 session_factory.assert_not_called()
         finally:
             _st.acp_client, _st.local_mode, _st.local_mcp_manager = saved_client, saved_mode, saved_manager
@@ -1863,10 +1916,11 @@ class TestLegacyHTMLNeverAssigned(unittest.TestCase):
         with open(sessions_path) as f:
             sessions = f.read()
         persist_at = gemini.index('localStorage.setItem("geminiMessages"')
-        render_at = gemini.index(
-            "await renderEvaResponse(mainResponse, out, capturedEnvelope)"
-        )
-        self.assertLess(persist_at, render_at)
+        render_at = gemini.index("await renderEvaResponse(")
+        finalize_at = gemini.index("await finalizeDirectProviderTurn(")
+        self.assertLess(finalize_at, render_at)
+        self.assertLess(render_at, persist_at)
+        self.assertIn("parts: [{ text: mainResponse }]", gemini)
         self.assertIn("if (typeof saveCurrentSession === 'function') saveCurrentSession();", gemini)
         self.assertIn("keys[i] === 'geminiMessages' && index < 2", sessions)
 
@@ -1893,23 +1947,27 @@ global.dateContents='';global.alert=()=>{};global.escapeHtml=s=>String(s);
 global.getSystemPrompt=()=>'';global.getModelMaxTokens=()=>1234;
 global.getModelTemperature=()=>0.7;global.getACPBridgeUrl=()=> 'http://localhost:8888';
 global.AbortSignal={timeout:()=>({})};
-global.fetch=async()=>({ok:false});
-global.isCurrentRequestEnvelope=()=>true;
 let sent=null;
-global.XMLHttpRequest=class {
-    open(){} setRequestHeader(){}
-    send(body){sent=JSON.parse(body)}
+global.fetch=async(url,options)=>{
+    if(String(url).startsWith('https://api.openai.com')){
+        sent=JSON.parse(options.body);return {ok:true,status:200,
+            text:async()=>'{"usage":{"completion_tokens":0,"total_tokens":0},"choices":[]}'};
+    }
+    return {ok:false,status:404};
 };
+global.isCurrentRequestEnvelope=()=>true;
 vm.runInThisContext(fs.readFileSync(process.argv[1],'utf8'));
 (async()=>{
     await trboSend({session_id:'s',turn_id:'t',request_id:'r',correlation_id:'c'});
+    await new Promise(resolve=>setTimeout(resolve,0));
     console.log(JSON.stringify(sent));
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         result = subprocess.run(
             ["node", "-e", script, path],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True,
         )
+        self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["model"], "o1")
         self.assertEqual(payload["temperature"], 1)
@@ -1977,6 +2035,17 @@ class TestRuntimePrerequisites(unittest.TestCase):
         self.assertIn('"arm64"', content)
         self.assertNotIn("copilot login", content)
         self.assertGreaterEqual(content.count("check_auth ||"), 2)
+        self.assertIn('EXPECTED_ROOT="$HOME/.eva"', content)
+        self.assertIn("systemctl --user", content)
+        self.assertIn("Do not run the ACP service installer as root", content)
+        self.assertIn('Bridge URL: http://localhost:${BRIDGE_PORT}', content)
+        self.assertNotIn("Bridge URL: http://$(hostname -I", content)
+        with open(os.path.join(TOOLS_DIR, "acp_bridge.service")) as service_file:
+            service = service_file.read()
+        self.assertIn("WorkingDirectory=%h/.eva", service)
+        self.assertIn("Environment=HOME=%h", service)
+        self.assertNotIn("User=www-data", service)
+        self.assertNotIn("/opt/eva-agent", service)
 
     def test_bridge_header_qualifies_cloud_prerequisites(self):
         path = os.path.join(TOOLS_DIR, "bridge", "core.py")

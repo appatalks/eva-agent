@@ -95,31 +95,36 @@ function geminiSend(capturedEnvelope) {
                     const candidate = result.candidates[0].content.parts;
 
                     // Extract thoughts and non-thoughts separately
-                    const thoughts = candidate.filter(part => part.thought).map(part => part.text).join("\n\n");
+                                        const thoughtsRaw = candidate.filter(part => part.thought).map(part => part.text).join("\n\n");
+                                        const thoughts = (typeof canonicalizeEvaResponse === 'function')
+                                            ? canonicalizeEvaResponse(thoughtsRaw).text : thoughtsRaw;
                     const nonThoughts = candidate.filter(part => !part.thought);
-
-                    // Display thoughts (if any)
-                    if (thoughts) {
-                        document.getElementById("txtOutput").innerHTML += '<span class="eva-thoughts">Eva\'s Thoughts:</span><br>' + escapeHtml(thoughts) + "<br><br>\n";
-                    }
-
-                    // Persist provider history before rendering. The unified
-                    // renderer auto-saves sessions, so ordering matters on the
-                    // first Gemini response.
-                    geminiMessages.push({ role: "user", parts: [{ text: sQuestion }] });
-                    geminiMessages.push({ role: "model", parts: [...candidate] }); // Log the entire candidate
-                    localStorage.setItem("geminiMessages", JSON.stringify(geminiMessages));
 
                     // Display main response via unified renderer
                     (async () => {
                         let mainResponse = nonThoughts.map(part => part.text).join("\n").trim();
+                                                var canonicalResponse = canonicalizeEvaResponse(mainResponse, {
+                                                    allowCamera: typeof _isExplicitCameraRequest === 'function' &&
+                                                        _isExplicitCameraRequest(sQuestion)
+                                                });
+                                                mainResponse = canonicalResponse.text;
+                                                if (typeof finalizeDirectProviderTurn === 'function') {
+                                                        await finalizeDirectProviderTurn(
+                                                            sQuestion, mainResponse, 'gemini', capturedEnvelope
+                                                        );
+                                                        if (!requestIsCurrent()) return;
+                                                }
+                                                if (thoughts) {
+                                                        document.getElementById("txtOutput").innerHTML += '<span class="eva-thoughts">Eva\'s Thoughts:</span><br>' + escapeHtml(thoughts) + "<br><br>\n";
+                                                }
                         const out = document.getElementById("txtOutput");
-                        if (!await renderEvaResponse(mainResponse, out, capturedEnvelope)) return;
+                                                if (!await renderEvaResponse(
+                                                    mainResponse, out, capturedEnvelope, [], canonicalResponse
+                                                )) return;
                         if (!requestIsCurrent()) return;
-                        if (typeof finalizeDirectProviderTurn === 'function') {
-                            await finalizeDirectProviderTurn(sQuestion, mainResponse, 'gemini', capturedEnvelope);
-                            if (!requestIsCurrent()) return;
-                        }
+                                                geminiMessages.push({ role: "user", parts: [{ text: sQuestion }] });
+                                                geminiMessages.push({ role: "model", parts: [{ text: mainResponse }] });
+                                                localStorage.setItem("geminiMessages", JSON.stringify(geminiMessages));
                         if (typeof saveCurrentSession === 'function') saveCurrentSession();
                     })();
                 }

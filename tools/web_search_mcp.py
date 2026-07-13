@@ -6,9 +6,8 @@ page content extraction. Designed for Eva's local mode where the Copilot CLI
 (and its built-in Bing) is not available.
 
 Tools:
-  web_search       — Search DuckDuckGo and return results with snippets
-  web_fetch        — Fetch a URL and extract readable text content
-  web_search_news  — Search DuckDuckGo News for recent headlines
+    web_search       — Search DuckDuckGo and return results with snippets
+    web_search_news  — Search DuckDuckGo News for recent headlines
 
 Runs as a stdio MCP server (JSON-RPC over stdin/stdout).
 """
@@ -16,10 +15,20 @@ Runs as a stdio MCP server (JSON-RPC over stdin/stdout).
 import html
 import json
 import re
+import ssl
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from bridge.mcp_protocol import (
+    MCPProtocolError,
+    MAX_MCP_FRAME_BYTES,
+    decode_request_line,
+    encode_response_line,
+    fixed_tool_schema,
+    validate_fixed_tool_arguments,
+)
 
 _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -96,6 +105,8 @@ TOOLS = [
     },
 ]
 TOOLS = [tool for tool in TOOLS if tool.get("name") != "web_fetch"]
+for _tool in TOOLS:
+    _tool["inputSchema"] = fixed_tool_schema(_tool["name"])
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +140,14 @@ def _http_get(url, timeout=15):
         "Accept-Language": "en-US,en;q=0.9",
     })
     try:
-        opener = urllib.request.build_opener(_NoRedirect())
+        import certifi
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        tls_context.load_verify_locations(cafile=certifi.where())
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=tls_context),
+            _NoRedirect(),
+        )
         with opener.open(req, timeout=timeout) as resp:
             # Read up to 512KB
             body = resp.read(512 * 1024)
@@ -293,14 +311,14 @@ def web_fetch(url, max_length=6000):
 
 def _respond(rid, result):
     msg = {"jsonrpc": "2.0", "id": rid, "result": result}
-    line = json.dumps(msg) + "\n"
+    line = encode_response_line(msg)
     sys.stdout.write(line)
     sys.stdout.flush()
 
 
 def _respond_error(rid, code, message):
     msg = {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
-    line = json.dumps(msg) + "\n"
+    line = encode_response_line(msg)
     sys.stdout.write(line)
     sys.stdout.flush()
 
@@ -326,12 +344,21 @@ def handle_request(msg):
         return  # no response needed for notifications
 
     if method == "tools/list":
+        if params:
+            _respond_error(rid, -32602, "MCP pagination is unsupported")
+            return
         _respond(rid, {"tools": TOOLS})
         return
 
     if method == "tools/call":
         name = params.get("name", "")
-        args = params.get("arguments", {})
+        try:
+            args = validate_fixed_tool_arguments(
+                name, params.get("arguments", {})
+            )
+        except MCPProtocolError:
+            _respond_error(rid, -32602, "Invalid tool arguments")
+            return
 
         if name == "web_search":
             query = args.get("query", "")
@@ -351,15 +378,6 @@ def handle_request(msg):
             _respond(rid, _tool_result(json.dumps(results, indent=2)))
             return
 
-        if name == "web_fetch":
-            url = args.get("url", "")
-            if not url:
-                _respond(rid, _tool_result("Error: url is required"))
-                return
-            result = web_fetch(url, args.get("max_length", 6000))
-            _respond(rid, _tool_result(json.dumps(result, indent=2)))
-            return
-
         _respond_error(rid, -32601, f"Unknown tool: {name}")
         return
 
@@ -373,21 +391,25 @@ def handle_request(msg):
 
 def main():
     print("[WebSearch MCP] Starting...", file=sys.stderr)
-    for line in sys.stdin:
-        line = line.strip()
+    while True:
+        line = sys.stdin.buffer.readline(MAX_MCP_FRAME_BYTES + 1)
         if not line:
+            break
+        if len(line) > MAX_MCP_FRAME_BYTES or not line.endswith(b"\n"):
+            break
+        if not line.strip():
             continue
         try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
+            msg = decode_request_line(line)
+        except MCPProtocolError:
             continue
         try:
             handle_request(msg)
-        except Exception as e:
+        except Exception:
             rid = msg.get("id")
             if rid is not None:
-                _respond_error(rid, -32603, f"Internal error: {e}")
-            print(f"[WebSearch MCP] Error: {e}", file=sys.stderr)
+                _respond_error(rid, -32603, "Internal error")
+            print("[WebSearch MCP] Request failed", file=sys.stderr)
 
 
 if __name__ == "__main__":

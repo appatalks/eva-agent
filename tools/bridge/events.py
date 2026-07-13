@@ -245,6 +245,18 @@ _READ_STATEMENT_RE = re.compile(
     r"^\s*(SELECT|WITH|EXPLAIN|PRAGMA\s+table_info|PRAGMA\s+index_list)",
     re.IGNORECASE
 )
+_OUTBOX_ERROR_CODES = frozenset({
+    "destination_query_exception", "destination_query_failed",
+    "destination_ingest_exception", "destination_ingest_failed",
+    "not_cloud_consented", "secret_projection_forbidden",
+    "projection_receipt_failed", "event_not_found",
+    "ingest_returned_false", "adx_projection_exception", "unknown_failure",
+})
+
+
+def outbox_error_code(value):
+    text = str(value or "")
+    return text if text in _OUTBOX_ERROR_CODES else "unknown_failure"
 
 
 def guard_read_only(sql):
@@ -696,7 +708,7 @@ class EventRepository:
         conn.execute(
             "UPDATE MemoryOutbox SET Status = ?, Attempts = ?, LastError = ?, "
             "NextAttemptAt = ?, UpdatedAt = ? WHERE EventId = ? AND Destination = ?",
-            (status, attempts, str(error)[:1000], next_attempt_at, now, event_id, destination),
+            (status, attempts, outbox_error_code(error), next_attempt_at, now, event_id, destination),
         )
         conn.commit()
 

@@ -3,6 +3,43 @@
 // Routes through the bridge which picks the best model for each task,
 // maintains Eva's persona, and handles data retrieval seamlessly.
 
+function _aigClosedActionReceipts(actions) {
+  if (!Array.isArray(actions)) return [];
+  return actions.slice(0, 16).reduce(function(receipts, entry) {
+    if (!entry || (entry.id !== 'file.download' && entry.id !== 'file.open')) {
+      return receipts;
+    }
+    var result = entry.result;
+    if (entry.ok !== true || !result || typeof result !== 'object') {
+      receipts.push({ id: entry.id, state: 'failed' });
+      return receipts;
+    }
+    var artifact = {
+      filename: String(result.filename || ''),
+      mime: String(result.mime || ''),
+      session_id: String(result.session_id || ''),
+      artifact_id: String(result.artifact_id || ''),
+      digest: String(result.digest || ''),
+      generation: String(result.generation || ''),
+      size: result.size
+    };
+    if (/^[A-Za-z0-9._-]{1,128}$/.test(artifact.filename) &&
+        artifact.mime.length <= 128 &&
+        /^[A-Za-z0-9!#$&^_.+\-]+\/[A-Za-z0-9!#$&^_.+\-]+$/.test(artifact.mime) &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(artifact.session_id) &&
+        /^[0-9a-f]{32}$/.test(artifact.artifact_id) &&
+        /^[0-9a-f]{64}$/.test(artifact.digest) &&
+        /^[1-9][0-9]{0,39}$/.test(artifact.generation) &&
+        Number.isInteger(artifact.size) && artifact.size >= 0 &&
+        artifact.size <= 16 * 1024 * 1024) {
+      receipts.push({ id: entry.id, state: 'succeeded', artifact: artifact });
+    } else {
+      receipts.push({ id: entry.id, state: 'failed' });
+    }
+    return receipts;
+  }, []);
+}
+
 async function aigSend(forcedModel, capturedEnvelope) {
   capturedEnvelope = capturedEnvelope || ((typeof captureRequestEnvelope === 'function')
     ? captureRequestEnvelope() : null);
@@ -13,6 +50,18 @@ async function aigSend(forcedModel, capturedEnvelope) {
   if (!requestIsCurrent()) return;
   var txtMsg = document.getElementById('txtMsg');
   var txtOutput = document.getElementById('txtOutput');
+  var assistantPersisted = false;
+
+  function persistCanonicalAssistant(storageKey, content) {
+    if (assistantPersisted || !content) return;
+    var messages;
+    try { messages = JSON.parse(localStorage.getItem(storageKey) || '[]'); }
+    catch (_) { messages = []; }
+    if (!Array.isArray(messages)) messages = [];
+    messages.push({ role: 'assistant', content: String(content) });
+    localStorage.setItem(storageKey, JSON.stringify(messages));
+    assistantPersisted = true;
+  }
 
   // Clean HTML artifacts from input
   txtMsg.innerHTML = txtMsg.innerHTML.replace(/<img\b[^>]*>/g, '');
@@ -42,9 +91,6 @@ async function aigSend(forcedModel, capturedEnvelope) {
   }
 
   var newMessages = [];
-  if (lastResponse) {
-    newMessages.push({ role: 'assistant', content: lastResponse.replace(/\n/g, ' ') });
-  }
   newMessages.push({ role: 'user', content: sQuestion });
 
   // External data augmentation
@@ -64,6 +110,15 @@ async function aigSend(forcedModel, capturedEnvelope) {
   var existingMessages = JSON.parse(localStorage.getItem(storageKey)) || [];
   existingMessages = existingMessages.concat(newMessages);
   localStorage.setItem(storageKey, JSON.stringify(existingMessages));
+  var trustedArtifacts = (typeof getTrustedArtifacts === 'function')
+    ? getTrustedArtifacts().map(function(row) {
+        return {
+          filename: row.filename, mime: row.mime, size: row.size,
+          session_id: row.session_id,
+          artifact_id: row.artifact_id, digest: row.digest,
+          generation: row.generation
+        };
+      }) : [];
 
   // Send to AIG orchestrator via bridge
   var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
@@ -94,6 +149,7 @@ async function aigSend(forcedModel, capturedEnvelope) {
         userMessage: sQuestion,
         messages: existingMessages,
         envelope: _envelope,
+        trustedArtifacts: trustedArtifacts,
         forceEnable: cogDecision.reason === 'phrase',
         forcedReason: cogDecision.reason
       });
@@ -107,29 +163,46 @@ async function aigSend(forcedModel, capturedEnvelope) {
         cogContent = execRes.content;
         actionsRun = execRes.actions || [];
       }
-      if (!await renderEvaResponse(cogContent, txtOutput, _envelope)) return;
-      if (!requestIsCurrent()) return;
-      if (Cognition.getCfg && Cognition.getCfg().showTrace && Cognition.renderTraceHtml) {
-        try {
-          txtOutput.innerHTML += Cognition.renderTraceHtml(cogResult.trace || []);
-          txtOutput.scrollTop = txtOutput.scrollHeight;
-        } catch (_) {}
-      }
-      if (cogContent) {
-        lastResponse = cogContent;
-        masterOutput += txtOutput.innerText + '\n';
-        localStorage.setItem('masterOutput', masterOutput);
-      }
+      var cogCanonical = canonicalizeEvaResponse(cogContent, {
+        allowCamera: typeof _isExplicitCameraRequest === 'function' &&
+          _isExplicitCameraRequest(sQuestion) && actionsRun.length === 0,
+        allowAgentControls: actionsRun.length === 0
+      });
+      cogContent = cogCanonical.text;
       var cogTag = 'cog:' + (cogResult.evaModel || '?') + '+' +
                    (cogResult.reviewerModel || '?') +
                    '/c' + (cogResult.cycles || 0) +
                    (cogDecision.reason === 'phrase' ? '/forced' : '') +
                    (actionsRun.length ? '/act' + actionsRun.length : '');
-      if (cogContent) {
+      var cognitionReceipts = _aigClosedActionReceipts(actionsRun);
+      if (cogContent || cognitionReceipts.length) {
         if (typeof finalizeDirectProviderTurn === 'function') {
-          await finalizeDirectProviderTurn(sQuestion, cogContent, cogTag, _envelope);
+          try {
+            await finalizeDirectProviderTurn(
+              sQuestion, cogContent, cogTag, _envelope, cognitionReceipts
+            );
+          } catch (finalizationError) {
+            finalizationError.code = 'EVA_DURABLE_FINALIZATION_FAILED';
+            throw finalizationError;
+          }
           if (!requestIsCurrent()) return;
         }
+      }
+      persistCanonicalAssistant(storageKey, cogContent);
+      if (!await renderEvaResponse(
+        cogContent, txtOutput, _envelope, actionsRun, cogCanonical
+      )) return;
+      if (!requestIsCurrent()) return;
+      if (cogContent) {
+        lastResponse = cogContent;
+        masterOutput += cogContent + '\n';
+        localStorage.setItem('masterOutput', masterOutput);
+      }
+      if (Cognition.getCfg && Cognition.getCfg().showTrace && Cognition.renderTraceHtml) {
+        try {
+          txtOutput.innerHTML += Cognition.renderTraceHtml(cogResult.trace || []);
+          txtOutput.scrollTop = txtOutput.scrollHeight;
+        } catch (_) {}
       }
       setStatus('info', 'Eva (AIG, cognition) \u2014 ' +
                 (cogResult.evaModel || 'eva') +
@@ -143,7 +216,13 @@ async function aigSend(forcedModel, capturedEnvelope) {
       return;
     } catch (cogErr) {
       if (!requestIsCurrent()) return;
-      var cogMsg = (cogErr && cogErr.message) ? cogErr.message : String(cogErr);
+      var cogMsg = 'Cognition request failed.';
+      if (cogErr && cogErr.code === 'EVA_DURABLE_FINALIZATION_FAILED') {
+        cogMsg = 'Durable cognition finalization failed.';
+        txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="error">AIG Error:</span> ' + escapeHtml(cogMsg) + '</div>';
+        setStatus('error', 'Durable cognition finalization failed.');
+        return;
+      }
       setStatus('warn', 'Cognition failed, falling back: ' + cogMsg);
       // fall through to single-shot path
     }
@@ -185,11 +264,12 @@ async function aigSend(forcedModel, capturedEnvelope) {
       }
     }
 
+    var requestMessages = existingMessages.slice();
     var resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        messages: existingMessages,
+        messages: requestMessages,
         user_message: sQuestion,
         model: aigModel,
         session_id: _envelope.session_id,
@@ -199,15 +279,15 @@ async function aigSend(forcedModel, capturedEnvelope) {
         lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
         lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
         github_pat: (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : '',
-        openai_api_key: (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : ''
+        openai_api_key: (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : '',
+        trusted_artifacts: trustedArtifacts
       })
     });
     if (!requestIsCurrent()) return;
 
     if (!resp.ok) {
-      var errText = await resp.text();
       if (!requestIsCurrent()) return;
-      var errMsg = 'AIG Error ' + resp.status + ': ' + errText;
+      var errMsg = 'AIG request failed (HTTP ' + resp.status + ').';
       txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="error">' + escapeHtml(errMsg) + '</span></div>';
       txtOutput.scrollTop = txtOutput.scrollHeight;
       setStatus('error', errMsg);
@@ -218,9 +298,32 @@ async function aigSend(forcedModel, capturedEnvelope) {
     if (!requestIsCurrent()) return;
     var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
     var modelUsed = data.model || 'aig';
+    var normalActions = [];
+    if (typeof Cognition !== 'undefined' && Cognition.executeActions) {
+      var normalExecution = await Cognition.executeActions(content, _envelope);
+      if (!requestIsCurrent()) return;
+      content = normalExecution.content;
+      normalActions = normalExecution.actions || [];
+    }
+    var normalCanonical = canonicalizeEvaResponse(content, {
+      allowCamera: typeof _isExplicitCameraRequest === 'function' &&
+        _isExplicitCameraRequest(sQuestion) && normalActions.length === 0,
+      allowAgentControls: normalActions.length === 0
+    });
+    content = normalCanonical.text;
+    if (typeof finalizeDirectProviderTurn === 'function') {
+      await finalizeDirectProviderTurn(
+        sQuestion, content, modelUsed, _envelope,
+        _aigClosedActionReceipts(normalActions)
+      );
+      if (!requestIsCurrent()) return;
+    }
+    persistCanonicalAssistant(storageKey, content);
 
     // Render response
-    if (!await renderEvaResponse(content, txtOutput, _envelope)) return;
+    if (!await renderEvaResponse(
+      content, txtOutput, _envelope, normalActions, normalCanonical
+    )) return;
     if (!requestIsCurrent()) return;
 
     if (content) {
@@ -259,10 +362,8 @@ async function aigSend(forcedModel, capturedEnvelope) {
 
   } catch (err) {
     if (!requestIsCurrent()) return;
-    var errorMessage = err.message || String(err);
-    if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError')) {
-      errorMessage += ' — Is the ACP bridge server running? Start it with: python3 tools/acp_bridge.py --enable-kusto-mcp';
-    }
+    var errorMessage = err && err.code === 'EVA_DURABLE_FINALIZATION_FAILED'
+      ? 'Durable AIG finalization failed.' : 'AIG request failed.';
     txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="error">AIG Error:</span> ' + escapeHtml(errorMessage) + '</div>';
     txtOutput.scrollTop = txtOutput.scrollHeight;
     setStatus('error', errorMessage);

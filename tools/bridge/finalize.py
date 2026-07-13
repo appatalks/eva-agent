@@ -5,7 +5,69 @@ import json
 import re
 
 from bridge.events import IdempotencyCollisionError, deterministic_source_message_id
-from bridge.sensitive import default_conversation_consent, redact_credentials
+from bridge.sensitive import (
+    default_conversation_consent, is_synthetic_memory_value,
+    redact_credentials,
+)
+
+_ARTIFACT_SESSION_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+
+
+def _normalize_action_receipts(value):
+    if value in (None, []):
+        return []
+    if not isinstance(value, list) or len(value) > 16:
+        raise ValueError("action_receipts must contain at most 16 entries")
+    receipts = []
+    for item in value:
+        if not isinstance(item, dict) or item.get("id") not in (
+            "file.download", "file.open"
+        ) or item.get("state") not in ("succeeded", "failed"):
+            raise ValueError("action receipt is invalid")
+        if item["state"] == "failed":
+            if set(item) != {"id", "state"}:
+                raise ValueError("failed action receipt has invalid fields")
+            receipts.append({"id": item["id"], "state": "failed"})
+            continue
+        if set(item) != {"id", "state", "artifact"}:
+            raise ValueError("successful action receipt has invalid fields")
+        artifact = item.get("artifact")
+        if not isinstance(artifact, dict) or set(artifact) != {
+            "filename", "mime", "session_id", "artifact_id", "digest",
+            "generation", "size",
+        }:
+            raise ValueError("action artifact receipt has invalid fields")
+        if (
+            not isinstance(artifact["filename"], str)
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", artifact["filename"]) is None
+            or not isinstance(artifact["mime"], str)
+            or len(artifact["mime"]) > 128
+            or re.fullmatch(
+                r"[A-Za-z0-9!#$&^_.+\-]+/[A-Za-z0-9!#$&^_.+\-]+",
+                artifact["mime"],
+            ) is None
+            or not isinstance(artifact["session_id"], str)
+            or _ARTIFACT_SESSION_RE.fullmatch(artifact["session_id"]) is None
+            or not isinstance(artifact["artifact_id"], str)
+            or re.fullmatch(r"[0-9a-f]{32}", artifact["artifact_id"]) is None
+            or not isinstance(artifact["digest"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", artifact["digest"]) is None
+            or not isinstance(artifact["generation"], str)
+            or re.fullmatch(r"[1-9][0-9]{0,39}", artifact["generation"]) is None
+            or isinstance(artifact["size"], bool)
+            or not isinstance(artifact["size"], int)
+            or not 0 <= artifact["size"] <= 16 * 1024 * 1024
+        ):
+            raise ValueError("action artifact receipt is invalid")
+        receipts.append({
+            "id": item["id"], "state": "succeeded",
+            "artifact": dict(artifact),
+        })
+    if len(json.dumps(receipts, sort_keys=True).encode("utf-8")) > 16 * 1024:
+        raise ValueError("action receipts exceed the byte limit")
+    return receipts
 
 
 def _utc_now():
@@ -66,6 +128,7 @@ def finalize_turn(
     origin="bridge",
     extract_facts_fn=None,
     extract_candidates_fn=None,
+    action_receipts=None,
 ):
     """Durably finalize one logical turn in one SQLite transaction.
 
@@ -76,6 +139,7 @@ def finalize_turn(
         raise ValueError("session_id and turn_id are required")
     safe_user = redact_credentials(str(user_message or "")[:16000])
     safe_assistant = redact_credentials(str(assistant_message or "")[:16000])
+    safe_action_receipts = _normalize_action_receipts(action_receipts)
     now = _utc_now()
     stream = f"conversation:{session_id}"
     user_message_id = deterministic_source_message_id(turn_id, "user")
@@ -100,6 +164,7 @@ def finalize_turn(
                 user_existing.get("SessionId") != session_id
                 or user_payload.get("content") != safe_user
                 or assistant_payload.get("content") != safe_assistant
+                or assistant_payload.get("action_receipts", []) != safe_action_receipts
                 or user_payload.get("model") != model
                 or assistant_payload.get("model") != model
             ):
@@ -147,6 +212,7 @@ def finalize_turn(
                 "role": "assistant", "content": safe_assistant, "model": model,
                 "token_estimate": len(str(assistant_message or "").split()),
                 "exchange_ordinal": exchange_ordinal,
+                "action_receipts": safe_action_receipts,
             },
             actor_type="system", actor_id="eva", origin=origin,
             occurred_at=now, correlation_id=correlation_id,
@@ -175,10 +241,13 @@ def finalize_turn(
         events = [user_event, assistant_event]
         facts = extract_facts_fn(user_message) if extract_facts_fn else []
         for index, fact in enumerate(facts or []):
+            raw_fact_value = str(fact.get("Value", ""))[:200]
+            if is_synthetic_memory_value(raw_fact_value):
+                continue
             fact_payload = {
                 "entity": str(fact.get("Entity", "User"))[:200],
                 "relation": str(fact.get("Relation", ""))[:200],
-                "value": redact_credentials(str(fact.get("Value", ""))[:200]),
+                "value": redact_credentials(raw_fact_value),
                 "confidence": float(fact.get("Confidence", 0.5)),
                 "extraction_method": "explicit_regex",
                 "confidence_source": "pattern_match",

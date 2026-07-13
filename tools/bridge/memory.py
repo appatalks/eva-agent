@@ -13,6 +13,21 @@ _EMBEDDING_CACHE_PATH = _cfg.EMBEDDING_CACHE_PATH
 _EMBEDDING_MODEL = _cfg.EMBEDDING_MODEL
 _ENTITY_IGNORE_WORDS = _cfg.ENTITY_IGNORE_WORDS
 _MEMORY_BACKEND_PREF_PATH = _cfg.MEMORY_BACKEND_PREF_PATH
+_OPENAI_EMBEDDINGS_ENDPOINT = "https://api.openai.com/v1/embeddings"
+
+
+def _post_embeddings_request(requests_module, key, missing):
+    with requests_module.Session() as session:
+        session.trust_env = False
+        return session.post(
+            _OPENAI_EMBEDDINGS_ENDPOINT,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json={"model": _EMBEDDING_MODEL, "input": missing},
+            timeout=30, allow_redirects=False, verify=True,
+        )
 
 def _resolve_memory_backend():
     """Return the active memory backend name, checking persisted preference."""
@@ -20,15 +35,14 @@ def _resolve_memory_backend():
     if _st.memory_backend not in ("kusto", "sqlite"):
         # Check persisted preference
         try:
-            if os.path.isfile(_MEMORY_BACKEND_PREF_PATH):
-                with open(_MEMORY_BACKEND_PREF_PATH) as f:
-                    saved = f.read().strip().lower()
-                if saved in ("kusto", "sqlite"):
-                    _st.memory_backend = saved
-        except Exception:
+            with _cfg.open_private_file(_MEMORY_BACKEND_PREF_PATH, "r") as f:
+                saved = f.read().strip().lower()
+            if saved in ("kusto", "sqlite"):
+                _st.memory_backend = saved
+        except (FileNotFoundError, OSError, _cfg.PrivateStorageError):
             pass
     if _st.memory_backend not in ("kusto", "sqlite"):
-        _st.memory_backend = "kusto"
+        _st.memory_backend = "sqlite"
     return _st.memory_backend
 
 
@@ -39,7 +53,7 @@ def _get_sqlite_mem():
         with _st.sqlite_mem_lock:
             if _st.sqlite_mem is None:
                 from sqlite_memory import SqliteMemory
-                db_path = os.environ.get("EVA_MEMORY_DB", os.path.expanduser("~/.eva/memory.db"))
+                db_path = _cfg.configured_memory_db_path()
                 _st.sqlite_mem = SqliteMemory(db_path)
                 print(f"[Bridge] SQLite memory initialized: {_st.sqlite_mem.db_path}")
     return _st.sqlite_mem
@@ -51,13 +65,14 @@ def _set_memory_backend(backend):
     if backend not in ("kusto", "sqlite"):
         return False
     with _st.memory_backend_lock:
-        _st.memory_backend = backend
         try:
-            os.makedirs(os.path.dirname(_MEMORY_BACKEND_PREF_PATH), exist_ok=True)
-            with open(_MEMORY_BACKEND_PREF_PATH, "w") as f:
+            _cfg.ensure_private_directory(os.path.dirname(_MEMORY_BACKEND_PREF_PATH))
+            with _cfg.open_private_file(_MEMORY_BACKEND_PREF_PATH, "w") as f:
                 f.write(backend)
         except Exception as e:
             print(f"[Bridge] Failed to persist memory backend preference: {e}")
+            return False
+        _st.memory_backend = backend
         print(f"[Bridge] Memory backend set to: {backend}")
         return True
 
@@ -103,7 +118,7 @@ def _load_embedding_cache():
         if _st.embedding_cache is not None:
             return _st.embedding_cache
         try:
-            with open(_EMBEDDING_CACHE_PATH) as f:
+            with _cfg.open_private_file(_EMBEDDING_CACHE_PATH, "r") as f:
                 loaded = json.load(f)
             _st.embedding_cache = loaded if isinstance(loaded, dict) else {}
         except Exception:
@@ -117,11 +132,9 @@ def _save_embedding_cache():
     if cache is None:
         return
     try:
-        os.makedirs(os.path.dirname(_EMBEDDING_CACHE_PATH), exist_ok=True)
-        tmp = _EMBEDDING_CACHE_PATH + ".tmp"
-        with open(tmp, "w") as f:
+        _cfg.ensure_private_directory(os.path.dirname(_EMBEDDING_CACHE_PATH))
+        with _cfg.open_private_file(_EMBEDDING_CACHE_PATH, "w") as f:
             json.dump(cache, f)
-        os.replace(tmp, _EMBEDDING_CACHE_PATH)
     except Exception as e:
         print(f"[Cognition] Embedding cache save failed: {e}")
 
@@ -132,7 +145,6 @@ def _embed_texts(texts):
     single batched OpenAI embeddings call for cache misses. Returns whatever is
     available (possibly empty) without raising, so recall degrades to lexical."""
     # global statement removed — writes go to _st.*
-    import hashlib
     key = _st.openai_api_key_cache or os.environ.get("OPENAI_API_KEY", "").strip()
 
     unique = []
@@ -157,37 +169,33 @@ def _embed_texts(texts):
             missing.append(t)
 
     if missing:
-        if _st.egress_mode != "cloud":
-            if not _st.embedding_disabled_logged:
-                print(f"[Cognition] {_st.egress_mode} mode: public embeddings disabled; recall uses cached/lexical match only")
-                _st.embedding_disabled_logged = True
-            return result
-        if not key:
-            if not _st.embedding_disabled_logged:
-                print("[Cognition] No OpenAI key for embeddings; recall uses lexical match only")
-                _st.embedding_disabled_logged = True
-            return result
-        try:
-            import requests as _req
-            resp = _req.post(
-                "https://api.openai.com/v1/embeddings",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"model": _EMBEDDING_MODEL, "input": missing},
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                for item in resp.json().get("data", []):
-                    idx = item.get("index", -1)
-                    emb = item.get("embedding")
-                    if emb and 0 <= idx < len(missing):
-                        t = missing[idx]
-                        result[t] = emb
-                        cache[hashlib.sha1(t.encode("utf-8")).hexdigest()] = emb
-                _save_embedding_cache()
-            else:
-                print(f"[Cognition] Embedding API failed ({resp.status_code}): {resp.text[:160]}")
-        except Exception as e:
-            print(f"[Cognition] Embedding request error: {e}")
+        with _st.mode_mcp_transition_lock:
+            if _st.egress_mode != "cloud" or _st.local_mode:
+                if not _st.embedding_disabled_logged:
+                    print("[Cognition] Public embeddings disabled; recall uses cached/lexical match only")
+                    _st.embedding_disabled_logged = True
+                return result
+            if not key:
+                if not _st.embedding_disabled_logged:
+                    print("[Cognition] No OpenAI key for embeddings; recall uses lexical match only")
+                    _st.embedding_disabled_logged = True
+                return result
+            try:
+                import requests as _req
+                resp = _post_embeddings_request(_req, key, missing)
+                if resp.status_code == 200:
+                    for item in resp.json().get("data", []):
+                        idx = item.get("index", -1)
+                        emb = item.get("embedding")
+                        if emb and 0 <= idx < len(missing):
+                            t = missing[idx]
+                            result[t] = emb
+                            cache[hashlib.sha1(t.encode("utf-8")).hexdigest()] = emb
+                    _save_embedding_cache()
+                else:
+                    print(f"[Cognition] Embedding API failed ({resp.status_code})")
+            except Exception:
+                print("[Cognition] Embedding request failed")
     return result
 
 

@@ -263,9 +263,6 @@ async function _copilotSendModelsAPI(messages, modelValue, txtOutput, storageKey
 
   try {
     var url = 'https://models.github.ai/inference/chat/completions';
-    if (typeof DEBUG_CORS !== 'undefined' && DEBUG_CORS && typeof DEBUG_PROXY_URL !== 'undefined' && DEBUG_PROXY_URL) {
-      url = DEBUG_PROXY_URL + '/?target=' + encodeURIComponent(url);
-    }
 
     var resp = await fetch(url, {
       method: 'POST',
@@ -325,14 +322,12 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, captur
 
     var data = await resp.json();
     if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
-    await _copilotRenderResponse(data, txtOutput, modelLabel, true, question, capturedEnvelope);
+    await _copilotRenderResponse(data, txtOutput, modelLabel, false, question, capturedEnvelope);
 
   } catch (err) {
-    var errorMessage = err.message || String(err);
-    if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError')) {
-      errorMessage += ' \u2014 Is the ACP bridge server running? Start it with: python3 tools/acp_bridge.py';
-    }
-    _copilotHandleFetchError({ message: errorMessage }, txtOutput, capturedEnvelope);
+    _copilotHandleFetchError(
+      { message: 'Copilot request failed.' }, txtOutput, capturedEnvelope
+    );
   }
 }
 
@@ -341,9 +336,25 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, captur
 async function _copilotRenderResponse(data, txtOutput, modelLabel, bridgeOwnedReflection, question, capturedEnvelope) {
   if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
   var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+  var canonicalResponse = typeof canonicalizeEvaResponse === 'function'
+    ? canonicalizeEvaResponse(content, {
+        allowCamera: typeof _isExplicitCameraRequest === 'function' &&
+          _isExplicitCameraRequest(question)
+      }) : { text: String(content || '') };
+  content = canonicalResponse.text;
+
+  if (!bridgeOwnedReflection && content && question &&
+      typeof finalizeDirectProviderTurn === 'function') {
+    await finalizeDirectProviderTurn(
+      question, content, modelLabel, capturedEnvelope
+    );
+    if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
+  }
 
   // Use unified renderer
-  if (!await renderEvaResponse(content, txtOutput, capturedEnvelope)) return;
+  if (!await renderEvaResponse(
+    content, txtOutput, capturedEnvelope, [], canonicalResponse
+  )) return;
   if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
 
   if (content) {
@@ -354,12 +365,6 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, bridgeOwnedRe
   }
 
   setStatus('info', 'Response received from ' + modelLabel);
-
-  if (!bridgeOwnedReflection && content && question &&
-      typeof finalizeDirectProviderTurn === 'function') {
-    await finalizeDirectProviderTurn(question, content, modelLabel, capturedEnvelope);
-    if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
-  }
 
   // Auto-speak
   var checkbox = document.getElementById('autoSpeak');
@@ -374,15 +379,7 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, bridgeOwnedRe
 
 async function _copilotHandleHTTPError(resp, txtOutput, capturedEnvelope) {
   if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
-  var errText = await resp.text();
-  if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
-  var errMsg = 'Error ' + resp.status;
-  try {
-    var errJson = JSON.parse(errText);
-    errMsg += ': ' + (errJson.error ? (errJson.error.message || errJson.error) : (errJson.message || errText));
-  } catch (e) {
-    errMsg += ': ' + errText;
-  }
+  var errMsg = 'Copilot request failed (HTTP ' + resp.status + ').';
   txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="error">' + escapeHtml(errMsg) + '</span></div>';
   txtOutput.scrollTop = txtOutput.scrollHeight;
   setStatus('error', errMsg);
@@ -390,13 +387,8 @@ async function _copilotHandleHTTPError(resp, txtOutput, capturedEnvelope) {
 
 function _copilotHandleFetchError(err, txtOutput, capturedEnvelope) {
   if (!_copilotRequestIsCurrent(capturedEnvelope)) return;
-  console.error('Copilot error:', err);
-  var errorMessage = err.message || String(err);
-  if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError') || errorMessage.includes('CORS')) {
-    if (!errorMessage.includes('ACP bridge')) {
-      errorMessage += ' \u2014 This may be a CORS issue. Configure DEBUG_CORS and DEBUG_PROXY_URL in config.json, or use a CORS proxy.';
-    }
-  }
+  console.error('Copilot request failed');
+  var errorMessage = 'Copilot request failed.';
   txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="error">Error:</span> ' + escapeHtml(errorMessage) + '</div>';
   txtOutput.scrollTop = txtOutput.scrollHeight;
   setStatus('error', errorMessage);
@@ -508,6 +500,19 @@ function sanitizeMCPConfig(cfg) {
 // after each restart. Reads the persisted config directly from localStorage so
 // it does not depend on the Settings form fields being populated yet.
 async function autoApplySavedMCPConfig() {
+  try {
+    var repairBridge = await detectACPBridge();
+    var healthResp = await fetch(repairBridge.replace(/\/+$/, '') + '/health');
+    if (healthResp.ok) {
+      var health = await healthResp.json();
+      if (health && health.repair_required === true) {
+        setStatus('warn', 'Runtime repair required: choose Local or Cloud mode explicitly.');
+        return;
+      }
+    }
+  } catch (_) {
+    // Existing bounded restore retries handle a bridge that is not ready yet.
+  }
   var saved;
   try {
     saved = JSON.parse(localStorage.getItem('mcp_config') || 'null');
@@ -763,17 +768,10 @@ async function purgeArtifactsFromSettings() {
   setArtifactPurgeStatus('info', 'Purging artifacts...');
 
   try {
-    var bridgeUrl = await detectACPBridge();
-    var response = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/files/purge', {
-      method: 'POST',
-      body: ''
-    });
-    var data = await response.json();
-    if (!response.ok || data.status !== 'ok') {
-      var message = data && data.error && data.error.message ? data.error.message : 'Artifact purge failed';
-      setArtifactPurgeStatus('error', message);
-      return { ok: false, data: data };
-    }
+    if (typeof purgeAssets !== 'function') throw new Error('Artifact purge is unavailable');
+    var result = await purgeAssets({ skipConfirm: true });
+    if (!result || result.ok !== true) throw new Error('Artifact purge failed');
+    var data = result.data || {};
     var purged = typeof data.purged === 'number' ? data.purged : 0;
     setArtifactPurgeStatus('info', 'Purged ' + purged + ' artifacts.');
     return { ok: true, data: data };

@@ -50,18 +50,17 @@
       "Before an allowed marker, write one short sentence describing the bounded request. Never claim it completed",
       "until the typed outcome is verified. If no deterministic postcondition is available, the result remains",
       "unverified and must be described that way.",
-      "You can SEE through the user's webcam. When asked what you see, to look, or to describe something in",
-      "front of the camera, emit one line [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] (the",
-      "question is optional). A frame is captured and you describe it. Do NOT claim you cannot see or use a",
-      "camera. Emit at most one EVA_LOOK per reply, only when the user asks you to look or about what you see.",
-      "You can also send Signal messages by emitting [[EVA_SIGNAL]]{\"message\":\"<text>\"}[[/EVA_SIGNAL]] when",
-      "the user asks to text them.",
+      "Only after the user explicitly asks to use or look through their camera/webcam, emit one standalone",
+      "mandatory closed [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] proposal.",
+      "Electron separately asks the user to authorize one fresh frame. Never use camera control for web search,",
+      "shopping, or image requests. Emit exactly one control surface at most per response.",
+      "Signal delivery is unavailable from model output. Trusted configured alerts use a separate path.",
       "SCHEDULED TASKS: Eva has a cron scheduler. When the user asks to schedule something recurring",
       "(daily briefings, periodic checks, reminders), acknowledge that this can be set up in Settings > Cron.",
       "SUBAGENTS: For multi-part tasks that can run in parallel, Eva can spawn isolated subagents. Each runs",
       "its own prompt concurrently and delivers results via notifications when done.",
-      "SKILLS: Eva learns from successful complex tasks. After finishing a browser or desktop task, she may",
-      "auto-extract a reusable skill. Skills are stored as drafts for user review in Settings > Goals/Skills.",
+      "LEARNING: governed Phase 3 experiments are default-off, local, shadow-only, and never activate behavior.",
+      "The separately gated legacy skill-draft path requires explicit review; never claim automatic extraction.",
       "Do NOT narrate phases. Do NOT mention the pipeline, the reviewer,",
       "or any '.github/agents/' file. Do NOT print fake 'PHASE 1 / PHASE 2 / PHASE 3' headers.",
       "Just answer the user."
@@ -185,12 +184,15 @@
   var capabilities = [];
 
   function registerCapability(spec) {
-    if (!spec || !spec.id || typeof spec.run !== 'function') return false;
+    if (!spec || !spec.id || typeof spec.validate !== 'function' ||
+        typeof spec.run !== 'function') return false;
     // Replace existing with same id so reload is safe
     capabilities = capabilities.filter(function (c) { return c.id !== spec.id; });
     capabilities.push({
       id: String(spec.id),
       description: String(spec.description || ''),
+      effectful: spec.effectful === true,
+      validate: spec.validate,
       run: spec.run
     });
     return true;
@@ -212,11 +214,29 @@
   //   [[EVA_ACTION]]
   //   {"id": "file.download", "args": {...}}
   //   [[/EVA_ACTION]]
-  // The browser parses each block, runs the matching capability, and replaces
-  // the block with the capability's HTML output (or an inline error).
-  // Match both properly closed blocks and unclosed ones (local models often
-  // forget the closing tag). The second alternation grabs to end-of-string.
-  var ACTION_BLOCK_RE = /\[\[EVA_ACTION\]\]([\s\S]*?)\[\[\/EVA_ACTION\]\]|\[\[EVA_ACTION\]\]([\s\S]+)$/g;
+  // The complete response is parsed before any capability validation or I/O.
+  // Exactly one closed top-level control surface is allowed per response.
+  var MAX_ACTIONS_PER_TURN = 1;
+  var MAX_ACTION_BODY_BYTES = 32 * 1024;
+  var MAX_ACTION_BATCH_BYTES = 32 * 1024;
+
+  function parseWholeResponse(text) {
+    if (typeof EvaAgentMarkers !== 'undefined' &&
+        typeof EvaAgentMarkers.parseResponse === 'function') {
+      return EvaAgentMarkers.parseResponse(text);
+    }
+    var source = String(text || '');
+    var first = source.search(/\[\[\/?EVA_/);
+    return {
+      text: first < 0 ? source : source.slice(0, first).trim(),
+      actions: [], invalid: first >= 0, conflict: first >= 0,
+      browser: null, desktop: null, camera: null, signal: false
+    };
+  }
+
+  function sanitizeActionText(text) {
+    return parseWholeResponse(text).text;
+  }
 
   function envelopeIsCurrent(envelope) {
     if (!envelope) return true;
@@ -234,53 +254,111 @@
   async function executeActions(text, capturedEnvelope) {
     requireCurrentEnvelope(capturedEnvelope);
     if (!text) return { content: '', actions: [] };
-    var actions = [];
-    var out = text;
-    var match;
-    var replacements = [];
-    ACTION_BLOCK_RE.lastIndex = 0;
-    while ((match = ACTION_BLOCK_RE.exec(text)) !== null) {
-      // Group 1 = closed block body, group 2 = unclosed block body
-      replacements.push({ full: match[0], body: match[1] || match[2], index: match.index });
+    var protocol = parseWholeResponse(text);
+    if (protocol.invalid || protocol.conflict) {
+      return {
+        content: protocol.text,
+        actions: [{
+          ok: false, id: 'control.response', error: 'invalid-control-response',
+          detail: 'No control executed because the complete response was invalid.'
+        }]
+      };
     }
-    for (var i = 0; i < replacements.length; i++) {
-      var r = replacements[i];
-      var spec;
-      try { spec = JSON.parse(String(r.body || '').trim()); }
-      catch (e) {
-        actions.push({ ok: false, error: 'invalid-json', detail: e.message });
-        // Silently remove the malformed block instead of showing the raw
-        // JSON error to the user. Local models often produce broken JSON.
-        out = out.replace(r.full, '');
-        continue;
+    if (!protocol.actions || protocol.actions.length === 0) {
+      return { content: String(text), actions: [] };
+    }
+    var actions = [];
+    var parsedActions = [];
+    var batchBytes = 0;
+    var effectCount = 0;
+    var validationError = '';
+    if (protocol.actions.length > MAX_ACTIONS_PER_TURN) {
+      validationError = 'action-count-exceeded';
+    }
+    for (var preIndex = 0; preIndex < protocol.actions.length && !validationError; preIndex++) {
+      var body = String(protocol.actions[preIndex].raw || '').trim();
+      var bodyBytes = new TextEncoder().encode(body).byteLength;
+      batchBytes += bodyBytes;
+      if (bodyBytes === 0 || bodyBytes > MAX_ACTION_BODY_BYTES ||
+          batchBytes > MAX_ACTION_BATCH_BYTES) {
+        validationError = 'action-size-exceeded';
+        break;
       }
-      var cap = capabilities.filter(function (c) { return c.id === spec.id; })[0];
-      if (!cap) {
-        actions.push({ ok: false, error: 'unknown-capability', id: spec.id });
-        // Silently remove — local models often hallucinate capability IDs.
-        out = out.replace(r.full, '');
-        continue;
+      var parsedSpec = protocol.actions[preIndex].payload;
+      if (!parsedSpec || typeof parsedSpec !== 'object' || Array.isArray(parsedSpec) ||
+          Object.keys(parsedSpec).some(function(key) {
+            return key !== 'id' && key !== 'args';
+          }) || typeof parsedSpec.id !== 'string' ||
+          !parsedSpec.args || typeof parsedSpec.args !== 'object' ||
+          Array.isArray(parsedSpec.args)) {
+        validationError = 'invalid-action-shape';
+        break;
       }
+      var parsedCap = capabilities.filter(function(capability) {
+        return capability.id === parsedSpec.id;
+      })[0];
+      if (!parsedCap) {
+        validationError = 'unknown-capability';
+        break;
+      }
+      var normalizedArgs;
+      try {
+        normalizedArgs = parsedCap.validate(parsedSpec.args);
+      } catch (_) {
+        validationError = 'invalid-capability-arguments';
+        break;
+      }
+      if (!normalizedArgs || typeof normalizedArgs !== 'object' ||
+          Array.isArray(normalizedArgs) || typeof normalizedArgs.then === 'function') {
+        validationError = 'invalid-capability-arguments';
+        break;
+      }
+      if (parsedCap.effectful) effectCount += 1;
+      if (effectCount > 1) {
+        validationError = 'multiple-effects-unavailable';
+        break;
+      }
+      parsedActions.push({
+        spec: { id: parsedSpec.id, args: normalizedArgs }, cap: parsedCap
+      });
+    }
+    if (validationError) {
+      return {
+        content: protocol.text,
+        actions: [{
+          ok: false, id: 'action.batch', error: validationError,
+          detail: 'No actions executed because the complete batch was invalid.'
+        }]
+      };
+    }
+    for (var i = 0; i < parsedActions.length; i++) {
+      var spec = parsedActions[i].spec;
+      var cap = parsedActions[i].cap;
       try {
         requireCurrentEnvelope(capturedEnvelope);
-        var result = await cap.run(spec.args || {});
+        var result = await cap.run(spec.args || {}, {
+          envelope: capturedEnvelope
+        });
         requireCurrentEnvelope(capturedEnvelope);
+        if (spec.id === 'file.download' && result &&
+            typeof result.filename === 'string') {
+            if (typeof recordTrustedArtifact !== 'function' ||
+              !recordTrustedArtifact(
+                result, result.registry_epoch, result.generation
+              )) {
+            throw new Error('artifact registry rejected the created file');
+          }
+        }
         actions.push({ ok: true, id: spec.id, result: result });
-        var html = (result && typeof result.html === 'string') ? result.html :
-                   '<div class="cog-action-ok">[action ' + spec.id + ' completed]</div>';
-        out = out.replace(r.full, html);
       } catch (err) {
         if (err && err.code === 'EVA_STALE_ENVELOPE') throw err;
         var msg = (err && err.message) ? err.message : String(err);
         actions.push({ ok: false, id: spec.id, error: 'run-failed', detail: msg });
-        out = out.replace(r.full,
-          '<div class="cog-action-err">[action ' + spec.id + ' failed: ' +
-          String(msg).replace(/</g,'&lt;') + ']</div>');
       }
     }
     // Strip fake [Data Retrieved] sections that local models hallucinate.
     // Real data is injected into the system prompt, never the response.
-    out = out.replace(/\[Data Retrieved\][^\[]*(?=\n\n|\n$|$)/gs, '');
+    var out = protocol.text.replace(/\[Data Retrieved\][^\[]*(?=\n\n|\n$|$)/gs, '');
     return { content: out.trim(), actions: actions };
   }
 
@@ -291,7 +369,7 @@
   //   filename: string  (required)
   //   content:  string  (required) - the file body
   //   mime:     string  (optional, default 'text/plain')
-  // Returns { html } where html is a real <a download> link rendered inline.
+  // Returns structured metadata; the response renderer builds links with DOM APIs.
   //
   // Artifacts are namespaced under a virtual path tmp/<session_id>/<filename>.
   // Browsers strip path separators from the download attribute for security,
@@ -408,71 +486,133 @@
 
   registerCapability({
     id: 'file.download',
+    effectful: true,
     description: 'Deliver a downloadable artifact (text, markdown, csv, or a real PDF). ' +
                  'args: {filename:string, content:string, mime?:string}. Use mime ' +
                  '"application/pdf" or a .pdf filename to produce a genuine PDF. ' +
-                 'The artifact renders inline as Download/Open links and PDFs auto-open ' +
-                 'in a viewer tab. To let the user view it again, tell them to click the ' +
-                 'Open or Download link in your message; do NOT say you cannot open files.',
-    run: async function (args) {
-      args = args || {};
-      var safeName = String(args.filename || 'eva-artifact.txt')
+                 'The artifact renders as a manual Download control. To let the user view it again, tell them to click the ' +
+                 'Download link in your message; server-side file opening is unavailable.',
+    validate: function(args) {
+      if (!args || typeof args !== 'object' || Array.isArray(args) ||
+          Object.keys(args).some(function(key) {
+            return key !== 'filename' && key !== 'content' && key !== 'mime';
+          }) || typeof args.filename !== 'string' || !args.filename.trim() ||
+          args.filename.length > 120 || typeof args.content !== 'string' ||
+          (args.mime !== undefined && (typeof args.mime !== 'string' ||
+            !args.mime.trim() || args.mime.length > 128))) {
+        throw new Error('file.download arguments are invalid');
+      }
+      var safeName = args.filename
                        .replace(/[^A-Za-z0-9._\-]+/g, '_').slice(0, 120) || 'eva-artifact.txt';
-      var content = String(args.content == null ? '' : args.content);
-      var mime = String(args.mime || 'text/plain');
+      if (safeName === '.identity.json') {
+        throw new Error('file.download filename is reserved');
+      }
+      var mime = args.mime || 'text/plain';
       var isPdf = /application\/pdf/i.test(mime) || /\.pdf$/i.test(safeName);
       if (isPdf) {
         mime = 'application/pdf';
         if (!/\.pdf$/i.test(safeName)) safeName += '.pdf';
       }
+      return {
+        filename: safeName, content: args.content, mime: mime, isPdf: isPdf
+      };
+    },
+    run: async function (args, context) {
+      var safeName = args.filename;
+      var content = args.content;
+      var mime = args.mime;
+      var isPdf = args.isPdf;
 
       // Write the file through the bridge so it lands in ARTIFACTS_DIR and is
-      // served via /v1/files/<name>. This replaces the old blob URL approach
+      // served via its immutable session/artifact/digest route. This replaces the old blob URL approach
       // which broke under Electron's file:// origin.
       var bUrl = bridgeUrl().replace(/\/+$/, '');
+      var envelope = context && context.envelope;
+      if (!envelope || typeof envelope.session_id !== 'string') {
+        throw new Error('artifact creation requires a bound session');
+      }
       try {
+        var artifactEpoch = (typeof _artifactRegistryEpoch === 'function')
+          ? _artifactRegistryEpoch() : 0;
+        var generationResp = await fetch(bUrl + '/v1/files/generation');
+        if (!generationResp.ok) throw new Error('generation HTTP ' + generationResp.status);
+        var generationData = await generationResp.json();
+        if (!generationData || typeof generationData.generation !== 'string' ||
+          !/^[1-9][0-9]{0,39}$/.test(generationData.generation)) {
+          throw new Error('bridge returned no artifact generation');
+        }
+        if (typeof _acceptArtifactServerGeneration !== 'function' ||
+            !_acceptArtifactServerGeneration(generationData.generation).ok) {
+          throw new Error('bridge artifact generation regressed');
+        }
         var writeResp = await fetch(bUrl + '/v1/files/write', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename: safeName, content: content, is_pdf: isPdf })
+          body: JSON.stringify({
+            filename: safeName, content: content, is_pdf: isPdf,
+            mime: mime, session_id: envelope.session_id,
+            turn_id: envelope.turn_id,
+            generation: generationData.generation
+          })
         });
         if (!writeResp.ok) throw new Error('HTTP ' + writeResp.status);
+        var artifact = await writeResp.json();
+        if (!artifact || artifact.ok !== true ||
+          artifact.generation !== generationData.generation ||
+          (typeof currentArtifactServerGeneration === 'function' &&
+           artifact.generation !== currentArtifactServerGeneration())) {
+          throw new Error('bridge returned no artifact identity');
+        }
       } catch (e) {
-        return { html: '<div class="cog-action-err">[file write failed: ' + String(e.message || e) + ']</div>' };
+        throw new Error('file write failed: ' + String(e.message || e));
       }
 
-      // Emit [[EVA_FILE]] marker so renderEvaResponse appends proper download/open links.
       return {
-        html: '\n[[EVA_FILE]] ' + safeName,
-        filename: safeName,
-        mime: mime
+        filename: artifact.filename,
+        mime: artifact.mime,
+        session_id: artifact.session_id,
+        artifact_id: artifact.artifact_id,
+        digest: artifact.digest,
+        generation: artifact.generation,
+        size: artifact.size,
+        registry_epoch: artifactEpoch,
+        notice: 'Created artifact ' + safeName
       };
     }
   });
 
   registerCapability({
     id: 'file.open',
-    description: 'Open an existing artifact file that was already created in this conversation. ' +
+    description: 'Surface an existing artifact file that was already created in this conversation. ' +
                  'args: {filename:string}. Use this when the user asks to open, view, or show ' +
                  'a file that was already created via file.download. Do NOT recreate the file.',
+    validate: function(args) {
+      if (!args || typeof args !== 'object' || Array.isArray(args) ||
+          Object.keys(args).length !== 1 || typeof args.filename !== 'string' ||
+          !args.filename.trim() || args.filename.length > 120) {
+        throw new Error('file.open arguments are invalid');
+      }
+      var filename = args.filename.replace(/[^A-Za-z0-9._\-]+/g, '_').slice(0, 120);
+      var artifact = (typeof getTrustedArtifact === 'function')
+        ? getTrustedArtifact(filename) : null;
+      if (!artifact) {
+        throw new Error('file.open: filename is not in the trusted artifact registry');
+      }
+      return { filename: filename, artifact: artifact };
+    },
     run: async function (args) {
-      args = args || {};
-      var filename = String(args.filename || '').replace(/[^A-Za-z0-9._\-]+/g, '_').slice(0, 120);
-      if (!filename) {
-        return { html: '<div class="cog-action-err">[file.open: no filename provided]</div>' };
-      }
-      var bUrl = bridgeUrl().replace(/\/+$/, '');
-      try {
-        var resp = await fetch(bUrl + '/v1/files/' + encodeURIComponent(filename) + '?open=1');
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        var data = await resp.json();
-        if (data.opened) {
-          return { html: '<div class="cog-action-ok">[Opened ' + filename + ']</div>' };
-        }
-        throw new Error('open returned false');
-      } catch (e) {
-        return { html: '<div class="cog-action-err">[Could not open ' + filename + ': ' + String(e.message || e) + ']</div>' };
-      }
+      var filename = args.filename;
+      var artifact = args.artifact;
+      return {
+        filename: artifact.filename,
+        mime: artifact.mime,
+        session_id: artifact.session_id,
+        artifact_id: artifact.artifact_id,
+        digest: artifact.digest,
+        generation: artifact.generation,
+        size: artifact.size,
+        notice: 'Artifact ' + filename + ' is ready; use the Download link.'
+      };
     }
   });
 
@@ -519,10 +659,7 @@
     });
     requireCurrentEnvelope(_callEnvelope);
     if (!resp.ok) {
-      var t = '';
-      try { t = await resp.text(); } catch (_) {}
-      requireCurrentEnvelope(_callEnvelope);
-      throw new Error(role + ' (' + model + ') HTTP ' + resp.status + (t ? ': ' + t : ''));
+      throw new Error(role + ' request failed (HTTP ' + resp.status + ').');
     }
     var data = await resp.json();
     requireCurrentEnvelope(_callEnvelope);
@@ -606,7 +743,7 @@
   var RETRIEVAL_INTENT = /\b(look(ing)?\s*(it\s*)?up|search(\s+for)?|google|find\s+out|latest|most\s+recent|breaking|what'?s\s+(happening|going\s+on|new)|right\s+now)\b/i;
 
   function reviewFloorReason(userMsg, draftContent) {
-    if (/\[\[EVA_ACTION\]\]|\[\[EVA_BROWSER\]\]|\[\[EVA_DESKTOP\]\]|\[\[EVA_LOOK\]\]|\[\[EVA_FILE\]\]/i.test(String(draftContent || ''))) {
+    if (/\[\[EVA_ACTION\]\]|\[\[EVA_BROWSER\]\]|\[\[EVA_DESKTOP\]\]|\[\[EVA_LOOK\]\]/i.test(String(draftContent || ''))) {
       return 'action';
     }
     var u = String(userMsg || '');
@@ -635,6 +772,8 @@
     var _turnStart = Date.now();
     var _draftMs = 0, _reviewMs = 0, _reviseMs = 0;
     var capDesc = describeCapabilities();
+    var trustedArtifacts = Array.isArray(opts.trustedArtifacts)
+      ? opts.trustedArtifacts.slice(0, 32) : [];
 
     var actionHelp = [
       '',
@@ -676,7 +815,10 @@
     ].join('\n');
     var draft = await callAgent(
       'eva', cfg.evaModel, cfg.evaPrompt, convo, draftTask,
-      { inject_memory: true, recall_query: userMsg, retrieve_data: true }, runEnvelope
+      {
+        inject_memory: true, recall_query: userMsg, retrieve_data: true,
+        trusted_artifacts: trustedArtifacts
+      }, runEnvelope
     );
     requireCurrentEnvelope(runEnvelope);
 
@@ -780,7 +922,10 @@
       try {
         revised = await callAgent(
           'eva', cfg.evaModel, cfg.evaPrompt, convo, reviseTask,
-          { inject_memory: true, recall_query: userMsg }, runEnvelope
+          {
+            inject_memory: true, recall_query: userMsg,
+            trusted_artifacts: trustedArtifacts
+          }, runEnvelope
         );
       } catch (reviseErr) {
         if (reviseErr && reviseErr.code === 'EVA_STALE_ENVELOPE') throw reviseErr;
@@ -854,7 +999,11 @@
       parts.push('<div class="cog-step"><div class="cog-step-head">' +
                  esc(label) + ' <span class="cog-step-model">' +
                  esc(step.model || '') + '</span></div>' +
-                 '<pre class="cog-step-body">' + esc(step.content) + '</pre></div>');
+                 '<pre class="cog-step-body">' + esc(
+                   typeof canonicalizeEvaResponse === 'function'
+                     ? canonicalizeEvaResponse(step.content).text
+                     : sanitizeActionText(step.content)
+                 ) + '</pre></div>');
     });
     parts.push('</details>');
     return parts.join('');
@@ -878,6 +1027,7 @@
     listCapabilities: listCapabilities,
     describeCapabilities: describeCapabilities,
     executeActions: executeActions,
+    sanitizeActionText: sanitizeActionText,
     renderTraceHtml: renderTraceHtml
   };
 })(window);

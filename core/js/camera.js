@@ -58,11 +58,14 @@
       var resp = await fetch(bridgeBase() + '/v1/camera/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device: dev })
+        body: JSON.stringify({ purpose: 'presence', device: dev })
       });
       var data = await resp.json();
       if (!resp.ok) {
-        var msg = (data && data.error && data.error.message) || ('HTTP ' + resp.status);
+        var msg = _canonicalSecondaryText(
+          (data && data.error && data.error.message) ||
+          ('Camera start failed (HTTP ' + resp.status + ').')
+        ) || 'Camera start failed.';
         setChatStatus('error', 'Camera: ' + msg);
         _state.available = false;
         return false;
@@ -169,16 +172,43 @@
 
   // --- Eva's eyes (look on demand) -----------------------------------------
 
-  async function _getFrameDataUrl() {
-    var resp = await fetch(bridgeBase() + '/v1/camera/frame?t=' + Date.now(), { cache: 'no-store' });
+  async function _getFrameDataUrl(captureReceipt) {
+    if (!captureReceipt || captureReceipt.contract !== 'eva.camera-capture/1' ||
+        !/^[0-9a-f]{32}$/.test(String(captureReceipt.capture_id || '')) ||
+        !/^[0-9a-f]{64}$/.test(String(captureReceipt.question_hash || ''))) {
+      throw new Error('Camera capture receipt is invalid.');
+    }
+    var resp = await fetch(
+      bridgeBase() + '/v1/camera/frame?capture_id=' +
+        encodeURIComponent(captureReceipt.capture_id),
+      { cache: 'no-store' }
+    );
     if (!resp.ok) return null;
+    var contract = resp.headers.get('X-Eva-Camera-Contract');
+    var captureId = resp.headers.get('X-Eva-Camera-Capture-Id');
+    var frameSeq = resp.headers.get('X-Eva-Camera-Frame-Seq');
+    var questionHash = resp.headers.get('X-Eva-Camera-Question-Hash');
+    if (contract !== 'eva.camera-capture/1' ||
+        captureId !== captureReceipt.capture_id ||
+        questionHash !== captureReceipt.question_hash ||
+        !/^[1-9][0-9]{0,15}$/.test(String(frameSeq || '')) ||
+        Number(frameSeq) <= captureReceipt.baseline_frame_seq) {
+      throw new Error('Camera fresh-frame attestation failed.');
+    }
     var blob = await resp.blob();
-    return await new Promise(function (resolve) {
+    var dataUrl = await new Promise(function (resolve) {
       var fr = new FileReader();
       fr.onload = function () { resolve(fr.result); };
       fr.onerror = function () { resolve(null); };
       fr.readAsDataURL(blob);
     });
+    return {
+      dataUrl: dataUrl,
+      receipt: {
+        contract: contract, capture_id: captureId, state: 'succeeded',
+        question_hash: questionHash, frame_seq: String(frameSeq)
+      }
+    };
   }
 
   // Current published frame sequence (increments once per captured frame).
@@ -243,7 +273,7 @@
     document.body.appendChild(el);
     document.getElementById('ecpClose').addEventListener('click', _closePopup);
     document.getElementById('ecpAgain').addEventListener('click', function () {
-      look(_popup.lastQuestion, { silent: true });
+      _lookAgainAuthorized();
     });
     var shot = document.getElementById('ecpShot');
     shot.addEventListener('load', function () {
@@ -260,6 +290,27 @@
   function _closePopup() {
     var el = document.getElementById('evaCameraPopup');
     if (el) el.remove();
+  }
+
+  async function _lookAgainAuthorized() {
+    try {
+      if (!global.evaStandalone ||
+          typeof global.evaStandalone.authorizeCameraLook !== 'function') {
+        throw new Error('Native camera authorization is unavailable.');
+      }
+      var authorization = await global.evaStandalone.authorizeCameraLook(
+        _popup.lastQuestion, _state.device
+      );
+      if (!authorization || authorization.authorized !== true) return;
+      await look(_popup.lastQuestion, {
+        silent: true, authorization: authorization
+      });
+    } catch (error) {
+      _popupBadge('error');
+      _popupResult(_canonicalSecondaryText(
+        (error && error.message) || 'Camera authorization failed.'
+      ));
+    }
   }
 
   // --- Embedded vision panel (voice view) ----------------------------------
@@ -321,11 +372,30 @@
     if (m) m.textContent = text || '';
   }
 
+  function _canonicalSecondaryText(value) {
+    if (typeof canonicalizeEvaResponse === 'function') {
+      return canonicalizeEvaResponse(value, {
+        allowCamera: false, allowAgentControls: false
+      }).text;
+    }
+    var source = String(value || '');
+    var first = source.search(/\[\[\/?EVA_/);
+    return (first < 0 ? source : source.slice(0, first)).trim();
+  }
+
   // Grab the current camera frame and ask the vision model about it. Returns a
   // plain-text description, or throws with a user-facing message. Also drives
   // the confirmation popup so the user can see the exact frame that was sent.
   async function look(question, opts) {
     opts = opts || {};
+    var authorization = opts.authorization;
+    if (!authorization || authorization.authorized !== true ||
+        typeof authorization.capability !== 'string' ||
+        !authorization.specification ||
+        authorization.specification.question !== question ||
+        authorization.specification.device !== _state.device) {
+      throw new Error('One-shot camera authorization is required.');
+    }
     if (_state.busyLook) return 'I\'m already looking.';
     _state.busyLook = true;
     _popup.lastQuestion = question || '';
@@ -350,28 +420,30 @@
       // past the value seen when the look began so we never describe a stale or
       // cached image (the repeated "old image" problem).
       var dataUrl = null;
-      if (!_state.enabled) {
-        var ok = await enableOneShot();
-        if (!ok) throw new Error('I could not access the camera.');
-        startedHere = true;
-      }
-      var baseSeq = await _frameSeq();
+      startedHere = !_state.enabled;
+      var captureReceipt = await enableOneShot(authorization, question);
+      if (!captureReceipt) throw new Error('I could not authorize a fresh camera frame.');
+      var baseSeq = captureReceipt.baseline_frame_seq;
       // Wait for at least 2 new frames so the published image is current.
       var fresh = await _waitForNewFrame(baseSeq, 2, 6000);
-      if (fresh) dataUrl = await _getFrameDataUrl();
+      var frameResult = null;
+      if (fresh) frameResult = await _getFrameDataUrl(captureReceipt);
       // Fallbacks if the seq never advanced (older worker / odd driver).
-      if (!dataUrl) {
-        for (var i = 0; i < 8 && !dataUrl; i++) {
+      if (!frameResult) {
+        for (var i = 0; i < 8 && !frameResult; i++) {
           await _sleep(250);
-          dataUrl = await _getFrameDataUrl();
+          frameResult = await _getFrameDataUrl(captureReceipt);
         }
       }
+      dataUrl = frameResult && frameResult.dataUrl;
       if (!dataUrl) throw new Error('I could not get a picture from the camera.');
 
       if (embedded) { _visionFrame(dataUrl); }
       else { _popupFrame(dataUrl); _popupBadge('looking'); }
 
       var res = await _describe(dataUrl, question, key);
+      res.text = _canonicalSecondaryText(res && res.text);
+      if (!res.text) throw new Error('The vision response contained no safe description.');
       if (embedded) {
         // Prefix the backend so the model is visible even in the ambient panel.
         var tag = res.model ? ('[' + res.model + ']\n') : '';
@@ -382,9 +454,11 @@
         _popupResult(res.text || '');
         _popupModel(res.model || '');
       }
-      return res.text;
+      return { text: res.text, capture_receipt: frameResult.receipt };
     } catch (e) {
-      var msg = (e && e.message) ? e.message : String(e);
+      var msg = _canonicalSecondaryText(
+        (e && e.message) ? e.message : String(e)
+      ) || 'Camera operation failed.';
       if (embedded) { _visionText(msg); _visionDone(); }
       else { _popupBadge('error'); _popupResult(msg); }
       throw e;
@@ -399,17 +473,27 @@
   }
 
   // Start the worker without flipping persistent presence mode on.
-  async function enableOneShot() {
+  async function enableOneShot(authorization, question) {
     try {
       var resp = await fetch(bridgeBase() + '/v1/camera/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device: _state.device })
+        body: JSON.stringify({
+          purpose: 'one_shot', device: _state.device, question: question,
+          launch_capability: authorization.capability
+        })
       });
-      if (!resp.ok) return false;
+      if (!resp.ok) return null;
+      var data = await resp.json();
+      var receipt = data && data.capture_receipt;
+      if (!receipt || receipt.contract !== 'eva.camera-capture/1' ||
+          receipt.state !== 'authorized' ||
+          !/^[0-9a-f]{32}$/.test(String(receipt.capture_id || '')) ||
+          !/^[0-9a-f]{64}$/.test(String(receipt.question_hash || '')) ||
+          typeof receipt.baseline_frame_seq !== 'number') return null;
       _state.enabled = true;
-      return true;
-    } catch (e) { return false; }
+      return receipt;
+    } catch (e) { return null; }
   }
 
   // Describe the frame. Returns { text, model }. Routing by preference order:
@@ -486,8 +570,7 @@
       signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(60000) : undefined
     });
     if (!resp.ok) {
-      var t = await resp.text();
-      throw new Error('GitHub Models ' + resp.status + ': ' + t.slice(0, 160));
+      throw new Error('GitHub Models vision request failed (HTTP ' + resp.status + ').');
     }
     var data = await resp.json();
     var text = (data.choices && data.choices[0] && data.choices[0].message &&
@@ -514,8 +597,7 @@
       })
     });
     if (!resp.ok) {
-      var t = await resp.text();
-      throw new Error('Vision model ' + resp.status + ': ' + t.slice(0, 160));
+      throw new Error('OpenAI vision request failed (HTTP ' + resp.status + ').');
     }
     var data = await resp.json();
     return (data.choices && data.choices[0] && data.choices[0].message &&
@@ -555,12 +637,14 @@
   }
 
   function status() { return Object.assign({}, _state); }
+  function device() { return _state.device; }
 
   global.EvaCamera = {
     enable: enable,
     disable: disable,
     isEnabled: isEnabled,
     look: look,
+    device: device,
     status: status
   };
 

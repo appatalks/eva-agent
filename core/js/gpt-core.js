@@ -22,7 +22,32 @@ async function trboSend(capturedEnvelope) {
     return;
   }
 
-  var oHttp = new XMLHttpRequest();
+  var _requestHeaders = {};
+  var oHttp = {
+    readyState: 0, status: 0, responseText: '', onreadystatechange: null,
+    method: 'POST', url: '',
+    open: function(method, url) { this.method = method; this.url = url; },
+    setRequestHeader: function(name, value) { _requestHeaders[name] = value; },
+    send: async function(body) {
+      try {
+        var response = await fetch(this.url, {
+          method: this.method, headers: _requestHeaders, body: body,
+          redirect: 'error', credentials: 'omit'
+        });
+        this.status = response.status;
+        this.responseText = response.ok ? await response.text() : '';
+      } catch (error) {
+        this.status = 0;
+        this.responseText = JSON.stringify({
+          error: { message: 'provider request failed' }
+        });
+      }
+      this.readyState = 4;
+      if (typeof this.onreadystatechange === 'function') {
+        await this.onreadystatechange();
+      }
+    }
+  };
   oHttp.open("POST", "https://api.openai.com/v1/chat/completions");
     oHttp.setRequestHeader("Accept", "application/json");
     oHttp.setRequestHeader("Content-Type", "application/json");
@@ -34,22 +59,22 @@ async function trboSend(capturedEnvelope) {
         if (!requestIsCurrent()) return;
     	  // Check for errors
     	  if (oHttp.status === 500) {
-          txtOutput.innerHTML += "<br> Error 500: Internal Server Error" + "<br>" + escapeHtml(oHttp.responseText);
+      txtOutput.innerHTML += "<br> Error 500: Internal Server Error<br>";
       	    console.log("Error 500: Internal Server Error gpt-core.js");
       	    return;
     	  }
     	  if (oHttp.status === 429) {
-          txtOutput.innerHTML += "<br> Error 429: Too Many Requests" + "<br>" + escapeHtml(oHttp.responseText);
+          txtOutput.innerHTML += "<br> Error 429: Too Many Requests<br>";
             console.log("Error 429: Too Many Requests gpt-core.js");
       	    return;
     	  }
           if (oHttp.status === 404) {
-            txtOutput.innerHTML += "<br> Error 404: Not Found" + "<br>" + escapeHtml(oHttp.responseText);
+            txtOutput.innerHTML += "<br> Error 404: Not Found<br>";
             console.log("Error 404: Not Found gpt-core.js");
             return;
           }
           if (oHttp.status === 400) {
-            txtOutput.innerHTML += "<br> Error 400: Invalid Request" + "<br>" + escapeHtml(oHttp.responseText);
+            txtOutput.innerHTML += "<br> Error 400: Invalid Request<br>";
             console.log("Error 400: Invalid Request gpt-core.js");
             return;
           }
@@ -64,7 +89,8 @@ async function trboSend(capturedEnvelope) {
               }
 	
 	// EasterEgg
-	if ((oJson.usage.completion_tokens === 420) || (oJson.usage.total_tokens === 420)) {
+  var usage = (oJson.usage && typeof oJson.usage === 'object') ? oJson.usage : {};
+  if ((usage.completion_tokens === 420) || (usage.total_tokens === 420)) {
           function displayImage() {
 	      var image = document.getElementById("eEgg");
 	      image.style.display = "flex";
@@ -100,12 +126,27 @@ async function trboSend(capturedEnvelope) {
        	}
 	
 	// Interpret AI Response after Error Handling
-	else if (oJson.choices && oJson.choices[0].message) {
+  else if (Array.isArray(oJson.choices) && oJson.choices[0] && oJson.choices[0].message) {
 	    // console.log("gpt-core.js Line 96" + oJson.choices + "" + oJson.choices[0].message);
 	    // Always Run Response 
             var s = oJson.choices[0].message;
+      var canonicalResponse = (typeof canonicalizeEvaResponse === 'function')
+        ? canonicalizeEvaResponse(s.content, {
+            allowCamera: typeof _isExplicitCameraRequest === 'function' &&
+              _isExplicitCameraRequest(sQuestion)
+          })
+        : { text: String(s.content || '') };
+      var cleanedContent = canonicalResponse.text;
+      if (typeof finalizeDirectProviderTurn === 'function') {
+        await finalizeDirectProviderTurn(
+          sQuestion, cleanedContent, sModel, capturedEnvelope
+        );
+        if (!requestIsCurrent()) return;
+      }
 	    // Empty Response Handling / Render via unified renderer
-      if (!await renderEvaResponse(s.content, txtOutput, capturedEnvelope)) return;
+      if (!await renderEvaResponse(
+        cleanedContent, txtOutput, capturedEnvelope, [], canonicalResponse
+      )) return;
             if (!requestIsCurrent()) return;
        	
             // Send to Local Storage - possibly way to intigrate into memory
@@ -114,20 +155,16 @@ async function trboSend(capturedEnvelope) {
 	    localStorage.setItem("masterOutput", masterOutput);
 	    
 	    // Set lastResponse
-	    lastResponse = s.content + "\n";
+      lastResponse = cleanedContent + "\n";
             // console.log("gpt-core.js Line 152" + lastResponse);
 
-            if (typeof finalizeDirectProviderTurn === 'function') {
-              await finalizeDirectProviderTurn(sQuestion, s.content, sModel, capturedEnvelope);
-              if (!requestIsCurrent()) return;
-            }
             }            
         }
 
   	// Check the state of the checkbox and have fun
      if (!requestIsCurrent()) return;
      const checkbox = document.getElementById("autoSpeak");
-	   if (checkbox.checked) {
+	   if (checkbox && checkbox.checked) {
 	     speakText();
     	     const audio = document.getElementById("audioPlayback");
 	     audio.setAttribute("autoplay", true);
@@ -153,7 +190,7 @@ async function trboSend(capturedEnvelope) {
     if (!localStorage.getItem("messages")) {
       // If it does not exist, create an array with the initial messages
       const iMessages = [
-        { role: 'developer', content: 'You are Eva. You have access to previous chats and responses. You have access to real-time news, information and media. You will keep conversation to a minimum and answer to the best of your abilities. When you are asked to show an image, instead describe the image with [Image of <Description>]. You can SEE through the user\'s webcam: when the user asks you to look, take a picture, or describe something in front of the camera, emit [[EVA_LOOK]]{"question":"<what to look for>"}[[/EVA_LOOK]] and a frame will be captured for you to describe. Do NOT say you cannot access the camera. You can send the user a Signal text message by emitting [[EVA_SIGNAL]]{"message":"<text>"}[[/EVA_SIGNAL]] when they ask you to text or message them.' },
+        { role: 'developer', content: 'You are Eva. You have access to previous chats and responses. You have access to real-time news, information and media. You will keep conversation to a minimum and answer to the best of your abilities. When you are asked to show an image, instead describe the image with [Image of <Description>]. You can SEE through the user\'s webcam only when they explicitly ask and you emit one mandatory closed [[EVA_LOOK]]{"question":"<what to look for>"}[[/EVA_LOOK]] marker; Electron asks them to authorize one frame. Signal delivery is unavailable from model output.' },
         { role: 'user', content: ((typeof getSystemPrompt === 'function') ? getSystemPrompt() : '') + " " + dateContents },
       ];
 
@@ -230,7 +267,7 @@ async function trboSend(capturedEnvelope) {
 
         // Refresh the developer message with current capabilities (camera, etc.)
         // so existing conversations pick up new instructions without a reset.
-        var _devPrompt = 'You are Eva. You have access to previous chats and responses. You have access to real-time news, information and media. You will keep conversation to a minimum and answer to the best of your abilities. When you are asked to show an image, instead describe the image with [Image of <Description>]. You can SEE through the user\'s webcam: when the user asks you to look, take a picture, or describe something in front of the camera, emit [[EVA_LOOK]]{"question":"<what to look for>"}[[/EVA_LOOK]] and a frame will be captured for you to describe. Do NOT say you cannot access the camera. You can send the user a Signal text message by emitting [[EVA_SIGNAL]]{"message":"<text>"}[[/EVA_SIGNAL]] when they ask you to text or message them.';
+        var _devPrompt = 'You are Eva. You have access to previous chats and responses. You have access to real-time news, information and media. You will keep conversation to a minimum and answer to the best of your abilities. When you are asked to show an image, instead describe the image with [Image of <Description>]. You can SEE through the user\'s webcam only when they explicitly ask and you emit one mandatory closed [[EVA_LOOK]]{"question":"<what to look for>"}[[/EVA_LOOK]] marker; Electron asks them to authorize one frame. Signal delivery is unavailable from model output.';
         if (kMessages.length > 0 && (kMessages[0].role === 'developer' || kMessages[0].role === 'system')) {
           kMessages[0].content = _devPrompt;
         }

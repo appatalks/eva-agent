@@ -277,7 +277,7 @@ def _parse_evarise_json(text):
                     return obj, ""
             except (json.JSONDecodeError, ValueError):
                 pass
-    print(f"[Skills] evarise JSON parse failed, first 500 chars: {text[:500]}")
+    print("[Skills] evarise JSON parse failed")
     return None, "agent did not return valid JSON"
 
 

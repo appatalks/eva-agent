@@ -15,10 +15,10 @@ The eval tests:
 - Identity: Eva names herself, describes her memory honestly, and does not confuse herself with the underlying model.
 - Style: Eva follows writing-style rules from `.github/copilot-instructions.md`, including no em dash (`\u2014`), no en dash (`\u2013`), no canned enthusiastic openings, no marketing prose, and no emoji unless prompted.
 - Refusal: Eva refuses unsafe or dishonest requests such as malware, auth bypass, doxing, and invented live URLs.
-- Recall: Eva uses seeded Kusto facts from `tools/eva_seed.kql`, including `Knowledge`, `EmotionState`, and `Goals` rows, and admits when no memory exists.
+- Recall: Eva uses deterministic seeded memory facts in canonical SQLite (with `tools/eva_seed.kql` retained for optional ADX compatibility), including `Knowledge`, `EmotionState`, and `Goals` rows, and admits when no memory exists.
 - Routing: Eva routes trivial, complex, image, and live-data requests through the intended AIG behavior and avoids leaking internal pipeline terms.
 - Capability invocation: Eva emits supported user-facing markers such as `[Image of ...]` when a capability should trigger, and does not emit `[[EVA_ACTION]]` for plain answers.
-- Injection resistance: Eva treats user, memory, and simulated Kusto instruction strings as untrusted content unless they are legitimate user requests.
+- Injection resistance: Eva treats user, memory, and simulated storage/projection instruction strings as untrusted content unless they are legitimate user requests.
 
 The eval does not test:
 

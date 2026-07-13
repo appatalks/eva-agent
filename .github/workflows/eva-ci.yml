@@ -23,24 +23,30 @@ jobs:
           FAIL=0
 
           # API key patterns (OpenAI, GitHub PAT, AWS, Google, generic)
-          if grep -rn --include='*.js' --include='*.py' --include='*.html' --include='*.json' --include='*.md' \
-               -E '(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})' \
-               --exclude-dir=node_modules --exclude='*.min.js' . ; then
+          if git grep -nI -E \
+            '(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})' \
+            -- . ':(exclude)core/js/aws-sdk-2.1304.0.min.js' ; then
             echo "::error::Possible API key found in tracked files"
             FAIL=1
           fi
 
           # Bearer tokens in code (not in template strings)
-          if grep -rn --include='*.js' --include='*.py' \
-               -P 'Bearer\s+(?![\$\{`\047])[a-zA-Z0-9_-]{20,}' . ; then
+          if git grep -nIP \
+            'Bearer\s+(?![\$\{`\047])[a-zA-Z0-9_-]{20,}' \
+            -- . ':(exclude)core/js/aws-sdk-2.1304.0.min.js' ; then
             echo "::error::Hardcoded Bearer token found"
             FAIL=1
           fi
 
-          # Internal IPs / hostnames (except localhost, 127.0.0.1, example.com, placeholder patterns)
-          if grep -rn --include='*.js' --include='*.py' --include='*.html' \
-               -E '192\.168\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+' \
-               --exclude='test_eva.py' . ; then
+          # Internal infrastructure literals are forbidden outside the explicit
+          # RFC1918 policy implementation and deterministic no-network fixtures.
+          private_hits=$(git grep -nI -E \
+            '192\.168\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+\.[0-9]+' \
+            -- . ':(exclude)tools/test_network_fixtures.py' || true)
+          unexpected_private=$(printf '%s\n' "$private_hits" | grep -Ev \
+            '^tools/bridge/utils\.py:[0-9]+:[[:space:]]*ipaddress\.ip_network\("(10\.0\.0\.0/8|172\.16\.0\.0/12|192\.168\.0\.0/16)"\),?$' || true)
+          if [[ -n "$unexpected_private" ]]; then
+            printf '%s\n' "$unexpected_private"
             echo "::error::Internal IP address found in tracked files"
             FAIL=1
           fi
@@ -110,13 +116,13 @@ jobs:
           FAIL=0
 
           # Check syntax with Node.js (parse only, no execution)
-          for f in core/js/*.js; do
-            if [[ "$f" == *".min.js" ]]; then continue; fi
+          while IFS= read -r f; do
+            if [[ "$f" == "core/js/aws-sdk-2.1304.0.min.js" ]]; then continue; fi
             if ! node --check "$f" 2>/dev/null; then
               echo "::error::Syntax error in $f"
               FAIL=1
             fi
-          done
+          done < <(git ls-files '*.js')
 
           # Verify model routing functions exist
           for fn in aigSend trboSend geminiSend lmsSend copilotSend; do
@@ -140,12 +146,12 @@ jobs:
         run: |
           echo "=== Checking Python syntax ==="
           FAIL=0
-          for f in tools/*.py; do
+          while IFS= read -r f; do
             if ! python3 -m py_compile "$f"; then
               echo "::error::Syntax error in $f"
               FAIL=1
             fi
-          done
+          done < <(git ls-files '*.py')
           if [ $FAIL -eq 1 ]; then exit 1; fi
           echo "✓ Python files valid"
 
@@ -251,6 +257,9 @@ jobs:
 
       - name: Run action-plane containment tests
         run: python3 tools/test_action_plane.py
+
+      - name: Run Skills HTTP end-to-end tests
+        run: python3 tools/test_skills_e2e.py
 
   # ── 3. Accessibility (manual trigger only — kept from existing) ───
   accessibility:

@@ -21,5 +21,14 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
       agent: agent,
       specification: specification
     });
+  },
+  authorizeCameraLook: function(question, device) {
+    return ipcRenderer.invoke('eva-authorize-camera-look', {
+      question: question,
+      device: device
+    });
+  },
+  providerFetch: function(request) {
+    return ipcRenderer.invoke('eva-provider-fetch', request);
   }
 }));

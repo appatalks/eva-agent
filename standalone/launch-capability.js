@@ -182,8 +182,23 @@ function validatePostcondition(agent, value) {
 }
 
 function buildSpec(agent, data, runtimeDefaults) {
-  if (agent !== 'browser' && agent !== 'desktop') throw new Error('invalid agent');
+  if (agent !== 'browser' && agent !== 'desktop' && agent !== 'camera') {
+    throw new Error('invalid agent');
+  }
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('invalid launch data');
+  if (agent === 'camera') {
+    if (!exactKeys(data, ['question', 'device'])) {
+      throw new Error('invalid camera specification');
+    }
+    const device = data.device;
+    if (!Number.isInteger(device) || device < 0 || device > 32) {
+      throw new Error('camera device is invalid');
+    }
+    return normalize({
+      question: boundedString(data.question, 'question', 1000, false),
+      device: device
+    });
+  }
   const goal = boundedString(data.goal, 'goal', 2000, false);
   const defaults = runtimeDefaults && typeof runtimeDefaults === 'object'
     ? runtimeDefaults : {};
@@ -239,11 +254,16 @@ function specHash(agent, data) {
 function displaySummary(agent, spec) {
   const canonical = canonicalSpec(agent, spec);
   return [
-    'Agent authority: ' + (agent === 'browser' ? 'browser' : 'desktop-launch-only'),
+    'Agent authority: ' + (
+      agent === 'browser' ? 'browser' :
+      agent === 'camera' ? 'one-camera-frame' : 'desktop-launch-only'
+    ),
     'Exact signed launch specification (canonical JSON):',
     canonical,
     '',
-    spec.postcondition
+    agent === 'camera'
+      ? 'This one-use capability permits one fresh webcam frame for the exact question shown.'
+      : spec.postcondition
       ? 'Success requires the signed condition to change from not observed to observed after an approved effect.'
       : 'No success condition is signed; model completion will remain unverified.',
     'This capability permits only launch admission. Every effectful action requires a separate approval.'

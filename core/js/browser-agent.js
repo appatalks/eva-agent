@@ -151,6 +151,17 @@
     error: 'error'
   };
 
+  function inertSecondaryText(value) {
+    if (typeof canonicalizeEvaResponse === 'function') {
+      return canonicalizeEvaResponse(value, {
+        allowCamera: false, allowAgentControls: false
+      }).text;
+    }
+    var source = String(value || '');
+    var first = source.search(/\[\[\/?EVA_/);
+    return (first < 0 ? source : source.slice(0, first)).trim();
+  }
+
   function render(status) {
     if (!status) return;
     _state.status = status;
@@ -183,7 +194,10 @@
     if (stepEl) stepEl.textContent = status.step != null ? ('step ' + status.step) : '';
 
     var subEl = document.getElementById('ebpSubgoal');
-    if (subEl) subEl.textContent = status.subgoal ? ('Plan: ' + status.subgoal) : '';
+    if (subEl) {
+      var safeSubgoal = inertSecondaryText(status.subgoal);
+      subEl.textContent = safeSubgoal ? ('Plan: ' + safeSubgoal) : '';
+    }
 
     var urlEl = document.getElementById('ebpUrl');
     if (urlEl) urlEl.textContent = status.title || status.url || status.active_app || status.screen || '';
@@ -255,10 +269,10 @@
     var txt = document.getElementById('vvVisionText');
     if (txt) {
       var line = '[' + (_state.title || 'Agent') + ']';
-      if (status.subgoal) line += '\n' + status.subgoal;
+      if (status.subgoal) line += '\n' + inertSecondaryText(status.subgoal);
       else if (status.url || status.title) line += '\n' + (status.title || status.url);
-      if (terminal && status.result) line += '\n' + status.result;
-      else if (terminal && status.error) line += '\nError: ' + status.error;
+      if (terminal && status.result) line += '\n' + inertSecondaryText(status.result);
+      else if (terminal && status.error) line += '\nError: ' + inertSecondaryText(status.error);
       txt.textContent = line;
     }
     if (terminal) {
@@ -275,9 +289,11 @@
   function _buildConfirmQuestion(status) {
     var request = status.approval_request || {};
     if (request.kind === 'input') {
-      return request.description || 'I need a bit more information to continue. What should I do?';
+      return String(request.description || '').trim() ||
+        'I need a bit more information to continue. What should I do?';
     }
-    var description = request.description || 'Exact effect details are unavailable.';
+    var description = String(request.description || '').trim() ||
+      'Exact effect details are unavailable.';
     return description + '\nApprove only this exact effect? Say yes to continue or no to stop.';
   }
 
@@ -303,7 +319,7 @@
   // (the director sets a new subgoal every few steps).
   function maybeFireProgress(status) {
     if (typeof _state.onProgress !== 'function') return;
-    var sub = (status && status.subgoal) ? String(status.subgoal).trim() : '';
+    var sub = inertSecondaryText(status && status.subgoal);
     if (!sub) return;
     // Skip while parked (the confirm/ask already speaks) or terminal.
     if (status.status === 'awaiting_confirmation' || status.status === 'awaiting_input') return;
@@ -398,10 +414,10 @@
       stop.onclick = closePopup;
       if (status.result) {
         var sub = document.getElementById('ebpSubgoal');
-        if (sub) sub.textContent = status.result;
+        if (sub) sub.textContent = inertSecondaryText(status.result);
       } else if (status.error) {
         var subE = document.getElementById('ebpSubgoal');
-        if (subE) subE.textContent = 'Error: ' + status.error;
+        if (subE) subE.textContent = 'Error: ' + inertSecondaryText(status.error);
       }
     } else {
       stop.textContent = 'Stop';

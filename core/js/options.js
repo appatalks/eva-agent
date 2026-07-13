@@ -8,9 +8,257 @@ var aiMasterResponse = "";
 var masterOutput = "";
 var storageAssistant = "";
 var imgSrcGlobal; // Declare a global variable for img.src
-// Debug/CORS flags (from config.json)
-var DEBUG_CORS = false;
-var DEBUG_PROXY_URL = "";
+
+// One renderer-wide admission gate for every direct cloud-AI transport.
+// Local mode closes admissions and aborts/drains existing fetch/XHR requests
+// before the bridge is allowed to commit the transition.
+(function installEvaCloudTransportGate(global) {
+var cloudAdmissionsBlocked = true;
+var cloudRequests = new Map();
+var cloudDrainWaiters = [];
+var cloudRequestSequence = 0;
+var PROVIDER_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
+const nativeFetch = global.fetch.bind(global);
+
+function _evaFetchRequestUrl(input) {
+  if (typeof input === 'string') return input;
+  if (typeof URL !== 'undefined' && input instanceof URL) return input.href;
+  if (typeof Request !== 'undefined' && input instanceof Request) return input.url;
+  return '';
+}
+
+function _evaIsCloudAiUrl(raw) {
+  try {
+    var parsed = new URL(String(raw || ''), window.location && window.location.href);
+    var host = parsed.hostname.toLowerCase();
+    if (host.endsWith('.')) host = host.slice(0, -1);
+    return host === 'api.openai.com' || host === 'models.github.ai' ||
+      host === 'models.inference.ai.azure.com' ||
+      host === 'generativelanguage.googleapis.com' ||
+      host === 'vision.googleapis.com' ||
+      host === 'api.elevenlabs.io' ||
+      /^polly\.[a-z0-9-]+\.amazonaws\.com$/.test(host);
+  } catch (_) {
+    return false;
+  }
+}
+
+function _evaCloudBlocked() {
+  return cloudAdmissionsBlocked ||
+    (typeof _confirmedDataMode !== 'undefined' && _confirmedDataMode === 'local');
+}
+
+function _evaReleaseCloudRequest(token) {
+  if (!cloudRequests.delete(token) || cloudRequests.size !== 0) return;
+  var waiters = cloudDrainWaiters.splice(0);
+  waiters.forEach(function(resolve) { resolve(); });
+}
+
+function _evaDrainCloudRequests() {
+  if (cloudRequests.size === 0) return Promise.resolve();
+  return new Promise(function(resolve) { cloudDrainWaiters.push(resolve); });
+}
+
+function _evaBlockAndDrainCloudRequests() {
+  cloudAdmissionsBlocked = true;
+  cloudRequests.forEach(function(cancel) {
+    try { cancel(); } catch (_) {}
+  });
+  return _evaDrainCloudRequests();
+}
+
+function _evaCommitCloudAdmissionMode(mode) {
+  cloudAdmissionsBlocked = mode === 'local';
+}
+
+async function _evaBrokerProviderFetch(input, init, controller) {
+  if (!global.evaStandalone ||
+      typeof global.evaStandalone.providerFetch !== 'function') {
+    throw new DOMException(
+      'The trusted provider broker is unavailable', 'AbortError'
+    );
+  }
+  var request = new Request(input, init || {});
+  var headers = {};
+  request.headers.forEach(function(value, name) { headers[name] = value; });
+  var method = request.method.toUpperCase();
+  var body = '';
+  if (method !== 'GET' && method !== 'HEAD') {
+    body = await request.clone().text();
+  }
+  var brokerPromise = global.evaStandalone.providerFetch({
+    url: request.url, method: method, headers: headers, body: body
+  });
+  var aborted = new Promise(function(_resolve, reject) {
+    if (controller.signal.aborted) {
+      reject(new DOMException('aborted', 'AbortError'));
+      return;
+    }
+    controller.signal.addEventListener('abort', function() {
+      reject(new DOMException('aborted', 'AbortError'));
+    }, { once: true });
+  });
+  var result;
+  try {
+    result = await Promise.race([brokerPromise, aborted]);
+  } catch (error) {
+    if (error && error.name === 'AbortError') throw error;
+    throw new DOMException('Cloud provider admission denied', 'AbortError');
+  }
+  if (!result || typeof result !== 'object' ||
+      !Number.isInteger(result.status) || result.status < 100 || result.status > 599 ||
+      typeof result.statusText !== 'string' || result.statusText.length > 256 ||
+      !result.headers || typeof result.headers !== 'object' ||
+      typeof result.bodyBase64 !== 'string' ||
+      result.bodyBase64.length > Math.ceil(PROVIDER_RESPONSE_MAX_BYTES / 3) * 4 + 8 ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(result.bodyBase64)) {
+    throw new TypeError('Provider broker returned an invalid response');
+  }
+  var binary = atob(result.bodyBase64);
+  var bytes = new Uint8Array(binary.length);
+  for (var index = 0; index < binary.length; index++) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Response(bytes, {
+    status: result.status, statusText: result.statusText,
+    headers: result.headers
+  });
+}
+
+async function _evaBufferProviderResponse(response, controller) {
+  if (typeof Response === 'undefined' || !(response instanceof Response)) {
+    throw new TypeError('Cloud provider returned an invalid Fetch response');
+  }
+  var rawLength = response.headers.get('Content-Length');
+  if (rawLength !== null && (
+      !/^[0-9]+$/.test(rawLength) ||
+      Number(rawLength) > PROVIDER_RESPONSE_MAX_BYTES
+  )) {
+    controller.abort();
+    throw new Error('Cloud provider response exceeds the byte limit');
+  }
+  var chunks = [];
+  var total = 0;
+  if (response.body !== null) {
+    if (typeof response.body.getReader !== 'function') {
+      controller.abort();
+      throw new TypeError('Cloud provider response body is not a readable stream');
+    }
+    var reader = response.body.getReader();
+    try {
+      while (true) {
+        var item = await reader.read();
+        if (item.done) break;
+        if (!(item.value instanceof Uint8Array)) {
+          throw new TypeError('Cloud provider response chunk is invalid');
+        }
+        total += item.value.byteLength;
+        if (total > PROVIDER_RESPONSE_MAX_BYTES) {
+          controller.abort();
+          try { await reader.cancel(); } catch (_) {}
+          throw new Error('Cloud provider response exceeds the byte limit');
+        }
+        chunks.push(item.value);
+      }
+    } finally {
+      try { reader.releaseLock(); } catch (_) {}
+    }
+  }
+  var body = null;
+  if (total > 0) {
+    body = new Uint8Array(total);
+    var offset = 0;
+    chunks.forEach(function(chunk) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    });
+  }
+  var headers = new Headers(response.headers);
+  headers.delete('content-encoding');
+  headers.set('content-length', String(total));
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: headers
+  });
+}
+
+if (typeof window !== 'undefined' && typeof window.fetch === 'function' &&
+    !window.__evaCloudFetchInstalled) {
+  global.__evaCloudFetchInstalled = true;
+  global.fetch = async function(input, init) {
+    var url = _evaFetchRequestUrl(input);
+    if (!_evaIsCloudAiUrl(url)) return nativeFetch(input, init);
+    if (_evaCloudBlocked()) {
+      return Promise.reject(new DOMException(
+        'Cloud AI is disabled while local mode is selected', 'AbortError'
+      ));
+    }
+    var controller = null;
+    var originalSignal = null;
+    var abortForwarder = null;
+    var token = null;
+    var timeoutId = null;
+    try {
+      if (_evaCloudBlocked()) {
+        throw new DOMException(
+          'Cloud AI is disabled while local mode is selected', 'AbortError'
+        );
+      }
+      controller = new AbortController();
+      var options = Object.assign({}, init || {}, {
+        signal: controller.signal, redirect: 'error', credentials: 'omit'
+      });
+      originalSignal = (init && init.signal) || (
+        typeof Request !== 'undefined' && input instanceof Request
+          ? input.signal : null
+      );
+      if (originalSignal) {
+        if (originalSignal.aborted) controller.abort();
+        else {
+          abortForwarder = function() { controller.abort(); };
+          originalSignal.addEventListener('abort', abortForwarder, { once: true });
+        }
+      }
+      token = ++cloudRequestSequence;
+      cloudRequests.set(token, function() { controller.abort(); });
+      timeoutId = setTimeout(function() { controller.abort(); }, 180000);
+      var response = await _evaBrokerProviderFetch(input, options, controller);
+      return await _evaBufferProviderResponse(response, controller);
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+      if (originalSignal && abortForwarder) {
+        originalSignal.removeEventListener('abort', abortForwarder);
+      }
+      if (token !== null) _evaReleaseCloudRequest(token);
+    }
+  };
+}
+
+if (typeof window !== 'undefined' && typeof window.XMLHttpRequest === 'function' &&
+    !window.__evaCloudXhrInstalled) {
+  window.__evaCloudXhrInstalled = true;
+  const nativeXhrOpen = global.XMLHttpRequest.prototype.open;
+  const nativeXhrSend = global.XMLHttpRequest.prototype.send;
+  global.XMLHttpRequest.prototype.open = function(method, url) {
+    this.__evaCloudAiRequest = _evaIsCloudAiUrl(url);
+    return nativeXhrOpen.apply(this, arguments);
+  };
+  global.XMLHttpRequest.prototype.send = function() {
+    if (!this.__evaCloudAiRequest) return nativeXhrSend.apply(this, arguments);
+    try { this.abort(); } catch (_) {}
+    throw new DOMException(
+      'Direct cloud-provider XHR is disabled; use the trusted provider broker',
+      'AbortError'
+    );
+  };
+}
+
+Object.defineProperties(global, {
+  _evaBlockAndDrainCloudRequests: { value: _evaBlockAndDrainCloudRequests },
+  _evaCommitCloudAdmissionMode: { value: _evaCommitCloudAdmissionMode }
+});
+})(window);
 
 // Error Handling Variables
 var retryCount = 0;
@@ -47,9 +295,6 @@ function applyConfig(config) {
   GOOGLE_VISION_KEY = config.GOOGLE_VISION_KEY;
   // GitHub Copilot PAT
   if (config.GITHUB_PAT) GITHUB_PAT = config.GITHUB_PAT;
-  // CORS debug
-  DEBUG_CORS = !!config.DEBUG_CORS;
-  DEBUG_PROXY_URL = config.DEBUG_PROXY_URL || "";
   AWS.config.region = config.AWS_REGION;
   AWS.config.credentials = new AWS.Credentials(config.AWS_ACCESS_KEY_ID, config.AWS_SECRET_ACCESS_KEY);
   // Apply any localStorage auth overrides
@@ -110,6 +355,7 @@ function saveAuthKeys() {
   } else if (lmsModelEl) {
     localStorage.removeItem('aig_lmstudio_model');
   }
+  _pushLmStudioSettingsToBridge();
   // Save Signal sender/recipient to localStorage and push to bridge
   var sigSender = document.getElementById('authSignalSender');
   var sigRecip = document.getElementById('authSignalRecipient');
@@ -128,6 +374,22 @@ function saveAuthKeys() {
   if (typeof loadGoals === 'function') loadGoals(true);
   if (typeof loadBackgroundData === 'function') loadBackgroundData(true);
   setStatus('info', 'API keys saved to browser storage.');
+}
+
+function _pushLmStudioSettingsToBridge() {
+  var base = (typeof getSafeBridgeBaseUrl === 'function')
+    ? getSafeBridgeBaseUrl() : '';
+  if (!base) return;
+  var model = (typeof getLmStudioModel === 'function')
+    ? getLmStudioModel() : '';
+  fetch(base.replace(/\/+$/, '') + '/v1/prefs', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      lmstudio_base_url: getLmStudioBaseUrl(),
+      lmstudio_model: model
+    }),
+    redirect: 'error', credentials: 'omit'
+  }).catch(function() {});
 }
 
 function _pushSignalSettingsToBridge() {
@@ -212,12 +474,104 @@ function populateAuthFields() {
 
 function getLmStudioBaseUrl() {
   var v = (localStorage.getItem('aig_lmstudio_base_url') || '').trim();
-  return v || 'http://localhost:1234/v1';
+  var fallback = 'http://localhost:1234/v1';
+  if (!v) return fallback;
+  try {
+    var parsed = new URL(v);
+    var host = String(parsed.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+    var privateHost = host === 'localhost' || host === '::1';
+    var ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4) {
+      var octets = ipv4.slice(1).map(Number);
+      privateHost = octets.every(function(value) { return value >= 0 && value <= 255; }) &&
+        (octets[0] === 10 || octets[0] === 127 ||
+         (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+         (octets[0] === 192 && octets[1] === 168));
+    } else if (host.indexOf(':') !== -1) {
+      privateHost = host === '::1' || /^f[cd]/.test(host);
+    }
+    var allowedPorts = ['1234', '8000', '8080', '11434'];
+    if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+        parsed.username || parsed.password || parsed.search || parsed.hash ||
+        !privateHost || allowedPorts.indexOf(parsed.port) === -1 ||
+        (parsed.pathname !== '/' && parsed.pathname !== '/v1' && parsed.pathname !== '/v1/')) {
+      return fallback;
+    }
+    return parsed.origin + '/v1';
+  } catch (_) {
+    return fallback;
+  }
 }
 
 function getLmStudioModel() {
   var v = (localStorage.getItem('aig_lmstudio_model') || '').trim();
   return v || 'granite-3.1-8b-instruct';
+}
+
+function _validatedBarkBase(raw) {
+  var value = String(raw || 'localhost:8888').trim();
+  if (!/^https?:\/\//i.test(value)) value = 'https://' + value;
+  try {
+    var parsed = new URL(value);
+    var host = String(parsed.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+    var privateHost = host === 'localhost' || host === '::1';
+    var ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4) {
+      var octets = ipv4.slice(1).map(Number);
+      privateHost = octets.every(function(number) {
+        return number >= 0 && number <= 255;
+      }) && (
+        octets[0] === 10 || octets[0] === 127 ||
+        (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+        (octets[0] === 192 && octets[1] === 168)
+      );
+    } else if (host.indexOf(':') !== -1) {
+      privateHost = host === '::1' || /^f[cd]/.test(host);
+    }
+    if (!privateHost || parsed.port !== '8888' ||
+        (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+        parsed.username || parsed.password || parsed.pathname !== '/' ||
+        parsed.search || parsed.hash) return '';
+    return parsed.origin;
+  } catch (_) {
+    return '';
+  }
+}
+
+async function _evaReadBoundedBlob(response, maxBytes, controller) {
+  var rawLength = response.headers.get('Content-Length');
+  if (rawLength !== null && (
+      !/^[0-9]+$/.test(rawLength) || Number(rawLength) > maxBytes
+  )) {
+    if (controller) controller.abort();
+    throw new Error('Audio response exceeds the byte limit');
+  }
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    throw new Error('Audio response has no readable body');
+  }
+  var reader = response.body.getReader();
+  var chunks = [];
+  var total = 0;
+  try {
+    while (true) {
+      var item = await reader.read();
+      if (item.done) break;
+      if (!(item.value instanceof Uint8Array)) {
+        throw new Error('Audio response chunk is invalid');
+      }
+      total += item.value.byteLength;
+      if (total > maxBytes) {
+        if (controller) controller.abort();
+        try { await reader.cancel(); } catch (_) {}
+        throw new Error('Audio response exceeds the byte limit');
+      }
+      chunks.push(item.value);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch (_) {}
+  }
+  if (total === 0) throw new Error('Audio response is empty');
+  return new Blob(chunks);
 }
 
 function getSafeBridgeBaseUrl() {
@@ -377,19 +731,13 @@ async function goalsBridgeRequest(path, options) {
   options = _withBridgeMutationEnvelope(options || {});
   var bridgeUrl = await getGoalsBridgeUrl();
   var response = await fetch(bridgeUrl.replace(/\/+$/, '') + path, options || {});
-  var text = await response.text();
-  var data = {};
-  if (text) {
-    try { data = JSON.parse(text); } catch (_) { data = { message: text }; }
-  }
   if (!response.ok) {
-    var message = data && data.error && data.error.message ? data.error.message : (data.message || ('HTTP ' + response.status));
-    var error = new Error(message);
+    var error = new Error('Goals request failed (HTTP ' + response.status + ').');
     error.status = response.status;
-    error.data = data;
     throw error;
   }
-  return data;
+  try { return await response.json(); }
+  catch (_) { throw new Error('Goals response was invalid.'); }
 }
 
 async function loadGoals(quiet) {
@@ -571,19 +919,13 @@ async function backgroundBridgeRequest(path, options) {
   options = _withBridgeMutationEnvelope(options || {});
   var bridgeUrl = await getSettingsBridgeUrl();
   var response = await fetch(bridgeUrl.replace(/\/+$/, '') + path, options || {});
-  var text = await response.text();
-  var data = {};
-  if (text) {
-    try { data = JSON.parse(text); } catch (_) { data = { message: text }; }
-  }
   if (!response.ok) {
-    var message = data && data.error && data.error.message ? data.error.message : (data.message || ('HTTP ' + response.status));
-    var error = new Error(message);
+    var error = new Error('Background request failed (HTTP ' + response.status + ').');
     error.status = response.status;
-    error.data = data;
     throw error;
   }
-  return data;
+  try { return await response.json(); }
+  catch (_) { throw new Error('Background response was invalid.'); }
 }
 
 function getBackgroundField(row, primary, alternate) {
@@ -797,60 +1139,135 @@ function renderBackgroundAll() {
 // ---------------------------------------------------------------------------
 // Data retrieval mode switching (cloud vs local)
 // ---------------------------------------------------------------------------
-function switchDataMode(mode) {
-  var bUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
-  bUrl = bUrl.replace(/\/+$/, '');
-  var statusEl = document.getElementById('dataModeStatus');
-  if (statusEl) statusEl.textContent = 'Switching to ' + mode + '...';
+var _dataModeOperationGeneration = 0;
+var _confirmedDataMode = '';
+var _dataModeOperationPromise = null;
+var _dataModeSwitchPromise = null;
+var _dataModeQueue = Promise.resolve();
 
-  fetch(bUrl + '/v1/mode', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: mode }),
-    signal: AbortSignal.timeout(30000)
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(d) {
-    if (d.error) {
-      if (statusEl) statusEl.textContent = 'Error: ' + (d.error.message || d.error);
-      return;
+function _queueDataModeOperation(kind, operation) {
+  var operationId = ++_dataModeOperationGeneration;
+  var run = _dataModeQueue.then(function() {
+    return operation(operationId);
+  }, function() {
+    return operation(operationId);
+  });
+  _dataModeQueue = run.then(function() {}, function() {});
+  _dataModeOperationPromise = run;
+  if (kind === 'switch') {
+    var tracked = run.then(function(result) {
+      if (_dataModeSwitchPromise === tracked) _dataModeSwitchPromise = null;
+      return result;
+    });
+    _dataModeSwitchPromise = tracked;
+    _dataModeOperationPromise = tracked;
+    return tracked;
+  }
+  return run;
+}
+
+function _parseExactModeResponse(response) {
+  if (!response || response.status !== 200 || response.redirected) {
+    return response.json().catch(function() { return {}; }).then(function(data) {
+      throw new Error(
+        data && data.error && data.error.message
+          ? data.error.message : 'HTTP ' + (response && response.status)
+      );
+    });
+  }
+  return response.json().then(function(data) {
+    if (!data || (data.mode !== 'local' && data.mode !== 'cloud')) {
+      throw new Error('bridge returned an invalid mode');
     }
-    var sel = document.getElementById('selDataMode');
-    if (sel) sel.value = d.mode;
-    try { localStorage.setItem('evaDataMode', d.mode); } catch (_) {}
-    if (statusEl) {
-      if (d.mode === 'local') {
-        statusEl.textContent = 'Local mode active (' + (d.local_tools || 0) + ' MCP tools available)';
-      } else {
-        statusEl.textContent = 'Cloud mode active (Copilot CLI)';
+    return data;
+  });
+}
+
+async function _applyConfirmedDataMode(data, statusEl) {
+  if (data.mode === 'local') await _evaBlockAndDrainCloudRequests();
+  _confirmedDataMode = data.mode;
+  _evaCommitCloudAdmissionMode(data.mode);
+  var sel = document.getElementById('selDataMode');
+  if (sel) sel.value = data.mode;
+  try { localStorage.setItem('evaDataMode', data.mode); } catch (_) {}
+  if (statusEl) {
+    if (data.mode === 'local') {
+      statusEl.textContent = 'Local mode active (' +
+        (data.local_tools || 0) + ' MCP tools available)';
+    } else {
+      statusEl.textContent = 'Cloud mode active (Copilot CLI)';
+    }
+  }
+}
+
+async function _reconcileDataMode(baseUrl, statusEl) {
+  var response = await fetch(baseUrl + '/v1/mode', {
+    signal: AbortSignal.timeout(3000), redirect: 'error', credentials: 'omit'
+  });
+  var data = await _parseExactModeResponse(response);
+  await _applyConfirmedDataMode(data, statusEl);
+  return data;
+}
+
+function switchDataMode(mode) {
+  if (mode !== 'local' && mode !== 'cloud') {
+    return Promise.resolve({ ok: false, error: new Error('invalid mode') });
+  }
+  return _queueDataModeOperation('switch', async function(operationId) {
+    var bUrl = (typeof getACPBridgeUrl === 'function')
+      ? getACPBridgeUrl() : 'http://localhost:8888';
+    bUrl = bUrl.replace(/\/+$/, '');
+    var statusEl = document.getElementById('dataModeStatus');
+    if (statusEl) statusEl.textContent = 'Switching to ' + mode + '...';
+    try {
+      if (mode === 'local') await _evaBlockAndDrainCloudRequests();
+      var response = await fetch(bUrl + '/v1/mode', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: mode }),
+        signal: AbortSignal.timeout(30000), redirect: 'error', credentials: 'omit'
+      });
+      var data = await _parseExactModeResponse(response);
+      if (data.mode !== mode) throw new Error('bridge did not confirm requested mode');
+      await _applyConfirmedDataMode(data, statusEl);
+      return { ok: true, mode: data.mode, data: data, operation: operationId };
+    } catch (error) {
+      // A POST can commit even when its response is lost. Keep admissions
+      // closed until an exact serialized read proves the resulting mode.
+      await _evaBlockAndDrainCloudRequests();
+      try {
+        var reconciled = await _reconcileDataMode(bUrl, statusEl);
+        if (reconciled.mode === mode) {
+          return {
+            ok: true, mode: reconciled.mode, data: reconciled,
+            operation: operationId, reconciled: true
+          };
+        }
+      } catch (_) {
+        // Ambiguous means blocked; stale renderer state never reopens cloud.
       }
+      if (statusEl) statusEl.textContent = 'Error: ' + error.message;
+      return { ok: false, error: error, operation: operationId };
     }
-  })
-  .catch(function(e) {
-    if (statusEl) statusEl.textContent = 'Error: ' + e.message;
   });
 }
 
 function loadDataMode() {
-  var bUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
-  bUrl = bUrl.replace(/\/+$/, '');
-  fetch(bUrl + '/v1/mode', { signal: AbortSignal.timeout(3000) })
-  .then(function(r) { return r.json(); })
-  .then(function(d) {
-    var sel = document.getElementById('selDataMode');
-    if (sel) sel.value = d.mode || 'cloud';
-    try { localStorage.setItem('evaDataMode', d.mode || 'cloud'); } catch (_) {}
-    var statusEl = document.getElementById('dataModeStatus');
-    if (statusEl) {
-      var parts = [];
-      if (d.cloud_available) parts.push('Cloud: available');
-      else parts.push('Cloud: unavailable');
-      if (d.local_available) parts.push('Local: ' + d.local_tools + ' tools');
-      else parts.push('Local: not started');
-      statusEl.textContent = parts.join(' | ');
+  return _queueDataModeOperation('load', async function(operationId) {
+    var bUrl = (typeof getACPBridgeUrl === 'function')
+      ? getACPBridgeUrl() : 'http://localhost:8888';
+    bUrl = bUrl.replace(/\/+$/, '');
+    try {
+      var data = await _reconcileDataMode(bUrl, null);
+      var statusEl = document.getElementById('dataModeStatus');
+      if (statusEl) {
+        statusEl.textContent = 'Cloud: ' + (data.cloud_available ? 'available' : 'unavailable') +
+          ' | Local: ' + (data.local_available ? (data.local_tools + ' tools') : 'not started');
+      }
+      return { ok: true, mode: data.mode, data: data, operation: operationId };
+    } catch (error) {
+      return { ok: false, error: error, operation: operationId };
     }
-  })
-  .catch(function() {});
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,8 +1591,10 @@ function injectProactiveBubble(notif) {
   var txtOutput = document.getElementById('txtOutput');
   if (!txtOutput) return;
   if (typeof hideEvaWelcome === 'function') hideEvaWelcome();
-  var title = escapeHtml(String(notif.title || 'Eva'));
-  var body = escapeHtml(String(notif.body || '')).replace(/\n/g, '<br>');
+  var titleText = _canonicalInertSecondaryText(notif.title || 'Eva');
+  var bodyText = _canonicalInertSecondaryText(notif.body || '');
+  var title = escapeHtml(titleText);
+  var body = escapeHtml(bodyText).replace(/\n/g, '<br>');
   var bubble =
     '<div class="chat-bubble eva-bubble eva-proactive">' +
     '<span class="eva">Eva:</span> ' +
@@ -1234,7 +1653,7 @@ function _evaAgentFeedback(status, endpoint, title, capturedEnvelope) {
   var memory;     // factual note for the conversation history
 
   if (state === 'succeeded') {
-    var res = String(status.result || '').trim();
+    var res = _canonicalInertSecondaryText(status.result);
     var detail = res || 'The requested postcondition was verified.';
     spoken = /^(done|finished|all done|okay)/i.test(detail) ? detail : ('Verified. ' + detail);
     memory = 'Desktop/browser agent verified success' + (goal ? ' for "' + goal + '"' : '') + '. Result: ' + detail + '.';
@@ -1249,7 +1668,9 @@ function _evaAgentFeedback(status, endpoint, title, capturedEnvelope) {
     }
     memory = 'Desktop/browser agent aborted' + (goal ? ' for "' + goal + '"' : '') + '. Reason: ' + why + '.';
   } else if (state === 'failed') {
-    var err = String(status.error || 'an unknown error').trim();
+    var err = _canonicalInertSecondaryText(
+      status.error || 'an unknown error'
+    );
     spoken = 'I ran into a problem and could not finish' + (goal ? ' ' + goal : '') + ': ' + err + '.';
     memory = 'Desktop/browser agent failed' + (goal ? ' on "' + goal + '"' : '') + '. Error: ' + err + '.';
   } else if (state === 'indeterminate') {
@@ -1318,7 +1739,19 @@ function _evaAgentFeedback(status, endpoint, title, capturedEnvelope) {
 // feedback path: a chat bubble, optional speech, and a factual history note so
 // follow-ups ("what colour was it?") are grounded in what she actually saw.
 function _evaCameraLookResult(desc) {
-  desc = String(desc || '').trim();
+  var result = desc && typeof desc === 'object' ? desc : null;
+  var receipt = result && result.capture_receipt;
+  var attested = !!(receipt &&
+    Object.keys(receipt).length === 5 &&
+    receipt.contract === 'eva.camera-capture/1' &&
+    receipt.state === 'succeeded' &&
+    /^[0-9a-f]{32}$/.test(String(receipt.capture_id || '')) &&
+    /^[0-9a-f]{64}$/.test(String(receipt.question_hash || '')) &&
+    /^[1-9][0-9]{0,15}$/.test(String(receipt.frame_seq || '')));
+  if (!attested && !(result && result.localFailure === true)) return;
+  desc = canonicalizeEvaResponse(result.text, {
+    allowCamera: false, allowAgentControls: false
+  }).text;
   if (!desc) return;
   var txtOutput = document.getElementById('txtOutput');
   if (txtOutput) {
@@ -1381,7 +1814,7 @@ function _resetAgentInteractionState() {
 
 function _evaAgentProgress(subgoal, status, capturedEnvelope) {
   if (!_agentEnvelopeCurrent(capturedEnvelope)) return;
-  var sub = String(subgoal || '').trim();
+  var sub = _canonicalInertSecondaryText(subgoal);
   if (!sub) return;
   var now = Date.now();
   // Throttle: at most one spoken update every ~9s, and skip near-duplicates.
@@ -1408,6 +1841,13 @@ function _evaAgentProgress(subgoal, status, capturedEnvelope) {
 
 function _evaAgentConfirmAsk(question, needsText, status, capturedEnvelope) {
   if (!_agentEnvelopeCurrent(capturedEnvelope)) return;
+  // This is a bridge-authenticated approval description over a closed schema,
+  // not model response text. Preserve its exact canonical effect/binding/hash
+  // bytes and render only through textContent/escapeHtml below.
+  question = String(question || '').trim();
+  if (!question) question = needsText
+    ? 'What value should I use for this approved field?'
+    : 'Do you approve this exact action?';
   _agentConfirm.pending = true;
   _agentConfirm.needsText = !!needsText;
   _agentConfirm.gateId = status && status.approval_request && status.approval_request.gate_id;
@@ -1441,8 +1881,17 @@ function _evaAgentConfirmAsk(question, needsText, status, capturedEnvelope) {
   var txtOutput = document.getElementById('txtOutput');
   if (txtOutput) {
     if (typeof hideEvaWelcome === 'function') hideEvaWelcome();
-    var safe = escapeHtml(q).replace(/\n/g, '<br>');
-    txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> <div class="md">' + safe + '</div></div>';
+    var bubble = document.createElement('div');
+    bubble.className = 'chat-bubble eva-bubble';
+    var label = document.createElement('span');
+    label.className = 'eva';
+    label.textContent = 'Eva:';
+    var approvalText = document.createElement('pre');
+    approvalText.className = 'md eva-approval-description';
+    approvalText.textContent = q;
+    bubble.appendChild(label);
+    bubble.appendChild(approvalText);
+    txtOutput.appendChild(bubble);
     txtOutput.scrollTop = txtOutput.scrollHeight;
   }
   try {
@@ -1542,7 +1991,10 @@ async function pollNotifications() {
       injectProactiveBubble(notif);
       var channels = Array.isArray(notif.channels) ? notif.channels : ['chat'];
       if (channels.indexOf('voice') !== -1 && notif.body) {
-        voiceText.push(String(notif.title || '') + '. ' + String(notif.body || ''));
+        voiceText.push(
+          _canonicalInertSecondaryText(notif.title || '') + '. ' +
+          _canonicalInertSecondaryText(notif.body || '')
+        );
       }
       if (notif.id) seenIds.push(notif.id);
     });
@@ -1903,20 +2355,26 @@ function hasSavedStandaloneKustoConfig() {
   return !!(env.KUSTO_CLUSTER_URL && String(env.KUSTO_CLUSTER_URL).trim());
 }
 
-function initStandaloneFirstRun() {
+async function initStandaloneFirstRun() {
   if (!(typeof isEvaStandalone === 'function' && isEvaStandalone())) return;
   // If no memory backend has been chosen yet, default to SQLite and seed
   if (!localStorage.getItem('eva_memory_backend') && !hasSavedStandaloneKustoConfig()) {
-    localStorage.setItem('eva_memory_backend', 'sqlite');
-    localStorage.setItem('eva_standalone_first_run_done', '1');
     var bridgeUrl = typeof getACPBridgeUrl === 'function' ? getACPBridgeUrl() : '';
-    if (bridgeUrl) {
-      fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/backend', {
+    if (!bridgeUrl) return;
+    try {
+      var response = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/backend', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ backend: 'sqlite' }),
         signal: AbortSignal.timeout(5000)
-      }).catch(function() {});
+      });
+      if (!response.ok) return;
+      var result = await response.json();
+      if (!result || result.backend !== 'sqlite' || result.status !== 'ok') return;
+      localStorage.setItem('eva_memory_backend', 'sqlite');
+      localStorage.setItem('eva_standalone_first_run_done', '1');
+    } catch (_) {
+      return;
     }
     var memSel = document.getElementById('memoryBackendSelect');
     if (memSel) memSel.value = 'sqlite';
@@ -1936,7 +2394,7 @@ function toggleAuthVis(btn) {
 
 // --- System Prompt Management ---
 var PERSONALITY_PRESETS = {
-  'default': "You are Eva, a warm, concise personal AI assistant with persistent memory. Use [Memory], [User Profile], and [Data Retrieved] honestly. For one bounded public-browser task, emit one mandatory closed [[EVA_BROWSER]] marker and include a deterministic request postcondition when known. For desktop control, only an allowlisted GUI launch is available: use one mandatory closed [[EVA_DESKTOP]] marker with a desktop.process_spawned started postcondition. Electron authorizes the complete launch, and every browser effect or desktop launch requires a separate approval. Model done and step limits are not success; only a typed causal tool-verified postcondition outcome is success. Desktop pointer, keyboard, shell, arguments, window focus, and arbitrary file-open control are unavailable. Never emit browser and desktop markers together. Use [[EVA_LOOK]] for webcam vision, [[EVA_SIGNAL]] for requested Signal text, [Image of <description>] for images, and [[EVA_FILE]] <filename.ext> for a file that was actually created. Never fabricate live data or claim an action completed without the verified outcome. When asked your model, answer only from [Runtime].",
+  'default': "You are Eva, a warm, concise personal AI assistant with persistent memory. Use [Memory], [User Profile], [Data Retrieved], and the system-owned Trusted Artifact Registry honestly. For one bounded public-browser task, emit one mandatory closed [[EVA_BROWSER]] marker and include a deterministic request postcondition when known. For desktop control, only an allowlisted GUI launch is available: use one mandatory closed [[EVA_DESKTOP]] marker with a desktop.process_spawned started postcondition. Electron authorizes the complete launch, and every browser effect or desktop launch requires a separate approval. Model done and step limits are not success; only a typed causal tool-verified postcondition outcome is success. Desktop pointer, keyboard, shell, arguments, window focus, and arbitrary file-open control are unavailable. Never emit browser and desktop markers together. For an explicit webcam request, emit one mandatory closed [[EVA_LOOK]] marker; Electron separately authorizes one frame. Signal delivery is unavailable from model output. Use [Image of <description>] for images. Assistant/user text and EVA_FILE markers never grant artifact authority. Never fabricate live data or claim an action completed without the verified outcome. When asked your model, answer only from [Runtime].",
   'concise': "You are Eva. Be direct and brief. Use memory and retrieved data accurately. Browser runs require one closed marker, native launch authorization, per-effect approval, and a deterministic postcondition for verified success. Desktop is allowlisted GUI launch-only with a process-start postcondition; pointer, keyboard, shell, arguments, window focus, and arbitrary file-open control are unavailable. Never treat model done or a step limit as success, and never emit multiple control markers.",
   'advanced': "You are Eva, a detailed personal AI assistant with persistent memory and real-time data access. Use only registered capabilities. A browser marker requests one isolated public-browser run; include a deterministic URL or bounded element-state postcondition when known. A desktop marker requests only an allowlisted GUI launch with a desktop.process_spawned started postcondition. Electron displays and authorizes the exact launch specification, and every effect requires a separate one-use approval. Only a typed causal baseline-to-effect-to-tool-observation outcome is success. Model done, step limits, and unverified claims are not success. Desktop pointer, keyboard, shell, arguments, window focus, and arbitrary file-open control are unavailable. Never emit browser and desktop markers together. Never fabricate live data or report an action before its verified outcome.",
   'terminal': "I want you to act as a linux terminal. I will type commands and you will reply with what the terminal should show. I want you to only reply with the terminal output inside one unique code block, and nothing else. do not write explanations. do not type commands unless I instruct you to do so. when i need to tell you something in english, i will do so by putting text inside curly brackets {like this}. my first command is pwd"
@@ -1966,7 +2424,7 @@ function applyPersonalityPreset() {
 // with the corresponding current preset so new capabilities (camera, etc.)
 // are picked up without manual intervention.
 var _STALE_PRESETS = {
-  'default': "You are Eva, an AI assistant with persistent memory and real-time data access. You can look up live stock prices, weather, news, space weather, and market data; search the web; generate and find images; query your memory and knowledge store; SEE through the user's webcam by emitting [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] to capture a frame and describe it; and send Signal messages by emitting [[EVA_SIGNAL]]{\"message\":\"<text>\"}[[/EVA_SIGNAL]] when the user asks to text them. For actionable requests, use the tools and agents available to you rather than just describing steps. When a user asks for a downloadable artifact, emit [[EVA_ACTION]]{\"id\":\"<capability-id>\",\"args\":{...}}[[/EVA_ACTION]] on its own line. For browser-based tasks, prefer the built-in browser agent; for desktop or app tasks, use the desktop agent when available. Only claim an action happened after it actually ran. Always try to fulfill requests using your available tools and data before saying you cannot. Be accurate, helpful, and straightforward.",
+  'default': "You are Eva, an AI assistant with persistent memory and real-time data access. You can look up live stock prices, weather, news, space weather, and market data; search the web; generate and find images; query your memory and knowledge store; and request one webcam frame only after an explicit user request by emitting one mandatory closed [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] marker. Electron separately asks the user to authorize that frame. Signal delivery is unavailable from model output. For actionable requests, use the tools and agents available to you rather than just describing steps. When a user asks for a downloadable artifact, emit [[EVA_ACTION]]{\"id\":\"<capability-id>\",\"args\":{...}}[[/EVA_ACTION]] on its own line. For browser-based tasks, prefer the built-in browser agent; for desktop or app tasks, use the desktop agent when available. Only claim an action happened after it actually ran. Always try to fulfill requests using your available tools and data before saying you cannot. Be accurate, helpful, and straightforward.",
   'concise': "You are Eva. Capabilities: persistent memory, real-time data (stocks, weather, news, markets), web search, image generation, Kusto database queries, webcam vision (emit [[EVA_LOOK]]{\"question\":\"...\"}[[/EVA_LOOK]] to capture and describe a frame). Answer factual questions concisely. Use your tools to fetch live data when asked.",
   'advanced': "You are Eva, an intelligent AI assistant with full tool access. You can: retrieve live stock quotes and financial data, fetch weather/news/market/space weather feeds, search the web and retrieve information, generate and find images, query your Kusto persistent memory database (tables: Knowledge, Conversations, EmotionState, MemorySummaries, SelfState, HeuristicsIndex, Reflections, EmotionBaseline), and SEE through the user's webcam by emitting [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] to capture a frame and describe it. Do NOT claim you cannot access the camera. You remember the user across sessions. Provide detailed, well-structured responses with lists where applicable. Always attempt to use your tools before claiming inability."
 };
@@ -2066,7 +2524,7 @@ function onModelSettingsChange() {
   // Auto-switch data retrieval mode based on selected model.
   // lm-studio (or aig with lmstudio backend) -> local mode
   // Cloud models: leave the user's persisted mode choice alone.
-  // Skip during init — the bridge (mode.txt) is the source of truth at startup.
+  // Skip during init — the bridge's atomic runtime_state.json is authoritative.
   if (_modeInitDone) {
     var needsLocal = (model === 'lm-studio') ||
       (model === 'aig' && (localStorage.getItem('aigBackend') || '') === 'lmstudio');
@@ -2175,6 +2633,14 @@ function updateModelOptionsForTheme(theme) {
 
 // Settings Menu Options 
 document.addEventListener('DOMContentLoaded', () => {
+  if (!(typeof isEvaStandalone === 'function' && isEvaStandalone())) {
+    setStatus(
+      'error',
+      'This containment release requires Eva Standalone and its authenticated local bridge.'
+    );
+    var unsupportedSend = document.getElementById('btnSend');
+    if (unsupportedSend) unsupportedSend.disabled = true;
+  }
   const settingsButton = document.getElementById('settingsButton');
   const settingsMenu = document.getElementById('settingsMenu');
   const themeSelect = document.getElementById('selTheme');
@@ -2214,7 +2680,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // probe the LM Studio endpoint and switch to it when reachable.
     if (!savedAigBackend) {
       var lmsUrl = (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : 'http://localhost:1234/v1';
-      fetch(lmsUrl + '/models', { signal: AbortSignal.timeout(2000) })
+      var bridgeUrl = (typeof getSafeBridgeBaseUrl === 'function')
+        ? getSafeBridgeBaseUrl() : 'http://localhost:8888';
+      fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/lmstudio/models', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base_url: lmsUrl }),
+        signal: AbortSignal.timeout(2000), redirect: 'error', credentials: 'omit'
+      })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
         .then(function (data) {
           if (data && data.data && data.data.length > 0) {
@@ -3400,9 +3872,12 @@ function _vvSurfaceAssets(assets) {
   body.innerHTML = '';
   assets.forEach(function(a) {
     if (!a || !a.url) return;
+    var safeUrl = (typeof _safeInlineImageUrl === 'function')
+      ? _safeInlineImageUrl(a.url) : '';
+    if (!safeUrl) return;
     var img = document.createElement('img');
     img.className = 'eva-inline-img';
-    img.src = a.url;
+    img.src = safeUrl;
     img.alt = a.caption || 'Image';
     body.appendChild(img);
     if (a.caption) {
@@ -4419,7 +4894,7 @@ function updateButton() {
   if (btnSend) btnSend.onclick = sendData;
 }
 
-function sendData() {
+async function sendData() {
     // Natural agent confirmation: if the browser/desktop agent is parked waiting
     // on a yes/no (e.g. the final purchase), interpret this message as the answer
     // and route it to the agent instead of sending a normal chat turn.
@@ -4437,6 +4912,69 @@ function sendData() {
 
     // Logic required for initial message
     var selModel = document.getElementById("selModel");
+    var _selectedModelAtDispatch = selModel ? selModel.value : '';
+    var _selectedBackend = localStorage.getItem('aigBackend') || '';
+    function _dispatchSelectionStillCurrent() {
+      return !!(selModel && selModel.value === _selectedModelAtDispatch &&
+        (localStorage.getItem('aigBackend') || '') === _selectedBackend);
+    }
+    var _needsLocalMode = selModel && (
+      selModel.value === 'lm-studio' ||
+      (selModel.value === 'aig' && _selectedBackend === 'lmstudio')
+    );
+    var _needsBridgeMode = _needsLocalMode || _selectedModelAtDispatch === 'aig' ||
+      _selectedModelAtDispatch === 'copilot-acp' ||
+      (typeof isEvaStandalone === 'function' && isEvaStandalone());
+    if (_dataModeSwitchPromise) {
+      var _explicitModeTransition = await _dataModeSwitchPromise;
+      if (!_explicitModeTransition || _explicitModeTransition.ok !== true ||
+          !_dispatchSelectionStillCurrent()) {
+        setStatus('error', 'The mode or selected model changed; the request was not sent.');
+        return;
+      }
+    }
+    if (_needsBridgeMode && _dataModeOperationPromise) {
+      var _pendingMode = await _dataModeOperationPromise;
+      if (!_pendingMode || _pendingMode.ok !== true) {
+        setStatus('error', 'Bridge mode transition did not complete; the request was not sent.');
+        return;
+      }
+      if (!_dispatchSelectionStillCurrent()) {
+        setStatus('error', 'The selected model changed while mode was switching; send again.');
+        return;
+      }
+    }
+    var _visibleMode = (document.getElementById('selDataMode') || {}).value || '';
+    if (_needsBridgeMode && !_confirmedDataMode) {
+      var _loadedMode = await loadDataMode();
+      if (!_loadedMode || _loadedMode.ok !== true) {
+        setStatus('error', 'Bridge mode could not be confirmed; the request was not sent.');
+        return;
+      }
+      _visibleMode = _loadedMode.mode;
+    }
+    if (_needsLocalMode && (_confirmedDataMode !== 'local' || _visibleMode !== 'local')) {
+      var _modeResult = await switchDataMode('local');
+      if (!_modeResult || _modeResult.ok !== true) {
+        setStatus('error', 'Local mode could not be confirmed; the request was not sent.');
+        return;
+      }
+      if (!_dispatchSelectionStillCurrent()) {
+        setStatus('error', 'The selected model changed while mode was switching; send again.');
+        return;
+      }
+    }
+    if (!_needsLocalMode && _confirmedDataMode === 'local') {
+      setStatus('error', 'Cloud AI is disabled while local data mode is active. Switch to Cloud mode first.');
+      return;
+    }
+    if (_needsBridgeMode && typeof ensureArtifactGenerationReconciled === 'function') {
+      var _artifactReady = await ensureArtifactGenerationReconciled();
+      if (!_artifactReady || !_dispatchSelectionStillCurrent()) {
+        setStatus('error', 'Artifact authority could not be reconciled; the request was not sent.');
+        return;
+      }
+    }
     var _dispatchEnvelope = null;
     if (typeof newEnvelopeTurn === 'function') {
       newEnvelopeTurn();
@@ -4453,6 +4991,11 @@ function sendData() {
 
   // Detect if user wants image generation (for renderEvaResponse routing)
   _detectGenerationIntent();
+
+  if (!_dispatchSelectionStillCurrent()) {
+    setStatus('error', 'The selected model changed before dispatch; send again.');
+    return;
+  }
 
   if (selModel.value === 'aig') {
         clearText();
@@ -5318,7 +5861,7 @@ function _ttsSpeakOpenAIChunked(text, key, voice) {
       headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: voice, input: chunks[i], response_format: 'mp3' })
     }).then(function (resp) {
-      if (!resp.ok) return resp.text().then(function (t) { throw new Error('OpenAI TTS ' + resp.status + ': ' + t.slice(0, 200)); });
+      if (!resp.ok) throw new Error('OpenAI TTS failed (HTTP ' + resp.status + ').');
       return resp.blob();
     }).then(function (blob) { urls[i] = URL.createObjectURL(blob); return urls[i]; });
     return fetches[i];
@@ -5478,44 +6021,42 @@ function speakText() {
 
     // If selEngine is "bark", call barkTTS function
     if (speechParams.Engine === "bark") {
-
-      const barkHost = localStorage.getItem('barkTTSHost') || 'localhost';
-      const barkBase = 'https://' + barkHost;
-      const url = barkBase + '/send-string';
-      const data = "WOMAN: " + ((typeof textArr !== 'undefined' && textArr[1]) ? textArr[1] : speechParams.Text);
-      const xhr = new XMLHttpRequest();
-      xhr.responseType = 'blob';
-
-      xhr.onload = function() {
-      const audioElement = new Audio("./audio/bark_audio.wav");
-      audioElement.addEventListener("ended", function() {
-      // Delete the previous recording
-      const deleteRequest = new XMLHttpRequest();
-      deleteRequest.open('DELETE', barkBase + '/audio/bark_audio.wav', true);
-      deleteRequest.send();
-      });
-    
-      //audioElement.play();
-      // Check if the old audio file exists and delete it
-      const checkRequest = new XMLHttpRequest();
-      checkRequest.open('HEAD', barkBase + '/audio/bark_audio.wav', true);
-      checkRequest.onreadystatechange = function() {
-        if (checkRequest.readyState === 4) {
-          if (checkRequest.status === 200) {
-            // File exists, send delete request
-	      const deleteRequest = new XMLHttpRequest(); 
-    	      deleteRequest.open('DELETE', barkBase + '/audio/bark_audio.wav', true);
-              deleteRequest.send();
-          }
-          // Start playing the new audio
-          audioElement.play();
-        }
-      };
-      checkRequest.send();
+      const barkBase = _validatedBarkBase(
+        localStorage.getItem('barkTTSHost') || 'localhost:8888'
+      );
+      if (!barkBase) {
+        console.warn('Bark TTS endpoint must be a private address on port 8888.');
+        return;
       }
-      xhr.open('POST', url, true);
-      xhr.setRequestHeader('Content-Type', 'text/plain');
-      xhr.send(data);
+      const data = "WOMAN: " + ((typeof textArr !== 'undefined' && textArr[1]) ? textArr[1] : speechParams.Text);
+      const barkController = new AbortController();
+      const barkTimeout = setTimeout(function() { barkController.abort(); }, 180000);
+      fetch(barkBase + '/send-string', {
+        method: 'POST', headers: { 'Content-Type': 'text/plain' },
+        body: data, redirect: 'error', credentials: 'omit',
+        signal: barkController.signal
+      }).then(function(response) {
+        if (!response.ok || response.redirected) {
+          throw new Error('Bark TTS returned an invalid response');
+        }
+        return _evaReadBoundedBlob(response, 20 * 1024 * 1024, barkController);
+      }).then(function(blob) {
+        var objectUrl = URL.createObjectURL(blob);
+        var audioElement = new Audio(objectUrl);
+        var revokeBarkUrl = function() { URL.revokeObjectURL(objectUrl); };
+        audioElement.addEventListener('ended', function() {
+          revokeBarkUrl();
+        }, { once: true });
+        audioElement.addEventListener('error', revokeBarkUrl, { once: true });
+        return Promise.resolve(audioElement.play()).catch(function(error) {
+          revokeBarkUrl();
+          throw error;
+        });
+      }).catch(function(error) {
+        console.warn('Bark TTS failed:', error && error.message ? error.message : error);
+      }).finally(function() {
+        clearTimeout(barkTimeout);
+      });
       return;
     }
 
@@ -5533,17 +6074,36 @@ function speakText() {
               console.error('Polly error:', error);
             }
         } else {
-            document.getElementById('audioSource').src = url;
-            document.getElementById('audioPlayback').load();
-            var resultEl2 = document.getElementById('result');
-            if (resultEl2) { resultEl2.textContent = ""; }
-
-            // Check the state of the checkbox and have fun
-            const checkbox = document.getElementById("autoSpeak");
-            if (checkbox.checked) {
-                const audio = document.getElementById("audioPlayback");
-                audio.setAttribute("autoplay", true);
-            }
+            var pollyController = new AbortController();
+            var pollyTimeout = setTimeout(function() { pollyController.abort(); }, 180000);
+            fetch(url, {
+              redirect: 'error', credentials: 'omit', signal: pollyController.signal
+            }).then(function(response) {
+              if (!response.ok || response.redirected) {
+                throw new Error('Polly returned an invalid response');
+              }
+              return _evaReadBoundedBlob(
+                response, 20 * 1024 * 1024, pollyController
+              );
+            }).then(function(blob) {
+              var objectUrl = URL.createObjectURL(blob);
+              var playback = document.getElementById('audioPlayback');
+              document.getElementById('audioSource').src = objectUrl;
+              var revokePollyUrl = function() { URL.revokeObjectURL(objectUrl); };
+              playback.addEventListener('ended', function() {
+                revokePollyUrl();
+              }, { once: true });
+              playback.addEventListener('error', revokePollyUrl, { once: true });
+              playback.load();
+              var resultEl2 = document.getElementById('result');
+              if (resultEl2) resultEl2.textContent = "";
+              const checkbox = document.getElementById("autoSpeak");
+              if (checkbox.checked) playback.setAttribute("autoplay", true);
+            }).catch(function(fetchError) {
+              console.warn('Polly audio fetch failed:', fetchError && fetchError.message ? fetchError.message : fetchError);
+            }).finally(function() {
+              clearTimeout(pollyTimeout);
+            });
         }
     });
 }
@@ -5727,143 +6287,292 @@ async function _generateImage(prompt) {
   }
 }
 
+function _trustedActionRenderData(actions) {
+  var data = { artifacts: [], notices: [] };
+  if (!Array.isArray(actions)) return data;
+  actions.forEach(function(entry) {
+    if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string') return;
+    var ok = entry.ok === true;
+    var result = ok && entry.result && typeof entry.result === 'object'
+      ? entry.result : {};
+    var filename = (entry.id === 'file.download' || entry.id === 'file.open') &&
+      typeof result.filename === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(result.filename)
+      ? result.filename : '';
+    var artifact = filename &&
+      typeof result.mime === 'string' &&
+      result.mime.length <= 128 &&
+      /^[A-Za-z0-9!#$&^_.+\-]+\/[A-Za-z0-9!#$&^_.+\-]+$/.test(result.mime) &&
+      Number.isInteger(result.size) && result.size >= 0 &&
+      result.size <= 16 * 1024 * 1024 &&
+      typeof result.session_id === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(result.session_id) &&
+      typeof result.artifact_id === 'string' && /^[0-9a-f]{32}$/.test(result.artifact_id) &&
+        typeof result.digest === 'string' && /^[0-9a-f]{64}$/.test(result.digest) &&
+        typeof result.generation === 'string' && /^[1-9][0-9]{0,39}$/.test(result.generation)
+      ? {
+          filename: filename, session_id: result.session_id,
+          artifact_id: result.artifact_id, digest: result.digest,
+          generation: result.generation, mime: result.mime, size: result.size
+        } : null;
+    if (artifact && !data.artifacts.some(function(row) {
+      return row.artifact_id === artifact.artifact_id;
+    })) {
+      data.artifacts.push(artifact);
+    }
+    var notice = ok && typeof result.notice === 'string'
+      ? result.notice : (!ok && typeof entry.detail === 'string'
+        ? 'Action ' + entry.id + ' failed: ' + entry.detail
+        : 'Action ' + entry.id + (ok ? ' completed.' : ' failed.'));
+    data.notices.push({ ok: ok, text: String(notice).slice(0, 500) });
+  });
+  return data;
+}
+
+function sanitizeEvaActionText(value) {
+  if (typeof EvaAgentMarkers !== 'undefined' &&
+      typeof EvaAgentMarkers.parseResponse === 'function') {
+    return EvaAgentMarkers.parseResponse(value).text;
+  }
+  if (typeof Cognition !== 'undefined' &&
+      typeof Cognition.sanitizeActionText === 'function') {
+    return Cognition.sanitizeActionText(value);
+  }
+  return String(value || '')
+    .replace(/\[\[EVA_ACTION\]\][\s\S]*?\[\[\/EVA_ACTION\]\]/g, '')
+    .replace(/\[\[EVA_ACTION\]\][\s\S]*$/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function _isExplicitCameraRequest(value) {
+  var text = String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return /\b(?:use|access|activate|open|turn on)\s+(?:my|the)\s+(?:camera|webcam)\b/.test(text) ||
+    /\b(?:look|see|view|check)\s+(?:through|using|with)\s+(?:my|the)\s+(?:camera|webcam)\b/.test(text) ||
+    /\b(?:look|point)\s+(?:my|the)\s+(?:camera|webcam)\s+(?:at|toward)\b/.test(text) ||
+    /\b(?:take|capture)\s+(?:a\s+)?(?:photo|picture|frame)\s+(?:with|using|through)\s+(?:my|the)\s+(?:camera|webcam)\b/.test(text) ||
+    /\b(?:show|tell)\s+me\s+what\s+(?:my|the)\s+(?:camera|webcam)\s+(?:sees|can see)\b/.test(text);
+}
+
+function canonicalizeEvaResponse(value, options) {
+  options = options || {};
+  var controls;
+  if (typeof EvaAgentMarkers !== 'undefined' &&
+      typeof EvaAgentMarkers.parseResponse === 'function') {
+    controls = EvaAgentMarkers.parseResponse(value);
+  } else {
+    var fallback = String(value || '');
+    var firstControl = fallback.search(/\[\[\/?EVA_/);
+    controls = {
+      text: firstControl < 0 ? fallback : fallback.slice(0, firstControl),
+      browser: null, desktop: null, camera: null,
+      invalid: firstControl >= 0, conflict: firstControl >= 0
+    };
+  }
+  var text = controls.text;
+  var browser = options.allowAgentControls === false ? null : controls.browser;
+  var desktop = options.allowAgentControls === false ? null : controls.desktop;
+  var camera = options.allowCamera === true ? controls.camera : null;
+  text = text.replace(/^\s*\[\[EVA_FILE\]\].*$/gm, '');
+  text = text.replace(/\n{3,}/g, '\n\n').trim();
+  return Object.freeze({
+    __evaCanonical: true,
+    text: text,
+    browser: browser,
+    desktop: desktop,
+    camera: camera,
+    conflict: controls.invalid === true || controls.conflict === true
+  });
+}
+
+function _canonicalInertSecondaryText(value) {
+  return canonicalizeEvaResponse(value, {
+    allowCamera: false, allowAgentControls: false
+  }).text;
+}
+
+function _safeInlineImageUrl(value) {
+  var text = String(value || '');
+  if (/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(text) &&
+      text.length <= 20 * 1024 * 1024) return text;
+  try {
+    var parsed = new URL(text);
+    var allowed = [
+      'upload.wikimedia.org', 'commons.wikimedia.org',
+      'oaidalleapiprodscus.blob.core.windows.net'
+    ];
+    if (parsed.protocol === 'https:' && !parsed.username && !parsed.password &&
+        allowed.indexOf(parsed.hostname.toLowerCase()) !== -1) return parsed.href;
+  } catch (_) {}
+  return '';
+}
+
+function _appendEvaResponseBubble(txtOutput, markdownText, notices, assets) {
+  var bubble = document.createElement('div');
+  bubble.className = 'chat-bubble eva-bubble';
+  var label = document.createElement('span');
+  label.className = 'eva';
+  label.textContent = 'Eva:';
+  var body = document.createElement('div');
+  body.className = 'md';
+  body.innerHTML = (typeof renderMarkdown === 'function')
+    ? renderMarkdown(String(markdownText || '')) : escapeHtml(String(markdownText || ''));
+  bubble.appendChild(label);
+  bubble.appendChild(body);
+
+  (notices || []).forEach(function(item) {
+    var notice = document.createElement('div');
+    notice.className = item.ok ? 'cog-action-ok' : 'cog-action-err';
+    notice.textContent = item.text;
+    body.appendChild(notice);
+  });
+
+  (assets || []).forEach(function(asset) {
+    var safeUrl = _safeInlineImageUrl(asset.url);
+    if (!safeUrl) return;
+    var parent = body;
+    if (asset.generated === true) {
+      parent = document.createElement('div');
+      parent.className = 'eva-generated-wrap';
+      body.appendChild(parent);
+    }
+    var image = document.createElement('img');
+    image.className = 'eva-inline-img';
+    image.src = safeUrl;
+    image.alt = String(asset.caption || '').slice(0, 500);
+    image.title = image.alt;
+    if (asset.generated === true) image.dataset.generated = 'true';
+    parent.appendChild(image);
+    if (asset.generated === true) {
+      var badge = document.createElement('span');
+      badge.className = 'eva-generated-badge';
+      badge.textContent = 'AI Generated';
+      parent.appendChild(badge);
+    }
+  });
+  txtOutput.appendChild(bubble);
+  return bubble;
+}
+
+function _ensureArtifactDelegation(txtOutput) {
+  if (!txtOutput || txtOutput._evaArtifactDelegation === true) return;
+  txtOutput._evaArtifactDelegation = true;
+  txtOutput.addEventListener('click', function(event) {
+    var target = event.target && typeof event.target.closest === 'function'
+      ? event.target.closest('.eva-artifact-link[data-eva-artifact-action]')
+      : null;
+    if (!target || !txtOutput.contains(target)) return;
+    event.preventDefault();
+    var filename = String(target.dataset.evaArtifactFilename || '');
+    var sessionId = String(target.dataset.evaArtifactSession || '');
+    var artifactId = String(target.dataset.evaArtifactId || '');
+    var digest = String(target.dataset.evaArtifactDigest || '');
+    var generation = String(target.dataset.evaArtifactGeneration || '');
+    var mime = String(target.dataset.evaArtifactMime || '');
+    var size = Number(target.dataset.evaArtifactSize);
+    var action = String(target.dataset.evaArtifactAction || '');
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(filename) ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(sessionId) ||
+      !/^[0-9a-f]{32}$/.test(artifactId) || !/^[0-9a-f]{64}$/.test(digest) ||
+      !/^[1-9][0-9]{0,39}$/.test(generation) ||
+      !/^[A-Za-z0-9!#$&^_.+\-]+\/[A-Za-z0-9!#$&^_.+\-]+$/.test(mime) ||
+      !Number.isInteger(size) || size < 0 || size > 16 * 1024 * 1024 ||
+      action !== 'download') return;
+    var bridgeUrl = getSafeBridgeBaseUrl().replace(/\/+$/, '');
+    var fileUrl = bridgeUrl + '/v1/files/' + encodeURIComponent(sessionId) +
+      '/' + encodeURIComponent(artifactId) + '/' + encodeURIComponent(filename) +
+      '?digest=' + encodeURIComponent(digest) + '&generation=' +
+      encodeURIComponent(generation);
+    fetch(fileUrl).then(function(res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var responseMime = String(
+        res.headers.get('Content-Type') || ''
+      ).split(';', 1)[0];
+      if (responseMime !== mime) throw new Error('artifact MIME identity mismatch');
+      return res.blob();
+    }).then(function(blob) {
+      if (blob.size !== size) throw new Error('artifact size identity mismatch');
+      var url = URL.createObjectURL(blob);
+      var anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      setTimeout(function() {
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+      }, 200);
+    }).catch(function(err) {
+      console.warn('[Artifact] Download failed:', err);
+      alert('Could not download ' + filename + ': ' + err.message);
+    });
+  });
+}
+
 /**
  * Render an Eva response with markdown and inline images.
  * Detects [Image of ...] placeholders, routes to DALL-E (generation)
  * or Wikimedia (search) based on the user's original request.
  */
-async function renderEvaResponse(content, txtOutput, capturedEnvelope) {
+async function renderEvaResponse(
+  content, txtOutput, capturedEnvelope, trustedActions, canonicalResponse
+) {
   function responseIsCurrent() {
     if (!capturedEnvelope) return true;
     return typeof isCurrentRequestEnvelope === 'function' &&
       isCurrentRequestEnvelope(capturedEnvelope);
   }
   if (!responseIsCurrent()) return false;
-  if (!content || !content.trim()) {
-    txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> Sorry, can you please ask me in another way?</div>';
+  var trustedRender = _trustedActionRenderData(trustedActions);
+  var canonical = canonicalResponse && canonicalResponse.__evaCanonical === true
+    ? canonicalResponse : canonicalizeEvaResponse(content);
+  if ((!canonical.text || !canonical.text.trim()) &&
+      !canonical.browser && !canonical.desktop && !canonical.camera &&
+      trustedRender.notices.length === 0) {
+    _appendEvaResponseBubble(
+      txtOutput, 'Sorry, can you please ask me in another way?', [], []
+    );
     txtOutput.scrollTop = txtOutput.scrollHeight;
     return true;
   }
 
-  var text = content.trim();
-  var artifactNames = [];
+  var text = canonical.text;
+  var artifactNames = trustedRender.artifacts.slice();
+  var actionNotices = trustedRender.notices.slice();
   var surfacedAssets = [];
 
-  // Detect Eva browser-agent launch marker:
-  // [[EVA_BROWSER]]{"goal":"...","start_url":"..."}[[/EVA_BROWSER]]
-  var controlMarkers = (typeof EvaAgentMarkers !== 'undefined')
-    ? EvaAgentMarkers.extractControlMarkers(text)
-    : { text: text, browser: null, desktop: null, conflict: false };
-  var browserLaunch = controlMarkers.browser;
-  var desktopLaunch = controlMarkers.desktop;
-  text = controlMarkers.text.replace(/\n{3,}/g, '\n\n').trim();
-
-  // Detect Eva camera "look" marker:
-  // [[EVA_LOOK]]{"question":"..."}[[/EVA_LOOK]]  (question optional)
-  var cameraLook = null;
-  text = text.replace(/\[\[EVA_LOOK\]\]\s*(\{[\s\S]*?\})?\s*(?:\[\[\/EVA_LOOK\]\])?/g, function (full, json) {
-    if (!cameraLook) {
-      cameraLook = { question: '' };
-      if (json) {
-        try {
-          var parsed = JSON.parse(json);
-          if (parsed && typeof parsed.question === 'string') cameraLook.question = parsed.question;
-        } catch (e) { /* tolerate a bare marker with no JSON */ }
-      }
-    }
-    return '\n_Taking a look…_\n';
-  });
-  if (cameraLook) {
-    text = text.replace(/\n{3,}/g, '\n\n').trim();
-  }
-
-  // Strip [[EVA_SIGNAL]] — the bridge dispatches via signal-cli before
-  // returning the response. Only show confirmation if the marker was the
-  // *entire* response (AIG bridge path). If it appears inside a longer
-  // response the model hallucinated it — strip silently so a false
-  // "Signal message sent" never shows for lm-studio or other direct paths.
-  var _sigRe = /\[\[EVA_SIGNAL\]\]\s*(?:\{[\s\S]*?\})?\s*(?:\[\[\/EVA_SIGNAL\]\])?/g;
-  if (/\[\[EVA_SIGNAL\]\]/.test(text)) {
-    var _sigStripped = text.replace(_sigRe, '').trim();
-    if (_sigStripped.length === 0) {
-      // Whole response was the marker — bridge actually sent the message.
-      text = '\n_Signal message sent._\n';
-    } else {
-      // Marker embedded in a longer response — hallucination, strip silently.
-      text = text.replace(/\[\[EVA_SIGNAL\]\]\s*(?:\{[\s\S]*?\})?\s*(?:\[\[\/EVA_SIGNAL\]\])?/g, '');
-    }
-  }
-  text = text.replace(/\n{3,}/g, '\n\n').trim();
-
-  text = text.replace(/^\s*\[\[EVA_FILE\]\]\s+([A-Za-z0-9._-]{1,128})\s*$/gm, function(fullMatch, filename) {
-    artifactNames.push(filename);
-    return '';
-  });
-  if (artifactNames.length) {
-    text = text.replace(/\n{3,}/g, '\n\n').trim();
-  }
+  var browserLaunch = canonical.browser;
+  var desktopLaunch = canonical.desktop;
+  var cameraLook = canonical.camera;
+  if (browserLaunch) text += (text ? '\n\n' : '') + '_Opening the browser agent…_';
+  if (desktopLaunch) text += (text ? '\n\n' : '') + '_Opening the desktop agent…_';
+  if (cameraLook) text += (text ? '\n\n' : '') + '_Taking a look…_';
 
   function appendArtifactLinks() {
     if (!artifactNames.length) return;
-    var bridgeUrl = getSafeBridgeBaseUrl();
+    _ensureArtifactDelegation(txtOutput);
     var bubbles = txtOutput.querySelectorAll('.chat-bubble.eva-bubble');
     var bubble = bubbles.length ? bubbles[bubbles.length - 1] : null;
     if (!bubble) return;
-    artifactNames.forEach(function(filename) {
-      var link = document.createElement('a');
-      link.className = 'eva-artifact-link';
-      link.textContent = '\u2B07 Download ' + filename;
-      link.style.cursor = 'pointer';
-      link.style.textDecoration = 'underline';
-      link.style.color = '#4fc3f7';
-      link.style.display = 'inline-block';
-      link.style.marginTop = '8px';
-      // Use fetch + blob to download instead of navigating (Electron ignores
-      // the download attribute and navigates the window, freezing the UI).
-      link.addEventListener('click', function(e) {
-        e.preventDefault();
-        var fileUrl = bridgeUrl + '/v1/files/' + encodeURIComponent(filename);
-        fetch(fileUrl).then(function(res) {
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          return res.blob();
-        }).then(function(blob) {
-          var url = URL.createObjectURL(blob);
-          var a = document.createElement('a');
-          a.href = url;
-          a.download = filename;
-          document.body.appendChild(a);
-          a.click();
-          setTimeout(function() { document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
-        }).catch(function(err) {
-          console.warn('[Artifact] Download failed:', err);
-          alert('Could not download ' + filename + ': ' + err.message);
-        });
-      });
-
-      var openBtn = document.createElement('a');
-      openBtn.className = 'eva-artifact-link';
-      openBtn.textContent = '\u{1F4C2} Open';
-      openBtn.style.cursor = 'pointer';
-      openBtn.style.textDecoration = 'underline';
-      openBtn.style.color = '#81c784';
-      openBtn.style.display = 'inline-block';
-      openBtn.style.marginTop = '8px';
-      openBtn.style.marginLeft = '12px';
-      openBtn.addEventListener('click', function(e) {
-        e.preventDefault();
-        var openUrl = bridgeUrl + '/v1/files/' + encodeURIComponent(filename) + '?open=1';
-        fetch(openUrl).then(function(res) {
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          return res.json();
-        }).then(function(data) {
-          if (data.opened) console.log('[Artifact] Opened:', filename);
-        }).catch(function(err) {
-          console.warn('[Artifact] Open failed:', err);
-        });
-      });
-
-      bubble.appendChild(link);
-      bubble.appendChild(openBtn);
+    artifactNames.forEach(function(artifact) {
+      var filename = artifact.filename;
+      var downloadLink = document.createElement('a');
+      downloadLink.className = 'eva-artifact-link';
+      downloadLink.href = '#';
+      downloadLink.dataset.evaArtifactAction = 'download';
+      downloadLink.dataset.evaArtifactFilename = filename;
+      downloadLink.dataset.evaArtifactSession = artifact.session_id;
+      downloadLink.dataset.evaArtifactId = artifact.artifact_id;
+      downloadLink.dataset.evaArtifactDigest = artifact.digest;
+      downloadLink.dataset.evaArtifactGeneration = artifact.generation;
+      downloadLink.dataset.evaArtifactMime = artifact.mime;
+      downloadLink.dataset.evaArtifactSize = String(artifact.size);
+      downloadLink.textContent = '\u2913 Download ' + filename;
+      downloadLink.style.cursor = 'pointer';
+      downloadLink.style.textDecoration = 'underline';
+      downloadLink.style.color = '#81c784';
+      downloadLink.style.display = 'inline-block';
+      downloadLink.style.marginTop = '8px';
+      bubble.appendChild(downloadLink);
     });
   }
 
@@ -5938,13 +6647,7 @@ async function renderEvaResponse(content, txtOutput, capturedEnvelope) {
 
     results.forEach(function(r) {
       if (r.url) {
-        // Replace placeholder with image tag
-        var genLabel = r.generated ? ' data-generated="true"' : '';
-        var imgTag = '<img src="' + escapeHtml(r.url) + '" title="' + escapeHtml(r.placeholder.query) + '" alt="' + escapeHtml(r.placeholder.query) + '" class="eva-inline-img"' + genLabel + '>';
-        if (r.generated) {
-          imgTag = '<div class="eva-generated-wrap">' + imgTag + '<span class="eva-generated-badge">AI Generated</span></div>';
-        }
-        text = text.replace(r.placeholder.full, imgTag);
+        text = text.replace(r.placeholder.full, '');
         surfacedAssets.push({ url: r.url, caption: r.placeholder.query, generated: r.generated });
       } else {
         // Replace with a styled placeholder showing what was requested
@@ -5961,61 +6664,15 @@ async function renderEvaResponse(content, txtOutput, capturedEnvelope) {
       text = text.replace(/\n{3,}/g, '\n\n'); // clean up extra blank lines
     }
 
-    // Tokenize generated image wrappers and standalone <img> tags before markdown
-    var imgFragments = [];
-    // Tokenize cog-action artifact blocks (download links, ok/err markers) so
-    // the markdown renderer doesn't escape their HTML into plain text.
-    text = text.replace(/<div class="cog-action-(?:file|ok|err)">[\s\S]*?<\/div>/g, function(m) {
-      imgFragments.push(m);
-      return '\u0000IMG' + (imgFragments.length - 1) + '\u0000';
-    });
-    text = text.replace(/<div class="eva-generated-wrap">[\s\S]*?<\/div>/g, function(m) {
-      imgFragments.push(m);
-      return '\u0000IMG' + (imgFragments.length - 1) + '\u0000';
-    });
-    text = text.replace(/<img[^>]*>/g, function(m) {
-      imgFragments.push(m);
-      return '\u0000IMG' + (imgFragments.length - 1) + '\u0000';
-    });
-
-    // Render markdown
-    var html = (typeof renderMarkdown === 'function') ? renderMarkdown(text) : text;
-
-    // Restore <img> tags
-    html = html.replace(/\u0000IMG(\d+)\u0000/g, function(m, idx) {
-      return imgFragments[Number(idx)] || m;
-    });
-
-    txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> <div class="md">' + html + '</div></div>';
-  } else {
-    // No images or no search keys — just render markdown
-    // Still need to protect cog-action artifact HTML from being escaped.
-    var actFragments = [];
-    text = text.replace(/<div class="cog-action-(?:file|ok|err)">[\s\S]*?<\/div>/g, function(m) {
-      actFragments.push(m);
-      return '\u0000ACT' + (actFragments.length - 1) + '\u0000';
-    });
-    var html2 = (typeof renderMarkdown === 'function') ? renderMarkdown(text) : text;
-    html2 = html2.replace(/\u0000ACT(\d+)\u0000/g, function(m, idx) {
-      return actFragments[Number(idx)] || m;
-    });
-    txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> <div class="md">' + html2 + '</div></div>';
   }
+
+  _appendEvaResponseBubble(
+    txtOutput, text, actionNotices, surfacedAssets
+  );
 
   appendArtifactLinks();
 
   if (!responseIsCurrent()) return false;
-
-  // Auto-open artifact files so the user doesn't have to click.
-  if (artifactNames.length) {
-    var bridgeUrl = getSafeBridgeBaseUrl();
-    artifactNames.forEach(function(filename) {
-      var openUrl = bridgeUrl + '/v1/files/' + encodeURIComponent(filename) + '?open=1';
-      fetch(openUrl).then(function(res) {
-        if (responseIsCurrent() && res.ok) console.log('[Artifact] Auto-opened:', filename);
-      }).catch(function() {});
-    });
-  }
 
   txtOutput.scrollTop = txtOutput.scrollHeight;
 
@@ -6076,13 +6733,38 @@ async function renderEvaResponse(content, txtOutput, capturedEnvelope) {
 
   // Look through the webcam if Eva requested it (Eva's eyes).
   if (cameraLook && typeof EvaCamera !== 'undefined' && EvaCamera && typeof EvaCamera.look === 'function') {
-    EvaCamera.look(cameraLook.question).then(function (desc) {
-      if (!responseIsCurrent()) return;
-      _evaCameraLookResult(desc || 'I could not make out anything.');
-    }).catch(function (err) {
-      if (!responseIsCurrent()) return;
-      _evaCameraLookResult('I tried to look but ' + ((err && err.message) ? err.message : 'something went wrong') + '.');
-    });
+    var cameraAuthorized = false;
+    if (window.evaStandalone &&
+        typeof window.evaStandalone.authorizeCameraLook === 'function') {
+      try {
+        var cameraDecision = await window.evaStandalone.authorizeCameraLook(
+          cameraLook.question,
+          (EvaCamera && typeof EvaCamera.device === 'function')
+            ? EvaCamera.device() : 0
+        );
+        cameraAuthorized = !!(
+          cameraDecision && cameraDecision.authorized === true &&
+          typeof cameraDecision.capability === 'string' &&
+          cameraDecision.specification &&
+          cameraDecision.specification.question === cameraLook.question
+        );
+      } catch (_) {}
+    }
+    if (cameraAuthorized && responseIsCurrent()) {
+      EvaCamera.look(cameraLook.question, {
+        authorization: cameraDecision
+      }).then(function (desc) {
+        if (!responseIsCurrent()) return;
+        _evaCameraLookResult(desc);
+      }).catch(function (err) {
+        if (!responseIsCurrent()) return;
+        _evaCameraLookResult({
+          localFailure: true,
+          text: 'I tried to look but ' +
+            ((err && err.message) ? err.message : 'something went wrong') + '.'
+        });
+      });
+    }
   }
 
   // Auto-save session after each response
@@ -6304,12 +6986,18 @@ function clearMessages() {
       if (key && (key.indexOf('auth_') === 0 || key === 'theme' || key === 'systemPrompt'
           || key === 'lcars_collapsed' || key === 'acp_bridge_url'
           || key === 'aig_lmstudio_base_url' || key === 'aig_lmstudio_model'
-          || key === 'eva_sessions' || key.indexOf('session_') === 0)) {
+          || key === 'eva_artifact_registry_epoch'
+          || key === 'eva_artifact_server_generation'
+          || key === 'eva_sessions'
+          || key.indexOf('session_') === 0)) {
         keysToKeep.push({ k: key, v: localStorage.getItem(key) });
       }
     }
     localStorage.clear();
     keysToKeep.forEach(function(item) { localStorage.setItem(item.k, item.v); });
+    if (typeof _advanceArtifactRegistryEpoch === 'function') {
+      _advanceArtifactRegistryEpoch();
+    }
     // Start a fresh session (don't carry old active id)
     localStorage.removeItem('eva_active_session');
     resetTransientConversationState();

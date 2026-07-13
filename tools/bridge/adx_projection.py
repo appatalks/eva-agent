@@ -78,11 +78,11 @@ def project_pending_events(event_repo, kusto_ingest_fn, kusto_config_fn,
 
         # Skip ineligible events (extra safety beyond outbox creation filter)
         if entry.get("ConsentScope") != "cloud_allowed":
-            event_repo.fail_outbox(event_id, "event is not cloud-consented", "adx")
+            event_repo.fail_outbox(event_id, "not_cloud_consented", "adx")
             failed += 1
             continue
         if entry.get("Sensitivity") == "secret":
-            event_repo.fail_outbox(event_id, "secret events cannot be projected", "adx")
+            event_repo.fail_outbox(event_id, "secret_projection_forbidden", "adx")
             failed += 1
             continue
 
@@ -110,14 +110,14 @@ def project_pending_events(event_repo, kusto_ingest_fn, kusto_config_fn,
                     event_repo.complete_outbox(event_id, "adx")
                     succeeded += 1
                 else:
-                    event_repo.fail_outbox(event_id, "ADX projection receipt ingest failed", "adx")
+                    event_repo.fail_outbox(event_id, "projection_receipt_failed", "adx")
                     failed += 1
                 continue
 
         # Build ADX row from the event
         event = event_repo.get_event(event_id)
         if not event:
-            event_repo.fail_outbox(event_id, "event not found", "adx")
+            event_repo.fail_outbox(event_id, "event_not_found", "adx")
             failed += 1
             continue
 
@@ -148,7 +148,7 @@ def project_pending_events(event_repo, kusto_ingest_fn, kusto_config_fn,
                     datetime.datetime.now(datetime.timezone.utc)
                     + datetime.timedelta(seconds=delay)
                 ).isoformat(timespec="seconds").replace("+00:00", "Z")
-                event_repo.fail_outbox(event_id, f"ingest returned false (attempt {attempts + 1})", "adx", next_attempt)
+                event_repo.fail_outbox(event_id, "ingest_returned_false", "adx", next_attempt)
                 failed += 1
         except Exception as exc:
             attempts = entry.get("Attempts", 0)
@@ -157,7 +157,9 @@ def project_pending_events(event_repo, kusto_ingest_fn, kusto_config_fn,
                 datetime.datetime.now(datetime.timezone.utc)
                 + datetime.timedelta(seconds=delay)
             ).isoformat(timespec="seconds").replace("+00:00", "Z")
-            event_repo.fail_outbox(event_id, str(exc)[:500], "adx", next_attempt)
+            event_repo.fail_outbox(
+                event_id, "adx_projection_exception", "adx", next_attempt
+            )
             failed += 1
 
     return succeeded, failed

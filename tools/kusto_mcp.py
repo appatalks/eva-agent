@@ -19,10 +19,19 @@ Environment variables:
 
 import json
 import os
+import re
 import sys
 import threading
 
 from bridge import config as _bridge_config
+from bridge.mcp_protocol import (
+    MCPProtocolError,
+    MAX_MCP_FRAME_BYTES,
+    decode_request_line,
+    encode_response_line,
+    fixed_tool_schema,
+    validate_fixed_tool_arguments,
+)
 
 # --- Azure Identity + Kusto SDK ---
 try:
@@ -245,7 +254,12 @@ class KustoMCPServer:
             }
         }
     ]
-    TOOLS = [tool for tool in TOOLS if tool.get("name") != "kusto_ingest_inline"]
+    TOOLS = [
+        tool for tool in TOOLS
+        if tool.get("name") not in ("kusto_ingest_inline", "kusto_query")
+    ]
+    for _tool in TOOLS:
+        _tool["inputSchema"] = fixed_tool_schema(_tool["name"])
 
     def __init__(self):
         raw_cluster = os.environ.get("KUSTO_CLUSTER_URL", "")
@@ -403,7 +417,9 @@ class KustoMCPServer:
             return "", "Error: database name required. Set KUSTO_DATABASE in locked mode."
         return "Eva", None
 
-    def _kusto_query(self, cluster_url, database, query, is_mgmt=False):
+    def _kusto_query(
+        self, cluster_url, database, query, is_mgmt=False, parameters=None
+    ):
         """Execute a Kusto query and return formatted results."""
         token = self._get_token()
         endpoint = "mgmt" if is_mgmt else "query"
@@ -415,6 +431,11 @@ class KustoMCPServer:
         body = {"csl": query}
         if database:
             body["db"] = database
+        if parameters:
+            body["properties"] = json.dumps(
+                {"Parameters": dict(parameters)},
+                sort_keys=True, separators=(",", ":"),
+            )
 
         resp = self._http.post(
             url, json=body, headers=headers, timeout=60,
@@ -422,7 +443,7 @@ class KustoMCPServer:
         )
 
         if resp.status_code != 200:
-            return f"Kusto API error {resp.status_code}: {resp.text[:500]}"
+            return f"Kusto API request failed (HTTP {resp.status_code})."
 
         data = resp.json()
         return self._format_kusto_response(data)
@@ -462,20 +483,19 @@ class KustoMCPServer:
         """Route tool call to the appropriate handler."""
         if not HAS_AZURE:
             return "Error: azure-identity package not installed. Run: pip install azure-identity requests"
+        if name in ("kusto_query", "kusto_ingest_inline"):
+            return "Error: generic KQL is disabled; use a fixed read-only tool."
 
         try:
+            args = validate_fixed_tool_arguments(name, args)
             if name == "kusto_list_databases":
                 return self._tool_list_databases(args)
-            elif name == "kusto_query":
-                return self._tool_query(args)
             elif name == "kusto_show_tables":
                 return self._tool_show_tables(args)
             elif name == "kusto_show_schema":
                 return self._tool_show_schema(args)
             elif name == "kusto_sample_data":
                 return self._tool_sample_data(args)
-            elif name == "kusto_ingest_inline":
-                return self._tool_ingest_inline(args)
             elif name == "eva_recall_knowledge":
                 return self._tool_eva_recall_knowledge(args)
             elif name == "eva_get_emotion_state":
@@ -487,9 +507,11 @@ class KustoMCPServer:
             elif name == "eva_get_memory_summary":
                 return self._tool_eva_get_memory_summary(args)
             else:
-                return f"Unknown tool: {name}"
-        except Exception as e:
-            return f"Error: {str(e)}"
+                return "Error: unsupported tool"
+        except MCPProtocolError:
+            return "Error: invalid or unsupported tool arguments"
+        except Exception:
+            return "Error: tool execution failed"
 
     def _tool_list_databases(self, args):
         if self.database_locked:
@@ -532,8 +554,10 @@ class KustoMCPServer:
         if err:
             return err
         table = args.get("table", "")
-        if not table:
-            return "Error: 'table' parameter is required."
+        if not isinstance(table, str) or re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]{0,127}", table
+        ) is None:
+            return "Error: 'table' must be a valid identifier."
         database = self._resolve_database(args)
         if not database:
             return "Error: database name required."
@@ -544,9 +568,13 @@ class KustoMCPServer:
         if err:
             return err
         table = args.get("table", "")
-        if not table:
-            return "Error: 'table' parameter is required."
+        if not isinstance(table, str) or re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]{0,127}", table
+        ) is None:
+            return "Error: 'table' must be a valid identifier."
         count = args.get("count", 10)
+        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 100:
+            return "Error: 'count' must be an integer from 1 to 100."
         database = self._resolve_database(args)
         if not database:
             return "Error: database name required."
@@ -642,15 +670,15 @@ class KustoMCPServer:
         if err:
             return err
         entity = args.get("entity", "")
-        if not entity:
-            return "Error: 'entity' parameter is required."
-        safe_entity = str(entity).replace("'", "''")
-        try:
-            limit = int(args.get("limit", 20))
-        except (TypeError, ValueError):
-            limit = 20
-        query = f"Knowledge | where Entity has_cs '{safe_entity}' or Value has_cs '{safe_entity}' | order by Confidence desc, Timestamp desc | take {limit}"
-        return self._kusto_query(cluster_url, database, query)
+        limit = args.get("limit", 20)
+        query = (
+            "declare query_parameters(entity:string); "
+            "Knowledge | where Entity has_cs entity or Value has_cs entity "
+            f"| order by Confidence desc, Timestamp desc | take {limit}"
+        )
+        return self._kusto_query(
+            cluster_url, database, query, parameters={"entity": entity}
+        )
 
     def _tool_eva_get_emotion_state(self, args):
         """Get Eva's current emotional state and baseline."""
@@ -674,10 +702,7 @@ class KustoMCPServer:
         database, err = self._resolve_eva_database(args)
         if err:
             return err
-        try:
-            limit = int(args.get("limit", 5))
-        except (TypeError, ValueError):
-            limit = 5
+        limit = args.get("limit", 5)
         return self._kusto_query(cluster_url, database, f"Reflections | order by Timestamp desc | take {limit}")
 
     def _tool_eva_get_active_goals(self, args):
@@ -688,20 +713,21 @@ class KustoMCPServer:
         database, err = self._resolve_eva_database(args)
         if err:
             return err
-        try:
-            limit = int(args.get("limit", 20))
-        except (TypeError, ValueError):
-            limit = 20
+        limit = args.get("limit", 20)
         category = str(args.get("category", "") or "").strip()
         allowed_categories = {"self_improvement", "knowledge_curation", "relational"}
         if category and category not in allowed_categories:
             return "Error: category must be one of self_improvement, knowledge_curation, relational."
         query = "Goals | summarize arg_max(UpdatedAt, *) by GoalId | where Status == 'active'"
+        parameters = None
         if category:
-            safe_category = category.replace("'", "''")
-            query += f" | where Category == '{safe_category}'"
+            query = "declare query_parameters(category:string); " + query
+            query += " | where Category == category"
+            parameters = {"category": category}
         query += f" | order by Priority desc, UpdatedAt desc | take {limit}"
-        return self._kusto_query(cluster_url, database, query)
+        return self._kusto_query(
+            cluster_url, database, query, parameters=parameters
+        )
 
     def _tool_eva_get_memory_summary(self, args):
         """Get memory summaries."""
@@ -711,17 +737,18 @@ class KustoMCPServer:
         database, err = self._resolve_eva_database(args)
         if err:
             return err
-        try:
-            limit = int(args.get("limit", 5))
-        except (TypeError, ValueError):
-            limit = 5
+        limit = args.get("limit", 5)
         period = args.get("period", "")
         query = "MemorySummaries"
+        parameters = None
         if period:
-            safe_period = str(period).replace("'", "''")
-            query += f" | where Period == '{safe_period}'"
+            query = "declare query_parameters(period:string); " + query
+            query += " | where Period == period"
+            parameters = {"period": period}
         query += f" | order by Timestamp desc | take {limit}"
-        return self._kusto_query(cluster_url, database, query)
+        return self._kusto_query(
+            cluster_url, database, query, parameters=parameters
+        )
 
     # --- MCP Protocol (JSON-RPC over NDJSON/stdio) ---
 
@@ -732,35 +759,37 @@ class KustoMCPServer:
     def run(self):
         """Run the MCP server on stdio (NDJSON)."""
         self._log("Kusto MCP Server starting...")
-        self._log(f"Cluster: {self.cluster_url or '(not set — will use tool parameter)'}")
-        self._log(f"Database: {self.default_database or '(not set — will use tool parameter)'}")
+        self._log("Kusto configuration loaded")
         if self.database_locked:
-            self._log(f"Database locked to: {self.default_database or '(not set)'}")
+            self._log("Database lock enabled")
 
-        for line in sys.stdin:
-            line = line.strip()
+        while True:
+            line = sys.stdin.buffer.readline(MAX_MCP_FRAME_BYTES + 1)
             if not line:
+                break
+            if len(line) > MAX_MCP_FRAME_BYTES or not line.endswith(b"\n"):
+                break
+            if not line.strip():
                 continue
             try:
-                msg = json.loads(line)
+                msg = decode_request_line(line)
                 response = self._handle_message(msg)
                 if response:
-                    sys.stdout.write(json.dumps(response) + "\n")
+                    sys.stdout.write(encode_response_line(response))
                     sys.stdout.flush()
-            except json.JSONDecodeError:
-                self._log(f"Invalid JSON: {line[:100]}")
-            except Exception as e:
-                self._log(f"Error handling message: {e}")
+            except MCPProtocolError:
+                self._log("Invalid JSON frame")
+            except Exception:
+                self._log("Message handling failed")
                 # Send error response if we have an id
-                if isinstance(line, str):
-                    try:
-                        rid = json.loads(line).get("id")
-                        if rid is not None:
-                            err_resp = {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": str(e)}}
-                            sys.stdout.write(json.dumps(err_resp) + "\n")
-                            sys.stdout.flush()
-                    except Exception:
-                        pass
+                try:
+                    rid = json.loads(line.decode("utf-8", errors="strict")).get("id")
+                    if rid is not None:
+                        err_resp = {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "request failed"}}
+                        sys.stdout.write(encode_response_line(err_resp))
+                        sys.stdout.flush()
+                except Exception:
+                    pass
 
     def _handle_message(self, msg):
         """Handle a JSON-RPC message."""
@@ -799,8 +828,16 @@ class KustoMCPServer:
         # Call tool
         if method == "tools/call":
             tool_name = params.get("name", "")
-            tool_args = params.get("arguments", {})
-            self._log(f"Tool call: {tool_name}({json.dumps(tool_args)})")
+            try:
+                tool_args = validate_fixed_tool_arguments(
+                    tool_name, params.get("arguments", {})
+                )
+            except MCPProtocolError:
+                return {
+                    "jsonrpc": "2.0", "id": rid,
+                    "error": {"code": -32602, "message": "Invalid tool arguments"},
+                }
+            self._log("Tool call received")
 
             result_text = self.handle_tool(tool_name, tool_args)
 

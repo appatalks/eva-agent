@@ -1,11 +1,12 @@
 """Bridge domain: telemetry."""
 
 import datetime
+import hashlib
 import json
 import os
+import re
 import sys
 import threading
-import time
 from bridge import config as _cfg
 from bridge import state as _st
 
@@ -19,72 +20,60 @@ _TELEMETRY_MAX_BYTES = _cfg.TELEMETRY_MAX_BYTES
 _TELEMETRY_PATH = _cfg.TELEMETRY_PATH
 _TELEMETRY_RING_MAX = _cfg.TELEMETRY_RING_MAX
 
-# Debug log file: captures all bridge stdout to a rotating file.
-# Path: ~/.config/eva-standalone/bridge_debug.log (gitignored via *.log)
-_DEBUG_LOG_PATH = os.path.join(_cfg.EVA_CONFIG_DIR, "bridge_debug.log")
-_DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024  # rotate at 10 MB
+# Retired debug-log path is truncated at startup for legacy cleanup only.
+_DEBUG_LOG_PATH = _cfg.BRIDGE_DEBUG_LOG_PATH
 _debug_log_file = None
-_debug_log_lock = threading.Lock()
+_TELEMETRY_ENUMS = {
+    "result": frozenset({
+        "hit", "miss", "warm", "warm_failed", "evict", "emit", "suppressed",
+        "ok", "error", "approve", "deny",
+    }),
+    "reason": frozenset({
+        "below_min_salience", "quiet_hours", "rate_cap", "timeout",
+        "protocol", "storage", "unavailable",
+    }),
+    "route": frozenset({
+        "default", "internal-cognition", "acp-unavailable", "trivial",
+        "local", "acp", "github-models", "lmstudio",
+    }),
+    "request_type": frozenset({
+        "chat", "data", "weather", "news", "market", "search", "memory",
+        "unknown",
+    }),
+    "stop_reason": frozenset({
+        "end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled",
+        "error",
+    }),
+    "channels": frozenset({"chat", "signal", "chat,signal", "signal,chat"}),
+}
 
 
 def _open_debug_log():
-    """Open (or rotate) the debug log file. Called once at startup."""
+    """Revoke the retired free-form debug log without keeping it open."""
     global _debug_log_file
     try:
-        os.makedirs(os.path.dirname(_DEBUG_LOG_PATH), exist_ok=True)
-        # Rotate if too large
-        if os.path.isfile(_DEBUG_LOG_PATH):
-            try:
-                size = os.path.getsize(_DEBUG_LOG_PATH)
-                if size > _DEBUG_LOG_MAX_BYTES:
-                    backup = _DEBUG_LOG_PATH + ".1"
-                    if os.path.isfile(backup):
-                        os.remove(backup)
-                    os.rename(_DEBUG_LOG_PATH, backup)
-            except OSError:
-                pass
-        _debug_log_file = open(_DEBUG_LOG_PATH, "a", encoding="utf-8", buffering=1)
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        _debug_log_file.write(f"\n{'='*60}\n[{ts}] Bridge debug log started\n{'='*60}\n")
-        _debug_log_file.flush()
-    except Exception as e:
-        print(f"[Bridge] Debug log unavailable: {e}")
-        _debug_log_file = None
+        _cfg.ensure_private_directory(os.path.dirname(_DEBUG_LOG_PATH))
+        with _cfg.open_private_file(_DEBUG_LOG_PATH, "w"):
+            pass
+    except Exception:
+        pass
+    _debug_log_file = None
 
 
 def _debug_log_write(line):
-    """Write a line to the debug log file (thread-safe)."""
-    if _debug_log_file is None:
-        return
-    try:
-        with _debug_log_lock:
-            ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:12]
-            _debug_log_file.write(f"[{ts}] {line}\n")
-    except Exception:
-        pass
+    """Legacy free-form durable logging is disabled."""
+    return None
 
 class _StdoutTee:
-    """Wrap a stream so writes go to the original AND into the log ring.
-    Buffers partial writes until a newline so ring entries are whole lines."""
+    """Mirror output to the original stream without persisting free-form text."""
 
     def __init__(self, original, is_stderr=False):
         self._orig = original
-        self._buf = ""
         self._is_stderr = is_stderr
 
     def write(self, s):
         try:
             self._orig.write(s)
-        except Exception:
-            pass
-        try:
-            self._buf += s
-            while "\n" in self._buf:
-                line, self._buf = self._buf.split("\n", 1)
-                if self._is_stderr:
-                    _debug_log_write(f"[STDERR] {line}")
-                else:
-                    _log_ring_add(line)
         except Exception:
             pass
 
@@ -100,23 +89,13 @@ class _StdoutTee:
 
 
 def _log_ring_add(line):
-    # global statement removed — writes go to _st.*
-    line = (line or "").rstrip()
-    if not line:
-        return
-    _debug_log_write(line)
-    if len(line) > _LOG_LINE_CAP:
-        line = line[:_LOG_LINE_CAP] + "…"
-    with _st.log_lock:
-        _st.log_seq += 1
-        _st.log_ring.append((_st.log_seq, line))
-        if len(_st.log_ring) > _LOG_RING_MAX:
-            del _st.log_ring[:-_LOG_RING_MAX]
+    """Legacy free-form logging is disabled; use structured telemetry events."""
+    return None
 
 
 
 def _install_log_tee():
-    """Route stdout/stderr through the tee once (idempotent). Also opens the debug log."""
+    """Route stdout/stderr through a non-persisting tee once (idempotent)."""
     _open_debug_log()
     if not isinstance(sys.stdout, _StdoutTee):
         sys.stdout = _StdoutTee(sys.stdout)
@@ -139,27 +118,40 @@ def _telemetry_emit(event, **fields):
     if not _TELEMETRY_ENABLED:
         return
     try:
-        record = {"ts": _to_utc_iso(_utc_now()), "event": str(event)[:48]}
+        event_name = str(event)
+        if re.fullmatch(r"[a-z][a-z0-9_.-]{0,47}", event_name) is None:
+            return
+        record = {"ts": _to_utc_iso(_utc_now()), "event": event_name}
         for k, v in fields.items():
             if isinstance(v, bool) or isinstance(v, (int, float)) or v is None:
                 record[k] = v
-            else:
-                record[k] = _telemetry_clip(v)
+            elif (
+                k in _TELEMETRY_ENUMS and isinstance(v, str)
+                and v in _TELEMETRY_ENUMS[k]
+            ):
+                record[k] = v
+            elif k in ("model", "model_used") and isinstance(v, str) and v:
+                record[k + "_hash"] = hashlib.sha256(
+                    v.encode("utf-8", errors="strict")
+                ).hexdigest()
         with _st.telemetry_lock:
             _st.telemetry_ring.append(record)
             if len(_st.telemetry_ring) > _TELEMETRY_RING_MAX:
                 del _st.telemetry_ring[:-_TELEMETRY_RING_MAX]
             try:
-                os.makedirs(os.path.dirname(_TELEMETRY_PATH), exist_ok=True)
-                if (os.path.isfile(_TELEMETRY_PATH)
-                        and os.path.getsize(_TELEMETRY_PATH) >= _TELEMETRY_MAX_BYTES):
-                    try:
-                        os.replace(_TELEMETRY_PATH, _TELEMETRY_PATH + ".1")
-                    except OSError:
-                        pass
-                with open(_TELEMETRY_PATH, "a", encoding="utf-8") as f:
+                _cfg.ensure_private_directory(os.path.dirname(_TELEMETRY_PATH))
+                try:
+                    with _cfg.open_private_file(_TELEMETRY_PATH, "rb") as existing:
+                        if os.fstat(existing.fileno()).st_size >= _TELEMETRY_MAX_BYTES:
+                            with _cfg.open_private_file(_TELEMETRY_PATH, "w"):
+                                pass
+                except FileNotFoundError:
+                    pass
+                with _cfg.open_private_file(
+                    _TELEMETRY_PATH, "a", encoding="utf-8"
+                ) as f:
                     f.write(json.dumps(record) + "\n")
-            except OSError:
+            except (OSError, RuntimeError):
                 pass
         # Compact stdout mirror for live tailing.
         kv = " ".join(f"{k}={record[k]}" for k in record if k not in ("ts", "event"))

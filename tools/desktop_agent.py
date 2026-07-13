@@ -20,6 +20,7 @@ receipt followed by the same live canonical process receipt.
 """
 
 import os
+import io
 import re
 import json
 import time
@@ -125,6 +126,7 @@ def _new_run(goal, autonomy="pause", postcondition=None):
         "_decision": None,
         "_thread": None,
         "_process_receipts": [],
+        "_launch_consumed": False,
     }
     initialize_run(rec, "desktop", autonomy, postcondition)
     with _runs_lock:
@@ -136,9 +138,7 @@ def latest_screenshot_path(run_id):
     with _runs_lock:
         rec = _runs.get(run_id)
         shot = rec.get("last_screenshot") if rec else None
-    if shot and os.path.isfile(shot):
-        return shot
-    return None
+    return shot if isinstance(shot, str) and shot else None
 
 
 def public_status(run_id):
@@ -161,6 +161,19 @@ def cancel(run_id):
     return cancel_run(rec)
 
 
+def has_active_runs():
+    with _runs_lock:
+        return any(
+            int(rec.get("_bounded_operations", 0)) > 0
+            or (
+                not rec.get("_terminalized")
+                and rec.get("_thread") is not None
+                and rec["_thread"].is_alive()
+            )
+            for rec in _runs.values()
+        )
+
+
 def resolve(run_id, *, gate_id, kind, decision=None, text=None):
     with _runs_lock:
         rec = _runs.get(run_id)
@@ -174,6 +187,8 @@ def resolve(run_id, *, gate_id, kind, decision=None, text=None):
 # ---------------------------------------------------------------------------
 # Vision executor (OpenAI multimodal)
 # ---------------------------------------------------------------------------
+
+_OPENAI_VISION_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 
 def _executor_system(w, h):
     return (
@@ -199,6 +214,31 @@ def _executor_system(w, h):
 
 def _b64_png(data):
     return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+
+def _post_vision_request(requests_module, api_key, payload, *, endpoint=None):
+    target = endpoint or _OPENAI_VISION_ENDPOINT
+    if target != _OPENAI_VISION_ENDPOINT:
+        raise ActionRunValidationError("vision endpoint is not allowed")
+    session = requests_module.Session()
+    session.trust_env = False
+    try:
+        response = session.post(
+            target,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=60,
+            allow_redirects=False,
+            verify=True,
+        )
+    finally:
+        session.close()
+    if 300 <= response.status_code < 400:
+        raise RuntimeError("vision endpoint redirect was blocked")
+    return response
 
 
 def _call_executor(
@@ -233,14 +273,11 @@ def _call_executor(
             ]},
         ],
     }
-    resp = _req.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=60,
-    )
+    resp = _post_vision_request(_req, api_key, payload)
     if resp.status_code != 200:
-        raise RuntimeError(f"vision model {resp.status_code}: {resp.text[:200]}")
+        raise RuntimeError(
+            f"vision model request failed (HTTP {resp.status_code})"
+        )
     raw = resp.json()["choices"][0]["message"]["content"] or ""
     return _parse_action(raw), raw
 
@@ -289,42 +326,25 @@ def _parse_action(raw):
 # ---------------------------------------------------------------------------
 
 def _run_dir(run_id):
+    _bridge_config.ensure_private_directory(_TRAJ_DIR)
     d = os.path.join(_TRAJ_DIR, run_id)
-    os.makedirs(d, mode=0o700, exist_ok=True)
-    os.chmod(d, 0o700)
-    return d
+    return _bridge_config.ensure_private_directory(d)
 
 
 def _scavenge_artifacts(remove_all=False):
     cutoff = datetime.now(timezone.utc).timestamp() - _ARTIFACT_TTL_SECONDS
     try:
-        entries = os.scandir(_TRAJ_DIR)
-    except OSError:
-        return
-    with entries:
-        for entry in entries:
-            try:
-                if (
-                    entry.is_dir(follow_symlinks=False)
-                    and re.fullmatch(r"[0-9a-f]{16}", entry.name)
-                    and (
-                        remove_all
-                        or entry.stat(follow_symlinks=False).st_mtime < cutoff
-                    )
-                ):
-                    shutil.rmtree(entry.path, ignore_errors=True)
-            except OSError:
-                continue
-
-
-_scavenge_artifacts(remove_all=True)
+        return _bridge_config.scavenge_private_directories(
+            _TRAJ_DIR, r"[0-9a-f]{16}", cutoff, remove_all=remove_all
+        )
+    except (OSError, _bridge_config.PrivateStorageError):
+        return 0
 
 
 def _log_step(run_id, record):
     try:
         path = os.path.join(_run_dir(run_id), "trajectory.jsonl")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a") as f:
+        with _bridge_config.open_private_file(path, "a") as f:
             f.write(json.dumps(record) + "\n")
     except Exception:
         print("[DesktopAgent] trajectory write failed")
@@ -332,7 +352,10 @@ def _log_step(run_id, record):
 
 def _schedule_artifact_cleanup(rec):
     def cleanup():
-        shutil.rmtree(os.path.join(_TRAJ_DIR, rec["id"]), ignore_errors=True)
+        try:
+            _bridge_config.remove_private_subdirectory(_TRAJ_DIR, rec["id"])
+        except (FileNotFoundError, OSError, _bridge_config.PrivateStorageError):
+            pass
         with rec["_record_lock"]:
             rec["last_screenshot"] = None
 
@@ -345,9 +368,9 @@ def _record(rec, step, shot_path, subgoal, raw, action, result):
     def private_hash(value):
         return sha256({"salt": rec["_log_salt"], "value": value})
     try:
-        with open(shot_path, "rb") as handle:
+        with _bridge_config.open_private_file(shot_path, "rb") as handle:
             screenshot_hash = sha256(handle.read())
-    except (OSError, TypeError):
+    except (OSError, TypeError, _bridge_config.PrivateStorageError):
         screenshot_hash = ""
     action_view = {
         "kind": action.get("action", "unknown"),
@@ -392,6 +415,13 @@ def _desktop_action_binding(rec, action):
     for field in ("app",):
         if field in action:
             binding[field] = action[field]
+    if kind == "launch_app":
+        binary = _resolve_app_binary(str(action.get("app", "")))
+        with rec["_record_lock"]:
+            launch_available = not rec.get("_launch_consumed", False)
+        binding["binary"] = binary or ""
+        binding["launch_available"] = launch_available
+        binding["target_valid"] = bool(binary and launch_available)
     return binding
 
 
@@ -489,7 +519,7 @@ def _process_start_ticks(pid):
         return None
 
 
-def _launch_app(action):
+def _launch_app(action, binding=None):
     app = str(action.get("app", "")).strip()
     if not app or not re.fullmatch(r"[A-Za-z0-9._+-]{1,64}", app):
         return typed_action_result("rejected", "invalid_app", "Invalid application name.")
@@ -498,6 +528,12 @@ def _launch_app(action):
         return typed_action_result(
             "rejected", "app_not_allowlisted",
             "Application is not installed or is not in the GUI allowlist.",
+        )
+    expected_binary = (binding or {}).get("binary", binary)
+    if expected_binary != binary:
+        return typed_action_result(
+            "rejected", "app_identity_changed",
+            "The approved application identity changed before launch.",
         )
     args = action.get("args", [])
     if not isinstance(args, list) or args:
@@ -543,10 +579,17 @@ def _launch_app(action):
         return typed_action_result("failed", "app_launch_failed", "Application launch failed.")
 
 
-def _execute(gui, action, rec):
+def _execute(gui, action, rec, binding=None):
     kind = action["action"]
     if kind == "launch_app":
-        result = _launch_app(action)
+        with rec["_record_lock"]:
+            if rec.get("_launch_consumed", False):
+                return typed_action_result(
+                    "rejected", "launch_already_consumed",
+                    "This desktop run has already consumed its one launch.",
+                )
+            rec["_launch_consumed"] = True
+        result = _launch_app(action, binding)
         if result["state"] == "executed":
             receipt = result.pop("_launch_receipt", None)
             app = str(action.get("app", "")).strip()
@@ -573,7 +616,7 @@ def _verify_postcondition(rec, step):
             receipts = list(rec.get("_process_receipts", []))
         matched = False
         verified_pid = 0
-        for receipt in receipts:
+        for receipt in receipts if len(receipts) == 1 else ():
             pid = receipt.get("pid")
             binary = receipt.get("binary")
             process = receipt.get("process_handle")
@@ -667,6 +710,7 @@ def _worker(rec, api_key, vision_model, director, max_steps):
     history = rec["steps"]
     subgoal = ""
     try:
+        _bridge_config.ensure_private_directory(_TRAJ_DIR)
         gui = _get_pyautogui()
         w, h = gui.size()
         rec["_screen_size"] = (int(w), int(h))
@@ -703,16 +747,15 @@ def _worker(rec, api_key, vision_model, director, max_steps):
                 break
 
             try:
-                # Pass an explicit path: pyautogui's Linux backend (scrot) writes
-                # its intermediate file to the CURRENT WORKING DIRECTORY when no
-                # filename is given, which fails when cwd is read-only (e.g. an
-                # AppImage mount). Writing straight to the run dir avoids that.
                 shot_path = os.path.join(_run_dir(run_id), f"step_{step:02d}.png")
                 def capture():
-                    gui.screenshot(shot_path)
-                    os.chmod(shot_path, 0o600)
-                    with open(shot_path, "rb") as handle:
-                        return handle.read()
+                    image = gui.screenshot()
+                    buffer = io.BytesIO()
+                    image.save(buffer, format="PNG")
+                    png = buffer.getvalue()
+                    with _bridge_config.open_private_file(shot_path, "xb") as handle:
+                        handle.write(png)
+                    return png
 
                 png = run_bounded_call(rec, capture, timeout_seconds=10)
             except (ActionRunCancelled, ActionRunTimeout):
@@ -792,7 +835,24 @@ def _worker(rec, api_key, vision_model, director, max_steps):
 
             execution_action = action
             effect_lease = False
+            current_binding = None
             if effectful_action(action):
+                if action.get("action") == "launch_app":
+                    with rec["_record_lock"]:
+                        launch_consumed = bool(rec.get("_launch_consumed"))
+                    if launch_consumed:
+                        result = typed_action_result(
+                            "rejected", "launch_already_consumed",
+                            "This desktop run has already consumed its one launch.",
+                        )
+                        _record(
+                            rec, step, shot_path, subgoal, raw, action, result
+                        )
+                        terminalize(
+                            rec, "failed", result["code"], "action_execution",
+                            error=result["summary"],
+                        )
+                        break
                 binding = _desktop_action_binding(rec, action)
                 if not binding.get("target_valid", False):
                     terminalize(
@@ -838,7 +898,9 @@ def _worker(rec, api_key, vision_model, director, max_steps):
                     break
                 effect_lease = True
             try:
-                result = _execute(gui, execution_action, rec)
+                result = _execute(
+                    gui, execution_action, rec, current_binding
+                )
             except Exception:
                 result = typed_action_result(
                     "failed", "action_exception", "The desktop action failed."

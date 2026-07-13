@@ -5,10 +5,10 @@
 # ============================================================
 #
 #  Usage:
-#    sudo ./tools/acp_setup.sh              # Full install + service
-#    sudo ./tools/acp_setup.sh --local      # Local-only (no systemd)
-#    sudo ./tools/acp_setup.sh --status     # Check service status
-#    sudo ./tools/acp_setup.sh --uninstall  # Remove service
+#    ./tools/acp_setup.sh              # Install same-user systemd service
+#    ./tools/acp_setup.sh --local      # Local-only (no systemd)
+#    ./tools/acp_setup.sh --status     # Check service status
+#    ./tools/acp_setup.sh --uninstall  # Remove service
 #
 # ============================================================
 
@@ -19,6 +19,10 @@ BRIDGE_SCRIPT="$SCRIPT_DIR/acp_bridge.py"
 SERVICE_FILE="$SCRIPT_DIR/acp_bridge.service"
 SERVICE_NAME="acp-bridge"
 BRIDGE_PORT=8888
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+EXPECTED_ROOT="$HOME/.eva"
+USER_UNIT_DIR="$HOME/.config/systemd/user"
+INSTALLED_SERVICE="$USER_UNIT_DIR/${SERVICE_NAME}.service"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -144,23 +148,38 @@ install_service() {
         return 1
     fi
 
-    info "Installing systemd service..."
-    cp "$SERVICE_FILE" /etc/systemd/system/${SERVICE_NAME}.service
-    systemctl daemon-reload
-    systemctl enable ${SERVICE_NAME}
-    systemctl start ${SERVICE_NAME}
+    if (( EUID == 0 )); then
+        fail "Do not run the ACP service installer as root or through sudo"
+        echo "    Copilot authentication and Eva private storage must use the same account."
+        return 1
+    fi
+    if [[ "$(readlink -f "$PROJECT_ROOT")" != "$(readlink -m "$EXPECTED_ROOT")" ]]; then
+        fail "Systemd installation requires the canonical app root: $EXPECTED_ROOT"
+        echo "    Install or clone Eva into $EXPECTED_ROOT, then run $EXPECTED_ROOT/tools/acp_setup.sh"
+        return 1
+    fi
+    if [[ ! -x "$EXPECTED_ROOT/tools/acp_setup.sh" || ! -f "$EXPECTED_ROOT/tools/acp_bridge.py" ]]; then
+        fail "Canonical Eva installation is incomplete: $EXPECTED_ROOT"
+        return 1
+    fi
+
+    info "Installing same-user systemd service..."
+    install -d -m 700 "$USER_UNIT_DIR"
+    install -m 600 "$SERVICE_FILE" "$INSTALLED_SERVICE"
+    systemctl --user daemon-reload
+    systemctl --user enable ${SERVICE_NAME}
+    systemctl --user start ${SERVICE_NAME}
 
     sleep 2
-    if systemctl is-active --quiet ${SERVICE_NAME}; then
+    if systemctl --user is-active --quiet ${SERVICE_NAME}; then
         ok "Service ${SERVICE_NAME} is running"
         echo ""
-        echo "    Bridge URL: http://$(hostname -I | awk '{print $1}'):${BRIDGE_PORT}"
+        echo "    Bridge URL: http://localhost:${BRIDGE_PORT}"
         echo "    Health:     curl http://localhost:${BRIDGE_PORT}/health"
-        echo ""
-        echo "    Set this URL in Eva → Settings → Auth → ACP Bridge URL"
+        echo "    This service is for authenticated manual API clients."
     else
         fail "Service failed to start"
-        echo "    Check logs: journalctl -u ${SERVICE_NAME} -n 20"
+        echo "    Re-run with EVA diagnostics or start the bridge manually; the unit intentionally writes no journal output."
         return 1
     fi
 }
@@ -172,9 +191,9 @@ show_status() {
     echo ""
 
     # Check if running as systemd service
-    if systemctl is-active --quiet ${SERVICE_NAME} 2>/dev/null; then
+    if systemctl --user is-active --quiet ${SERVICE_NAME} 2>/dev/null; then
         ok "Systemd service: active"
-        systemctl status ${SERVICE_NAME} --no-pager -l | head -10
+        systemctl --user status ${SERVICE_NAME} --no-pager -l | head -10
     else
         warn "Systemd service: not running"
     fi
@@ -205,10 +224,10 @@ show_status() {
 # --- Uninstall ---
 uninstall_service() {
     info "Removing systemd service..."
-    systemctl stop ${SERVICE_NAME} 2>/dev/null || true
-    systemctl disable ${SERVICE_NAME} 2>/dev/null || true
-    rm -f /etc/systemd/system/${SERVICE_NAME}.service
-    systemctl daemon-reload
+    systemctl --user stop ${SERVICE_NAME} 2>/dev/null || true
+    systemctl --user disable ${SERVICE_NAME} 2>/dev/null || true
+    rm -f "$INSTALLED_SERVICE"
+    systemctl --user daemon-reload
     ok "Service removed"
 }
 
@@ -240,8 +259,7 @@ main() {
             ok "Ready! Start the bridge with:"
             echo "    python3 $BRIDGE_SCRIPT --port $BRIDGE_PORT"
             echo ""
-            echo "    Then set ACP Bridge URL in Eva → Settings → Auth"
-            echo "    to: http://$(hostname -I | awk '{print $1}'):${BRIDGE_PORT}"
+            echo "    Manual API clients must provide EVA_BRIDGE_TOKEN."
             exit 0
             ;;
     esac
@@ -262,11 +280,10 @@ main() {
     ok "Setup complete!"
     echo ""
     echo "  Useful commands:"
-    echo "    sudo systemctl status ${SERVICE_NAME}    # Check status"
-    echo "    sudo systemctl restart ${SERVICE_NAME}   # Restart"
-    echo "    sudo journalctl -u ${SERVICE_NAME} -f    # Follow logs"
-    echo "    sudo $0 --status                         # Quick status"
-    echo "    sudo $0 --uninstall                      # Remove"
+    echo "    systemctl --user status ${SERVICE_NAME}    # Check status"
+    echo "    systemctl --user restart ${SERVICE_NAME}   # Restart"
+    echo "    $0 --status                               # Quick status"
+    echo "    $0 --uninstall                            # Remove"
     echo ""
 }
 
