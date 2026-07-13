@@ -481,10 +481,10 @@ class KustoMCPServer:
 
     def handle_tool(self, name, args):
         """Route tool call to the appropriate handler."""
-        if not HAS_AZURE:
-            return "Error: azure-identity package not installed. Run: pip install azure-identity requests"
         if name in ("kusto_query", "kusto_ingest_inline"):
             return "Error: generic KQL is disabled; use a fixed read-only tool."
+        if not HAS_AZURE:
+            return "Error: azure-identity package not installed. Run: pip install azure-identity requests"
 
         try:
             args = validate_fixed_tool_arguments(name, args)

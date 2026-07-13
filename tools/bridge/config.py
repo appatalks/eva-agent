@@ -190,12 +190,19 @@ def _open_private_directory(path, *, create=True):
     try:
         for component in [part for part in target.split(os.path.sep) if part]:
             try:
-                child = os.open(component, flags, dir_fd=descriptor)
+                # codeql[py/path-injection]: each component is opened beneath
+                # a pinned directory descriptor with O_NOFOLLOW; separators
+                # and parent traversal cannot escape that descriptor.
+                child = os.open(component, flags, dir_fd=descriptor)  # codeql[py/path-injection]
             except FileNotFoundError:
                 if not create:
                     raise
-                os.mkdir(component, 0o700, dir_fd=descriptor)
-                child = os.open(component, flags, dir_fd=descriptor)
+                # codeql[py/path-injection]: descriptor-relative creation uses
+                # the same pinned O_NOFOLLOW parent as the open above.
+                os.mkdir(component, 0o700, dir_fd=descriptor)  # codeql[py/path-injection]
+                # codeql[py/path-injection]: descriptor-relative traversal is
+                # pinned to the verified parent descriptor.
+                child = os.open(component, flags, dir_fd=descriptor)  # codeql[py/path-injection]
                 os.fchmod(child, 0o700)
             except OSError as exc:
                 raise PrivateStorageError(
@@ -496,7 +503,9 @@ def detach_private_subdirectory(root, name, prefix=".revoked-"):
     quarantine = prefix + secrets.token_hex(16)
     try:
         try:
-            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            # codeql[py/path-injection]: `name` has the bounded component
+            # grammar above and is resolved only below `root_fd`.
+            info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)  # codeql[py/path-injection]
         except FileNotFoundError:
             return display, None
         if (
@@ -504,7 +513,9 @@ def detach_private_subdirectory(root, name, prefix=".revoked-"):
             or hasattr(os, "getuid") and info.st_uid != os.getuid()
         ):
             raise PrivateStorageError("private detachment target is unsafe")
-        os.rename(name, quarantine, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        # codeql[py/path-injection]: both names are bounded single path
+        # components and this is an atomic rename below the pinned root fd.
+        os.rename(name, quarantine, src_dir_fd=root_fd, dst_dir_fd=root_fd)  # codeql[py/path-injection]
         os.fsync(root_fd)
         return display, quarantine
     finally:
@@ -666,22 +677,30 @@ class _AtomicPrivateFile:
                 self._handle.close()
             if commit:
                 if self._exclusive:
-                    os.link(
+                    # codeql[py/path-injection]: both names were generated or
+                    # basename-validated and stay below the pinned parent fd.
+                    os.link(  # codeql[py/path-injection]
                         self._temp_name, self._final_name,
                         src_dir_fd=self._parent_fd,
                         dst_dir_fd=self._parent_fd,
                         follow_symlinks=False,
                     )
                     published_exclusive = True
-                    os.unlink(self._temp_name, dir_fd=self._parent_fd)
+                    # codeql[py/path-injection]: generated temporary name is
+                    # resolved beneath the pinned parent descriptor.
+                    os.unlink(self._temp_name, dir_fd=self._parent_fd)  # codeql[py/path-injection]
                 else:
-                    os.replace(
+                    # codeql[py/path-injection]: atomic replacement is wholly
+                    # descriptor-relative below the pinned private directory.
+                    os.replace(  # codeql[py/path-injection]
                         self._temp_name, self._final_name,
                         src_dir_fd=self._parent_fd, dst_dir_fd=self._parent_fd,
                     )
                 os.fsync(self._parent_fd)
             else:
-                os.unlink(self._temp_name, dir_fd=self._parent_fd)
+                # codeql[py/path-injection]: generated temporary name remains
+                # below the pinned parent descriptor.
+                os.unlink(self._temp_name, dir_fd=self._parent_fd)  # codeql[py/path-injection]
         except Exception:
             try:
                 if not self._handle.closed:
@@ -690,11 +709,15 @@ class _AtomicPrivateFile:
                 pass
             if published_exclusive:
                 try:
-                    os.unlink(self._final_name, dir_fd=self._parent_fd)
+                    # codeql[py/path-injection]: basename-validated final name
+                    # is resolved only below the pinned parent descriptor.
+                    os.unlink(self._final_name, dir_fd=self._parent_fd)  # codeql[py/path-injection]
                 except OSError:
                     pass
             try:
-                os.unlink(self._temp_name, dir_fd=self._parent_fd)
+                # codeql[py/path-injection]: generated temporary name remains
+                # below the pinned parent descriptor.
+                os.unlink(self._temp_name, dir_fd=self._parent_fd)  # codeql[py/path-injection]
             except OSError:
                 pass
             raise
@@ -751,7 +774,9 @@ def open_private_file(path, mode, *, encoding=None, buffering=-1):
     name = os.path.basename(target)
     try:
         try:
-            existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            # codeql[py/path-injection]: `name` is os.path.basename(target)
+            # and is opened only beneath the descriptor-safe parent fd.
+            existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)  # codeql[py/path-injection]
         except FileNotFoundError:
             existing = None
         if existing is not None:
@@ -769,7 +794,9 @@ def open_private_file(path, mode, *, encoding=None, buffering=-1):
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
             if hasattr(os, "O_CLOEXEC"):
                 flags |= os.O_CLOEXEC
-            descriptor = os.open(temp_name, flags, 0o600, dir_fd=parent_fd)
+            # codeql[py/path-injection]: generated temporary name is a single
+            # component beneath the descriptor-pinned parent directory.
+            descriptor = os.open(temp_name, flags, 0o600, dir_fd=parent_fd)  # codeql[py/path-injection]
             os.fchmod(descriptor, 0o600)
             fdopen_mode = "wb" if "b" in mode else "w"
             if "b" in mode:
@@ -797,7 +824,9 @@ def open_private_file(path, mode, *, encoding=None, buffering=-1):
         flags |= os.O_NOFOLLOW
         if hasattr(os, "O_CLOEXEC"):
             flags |= os.O_CLOEXEC
-        descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
+        # codeql[py/path-injection]: basename-only name is resolved below the
+        # descriptor-pinned parent and O_NOFOLLOW rejects a final symlink.
+        descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)  # codeql[py/path-injection]
     except Exception:
         os.close(parent_fd)
         raise

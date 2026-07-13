@@ -120,7 +120,10 @@ function recordTrustedArtifact(record, expectedEpoch, expectedGeneration) {
     artifact_id: artifactId, digest: digest, created_at: Date.now(),
     generation: generation, size: size
   });
-  localStorage.setItem(SESSION_ARTIFACTS_KEY, JSON.stringify(rows.slice(-32)));
+  // codeql[js/clear-text-storage]: this bounded registry contains only
+  // validated public metadata and digests, never artifact bytes, credentials,
+  // or bearer capabilities. The bridge independently revalidates every field.
+  localStorage.setItem(SESSION_ARTIFACTS_KEY, JSON.stringify(rows.slice(-32))); // codeql[js/clear-text-storage]
   return true;
 }
 

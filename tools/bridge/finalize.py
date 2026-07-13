@@ -13,6 +13,22 @@ from bridge.sensitive import (
 _ARTIFACT_SESSION_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
+_MEDIA_TOKEN_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$&^_.+-"
+)
+
+
+def _is_valid_media_type(value):
+    """Validate a bounded HTTP media type without a regex over request data."""
+    if not isinstance(value, str) or not 3 <= len(value) <= 128:
+        return False
+    slash = value.find("/")
+    if slash <= 0 or slash == len(value) - 1 or value.find("/", slash + 1) != -1:
+        return False
+    return (
+        all(char in _MEDIA_TOKEN_CHARS for char in value[:slash])
+        and all(char in _MEDIA_TOKEN_CHARS for char in value[slash + 1:])
+    )
 
 
 def _normalize_action_receipts(value):
@@ -43,11 +59,7 @@ def _normalize_action_receipts(value):
             not isinstance(artifact["filename"], str)
             or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", artifact["filename"]) is None
             or not isinstance(artifact["mime"], str)
-            or len(artifact["mime"]) > 128
-            or re.fullmatch(
-                r"[A-Za-z0-9!#$&^_.+\-]+/[A-Za-z0-9!#$&^_.+\-]+",
-                artifact["mime"],
-            ) is None
+            or not _is_valid_media_type(artifact["mime"])
             or not isinstance(artifact["session_id"], str)
             or _ARTIFACT_SESSION_RE.fullmatch(artifact["session_id"]) is None
             or not isinstance(artifact["artifact_id"], str)

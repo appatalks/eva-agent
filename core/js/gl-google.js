@@ -7,10 +7,9 @@ function _geminiInputText(element) {
     if (!element) return '';
     if (typeof element.innerText === 'string') return element.innerText.trim();
     if (typeof element.textContent === 'string') return element.textContent.trim();
-    return String(element.innerHTML || '')
-        .replace(/<br\s*\/?\s*>/gi, '\n')
-        .replace(/<[^>]+>/g, '')
-        .trim();
+    // This is a contenteditable field in supported runtimes. Do not parse
+    // `innerHTML` as a fallback: markup is untrusted input, not text.
+    return '';
 }
 
 function _geminiAppendText(output, className, label, text) {

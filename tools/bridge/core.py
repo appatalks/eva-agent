@@ -822,7 +822,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _cors_headers(self):
         allowed_origin = self._allowed_cors_origin(self.headers.get("Origin", ""))
         if allowed_origin is not None:
-            self.send_header("Access-Control-Allow-Origin", allowed_origin)
+            # codeql[py/http-response-splitting]: value is rebuilt from a
+            # parsed serialized origin or an operator-owned allowlist before
+            # reaching this header; CR/LF and all path/query data are rejected.
+            self.send_header("Access-Control-Allow-Origin", allowed_origin)  # codeql[py/http-response-splitting]
         # Else: do not set ACAO at all (browser blocks the response).
         self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
@@ -5852,9 +5855,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Eva-Camera-Contract", "eva.camera-capture/1")
-            self.send_header("X-Eva-Camera-Capture-Id", capture_id)
+            # codeql[py/http-response-splitting]: capture_id is a server-side
+            # UUID-like token minted after native authorization, never request
+            # header text.
+            self.send_header("X-Eva-Camera-Capture-Id", capture_id)  # codeql[py/http-response-splitting]
             self.send_header("X-Eva-Camera-Frame-Seq", str(frame_seq))
-            self.send_header("X-Eva-Camera-Question-Hash", capture["question_hash"])
+            # codeql[py/http-response-splitting]: question_hash is a fixed
+            # SHA-256 digest computed server-side from canonical text.
+            self.send_header("X-Eva-Camera-Question-Hash", capture["question_hash"])  # codeql[py/http-response-splitting]
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

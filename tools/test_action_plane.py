@@ -4064,7 +4064,7 @@ const store={openLLMessages:JSON.stringify([
 {role:'assistant',content:'prior'}
 ])};
 global.localStorage={getItem:key=>store[key]||null,setItem:(key,value)=>{store[key]=String(value)}};
-const elements={txtMsg:{innerHTML:'open my report',focus:()=>{}},
+const elements={txtMsg:{innerHTML:'open my report',innerText:'open my report',focus:()=>{}},
 txtOutput:{innerHTML:'',scrollTop:0,scrollHeight:0},autoSpeak:{checked:false}};
 global.document={getElementById:id=>elements[id]||null};global.txtMsg=elements.txtMsg;
 global.captureRequestEnvelope=()=>({session_id:'11111111-1111-4111-8111-111111111111',
@@ -5472,14 +5472,35 @@ process.stdout.write(JSON.stringify({rejected,unknown:Object.keys(unknown),
                     self.assertEqual(json.load(handle), projection)
                 client._cleanup_isolated_runtime()
 
-            resolved = acp_client._resolve_and_preflight_copilot(
-                "/usr/bin/copilot"
+            # CI hosts do not install Copilot CLI. Exercise preflight behavior
+            # with a controlled executable path rather than relying on a host
+            # installation outside this repository.
+            fake_cli = os.path.join(source_home, "copilot")
+            with open(fake_cli, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nexit 0\n")
+            os.chmod(fake_cli, 0o700)
+            preflight_result = types.SimpleNamespace(
+                returncode=0, stdout="1.2.3\n", stderr=""
             )
-            self.assertRegex(
-                resolved,
-                r"/\.copilot/pkg/(?:linux|darwin)-(?:x64|arm64)/"
-                r"[0-9.]+-[0-9]+/index\.js$",
+            help_result = types.SimpleNamespace(
+                returncode=0,
+                stdout="\n".join(acp_client._COPILOT_REQUIRED_FLAGS),
+                stderr="",
             )
+            with mock.patch.object(
+                acp_client, "_trusted_executable", return_value=fake_cli
+            ) as trusted, mock.patch.object(
+                acp_client, "_platform_copilot_candidate", return_value=fake_cli
+            ), mock.patch.object(
+                acp_client.subprocess, "run",
+                side_effect=[preflight_result, help_result, preflight_result],
+            ) as run:
+                resolved = acp_client._resolve_and_preflight_copilot(
+                    "/usr/bin/copilot"
+                )
+            self.assertEqual(resolved, fake_cli)
+            self.assertEqual(trusted.call_count, 2)
+            self.assertEqual(run.call_count, 3)
 
             os.chmod(source_path, 0o644)
             with self.assertRaises(RuntimeError):
