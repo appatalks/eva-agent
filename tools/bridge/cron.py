@@ -3,8 +3,6 @@
 import datetime
 import json
 import os
-import threading
-import time
 import uuid
 from bridge import config as _cfg
 from bridge import state as _st
@@ -15,17 +13,22 @@ _NOTIFY_RING_MAX = _cfg.NOTIFY_RING_MAX
 def _load_cron_tasks():
     # global statement removed — writes go to _st.*
     try:
-        with open(_CRON_TASKS_PATH, "r") as f:
+        with _cfg.open_private_file(_CRON_TASKS_PATH, "r") as f:
             _st.cron_tasks = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, OSError, json.JSONDecodeError, _cfg.PrivateStorageError):
         _st.cron_tasks = []
 
 
 
 def _save_cron_tasks():
-    os.makedirs(os.path.dirname(_CRON_TASKS_PATH), exist_ok=True)
-    with open(_CRON_TASKS_PATH, "w") as f:
-        json.dump(_st.cron_tasks, f, indent=2)
+    try:
+        _cfg.ensure_private_directory(os.path.dirname(_CRON_TASKS_PATH))
+        with _cfg.open_private_file(_CRON_TASKS_PATH, "w") as f:
+            json.dump(_st.cron_tasks, f, indent=2)
+        return True
+    except (OSError, TypeError, _cfg.PrivateStorageError) as exc:
+        print(f"[Cron] Could not persist tasks: {exc}")
+        return False
 
 
 
@@ -132,9 +135,13 @@ def _cron_tick():
         except Exception as e:
             print(f"[Cron] Error running {label}: {e}")
         with _st.cron_lock:
+            prior_last = task.get("last_run", "")
+            prior_next = task.get("next_run", "")
             task["last_run"] = now_iso
             task["next_run"] = _cron_next_run(task.get("schedule", ""), now)
-            _save_cron_tasks()
+            if not _save_cron_tasks():
+                task["last_run"] = prior_last
+                task["next_run"] = prior_next
 
 
 

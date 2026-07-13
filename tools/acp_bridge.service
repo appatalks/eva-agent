@@ -5,16 +5,15 @@ After=network.target
 
 [Service]
 Type=simple
-User=www-data
-Group=www-data
-WorkingDirectory=/usr/share/nginx/html/eva.hoshisato.com/public_html
-ExecStart=/usr/bin/python3 /usr/share/nginx/html/eva.hoshisato.com/public_html/tools/acp_bridge.py --port 8888
+WorkingDirectory=%h/.eva
+ExecStart=/usr/bin/env python3 %h/.eva/tools/acp_bridge.py --bind 127.0.0.1 --port 8888
 Restart=on-failure
 RestartSec=10
-StandardOutput=journal
-StandardError=journal
+StandardOutput=null
+StandardError=null
 SyslogIdentifier=acp-bridge
-Environment=HOME=/var/www
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

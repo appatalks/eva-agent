@@ -35,7 +35,7 @@ This project is a simple web UI for interacting with OpenAI, Google Generative m
 - **Prompts**: Personality presets and editable system/developer prompt textarea. `getSystemPrompt()` returns the textarea value.
 
 ## OpenAI Models
-- Endpoint: `POST https://api.openai.com/v1/chat/completions` (XMLHttpRequest is currently used).
+- Endpoint: `POST https://api.openai.com/v1/chat/completions` through Electron main's authenticated process-global provider lease and bounded direct-TLS broker.
 - Required headers: `Authorization: Bearer ${OPENAI_API_KEY}`, `Content-Type: application/json`.
 - Base payload: `{ model, messages, max_completion_tokens, temperature, frequency_penalty, presence_penalty, stop }`.
 - Special cases:

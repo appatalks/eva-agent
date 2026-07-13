@@ -33,7 +33,8 @@
     confirmKey: null,          // de-dupes the confirm callback per park
     onProgress: null,          // fired when the agent's plan/subgoal changes
     lastProgress: null,        // last subgoal narrated, to avoid repeats
-    generation: 0
+    generation: 0,
+    launching: false
   };
 
   // --- Bridge helpers -------------------------------------------------------
@@ -150,6 +151,17 @@
     error: 'error'
   };
 
+  function inertSecondaryText(value) {
+    if (typeof canonicalizeEvaResponse === 'function') {
+      return canonicalizeEvaResponse(value, {
+        allowCamera: false, allowAgentControls: false
+      }).text;
+    }
+    var source = String(value || '');
+    var first = source.search(/\[\[\/?EVA_/);
+    return (first < 0 ? source : source.slice(0, first)).trim();
+  }
+
   function render(status) {
     if (!status) return;
     _state.status = status;
@@ -182,15 +194,26 @@
     if (stepEl) stepEl.textContent = status.step != null ? ('step ' + status.step) : '';
 
     var subEl = document.getElementById('ebpSubgoal');
-    if (subEl) subEl.textContent = status.subgoal ? ('Plan: ' + status.subgoal) : '';
+    if (subEl) {
+      var safeSubgoal = inertSecondaryText(status.subgoal);
+      subEl.textContent = safeSubgoal ? ('Plan: ' + safeSubgoal) : '';
+    }
 
     var urlEl = document.getElementById('ebpUrl');
     if (urlEl) urlEl.textContent = status.title || status.url || status.active_app || status.screen || '';
 
     var badge = document.getElementById('ebpBadge');
     if (badge) {
-      badge.textContent = BADGE_LABELS[status.status] || status.status;
-      badge.setAttribute('data-state', status.status);
+      var outcomeState = (typeof EvaActionOutcomes !== 'undefined')
+        ? EvaActionOutcomes.displayState(status)
+        : (status.outcome && status.outcome.state);
+      var label = outcomeState === 'succeeded' ? 'verified'
+        : outcomeState === 'indeterminate' ? 'unverified'
+        : outcomeState === 'aborted' ? 'stopped'
+        : outcomeState === 'failed' ? 'failed'
+        : (BADGE_LABELS[status.status] || status.status);
+      badge.textContent = label;
+      badge.setAttribute('data-state', outcomeState || status.status);
     }
 
     refreshShot(status);
@@ -246,10 +269,10 @@
     var txt = document.getElementById('vvVisionText');
     if (txt) {
       var line = '[' + (_state.title || 'Agent') + ']';
-      if (status.subgoal) line += '\n' + status.subgoal;
+      if (status.subgoal) line += '\n' + inertSecondaryText(status.subgoal);
       else if (status.url || status.title) line += '\n' + (status.title || status.url);
-      if (terminal && status.result) line += '\n' + status.result;
-      else if (terminal && status.error) line += '\nError: ' + status.error;
+      if (terminal && status.result) line += '\n' + inertSecondaryText(status.result);
+      else if (terminal && status.error) line += '\nError: ' + inertSecondaryText(status.error);
       txt.textContent = line;
     }
     if (terminal) {
@@ -264,12 +287,14 @@
 
   // Build a natural, spoken-style question for a parked confirmation/input.
   function _buildConfirmQuestion(status) {
-    if (status.status === 'awaiting_input') {
-      return status.pending_question || 'I need a bit more information to continue. What should I do?';
+    var request = status.approval_request || {};
+    if (request.kind === 'input') {
+      return String(request.description || '').trim() ||
+        'I need a bit more information to continue. What should I do?';
     }
-    var act = status.pending_action || {};
-    var reason = act.reason || act.text || act.action || 'complete this purchase';
-    return 'I\'m at the final step to ' + reason + '. Do you want me to confirm and place the order? Say yes to go ahead or no to stop.';
+    var description = String(request.description || '').trim() ||
+      'Exact effect details are unavailable.';
+    return description + '\nApprove only this exact effect? Say yes to continue or no to stop.';
   }
 
   // Fire the confirmation callback once per park so Eva asks in chat/voice
@@ -278,11 +303,12 @@
   function maybeFireConfirm(status) {
     var parked = (status.status === 'awaiting_confirmation' || status.status === 'awaiting_input');
     if (!parked) { _state.confirmKey = null; return; }
-    var key = status.status + ':' + (status.step != null ? status.step : '') + ':' + (status.id || '');
+    var gate = status.approval_request || {};
+    var key = gate.gate_id || (status.status + ':' + (status.step != null ? status.step : '') + ':' + (status.id || ''));
     if (_state.confirmKey === key) return;   // already asked for this park
     _state.confirmKey = key;
     var question = _buildConfirmQuestion(status);
-    var needsText = (status.status === 'awaiting_input');
+    var needsText = (gate.kind === 'input');
     if (typeof _state.onConfirm === 'function') {
       try { _state.onConfirm(question, needsText, status); } catch (e) {}
     }
@@ -293,7 +319,7 @@
   // (the director sets a new subgoal every few steps).
   function maybeFireProgress(status) {
     if (typeof _state.onProgress !== 'function') return;
-    var sub = (status && status.subgoal) ? String(status.subgoal).trim() : '';
+    var sub = inertSecondaryText(status && status.subgoal);
     if (!sub) return;
     // Skip while parked (the confirm/ask already speaks) or terminal.
     if (status.status === 'awaiting_confirmation' || status.status === 'awaiting_input') return;
@@ -388,10 +414,10 @@
       stop.onclick = closePopup;
       if (status.result) {
         var sub = document.getElementById('ebpSubgoal');
-        if (sub) sub.textContent = status.result;
+        if (sub) sub.textContent = inertSecondaryText(status.result);
       } else if (status.error) {
         var subE = document.getElementById('ebpSubgoal');
-        if (subE) subE.textContent = 'Error: ' + status.error;
+        if (subE) subE.textContent = 'Error: ' + inertSecondaryText(status.error);
       }
     } else {
       stop.textContent = 'Stop';
@@ -412,9 +438,26 @@
   // --- Network actions ------------------------------------------------------
 
   async function launch(goal, opts) {
+    if (_state.launching) {
+      setChatStatus('error', 'Another agent launch is already awaiting authorization.');
+      return false;
+    }
+    _state.launching = true;
+    try {
+      return await _launchReserved(goal, opts);
+    } finally {
+      _state.launching = false;
+    }
+  }
+
+  async function _launchReserved(goal, opts) {
     opts = opts || {};
     goal = (goal || '').trim();
-    cancelActiveRun(); // cancel/detach known or pending prior launch
+    if (_state.runId && !(await _stopAndWaitActiveRun())) {
+      setChatStatus('error', 'The prior agent run is still finishing an action. Try again after it stops.');
+      return;
+    }
+    await cancelActiveRun();
     var launchGeneration = _state.generation;
     var launchBase = bridgeBase();
     var launchEndpoint = opts.endpoint || '/v1/browser';
@@ -441,15 +484,50 @@
     _applyTitle();
     render({ id: '', goal: goal, status: 'starting', step: 0 });
 
-    var body = {
+    var specification = {
       goal: goal,
-      openai_api_key: key,
       autonomy: opts.autonomy || 'pause',
       use_director: opts.use_director !== false
     };
-    if (opts.start_url) body.start_url = opts.start_url;
-    if (opts.vision_model) body.vision_model = opts.vision_model;
-    if (opts.max_steps) body.max_steps = opts.max_steps;
+    if (opts.start_url) specification.start_url = opts.start_url;
+    if (opts.vision_model) specification.vision_model = opts.vision_model;
+    if (opts.max_steps !== undefined) specification.max_steps = opts.max_steps;
+    if (opts.postcondition) specification.postcondition = opts.postcondition;
+    if (opts.headless !== undefined) specification.headless = opts.headless === true;
+
+    var standalone = global.evaStandalone;
+    if (!standalone || typeof standalone.authorizeAgentLaunch !== 'function') {
+      setChatStatus('error', _state.title + ' requires trusted standalone launch authorization.');
+      render({ id: '', goal: goal, status: 'error', error: 'Trusted launch authorization unavailable.' });
+      return;
+    }
+    var authorization;
+    try {
+      authorization = await standalone.authorizeAgentLaunch(
+        launchEndpoint === '/v1/desktop' ? 'desktop' : 'browser', specification
+      );
+    } catch (_) {
+      authorization = null;
+    }
+    if (
+      launchGeneration !== _state.generation
+      || !authorization || authorization.authorized !== true
+      || typeof authorization.capability !== 'string'
+      || !authorization.specification
+      || typeof authorization.specification !== 'object'
+    ) {
+      setChatStatus('info', _state.title + ' launch was not authorized.');
+      render({
+        id: '', goal: goal, status: 'cancelled',
+        outcome: { state: 'aborted', reason: 'launch_not_authorized' },
+        result: 'The user did not authorize this agent run.'
+      });
+      return;
+    }
+    var body = Object.assign({}, authorization.specification, {
+      openai_api_key: key,
+      launch_capability: authorization.capability
+    });
 
     try {
       var resp = await fetch(launchBase + launchEndpoint + '/run', {
@@ -540,18 +618,40 @@
     }
   }
 
-  async function confirmRun(approve, text) {
+  async function confirmRun(approve, text, expectedGateId) {
     if (!_state.runId) return;
+    if (typeof approve !== 'boolean') {
+      setChatStatus('error', _state.title + ': invalid approval decision; no action was approved.');
+      return;
+    }
     var confirmGeneration = _state.generation;
     var confirmRunId = _state.runId;
     var confirmBase = _state.base;
     var confirmEndpoint = _state.endpoint;
+    var gate = (_state.status && _state.status.approval_request) || null;
+    if (!gate || !gate.gate_id || !gate.kind) {
+      setChatStatus('error', _state.title + ': approval gate is stale.');
+      return;
+    }
+    if (expectedGateId && gate.gate_id !== expectedGateId) {
+      setChatStatus('error', _state.title + ': approval gate changed; no action was approved.');
+      return;
+    }
+    var body = gate.kind === 'input'
+      ? (approve === false
+          ? { run_id: confirmRunId, gate_id: gate.gate_id, kind: 'input', decision: 'cancel' }
+          : { run_id: confirmRunId, gate_id: gate.gate_id, kind: 'input', text: text || '' })
+      : {
+          run_id: confirmRunId, gate_id: gate.gate_id, kind: 'approval',
+          decision: approve === true ? 'approve' : 'deny'
+        };
     try {
-      await fetch(confirmBase + confirmEndpoint + '/confirm', {
+      var resp = await fetch(confirmBase + confirmEndpoint + '/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ run_id: confirmRunId, approve: approve, text: text || '' })
+        body: JSON.stringify(body)
       });
+      if (!resp.ok) throw new Error('approval ' + resp.status);
       if (confirmGeneration !== _state.generation || confirmRunId !== _state.runId) return;
       // optimistic: hide the prompt until next poll
       var wrap = document.getElementById('ebpPrompt');
@@ -581,6 +681,35 @@
       if (stopGeneration !== _state.generation || stopRunId !== _state.runId) return;
       closePopup();
     }
+  }
+
+  async function _stopAndWaitActiveRun() {
+    if (!_state.runId) return true;
+    var runId = _state.runId;
+    var base = _state.base || bridgeBase();
+    var endpoint = _state.endpoint;
+    stopPolling();
+    try {
+      await fetch(base + endpoint + '/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ run_id: runId })
+      });
+      for (var attempt = 0; attempt < 80; attempt += 1) {
+        var response = await fetch(base + endpoint + '/status?run_id=' +
+          encodeURIComponent(runId), { cache: 'no-store' });
+        if (response.ok) {
+          var status = await response.json();
+          if (_state.runId === runId) render(status);
+          if (status.status === 'done' || status.status === 'cancelled' || status.status === 'error') {
+            return true;
+          }
+        }
+        await new Promise(function(resolve) { setTimeout(resolve, 250); });
+      }
+    } catch (_) {}
+    if (_state.runId === runId) startPolling();
+    return false;
   }
 
   function _cancelRemoteRun(base, endpoint, runId) {
@@ -642,9 +771,13 @@
   // Answer a parked confirmation. approve=true continues (placing the order /
   // submitting input); approve=false stops. text carries free-form input when
   // the park was an input request.
-  function answerConfirm(approve, text) {
+  function answerConfirm(approve, text, gateId) {
     if (!_state.runId) return;
-    confirmRun(!!approve, text || '');
+    if (typeof approve !== 'boolean') {
+      setChatStatus('error', _state.title + ': invalid approval decision; no action was approved.');
+      return;
+    }
+    confirmRun(approve, text || '', gateId || '');
   }
 
   global.EvaBrowser = {

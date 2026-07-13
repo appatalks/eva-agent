@@ -174,15 +174,24 @@ def _set_background_activity(row, error_text=""):
 
 
 def _record_background_activity(cluster, database, tick_id, started_at, ended_at, status, proposal_count, token_estimate, notes, job_type=_BG_JOB_TYPE):
+    allowed_statuses = {
+        "completed", "failed", "paused", "skipped", "running", "ok",
+    }
+    safe_status = status if status in allowed_statuses else "failed"
+    safe_job_type = job_type if job_type in _BG_JOBS_ENABLED else _BG_JOB_TYPE
+    note_code = {
+        "completed": "completed", "ok": "completed", "failed": "failed",
+        "paused": "user_active", "skipped": "skipped", "running": "running",
+    }.get(safe_status, "failed")
     row = {
         "TickId": tick_id,
         "StartedAt": _to_utc_iso(started_at),
         "EndedAt": _to_utc_iso(ended_at),
-        "JobType": job_type,
-        "Status": status,
+        "JobType": safe_job_type,
+        "Status": safe_status,
         "ProposalCount": int(proposal_count or 0),
         "TokenEstimate": int(token_estimate or 0),
-        "Notes": str(notes or "")[:500],
+        "Notes": note_code,
     }
     wrote = False
     backend = _resolve_memory_backend()
@@ -194,18 +203,18 @@ def _record_background_activity(cluster, database, tick_id, started_at, ended_at
             event_type="background.activity_recorded", payload=row,
             actor_type="background", actor_id="eva-background", origin="background",
             trust=1.0, sensitivity="normal", consent_scope="local_only",
-            idempotency_key=f"background-activity:{tick_id}:{status}:{row['EndedAt']}",
+            idempotency_key=f"background-activity:{tick_id}:{safe_status}:{row['EndedAt']}",
             legacy_table="BackgroundActivity", legacy_columns=_BG_ACTIVITY_COLUMNS,
             legacy_row=row, projection_name="background_activity",
         )
         wrote = True
-    except Exception as exc:
-        print(f"[Background] Activity event mutation failed: {exc}")
+    except Exception:
+        print("[Background] Activity event mutation failed")
     if wrote and backend == "kusto" and cluster and database and _st.kusto_token_cache:
         wrote = _kusto_ingest_direct(cluster, database, "BackgroundActivity", _BG_ACTIVITY_COLUMNS, [row])
-    error_text = row["Notes"] if status == "failed" else ""
-    if status == "failed" and not wrote:
-        error_text = (error_text + "; activity write failed").strip("; ")
+    error_text = "failed" if safe_status == "failed" else ""
+    if safe_status == "failed" and not wrote:
+        error_text = "activity_write_failed"
     _set_background_activity(row, error_text)
     return wrote
 
@@ -471,7 +480,7 @@ def _create_background_proposal_row(job_type, target_table, payload, window_star
         "Status": status,
         "SourceWindowStart": _to_utc_iso(window_start),
         "SourceWindowEnd": _to_utc_iso(window_end),
-        "Notes": str(notes or "")[:500],
+        "Notes": "applying" if status == "applying" else "generated",
         "ReviewedAt": "",
         "ReviewedBy": "",
     }
@@ -1231,26 +1240,11 @@ def _job_alert_watch(ctx):
         }
         fired += 1
         salience = _alert_salience(rule, body)
-        proposals.append({
-            "target_table": "Reflections",
-            "payload": {
-                "Timestamp": ctx["now_iso"],
-                "Trigger": "alert_watch:" + str(rule.get("id", "")),
-                "Observation": (f"Alert '{rule.get('label', '')}':\n" + body)[:1000],
-                "ActionTaken": "",
-                "Effectiveness": 0.0,
-            },
-            "auto_apply": True,
-            "notes": "alert " + _alert_clip(rule.get("label"), 40),
-            "notify": {
-                "title": _alert_clip(rule.get("label"), 80) or "Eva alert",
-                "body": body[:1200],
-                "source": "alert_watch:" + str(rule.get("id", "")),
-                "salience": salience,
-                "channels": rule.get("channels") or ["chat"],
-                "settings": settings,
-            },
-        })
+        _notify_enqueue(
+            _alert_clip(rule.get("label"), 80) or "Eva alert",
+            body[:1200], "alert_watch", salience,
+            rule.get("channels") or ["chat"], settings=settings,
+        )
 
     if pending_updates:
         # Merge the fired-rule bookkeeping back under the lock against a fresh
@@ -1262,7 +1256,8 @@ def _job_alert_watch(ctx):
                 if upd:
                     r["last_fired_iso"] = upd["last_fired_iso"]
                     r["last_hash"] = upd["last_hash"]
-            _save_alerts(fresh)
+            if not _save_alerts(fresh):
+                return [], "alert storage unavailable; no proposals published"
     if not proposals:
         note = "; ".join(notes) if notes else (f"checked {checked}, none triggered" if checked else "no rules due")
         return [], note
@@ -1402,7 +1397,7 @@ def _run_background_tick(trigger="scheduled"):
                     if apply_ok:
                         applied += 1
                         row["Status"] = "applied"
-                        row["Notes"] = (notes + "; auto-applied (" + apply_note + ")")[:500]
+                        row["Notes"] = "auto_applied"
                         # Surface findings the job flagged for the user (alert rules,
                         # proactive briefings). Restraint + dedup live in _notify_enqueue.
                         notify = proposal.get("notify")
@@ -1422,7 +1417,7 @@ def _run_background_tick(trigger="scheduled"):
                     else:
                         failed_apply += 1
                         row["Status"] = "failed"
-                        row["Notes"] = (notes + "; auto-apply failed: " + apply_error)[:500]
+                        row["Notes"] = "auto_apply_failed"
                     row["ReviewedAt"] = _proposal_transition_iso()
                     row["ReviewedBy"] = "auto"
                 else:
@@ -1439,7 +1434,7 @@ def _run_background_tick(trigger="scheduled"):
                 summary_note += f"; {pending_count} pending review"
             if failed_apply:
                 summary_note += f"; {failed_apply} auto-apply failure(s)"
-            status = "succeeded" if created else "failed"
+            status = "completed"
             _record_background_activity(cluster, database, job_tick_id, job_started, _utc_now(), status, created, 0, summary_note, job_type=job_type)
     except Exception as error:
         _record_background_activity(cluster, database, tick_id, started_at, _utc_now(), "failed", 0, 0, f"{trigger} background tick: " + str(error)[:500])
@@ -1534,7 +1529,11 @@ def _background_proposal_update_row(current, status, reviewed_by, notes):
     row["Status"] = status
     row["ReviewedAt"] = _proposal_transition_iso()
     row["ReviewedBy"] = reviewed_by
-    row["Notes"] = notes or row.get("Notes", "")
+    row["Notes"] = {
+        "applying": "applying", "applied": "applied",
+        "rejected": "rejected", "approved": "approved",
+        "failed": "failed",
+    }.get(status, "updated")
     return row
 
 

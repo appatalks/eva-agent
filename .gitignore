@@ -1,6 +1,7 @@
 # API keys and local config (NEVER commit these)
 config.json
 config.local.js
+mcp.json
 
 # Python
 __pycache__/

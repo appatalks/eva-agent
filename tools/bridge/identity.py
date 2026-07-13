@@ -44,22 +44,17 @@ class EnvelopeValidationError(ValueError):
 def _read_or_create_id(path):
     """Read a UUID from *path*, or generate and persist one (mode 0600)."""
     try:
-        if os.path.isfile(path):
-            with open(path) as f:
-                value = f.read().strip()
-            if _UUID_RE.match(value):
-                return value
-    except OSError:
+        with _cfg.open_private_file(path, "r") as f:
+            value = f.read().strip()
+        if _UUID_RE.fullmatch(value):
+            return value
+    except (FileNotFoundError, OSError, _cfg.PrivateStorageError):
         pass
     new_id = str(uuid.uuid4())
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, new_id.encode("utf-8"))
-        finally:
-            os.close(fd)
-    except OSError as exc:
+        with _cfg.open_private_file(path, "w") as handle:
+            handle.write(new_id)
+    except (OSError, _cfg.PrivateStorageError) as exc:
         print(f"[Identity] Could not persist {os.path.basename(path)}: {exc}")
     return new_id
 

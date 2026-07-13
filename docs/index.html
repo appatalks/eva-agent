@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Eva AI Assistant</title>
-  <meta name="description" content="Eva is a voice-first AI assistant that sees, browses, controls your desktop, learns from experience, and runs scheduled tasks. Open source, local-first, no cloud lock-in.">
+  <meta name="description" content="Eva is a voice-first AI assistant with authorized camera vision, bounded browsing, launch-only desktop integration, persistent memory, governed learning experiments, and scheduled tasks.">
   <meta name="theme-color" content="#050510">
   <meta property="og:title" content="Eva AI Assistant">
   <meta property="og:description" content="Voice-first AI assistant that sees, learns, and acts. Local-first. Open source.">
@@ -589,7 +589,7 @@
     </div>
   </div>
   <h1>Eva</h1>
-  <p class="tagline">An AI assistant that sees through your camera, controls your browser and desktop, remembers everything, and learns from experience. Local-first. Open source.</p>
+  <p class="tagline">An AI assistant with authorized camera vision, bounded browser actions, launch-only desktop integration, persistent memory, and governed learning experiments. Local-first. Open source.</p>
   <div class="hero-actions">
     <a href="https://github.com/appatalks/eva-agent" class="btn-glass btn-glow">View on GitHub</a>
     <a href="https://github.com/appatalks/eva-agent/releases" class="btn-glass">Download AppImage</a>
@@ -636,25 +636,25 @@
 <section id="capabilities">
   <div class="section-inner">
     <h2>What Eva does</h2>
-    <p class="section-sub">Voice, vision, browsing, desktop control, memory, and autonomous task scheduling. No framework, no build step.</p>
+    <p class="section-sub">Voice, vision, bounded browsing, allowlisted GUI launch, memory, and governed task scheduling.</p>
     <div class="glass-grid">
 
       <div class="card reveal">
         <div class="card-icon">&#x1F441;</div>
         <h3>Camera vision</h3>
-        <p>Eva sees through your webcam. Face-detection auto-wake, on-demand "look" commands, ambient presence sensing. Frames stay local unless you ask her to describe what she sees.</p>
+        <p>Face-detection auto-wake and ambient presence sensing stay local. Each on-demand look requires an explicit camera request, an Electron-native one-use decision, and a fresh-frame bridge receipt before vision processing.</p>
       </div>
 
       <div class="card reveal">
         <div class="card-icon">&#x1F310;</div>
         <h3>Browser agent</h3>
-        <p>Controls a real Chromium browser through the DOM. Persistent login, precise click-by-element, hybrid vision fallback. Shops, fills forms, navigates, pauses for confirmation on purchases.</p>
+        <p>Runs an isolated Chromium context through public-unicast DNS-pinned egress. Native launch authorization and a separate one-use approval protect every navigation, click, scroll, or exact-field entry. Success requires a causal tool-verified postcondition.</p>
       </div>
 
       <div class="card reveal">
         <div class="card-icon">&#x1F5A5;</div>
-        <h3>Desktop control</h3>
-        <p>Drives your actual mouse and keyboard to operate any application. Focus windows, open apps, click buttons. Optional AT-SPI semantic control via computer-use-linux MCP.</p>
+        <h3>Contained desktop launch</h3>
+        <p>Launches curated, root-owned GUI applications with no model-supplied arguments and verifies the exact live process. Pointer, keyboard, shell, window-focus, and arbitrary file-open authority remain disabled until the capability broker is complete.</p>
       </div>
 
       <div class="card reveal">
@@ -666,13 +666,13 @@
       <div class="card reveal">
         <div class="card-icon">&#x1F9E0;</div>
         <h3>Persistent memory</h3>
-        <p>Kusto/ADX-backed conversation history, emotion tracking, knowledge graph, semantic recall. She remembers what you talked about last week and how you were feeling.</p>
+        <p>Local SQLite is canonical for conversation history, evidence-linked knowledge, and semantic recall. Kusto/ADX is an optional consent-aware projection.</p>
       </div>
 
       <div class="card reveal">
         <div class="card-icon">&#x1F4DA;</div>
-        <h3>Self-improving skills</h3>
-        <p>Auto-extracts reusable skills from successful complex tasks. Skills are stored as drafts for review and applied automatically to matching future requests.</p>
+        <h3>Governed learning experiments</h3>
+        <p>Default-off local shadow evaluation records verified outcomes and proposes restricted immutable candidates. It does not activate behavior; legacy skill drafts are separately gated and require review.</p>
       </div>
 
       <div class="card reveal">
@@ -702,13 +702,13 @@
       <div class="card reveal">
         <div class="card-icon">&#x2699;</div>
         <h3>MCP ecosystem</h3>
-        <p>Azure, GitHub, Kusto, and computer-use-linux MCP servers configurable from the UI. Extend Eva's capabilities with any MCP-compatible tool server.</p>
+        <p>Azure, GitHub, and Kusto MCP integrations are configurable from the UI. Desktop-control MCP servers are release-disabled until they can use the same governed capability broker.</p>
       </div>
 
       <div class="card reveal">
         <div class="card-icon">&#x1F3AF;</div>
         <h3>Cognitive layer</h3>
-        <p>Eva + Reviewer dual-agent pipeline with configurable models and max review cycles. Every response is drafted, critiqued, and refined before you see it.</p>
+        <p>Optional Eva + Reviewer dual-agent pipeline with configurable models and max review cycles. The normal fast path remains single-shot unless the user enables or explicitly triggers cognition.</p>
       </div>
 
     </div>
@@ -748,7 +748,7 @@
         <h4>Agents</h4>
         <ul>
           <li>Browser (Playwright)</li>
-          <li>Desktop (PyAutoGUI)</li>
+          <li>Desktop (allowlisted GUI launch only)</li>
           <li>Camera (OpenCV)</li>
           <li>Subagent spawner</li>
           <li>Cognition pipeline</li>
@@ -758,9 +758,9 @@
       <div class="arch-node glass reveal">
         <h4>Storage</h4>
         <ul>
-          <li>Azure Data Explorer</li>
-          <li>Kusto/KQL queries</li>
-          <li>Skills in ADX</li>
+          <li>Canonical local SQLite</li>
+          <li>Optional consent-aware ADX projection</li>
+          <li>Event-first memory and reviewed skills</li>
           <li>IndexedDB sessions</li>
           <li>Semantic embeddings</li>
         </ul>
@@ -789,11 +789,11 @@
           <tr><td>Open source</td><td class="y">Yes (MIT)</td><td class="y">Yes (MIT)</td><td class="n">No</td><td class="n">No</td></tr>
           <tr><td>Camera/vision</td><td class="y">Built-in</td><td class="n">No</td><td class="n">No</td><td class="n">No</td></tr>
           <tr><td>Browser automation</td><td class="y">Built-in (DOM + vision)</td><td>Via MCP</td><td class="n">No</td><td>Via MCP</td></tr>
-          <tr><td>Desktop control</td><td class="y">Built-in + MCP</td><td>Via MCP</td><td class="n">No</td><td>Via MCP</td></tr>
+          <tr><td>Desktop control</td><td>Allowlisted GUI launch only</td><td>Via MCP</td><td class="n">No</td><td>Via MCP</td></tr>
           <tr><td>Voice interface</td><td class="y">Full voice view</td><td>Transcription only</td><td class="y">Yes</td><td class="n">No</td></tr>
-          <tr><td>Self-improving skills</td><td class="y">Auto-learn</td><td class="y">Yes</td><td class="n">No</td><td class="n">No</td></tr>
+          <tr><td>Governed learning</td><td>Default-off shadow proposals, no activation</td><td class="y">Yes</td><td class="n">No</td><td class="n">No</td></tr>
           <tr><td>Scheduled tasks</td><td class="y">Cron</td><td class="y">Cron</td><td class="n">No</td><td class="n">No</td></tr>
-          <tr><td>Persistent memory</td><td class="y">Kusto/ADX</td><td class="y">FTS5 + files</td><td>Limited</td><td>Limited</td></tr>
+          <tr><td>Persistent memory</td><td class="y">SQLite canonical + optional ADX projection</td><td class="y">FTS5 + files</td><td>Limited</td><td>Limited</td></tr>
           <tr><td>Multi-provider</td><td class="y">4+ providers</td><td class="y">200+ models</td><td class="n">OpenAI only</td><td class="n">Anthropic only</td></tr>
           <tr><td>No build step</td><td class="y">Yes</td><td class="n">pip install</td><td class="n">N/A</td><td class="n">N/A</td></tr>
         </tbody>

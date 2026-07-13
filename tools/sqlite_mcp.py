@@ -17,12 +17,22 @@ Environment variables:
 """
 
 import json
+import contextlib
 import os
+import re
 import sys
 
 # Import the core SQLite memory module (same directory).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sqlite_memory import SqliteMemory
+from bridge.mcp_protocol import (
+    MCPProtocolError,
+    MAX_MCP_FRAME_BYTES,
+    decode_request_line,
+    encode_response_line,
+    fixed_tool_schema,
+    validate_fixed_tool_arguments,
+)
 
 
 class SqliteMCPServer:
@@ -175,11 +185,18 @@ class SqliteMCPServer:
             },
         },
     ]
-    TOOLS = [tool for tool in TOOLS if tool.get("name") != "kusto_ingest_inline"]
+    TOOLS = [
+        tool for tool in TOOLS
+        if tool.get("name") not in ("kusto_ingest_inline", "kusto_query")
+    ]
+    for _tool in TOOLS:
+        _tool["inputSchema"] = fixed_tool_schema(_tool["name"])
 
     def __init__(self):
-        db_path = os.environ.get("EVA_MEMORY_DB", os.path.expanduser("~/.eva/memory.db"))
-        self._mem = SqliteMemory(db_path)
+        from bridge import config as bridge_config
+        db_path = bridge_config.configured_memory_db_path()
+        with contextlib.redirect_stdout(sys.stderr):
+            self._mem = SqliteMemory(db_path)
         self._log(f"SQLite memory: {self._mem.db_path}")
 
     def _log(self, msg):
@@ -203,16 +220,12 @@ class SqliteMCPServer:
     # ── Tool handlers ───────────────────────────────────────────────────────
 
     def handle_tool(self, name, args):
+        if name in ("kusto_query", "kusto_ingest_inline"):
+            return "Error: generic SQL is disabled; use a fixed read-only tool."
         try:
+            args = validate_fixed_tool_arguments(name, args)
             if name == "kusto_list_databases":
-                return f"DatabaseName\n------------\nlocal ({self._mem.db_path})"
-
-            elif name == "kusto_query":
-                query = args.get("query", "")
-                if not query:
-                    return "Error: 'query' parameter is required."
-                rows = self._mem.query(query)
-                return self._format_rows(rows)
+                return "DatabaseName\n------------\nlocal"
 
             elif name == "kusto_show_tables":
                 tables = self._mem.list_tables()
@@ -222,8 +235,10 @@ class SqliteMCPServer:
 
             elif name == "kusto_show_schema":
                 table = args.get("table", "")
-                if not table:
-                    return "Error: 'table' parameter is required."
+                if not isinstance(table, str) or re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_]{0,127}", table
+                ) is None:
+                    return "Error: 'table' must be a valid identifier."
                 schema = self._mem.get_schema(table)
                 if not schema:
                     return f"Table '{table}' not found."
@@ -234,17 +249,15 @@ class SqliteMCPServer:
 
             elif name == "kusto_sample_data":
                 table = args.get("table", "")
-                if not table:
-                    return "Error: 'table' parameter is required."
-                count = int(args.get("count", 10))
-                rows = self._mem.query(
-                    f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT ?",
-                    (count,),
-                )
+                if not isinstance(table, str) or re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_]{0,127}", table
+                ) is None:
+                    return "Error: 'table' must be a valid identifier."
+                count = args.get("count", 10)
+                if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 100:
+                    return "Error: 'count' must be an integer from 1 to 100."
+                rows = self._mem.sample_rows(table, count)
                 return self._format_rows(rows)
-
-            elif name == "kusto_ingest_inline":
-                return self._tool_ingest(args)
 
             elif name == "eva_recall_knowledge":
                 return self._tool_recall_knowledge(args)
@@ -262,10 +275,12 @@ class SqliteMCPServer:
                 return self._tool_get_summary(args)
 
             else:
-                return f"Unknown tool: {name}"
+                return "Error: unsupported tool"
 
-        except Exception as e:
-            return f"Error: {e}"
+        except MCPProtocolError:
+            return "Error: invalid or unsupported tool arguments"
+        except Exception:
+            return "Error: tool execution failed"
 
     def _tool_ingest(self, args):
         return "Error: generic MCP writes are disabled; use Eva's authenticated event-first mutation APIs."
@@ -346,13 +361,17 @@ class SqliteMCPServer:
         """Run the MCP server over NDJSON stdio."""
         self._log("Starting SQLite MCP server (stdio)...")
 
-        for line in sys.stdin:
-            line = line.strip()
+        while True:
+            line = sys.stdin.buffer.readline(MAX_MCP_FRAME_BYTES + 1)
             if not line:
+                break
+            if len(line) > MAX_MCP_FRAME_BYTES or not line.endswith(b"\n"):
+                break
+            if not line.strip():
                 continue
             try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
+                msg = decode_request_line(line)
+            except MCPProtocolError:
                 continue
 
             method = msg.get("method", "")
@@ -377,8 +396,15 @@ class SqliteMCPServer:
 
             elif method == "tools/call":
                 tool_name = params.get("name", "")
-                tool_args = params.get("arguments", {})
-                result_text = self.handle_tool(tool_name, tool_args)
+                try:
+                    tool_args = validate_fixed_tool_arguments(
+                        tool_name, params.get("arguments", {})
+                    )
+                except MCPProtocolError:
+                    self._respond_error(msg_id, -32602, "Invalid tool arguments")
+                    continue
+                with contextlib.redirect_stdout(sys.stderr):
+                    result_text = self.handle_tool(tool_name, tool_args)
                 self._respond(msg_id, {
                     "content": [{"type": "text", "text": result_text}],
                 })
@@ -389,7 +415,7 @@ class SqliteMCPServer:
 
     def _respond(self, msg_id, result):
         resp = {"jsonrpc": "2.0", "id": msg_id, "result": result}
-        sys.stdout.write(json.dumps(resp) + "\n")
+        sys.stdout.write(encode_response_line(resp))
         sys.stdout.flush()
 
     def _respond_error(self, msg_id, code, message):
@@ -398,7 +424,7 @@ class SqliteMCPServer:
             "id": msg_id,
             "error": {"code": code, "message": message},
         }
-        sys.stdout.write(json.dumps(resp) + "\n")
+        sys.stdout.write(encode_response_line(resp))
         sys.stdout.flush()
 
 

@@ -117,6 +117,174 @@ class TestMigrations(unittest.TestCase):
         self.assertEqual(current_schema_version(conn), ver1)
         conn.close()
 
+    def test_v5_privacy_cleanup_rebuilds_and_reseals_event_kernel(self):
+        from bridge.event_store import EventRepositoryV2
+        from bridge.migrations import (
+            _META_DDL, _MIGRATIONS, _create_event_support,
+            run_migrations, verify_schema,
+        )
+
+        conn, path = self._make_conn()
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute(_META_DDL)
+        _create_event_support(conn)
+        for version, description, checksum, _ in _MIGRATIONS[:5]:
+            conn.execute(
+                "INSERT INTO _schema_migrations(version,description,applied_at,checksum) "
+                "VALUES (?,?,?,?)",
+                (version, description, "2026-01-01T00:00:00Z", checksum),
+            )
+        conn.execute("CREATE TABLE BackgroundActivity (Status TEXT, Notes TEXT)")
+        conn.execute(
+            "CREATE TABLE BackgroundProposals (JobType TEXT, Status TEXT, Notes TEXT)"
+        )
+        conn.execute("CREATE TABLE Reflections (Trigger TEXT)")
+        conn.commit()
+
+        sentinel = "PRIVATE_LEGACY_ALERT_SENTINEL"
+        repo = EventRepositoryV2(
+            lambda: conn, installation_id="privacy-migration-test"
+        )
+        alert = repo.append_event(
+            stream_id="background:reflection:alert_watch:rule",
+            event_type="background.reflection_recorded",
+            payload={"Trigger": "alert_watch:rule", "Observation": sentinel},
+            actor_type="background", actor_id="eva-background",
+            origin="background", trust=1.0, sensitivity="normal",
+            consent_scope="cloud_allowed", idempotency_key="legacy-alert",
+        )
+        safe = repo.append_event(
+            stream_id="safe:stream", event_type="safe.recorded",
+            payload={"status": "safe"}, actor_type="system", actor_id="eva",
+            origin="bridge", trust=1.0, sensitivity="normal",
+            consent_scope="cloud_allowed", idempotency_key="safe-event",
+        )
+        conversation = repo.append_event(
+            stream_id="conversation:11111111-1111-4111-8111-111111111111",
+            event_type="conversation.user_observed",
+            payload={
+                "role": "user",
+                "content": (
+                    "Please explain alert_watch:, background:%alert%, and "
+                    "the JSON example {\"JobType\":\"alert_watch\"}."
+                ),
+                "model": "test",
+            },
+            actor_type="user", actor_id="user", origin="browser",
+            trust=1.0, sensitivity="private", consent_scope="local_only",
+            idempotency_key="conversation-marker-control",
+        )
+        unrelated = repo.append_event(
+            stream_id="safe:alert-text",
+            event_type="safe.recorded",
+            payload={"JobType": "alert_watch", "Trigger": "alert_watch:rule"},
+            actor_type="system", actor_id="eva", origin="bridge",
+            trust=1.0, sensitivity="normal", consent_scope="local_only",
+            idempotency_key="unrelated-marker-control",
+        )
+        activity = repo.append_event(
+            stream_id="background:activity:legacy", event_type="background.activity_recorded",
+            payload={
+                "JobType": "daily_digest", "Status": "succeeded",
+                "Notes": sentinel,
+            }, actor_type="background", actor_id="eva-background",
+            origin="background", trust=1.0, sensitivity="normal",
+            consent_scope="local_only", idempotency_key="legacy-activity",
+        )
+        proposal = repo.append_event(
+            stream_id="background:proposal:legacy", event_type="background.proposal_recorded",
+            payload={
+                "JobType": "daily_digest", "Status": "pending",
+                "Notes": sentinel,
+            }, actor_type="background", actor_id="eva-background",
+            origin="background", trust=1.0, sensitivity="private",
+            consent_scope="local_only", idempotency_key="legacy-proposal",
+        )
+        conn.execute(
+            "UPDATE MemoryOutbox SET LastError=? WHERE EventId=?",
+            (sentinel, safe["EventId"]),
+        )
+        conn.execute(
+            "INSERT INTO LegacyProjectionReceipts "
+            "(EventId,ProjectionName,ProjectedAt,RowCount) VALUES (?,?,?,?)",
+            (alert["EventId"], "legacy", "2026-01-01T00:00:00Z", 1),
+        )
+        conn.execute(
+            "INSERT INTO MemoryProjectionReceipts "
+            "(EventId,Destination,ProjectedAt) VALUES (?,?,?)",
+            (alert["EventId"], "adx", "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO BackgroundActivity VALUES ('failed', ?)", (sentinel,)
+        )
+        conn.execute(
+            "INSERT INTO BackgroundActivity VALUES ('succeeded', ?)", (sentinel,)
+        )
+        conn.execute(
+            "INSERT INTO BackgroundProposals VALUES ('alert_watch','pending',?)",
+            (sentinel,),
+        )
+        conn.execute(
+            "INSERT INTO BackgroundProposals VALUES ('daily_digest','pending',?)",
+            (sentinel,),
+        )
+        conn.execute(
+            "INSERT INTO Reflections VALUES ('alert_watch:rule')"
+        )
+        conn.commit()
+
+        self.assertEqual(run_migrations(conn), 1)
+        self.assertEqual(verify_schema(conn), 5)
+        self.assertIsNone(conn.execute(
+            "SELECT 1 FROM MemoryEvents WHERE EventId=?", (alert["EventId"],)
+        ).fetchone())
+        self.assertIsNotNone(conn.execute(
+            "SELECT 1 FROM MemoryEvents WHERE EventId=?", (safe["EventId"],)
+        ).fetchone())
+        self.assertIsNotNone(conn.execute(
+            "SELECT 1 FROM MemoryEvents WHERE EventId=?",
+            (conversation["EventId"],),
+        ).fetchone())
+        self.assertIsNotNone(conn.execute(
+            "SELECT 1 FROM MemoryEvents WHERE EventId=?", (unrelated["EventId"],)
+        ).fetchone())
+        self.assertEqual(conn.execute(
+            "SELECT LastError FROM MemoryOutbox WHERE EventId=?",
+            (safe["EventId"],),
+        ).fetchone()[0], "unknown_failure")
+        self.assertEqual([
+            tuple(row) for row in conn.execute(
+                "SELECT Status,Notes FROM BackgroundActivity ORDER BY rowid"
+            ).fetchall()
+        ], [("failed", "failed"), ("completed", "completed")])
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM BackgroundProposals"
+        ).fetchone()[0], 1)
+        self.assertEqual(conn.execute(
+            "SELECT Notes FROM BackgroundProposals"
+        ).fetchone()[0], "generated")
+        for event_id, expected_note in (
+            (activity["EventId"], "completed"),
+            (proposal["EventId"], "generated"),
+        ):
+            payload = json.loads(conn.execute(
+                "SELECT Payload FROM MemoryEvents WHERE EventId=?", (event_id,)
+            ).fetchone()[0])
+            self.assertEqual(payload["Notes"], expected_note)
+            self.assertNotIn(sentinel, json.dumps(payload))
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM Reflections"
+        ).fetchone()[0], 0)
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute(
+                "DELETE FROM MemoryEvents WHERE EventId=?", (safe["EventId"],)
+            )
+        conn.close()
+        for candidate in (path, path + "-wal", path + "-shm"):
+            if os.path.exists(candidate):
+                with open(candidate, "rb") as handle:
+                    self.assertNotIn(sentinel.encode("utf-8"), handle.read())
+
     def test_standalone_migrations_enable_foreign_keys(self):
         from bridge.migrations import run_migrations
         path = os.path.join(_TMP_HOME, f"fk_{uuid.uuid4().hex[:8]}.db")
@@ -242,6 +410,48 @@ class TestMigrations(unittest.TestCase):
 #  A2. Production integration contracts
 # ═══════════════════════════════════════════════════════════════════
 class TestProductionContracts(unittest.TestCase):
+    def test_multiword_synthetic_entities_are_rejected(self):
+        from bridge.cognition import (
+            _extract_entity_candidates, _extract_explicit_user_facts,
+        )
+        from bridge.finalize import finalize_turn
+
+        accepted, rejected = _extract_entity_candidates(
+            "Test User met Dummy Person near Sample Entity and Foo Bar."
+        )
+        self.assertEqual(accepted, [])
+        self.assertEqual(
+            {entity for entity, reason in rejected if reason == "synthetic_pattern"},
+            {"Test User", "Dummy Person", "Sample Entity", "Foo Bar"},
+        )
+        synthetic_message = (
+            "My name is Test. I live in Dummy Place. I work for Sample Entity. "
+            "I am a Foo Bar. My favorite book is Test123."
+        )
+        self.assertEqual(_extract_explicit_user_facts(synthetic_message), [])
+        legitimate = _extract_explicit_user_facts(
+            "My name is Alice. I live in New York. I work for Acme Labs. "
+            "I am an engineer. My favorite book is Dune."
+        )
+        self.assertGreaterEqual(len(legitimate), 5)
+
+        mem = _fresh_mem("synthetic_explicit_boundary")
+        try:
+            finalize_turn(
+                mem, mem.event_repository(), session_id=str(uuid.uuid4()),
+                turn_id=str(uuid.uuid4()), user_message=synthetic_message,
+                assistant_message="Acknowledged.", model="test",
+                extract_facts_fn=lambda _message: [{
+                    "Entity": "User", "Relation": "user_location",
+                    "Value": "Dummy Place", "Confidence": 0.99,
+                }],
+            )
+            self.assertEqual(mem.query(
+                "SELECT * FROM Knowledge WHERE Value='Dummy Place'"
+            ), [])
+        finally:
+            mem.close()
+
     def test_public_repository_and_outer_rollback(self):
         from bridge.events import EventRepository
         self.assertEqual(EventRepository.__module__, "bridge.event_store")
@@ -497,8 +707,8 @@ class TestProductionContracts(unittest.TestCase):
         )
         conn.commit()
 
-        self.assertEqual(run_migrations(conn), 3)
-        self.assertEqual(verify_schema(conn), 4)
+        self.assertEqual(run_migrations(conn), 4)
+        self.assertEqual(verify_schema(conn), 5)
         event = conn.execute(
             "SELECT EventHash FROM MemoryEvents WHERE EventId='event-draft'"
         ).fetchone()
@@ -616,8 +826,8 @@ class TestProductionContracts(unittest.TestCase):
         )
         conn.commit()
 
-        self.assertEqual(run_migrations(conn), 2)
-        self.assertEqual(verify_schema(conn), 4)
+        self.assertEqual(run_migrations(conn), 3)
+        self.assertEqual(verify_schema(conn), 5)
         outbox = conn.execute(
             "SELECT Attempts,Status FROM MemoryOutbox WHERE OutboxId='outbox-v2-sparse'"
         ).fetchone()
@@ -670,8 +880,8 @@ class TestProductionContracts(unittest.TestCase):
         )
         conn.commit()
 
-        self.assertEqual(run_migrations(conn), 1)
-        self.assertEqual(verify_schema(conn), 4)
+        self.assertEqual(run_migrations(conn), 2)
+        self.assertEqual(verify_schema(conn), 5)
         repaired = conn.execute(
             "SELECT EventHash FROM MemoryEvents WHERE EventId='event-v3-hash'"
         ).fetchone()[0]
@@ -1547,6 +1757,8 @@ global.renderEvaResponse=async(content,out,envelope)=>{
     if(!isCurrentRequestEnvelope(envelope)) return false;
     out.innerText+=String(content);return true;
 };
+global.canonicalizeEvaResponse=value=>({__evaCanonical:true,text:String(value),browser:null,desktop:null,camera:null});
+global.finalizeDirectProviderTurn=async()=>({});
 global.getSystemPrompt=()=>'';
 global.getACPBridgeUrl=()=> 'http://localhost:8888';
 global.getLmStudioBaseUrl=()=>'';
@@ -1683,6 +1895,8 @@ global.renderEvaResponse=async(content,out,envelope)=>{
     if(!isCurrentRequestEnvelope(envelope)) return false;
     out.innerText+=String(content);return true;
 };
+global.canonicalizeEvaResponse=value=>({__evaCanonical:true,text:String(value),browser:null,desktop:null,camera:null});
+global.finalizeDirectProviderTurn=async()=>({});
 global.getSystemPrompt=()=>'';
 global.getACPBridgeUrl=()=> 'http://localhost:8888';
 global.getLmStudioBaseUrl=()=>'';
@@ -1801,6 +2015,8 @@ global.renderEvaResponse=async(content,out,envelope)=>{
     if(!isCurrentRequestEnvelope(envelope)) return false;
     renders.push(content);out.innerText+=String(content);return true;
 };
+global.canonicalizeEvaResponse=value=>({__evaCanonical:true,text:String(value),browser:null,desktop:null,camera:null});
+global.finalizeDirectProviderTurn=async()=>({});
 global.getSystemPrompt=()=>'';
 global.getACPBridgeUrl=()=> 'http://localhost:8888';
 global.getLmStudioBaseUrl=()=>'';
@@ -1898,11 +2114,24 @@ global.fetch=async(_url,opts)=>{
 
     def test_all_provider_completions_use_generation_guards(self):
         expected = {
-            "aig.js": ("requestIsCurrent", "renderEvaResponse(content, txtOutput, _envelope)"),
-            "gpt-core.js": ("requestIsCurrent", "renderEvaResponse(s.content, txtOutput, capturedEnvelope)"),
-            "gl-google.js": ("requestIsCurrent", "renderEvaResponse(mainResponse, out, capturedEnvelope)"),
-            "lm-studio.js": ("requestIsCurrent", "renderEvaResponse(candidate, out, capturedEnvelope)"),
-            "copilot.js": ("_copilotRequestIsCurrent", "renderEvaResponse(content, txtOutput, capturedEnvelope)"),
+            "aig.js": (
+                "requestIsCurrent",
+                "normalActions, normalCanonical",
+            ),
+            "gpt-core.js": (
+                "requestIsCurrent",
+                "cleanedContent, txtOutput, capturedEnvelope, [], canonicalResponse",
+            ),
+            "gl-google.js": (
+                "requestIsCurrent", "canonicalResponse"
+            ),
+            "lm-studio.js": (
+                "requestIsCurrent",
+                "candidate, out, capturedEnvelope, trustedActions",
+            ),
+            "copilot.js": (
+                "_copilotRequestIsCurrent", "canonicalResponse"
+            ),
         }
         for filename, markers in expected.items():
             with open(os.path.join(PROJECT_ROOT, "core", "js", filename)) as handle:
@@ -1995,6 +2224,7 @@ vm.runInThisContext(source);
     def test_agent_callbacks_cannot_cross_session_generation(self):
         sessions_path = os.path.join(PROJECT_ROOT, "core/js/sessions.js")
         options_path = os.path.join(PROJECT_ROOT, "core/js/options.js")
+        markers_path = os.path.join(PROJECT_ROOT, "core/js/agent-markers.js")
         script = r"""
 const fs=require('fs'),vm=require('vm'),crypto=require('crypto').webcrypto;
 global.crypto=crypto;
@@ -2004,12 +2234,24 @@ global.localStorage={
     getItem:k=>Object.prototype.hasOwnProperty.call(store,k)?store[k]:null,
     setItem:(k,v)=>{store[k]=String(v)},removeItem:k=>{delete store[k]}
 };
-let html='';
-const output={
-    get innerHTML(){return html},set innerHTML(v){html=String(v)},
-    innerText:'',scrollTop:0,scrollHeight:0,querySelectorAll:()=>[]
-};
-global.document={getElementById:id=>id==='txtOutput'?output:null};
+class Element {
+    constructor(tag){this.tagName=String(tag||'div').toUpperCase();this.children=[];
+        this.className='';this.dataset={};this.textContent='';this.innerText='';
+        this._html='';this.scrollTop=0;this.scrollHeight=0;}
+    get innerHTML(){return this._html} set innerHTML(v){this._html=String(v);this.children=[]}
+    appendChild(child){this.children.push(child);child.parentNode=this;return child}
+    querySelectorAll(selector){
+        const rows=[];function walk(node){
+            if(selector==='.chat-bubble.eva-bubble' &&
+               String(node.className).split(/\s+/).includes('chat-bubble') &&
+               String(node.className).split(/\s+/).includes('eva-bubble')) rows.push(node);
+            (node.children||[]).forEach(walk);
+        } walk(this);return rows;
+    }
+}
+const output=new Element('section');
+global.document={getElementById:id=>id==='txtOutput'?output:null,
+    createElement:tag=>new Element(tag),body:new Element('body')};
 global.window={addEventListener:()=>{}};
 global.setInterval=()=>0;
 global.console=console;
@@ -2020,19 +2262,20 @@ global.speakText=()=>{throw new Error('stale speech')};
 global._lastUserAskedImage=false;
 global._lastUserAskedGenerate=false;
 global._lastUserImageSubject='';
-let browserOpts,desktopOpts;
+let browserOpts;
 global.EvaBrowser={launch:(_goal,opts)=>{browserOpts=opts},isActive:()=>false};
-global.EvaDesktop={launch:(_goal,opts)=>{desktopOpts=opts},isActive:()=>false};
+global.EvaDesktop={launch:()=>{throw new Error('unexpected desktop launch')},isActive:()=>false};
 let sessions=fs.readFileSync(process.argv[1],'utf8');
 vm.runInThisContext(sessions);
-let options=fs.readFileSync(process.argv[2],'utf8');
+vm.runInThisContext(fs.readFileSync(process.argv[2],'utf8'));
+let options=fs.readFileSync(process.argv[3],'utf8');
 const feedback=options.slice(options.indexOf('function _agentEnvelopeCurrent'),
     options.indexOf('async function pollNotifications'));
 vm.runInThisContext(feedback);
 const reset=options.slice(options.indexOf('function resetTransientConversationState()'),
     options.indexOf('function clearMessages()'));
 vm.runInThisContext(reset);
-const renderer=options.slice(options.indexOf('async function renderEvaResponse'),
+const renderer=options.slice(options.indexOf('function _trustedActionRenderData'),
     options.indexOf('/**\n * Extract the key subject'));
 vm.runInThisContext(renderer);
 lastResponse='';masterOutput='';userMasterResponse='';aiMasterResponse='';
@@ -2040,10 +2283,9 @@ storageAssistant='';retryCount=0;
 (async()=>{
     resetEnvelopeSession(sid);newEnvelopeTurn();
     const envelope=captureRequestEnvelope();
-    const content='[[EVA_BROWSER]]{"goal":"old browser"}[[/EVA_BROWSER]]\n'+
-        '[[EVA_DESKTOP]]{"goal":"old desktop"}[[/EVA_DESKTOP]]';
+    const content='[[EVA_BROWSER]]{"goal":"old browser"}[[/EVA_BROWSER]]';
     const rendered=await renderEvaResponse(content,output,envelope);
-    if(!rendered||!browserOpts||!desktopOpts) throw new Error('agents not launched');
+    if(!rendered||!browserOpts) throw new Error('agent not launched');
     resetEnvelopeSession();
     resetTransientConversationState();
     output.innerHTML='';output.innerText='';
@@ -2051,16 +2293,13 @@ storageAssistant='';retryCount=0;
     browserOpts.onProgress('STALE_AGENT_PROGRESS',status);
     browserOpts.onConfirm('STALE_AGENT_CONFIRM',false,status);
     browserOpts.onComplete(status,'/v1/browser','Browser Agent');
-    desktopOpts.onProgress('STALE_DESKTOP_PROGRESS',status);
-    desktopOpts.onConfirm('STALE_DESKTOP_CONFIRM',false,status);
-    desktopOpts.onComplete(status,'/v1/desktop','Desktop Agent');
     await new Promise(resolve=>setTimeout(resolve,0));
     console.log(JSON.stringify({html:output.innerHTML,text:output.innerText,store,
         lastResponse,confirm:_agentConfirm,progress:_agentProgress}));
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         result = subprocess.run(
-            ["node", "-e", script, sessions_path, options_path],
+            ["node", "-e", script, sessions_path, markers_path, options_path],
             capture_output=True, text=True, check=True,
         )
         data = json.loads(result.stdout)
@@ -2078,6 +2317,7 @@ storageAssistant='';retryCount=0;
     def test_deferred_cognition_action_rethrows_stale_generation(self):
         sessions_path = os.path.join(PROJECT_ROOT, "core/js/sessions.js")
         cognition_path = os.path.join(PROJECT_ROOT, "core/js/cognition.js")
+        markers_path = os.path.join(PROJECT_ROOT, "core/js/agent-markers.js")
         script = r"""
 const fs=require('fs'),vm=require('vm'),crypto=require('crypto').webcrypto;
 global.crypto=crypto;
@@ -2090,11 +2330,12 @@ global.setInterval=()=>0;
 global.console=console;
 let sessions=fs.readFileSync(process.argv[1],'utf8');
 vm.runInThisContext(sessions);
+vm.runInThisContext(fs.readFileSync(process.argv[3],'utf8'));
 let cognition=fs.readFileSync(process.argv[2],'utf8');
 vm.runInThisContext(cognition);
 const Cognition=window.Cognition;
 let release;
-Cognition.registerCapability({id:'test.deferred',description:'test',run:()=>
+Cognition.registerCapability({id:'test.deferred',description:'test',validate:args=>args,run:()=>
     new Promise(resolve=>{release=()=>resolve({html:'STALE_ACTION_RESULT'})})});
 (async()=>{
     resetEnvelopeSession(sid);newEnvelopeTurn();
@@ -2109,7 +2350,7 @@ Cognition.registerCapability({id:'test.deferred',description:'test',run:()=>
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         result = subprocess.run(
-            ["node", "-e", script, sessions_path, cognition_path],
+            ["node", "-e", script, sessions_path, cognition_path, markers_path],
             capture_output=True, text=True, check=True,
         )
         data = json.loads(result.stdout)
@@ -2169,7 +2410,10 @@ global.document={
     querySelector:selector=>selector==='#evaBrowserPopup .ebp-title'?(elements.ebpTitlebar||null):null,
     addEventListener:()=>{}
 };
-global.window={innerWidth:1200,innerHeight:800};
+global.window={innerWidth:1200,innerHeight:800,
+    evaStandalone:{authorizeAgentLaunch:async(agent,specification)=>({
+        authorized:true,capability:'synthetic.capability',specification
+    })}};
 global.setInterval=()=>1;global.clearInterval=()=>{};
 global.setTimeout=setTimeout;global.clearTimeout=clearTimeout;
 global.AbortSignal={timeout:()=>({})};
@@ -2247,13 +2491,23 @@ global.fetch=async(url,opts)=>{
         cancelIds.push(JSON.parse(opts.body).run_id);cancelUrls.push(url);
         return {ok:true,json:async()=>({})}
     }
-    if(url.includes('/status?'))return new Promise(()=>{});
+    if(url.includes('/status?')){
+        const id=new URL(url).searchParams.get('run_id');
+        return {ok:true,json:async()=>({id,status:cancelIds.includes(id)?'cancelled':'running',goal:id})};
+    }
     return {ok:true,json:async()=>({})};
 };
 let source=fs.readFileSync(process.argv[1],'utf8');vm.runInThisContext(source);
 const EvaBrowser=window.EvaBrowser,EvaDesktop=window.EvaDesktop;
+async function waitResolver(number){
+    for(let i=0;i<100&&typeof runResolvers[number]!=='function';i++){
+        await new Promise(resolve=>setTimeout(resolve,0));
+    }
+    if(typeof runResolvers[number]!=='function')throw new Error('run resolver not reached '+number);
+}
 (async()=>{
     const first=EvaBrowser.launch('pending one',{});
+    await waitResolver(1);
     activeBase='http://bridge-two';
     EvaBrowser.cancel();
     runResolvers[1]({ok:true,json:async()=>({id:'late-pending',status:'starting',goal:'pending one'})});
@@ -2261,10 +2515,12 @@ const EvaBrowser=window.EvaBrowser,EvaDesktop=window.EvaDesktop;
 
     activeBase='http://known-origin';
     const second=EvaBrowser.launch('replacement old',{});
+    await waitResolver(2);
     runResolvers[2]({ok:true,json:async()=>({id:'known-old',status:'starting',goal:'replacement old'})});
     await second;
     activeBase='http://replacement-origin';
     const third=EvaDesktop.launch('replacement new',{});
+    await waitResolver(3);
     runResolvers[3]({ok:true,json:async()=>({id:'known-new',status:'starting',goal:'replacement new'})});
     await third;await new Promise(resolve=>setTimeout(resolve,0));
     console.log(JSON.stringify({cancelIds,cancelUrls,active:EvaBrowser.isActive()}));
@@ -2272,8 +2528,9 @@ const EvaBrowser=window.EvaBrowser,EvaDesktop=window.EvaDesktop;
 """
         result = subprocess.run(
             ["node", "-e", script, browser_path],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True,
         )
+        self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
         self.assertIn("late-pending", data["cancelIds"])
         self.assertIn("known-old", data["cancelIds"])
@@ -2291,7 +2548,7 @@ let oldShotResolve,cancelIds=[];
 global.fetch=async(url,opts)=>{
     if(url.endsWith('/browser/run'))return {ok:true,json:async()=>({id:'old-run',status:'starting',goal:'old'})};
     if(url.endsWith('/desktop/run'))return {ok:true,json:async()=>({id:'new-run',status:'starting',goal:'new'})};
-    if(url.includes('/status?run_id=old-run'))return {ok:true,json:async()=>({id:'old-run',status:'running',step:1,goal:'old'})};
+    if(url.includes('/status?run_id=old-run'))return {ok:true,json:async()=>({id:'old-run',status:cancelIds.includes('old-run')?'cancelled':'running',step:1,goal:'old'})};
     if(url.includes('/status?run_id=new-run'))return {ok:true,json:async()=>({id:'new-run',status:'running',step:1,goal:'new'})};
     if(url.includes('/browser/screenshot'))return new Promise(resolve=>{oldShotResolve=()=>resolve({ok:true,blob:async()=>({data:'OLD_SCREENSHOT'})})});
     if(url.includes('/desktop/screenshot'))return {ok:true,blob:async()=>({data:'NEW_SCREENSHOT'})};
@@ -3541,6 +3798,60 @@ class TestFinalizeTurn(unittest.TestCase):
         # No duplicate conversations
         rows = self.mem.query("SELECT COUNT(*) as cnt FROM Conversations WHERE SessionId = 'once-sess'")
         self.assertEqual(rows[0]["cnt"], 2)  # user + assistant, not 4
+
+    def test_finalize_persists_clean_text_and_closed_action_receipt_only(self):
+        from bridge.events import IdempotencyCollisionError
+        from bridge.finalize import finalize_turn
+
+        turn_id = str(uuid.uuid4())
+        artifact = {
+            "filename": "report.txt", "mime": "text/plain",
+            "session_id": "11111111-1111-4111-8111-111111111111",
+            "artifact_id": "a" * 32, "digest": "b" * 64,
+            "generation": "7", "size": 42,
+        }
+        receipts = [{
+            "id": "file.download", "state": "succeeded",
+            "artifact": artifact,
+        }]
+        finalize_turn(
+            self.mem, self.repo, session_id="receipt-session",
+            turn_id=turn_id, user_message="Create a report",
+            assistant_message="Created the report.", model="aig:test",
+            action_receipts=receipts,
+        )
+        events = self.repo.events_for_turn(turn_id)
+        assistant = next(
+            event for event in events
+            if event["EventType"] == "conversation.assistant_observed"
+        )
+        payload = json.loads(assistant["Payload"])
+        self.assertEqual(payload["content"], "Created the report.")
+        self.assertEqual(payload["action_receipts"], receipts)
+        self.assertNotIn("Create a report", payload["content"])
+        rows = self.mem.query(
+            "SELECT Content FROM Conversations WHERE SessionId=? AND Role='assistant'",
+            ("receipt-session",),
+        )
+        self.assertEqual(rows[0]["Content"], "Created the report.")
+        malformed = [{
+            "id": "file.download", "state": "succeeded",
+            "artifact": {**artifact, "content": "PRIVATE_ARTIFACT_BODY"},
+        }]
+        with self.assertRaises(ValueError):
+            finalize_turn(
+                self.mem, self.repo, session_id="other-session",
+                turn_id=str(uuid.uuid4()), user_message="x",
+                assistant_message="y", model="aig:test",
+                action_receipts=malformed,
+            )
+        with self.assertRaises(IdempotencyCollisionError):
+            finalize_turn(
+                self.mem, self.repo, session_id="receipt-session",
+                turn_id=turn_id, user_message="Create a report",
+                assistant_message="Created the report.", model="aig:test",
+                action_receipts=[],
+            )
 
     def test_finalize_with_fact_extraction(self):
         """finalize_turn with fact extractor creates fact events."""

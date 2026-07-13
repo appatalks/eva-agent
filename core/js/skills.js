@@ -1,9 +1,9 @@
 // ===========================================================================
 // Eva Skills importer
 // ---------------------------------------------------------------------------
-// Import a skill from a variety of sources (paste, URL, GitHub, file upload),
-// have Eva normalize ("Eva'rise") it into her schema via the bridge, review the
-// draft, then save it to ADX. Saved skills are surfaced automatically at runtime
+// Import a locally supplied skill (paste or file upload), have Eva normalize
+// ("Eva'rise") it into her schema via the bridge, review the draft, then save
+// it through canonical SQLite with optional ADX projection. Saved skills are surfaced automatically at runtime
 // by semantic match in the bridge's memory-context injection.
 //
 // Bridge endpoints used:
@@ -37,8 +37,6 @@ function updateSkillSourceFields() {
   var type = (document.getElementById('skillSourceType') || {}).value || 'paste';
   var map = {
     paste: 'skillPasteWrap',
-    url: 'skillUrlWrap',
-    github: 'skillRepoWrap',
     file: 'skillFileWrap'
   };
   Object.keys(map).forEach(function (k) {
@@ -70,17 +68,14 @@ async function evariseSkill() {
     if (type === 'paste') {
       payload.content = (document.getElementById('skillPasteInput') || {}).value || '';
       if (!payload.content.trim()) { _skillStatus('Paste some skill content first.', true); return; }
-    } else if (type === 'url') {
-      payload.url = (document.getElementById('skillUrlInput') || {}).value || '';
-      if (!payload.url.trim()) { _skillStatus('Enter a URL first.', true); return; }
-    } else if (type === 'github') {
-      payload.repo = (document.getElementById('skillRepoInput') || {}).value || '';
-      if (!payload.repo.trim()) { _skillStatus('Enter a GitHub reference first.', true); return; }
     } else if (type === 'file') {
       var f = await _readSkillFile();
       payload.source_type = 'file';
       payload.content = f.content;
       payload.filename = f.filename;
+    } else {
+      _skillStatus('Unsupported skill source. Paste text or upload a file.', true);
+      return;
     }
   } catch (e) {
     _skillStatus(e.message || 'Could not read source.', true);

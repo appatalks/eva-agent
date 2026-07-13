@@ -4,8 +4,8 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
 > Eva experience: persistent memory, emotion tracking, proactive data retrieval, and
-> intelligent cross-model orchestration. All other models work standalone, but AIG is the
-> way Eva was designed to be used.
+> intelligent cross-model orchestration. This containment release requires Eva Standalone;
+> all direct cloud models use its trusted main-process provider broker.
 
 ## Providers
 
@@ -24,17 +24,17 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 - Multi-agent AIG with eva and reviewer cognitive pipeline
 - Dual-mode data retrieval: cloud (Copilot CLI + MCP) or local (LM Studio + direct MCP)
 - MCP tool access (Kusto, GitHub, Azure, web search) hot-reloadable at runtime
-- Persistent memory via Azure Data Explorer (Kusto) or local SQLite
-- Signal text messaging (send-only via signal-cli, keyword-triggered fallback for local models)
-- Autonomous browser control (Playwright + CDP) and desktop control (pyautogui)
+- Canonical persistent memory via local SQLite with optional consent-aware Azure Data Explorer/Kusto projection
+- Signal delivery for configured trusted alerts (send-only via signal-cli; model text has no dispatch authority)
+- Bounded browser control (isolated Playwright + DNS-pinned egress) and launch-only desktop containment
 - Webcam presence detection (OpenCV face + motion)
 - Inline image search (Wikimedia) and generation (gpt-image-1)
-- Downloadable artifact creation (PDF, text, CSV, markdown) with auto-open
+- Downloadable artifact creation (PDF, text, CSV, markdown) with manual trusted Download controls
 - Skill import/normalization from paste, URL, GitHub, or file upload
 - Background memory consolidation with human-in-the-loop proposals
 - Cron scheduler for recurring tasks (briefings, checks, reminders)
 - Alert system (SEC filings, weather, space weather, keyword watch) with Signal delivery
-- Mode persistence across restarts (bridge-side mode.txt, frontend localStorage)
+- Atomic mode/MCP persistence across restarts (bridge-side runtime_state.json)
 - TTS: OpenAI (default), browser, Bark, Amazon Polly
 - LCARS and Eva themes (7 Eva variants)
 - Standalone Electron AppImage with bundled bridge
@@ -49,7 +49,7 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 |                                                                           |
 |  +---------+ +----------+ +--------+ +-----------+ +-------------+       |
 |  | OpenAI  | | Copilot  | | Gemini | | Copilot   | |  LM Studio  |       |
-|  | Direct  | | PAT API  | | Direct | | ACP/AIG   | |  Direct     |       |
+|  | Direct  | | PAT API  | | Direct | | ACP/AIG   | | via Bridge  |       |
 |  +----+----+ +----+-----+ +---+----+ +-----+-----+ +------+------+       |
 +-------|---------|-----------|-----------|--------------|-----------------+
         |         |           |           |              |
@@ -91,8 +91,10 @@ model or manually via Settings > General.
 - Optional web search via `web_search_mcp.py` when the `cloud` egress policy permits it
 - No cloud model inference; network access is governed independently by `EVA_EGRESS_MODE`
 
-**Mode persistence:** The selected mode is persisted to `~/.config/eva-standalone/mode.txt`
-by the bridge. On startup, the bridge reads this file to restore the previous mode.
+**Mode persistence:** The selected mode and canonical secret-free MCP selection are
+persisted atomically to `~/.config/eva-standalone/runtime_state.json` by the bridge.
+On startup, the bridge accepts only the complete versioned document; malformed or
+partial state fails closed rather than combining legacy mode and MCP files.
 The frontend seeds its selector from the bridge via `GET /v1/mode` after init, and
 skips auto-switch logic during startup to avoid overriding the persisted choice.
 
@@ -122,7 +124,16 @@ reflections, and summaries marked for review remain pending until approved.
 ### Request Flow
 
 **Direct models (OpenAI, Copilot PAT, Gemini):**
-Browser -> XHR/fetch -> Provider API -> JSON response -> `renderEvaResponse()`
+1. Renderer submits a closed request object through the preload IPC facade; raw provider transports are blocked at Electron's renderer network layer
+2. Electron main validates the fixed provider host/path, method, headers, and request size, then acquires an authenticated process-global bridge lease
+3. Main performs direct TLS with redirects/proxy inheritance disabled and streams the response into a bounded buffer while the lease remains active
+4. Main releases the lease only after transport settlement; local mode cannot commit while any lease exists
+5. Renderer canonicalizes one-turn intents away from inert history text; cleaned text and closed server-attested action receipts are finalized before rendering
+
+If the atomic runtime-state document is malformed, the bridge starts in a
+provider-blocked `unknown` repair state. Electron accepts that authenticated,
+bound process as UI-ready, but no model runtime starts. An explicit authenticated
+Cloud or Local selection rewrites the complete document and exits repair mode.
 
 **ACP models (Copilot CLI):**
 1. Browser -> `POST /v1/chat/completions` -> ACP Bridge (HTTP)
@@ -134,9 +145,9 @@ Browser -> XHR/fetch -> Provider API -> JSON response -> `renderEvaResponse()`
 **LM Studio (local):**
 1. Browser fetches `/v1/memory/context` + `/v1/data/retrieve` in parallel from bridge
 2. Bridge injects memory context from SQLite/Kusto
-3. Bridge runs data retrieval via local MCP tool-calling loop (see below)
-4. Browser prepends memory + data to the system prompt in cloud egress mode
-5. Browser sends to LM Studio directly in ordinary browser mode; restricted Eva Standalone routes through the authenticated bridge
+3. Bridge runs data retrieval through a fixed read-only local MCP profile (see below)
+4. Browser submits bounded user/assistant history and immutable artifact identities to authenticated `POST /v1/lmstudio/chat`
+5. Bridge validates the local/private LM Studio origin, injects the one system-owned artifact registry, disables inherited proxy/redirect behavior, and sends the provider request
 6. Response processed by `Cognition.executeActions()` for any action blocks
 7. Rendered via `renderEvaResponse()`
 
@@ -145,7 +156,7 @@ Browser -> XHR/fetch -> Provider API -> JSON response -> `renderEvaResponse()`
 2. Each agent call goes to `POST /v1/aig/chat` on the bridge
 3. Bridge runs Step 1 (memory), Step 2 (data retrieval), Step 3 (persona), Step 4 (LLM call)
 4. LLM call routes to GitHub Models API (PAT), ACP (Copilot CLI), or LM Studio based on model
-5. Step 5: background reflection thread logs conversation, extracts entities, computes emotion
+5. The canonical assistant response and closed action receipts finalize exactly once before rendering; governed background proposals run separately
 
 **Image handling:**
 1. `_detectGenerationIntent()` captures user's intent + subject before send
@@ -163,7 +174,7 @@ index.html                 Main UI: chat, settings modal, LCARS sidebar,
 config.json                API keys (not committed, gitignored)
 config.example.json        Template for config.json
 config.local.example.js    Template for file:// usage (inlined config)
-mcp.json                   MCP server configuration (gitignored)
+mcp.json                   Optional local MCP presets (gitignored; never auto-loaded)
 
 core/
   style.css                All styling: base theme, settings panel,
@@ -172,6 +183,8 @@ core/
     eva.css                Eva dark theme overrides
     lcars.css              LCARS (Star Trek) theme overrides
   js/
+    agent-markers.js       Strict closed-marker parser for nested browser/desktop launch specs
+    action-outcomes.js     Exact public eva.action-run/1 proof validator shared by UI consumers
     options.js             Core application logic (5000+ lines):
                            - Config loading (auth(), applyConfig())
                            - Auth key management (getAuthKey, saveAuthKeys)
@@ -182,12 +195,12 @@ core/
                            - Token/network/session monitors
                            - Image handling (renderEvaResponse, _searchImage, _generateImage)
                            - Markdown renderer (renderMarkdown)
-                           - Artifact download/open links (appendArtifactLinks)
-                           - Auto-open artifacts via bridge /v1/files/<name>?open=1
+                           - Immutable, digest-verified artifact download links
+                           - Server-side artifact opening is disabled
                            - AWS Polly TTS (speakText)
                            - Speech recognition, print, clear memory
     gpt-core.js            OpenAI Chat Completions API (trboSend)
-                           - XHR-based (legacy, not fetch)
+                           - Closed preload request to Electron main's leased, bounded TLS broker
                            - Model-specific params (o3-mini reasoning, gpt-5 top_p)
                            - External data augmentation (weather, news, markets, solar)
     gl-google.js           Google Gemini API (geminiSend)
@@ -197,7 +210,7 @@ core/
                            - Parallel memory context + data retrieval from bridge
                            - Action block execution (Cognition.executeActions)
                            - File capability documentation in system prompt
-                           - Post-response reflection via bridge
+                           - Synchronous exactly-once durable finalization via bridge
     copilot.js             GitHub Copilot integration (copilotSend)
                            - Dual mode: GitHub Models API (PAT) + ACP Bridge
                            - MCP configuration (applyMCPConfig, refreshMCPStatus)
@@ -212,7 +225,7 @@ core/
                            - Action protocol: [[EVA_ACTION]]{...}[[/EVA_ACTION]]
                            - Built-in PDF generator (Helvetica, Latin-1, multi-page)
                            - Marker protocol: [[EVA_BROWSER]], [[EVA_DESKTOP]],
-                             [[EVA_LOOK]], [[EVA_FILE]]
+                             [[EVA_LOOK]]; artifact authority is structured state
     dalle3.js              Image generation via gpt-image-1 (dalle3Send)
     idb-store.js           IndexedDB storage backend (sessions + blobs)
     sessions.js            Session persistence and management
@@ -242,18 +255,21 @@ tools/
     alerts.py              Alert/notification system (SEC, weather, space weather)
                            Signal messaging via signal-cli
     telemetry.py           Structured event logging (latency, routing decisions)
+    action_runs.py         Typed outcomes, causal proof, launch/gate capabilities, execution leases
+    public_egress_proxy.py Per-run public-unicast DNS-pinning HTTP CONNECT proxy
     utils.py               URL validation, LM Studio validation, config persistence
   web_search_mcp.py        MCP server: DuckDuckGo + Google fallback (no API key)
   sqlite_memory.py         SQLite memory backend (SqliteMemory class)
   kusto_mcp.py             MCP server for Azure Data Explorer (10 tools)
-  browser_agent.py         Autonomous web browsing (Playwright + CDP)
-  desktop_agent.py         Autonomous desktop control (pyautogui + vision)
+  browser_agent.py         Bounded isolated browsing (Playwright + DNS-pinned proxy)
+  desktop_agent.py         Launch-only GUI containment (pyautogui screenshot + process proof)
   camera_sense.py          Webcam presence detection (OpenCV face + motion)
   barkTTS_server.py        Suno Bark TTS engine server (GPU)
   eva_seed.kql             Sanitized database seed (public-safe)
-  acp_bridge.service       Systemd unit file
-  acp_setup.sh             One-command installer
+  acp_bridge.service       Same-user systemd unit for the canonical ~/.eva installation
+  acp_setup.sh             Same-user installer (run without sudo from ~/.eva)
   test_static.py           CI-safe static tests
+  test_action_plane.py     No-network action containment, proof, gate, proxy, and UI tests
   test_eva.py              Integration tests (64 checks)
   test_latency.py          Latency benchmarks
   test_skills_e2e.py       Skill import end-to-end tests
@@ -262,7 +278,8 @@ tools/
 standalone/
   main.js                  Electron shell: port allocation, bridge spawn, health polling
   preload.js               Context bridge (exposes evaStandalone API to renderer)
-  package.json             Electron + electron-builder config (v5.3.0)
+  launch-capability.js     Native-dialog one-use launch capability issuer
+  package.json             Electron + electron-builder config (v5.4.0)
 ```
 
 ## Dependencies
@@ -365,8 +382,13 @@ Options:
   --kusto-database NAME    Default Kusto database
   --enable-azure-mcp       Enable Azure MCP server (requires az login)
   --enable-github-mcp      Enable GitHub MCP server (requires Docker + PAT)
-  --mcp-config PATH        Custom MCP config JSON file
+  --mcp-config PATH        Explicit approved-preset MCP config JSON file
 ```
+
+MCP process startup is fail-closed. Only the exact Azure, GitHub, Kusto,
+bundled SQLite, and bundled web-search release shapes are accepted. Unknown,
+wrapped, Playwright, pointer/keyboard, or aliased servers are rejected, and a
+project `mcp.json` is never auto-discovered.
 
 ### HTTP Endpoints
 
@@ -376,6 +398,7 @@ Options:
 |---|---|---|
 | `/v1/chat/completions` | POST | OpenAI-compatible chat (routes to ACP) |
 | `/v1/aig/chat` | POST | AIG pipeline: memory + data + persona + LLM |
+| `/v1/lmstudio/chat` | POST | Validate private/local LM Studio egress and inject bridge-owned trusted context |
 | `/v1/models` | GET | Available models list |
 | `/health` | GET | Status, session ID, model, MCP servers |
 
@@ -384,7 +407,7 @@ Options:
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/v1/memory/context` | GET | Build and return memory context for injection |
-| `/v1/memory/reflect` | POST | Trigger post-response reflection (entities, emotion) |
+| `/v1/memory/reflect` | POST | Legacy-named endpoint for synchronous exactly-once turn finalization before render |
 | `/v1/memory/backend` | GET/POST | Get or switch memory backend (kusto/sqlite) |
 | `/v1/memory/seed` | POST | Seed database tables |
 
@@ -394,6 +417,8 @@ Options:
 |---|---|---|
 | `/v1/data/retrieve` | GET | Retrieve live data for any model path |
 | `/v1/mode` | GET/POST | Get or switch data retrieval mode (cloud/local) |
+| `/v1/provider/admit` | POST | Acquire a process-global direct-cloud-provider lease; denied unless committed cloud mode is ready |
+| `/v1/provider/release` | POST | Consume one provider lease after Electron main's transport has settled; local mode cannot commit while any lease exists |
 
 **Skills:**
 
@@ -402,7 +427,7 @@ Options:
 | `/v1/skills` | GET | List all active skills |
 | `/v1/skills` | POST | Create a new skill |
 | `/v1/skills/evarise` | POST | Normalize raw skill text into Eva schema |
-| `/v1/skills/auto-learn` | POST | Extract skill from conversation context |
+| `/v1/skills/auto-learn` | POST | Default-off legacy draft extraction; never activates behavior |
 | `/v1/skills/<id>` | PATCH | Update a skill (enable/disable/edit) |
 | `/v1/skills/<id>` | DELETE | Soft-delete a skill |
 
@@ -417,8 +442,11 @@ Options:
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/v1/files/write` | POST | Write artifact to ARTIFACTS_DIR |
-| `/v1/files/<name>` | GET | Serve artifact (download or auto-open with `?open=1`) |
+| `/v1/files/generation` | GET | Read the current write-authority epoch required by new artifact writes |
+| `/v1/files/write` | POST | Write an immutable artifact plus fsynced identity metadata containing creation epoch, MIME, byte size, and digest |
+| `/v1/files/<session-id>/<artifact-id>/<name>?digest=<sha256>&generation=<epoch>` | GET | Stream one immutable artifact only after generation, digest, MIME, and byte-size verification; server-side Open is disabled |
+| `/v1/files/purge` | POST | Revoke active/saved artifact registries and delete all artifacts |
+| `/v1/files/session/<session-id>/purge` | POST | Delete one session's artifact namespace during checked session deletion |
 
 **Background:**
 
@@ -458,20 +486,25 @@ Options:
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/v1/browser/launch` | POST | Start autonomous browser task |
-| `/v1/browser/<id>/status` | GET | Run status + latest screenshot |
-| `/v1/browser/<id>/confirm` | POST | Answer confirmation prompt |
-| `/v1/desktop/launch` | POST | Start autonomous desktop task |
-| `/v1/desktop/<id>/status` | GET | Run status + latest screenshot |
+| `/v1/browser/run` | POST | Consume a native one-use capability and start a bounded browser run |
+| `/v1/browser/status?run_id=<id>` | GET | Typed lifecycle/outcome status |
+| `/v1/browser/screenshot?run_id=<id>` | GET | Latest private screenshot while retained |
+| `/v1/browser/confirm` | POST | Resolve one exact approval/input gate |
+| `/v1/browser/cancel` | POST | Request run cancellation; reports pending in-flight effects |
+| `/v1/desktop/run` | POST | Consume a native one-use capability and start a bounded desktop run |
+| `/v1/desktop/status?run_id=<id>` | GET | Typed lifecycle/outcome status |
+| `/v1/desktop/screenshot?run_id=<id>` | GET | Latest private screenshot while retained |
+| `/v1/desktop/confirm` | POST | Resolve one exact approval/input gate |
+| `/v1/desktop/cancel` | POST | Request run cancellation; reports pending in-flight effects |
 
 **Camera:**
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/v1/camera/start` | POST | Start webcam presence detection |
+| `/v1/camera/start` | POST | Start explicit presence mode, or consume an Electron-signed one-use capability for a bound camera question/device |
 | `/v1/camera/stop` | POST | Stop webcam |
 | `/v1/camera/status` | GET | Presence state (faces, motion) |
-| `/v1/camera/frame` | GET | Latest captured frame (JPEG) |
+| `/v1/camera/frame?capture_id=<id>` | GET | Consume the capture authority and return one fresh JPEG with bridge receipt headers |
 
 **Diagnostics:**
 
@@ -502,11 +535,11 @@ class MCPServer:
 ```
 
 **Lifecycle:**
-1. `start()`: Spawn process, send `initialize` handshake (protocol 2024-11-05), send `notifications/initialized`, discover tools via `tools/list`
-2. `call_tool(name, arguments, timeout)`: Send `tools/call` JSON-RPC, parse content response
+1. `start()`: Spawn an exact bundled server, strictly validate bounded JSON-RPC `initialize` and `tools/list`, and abort the complete staged set if any server fails
+2. `call_tool(name, arguments, timeout)`: Revalidate the fixed read-only tool ID and bounded arguments, then parse an exact bounded content response
 3. `stop()`: Terminate process
 
-**Threading:** Background reader thread per server matches JSON-RPC responses by ID. Stderr is logged to bridge debug log.
+**Threading:** Background reader threads match bounded JSON-RPC responses by ID. Child stderr content is suppressed; only fixed metadata is logged. Mode/config stage-persist-swap transitions share one lock.
 
 ### LocalMCPManager
 
@@ -518,12 +551,18 @@ class LocalMCPManager:
     _tool_map: dict[tool_name -> server_name]  # routes calls
 ```
 
+Direct local-model execution permits only fixed read-only bundled profiles:
+SQLite/Kusto memory reads and fixed-host web search. Generic KQL, Azure/GitHub
+MCP tools, writes, callouts, unknown tools, and duplicate tool IDs are denied.
+The SQLite process is bound to the operator-configured canonical memory path;
+request configuration cannot select another filesystem target.
+
 ### Tool-Calling Agent Loop
 
 `local_agent_query()` implements an iterative tool-calling agent using LM Studio:
 
-1. Send user message + full tool schemas to LM Studio `/chat/completions`
-2. If model returns `tool_calls` in the response, execute each via `mcp_manager.call_tool()`
+1. Send the user message plus only the fixed read-only tool schemas to validated LM Studio `/chat/completions`
+2. If the model returns a closed, bounded `tool_calls` batch, revalidate each tool ID and argument object before `mcp_manager.call_tool()`
 3. Inject tool results back as assistant messages
 4. Repeat until model produces a text answer (max 5 iterations, 90s timeout)
 5. Return `(data_text, model_used)` matching the ACP retrieval signature
@@ -536,17 +575,22 @@ class LocalMCPManager:
 |---|---|---|
 | `web_search` | query, max_results (8) | DuckDuckGo HTML scraping + Google fallback |
 | `web_search_news` | query, max_results (8) | DDG with news-biased queries |
-| `web_fetch` | url, max_length (6000) | Extract readable text from URL |
+| `web_fetch` | disabled | Arbitrary URL fetching is disabled until it uses brokered DNS-pinned egress |
 
 **Search cascade:** DuckDuckGo HTML -> DuckDuckGo Lite -> Google HTML scraping. User-Agent spoofs Chrome 131.
 
 ### Auto-Configuration
 
 When switching to local mode, the bridge:
-1. Checks for ACP's MCP config (if ACP is connected)
-2. Falls back to persisted config (`~/.config/eva-standalone/mcp_config.json`)
-3. Always auto-adds `eva-web-search` MCP if not already present
-4. Searches multiple paths for `web_search_mcp.py` (bridge directory, `~/.eva/tools/`)
+1. Loads the exact versioned `runtime_state.json` document that atomically binds mode and secret-free MCP selection
+2. Rejects malformed/partial state as a whole; legacy split mode/MCP files are not combined
+3. Filters the canonical selection to the fixed direct-local read-only process/tool policy
+4. Auto-adds `eva-web-search` only when the active egress policy permits its fixed-host search transport
+5. Stages the complete local manager transactionally before publishing Local mode
+
+Direct-provider leases intentionally have no bridge-side timeout. Electron main
+owns transport settlement and release; if the broker process crashes, restarting
+Eva clears the bridge's in-memory leases.
 
 ## Memory System
 
@@ -607,7 +651,7 @@ output structure:
 **Skills manifest (always injected):**
 - data-retrieval, weather-news, web-search
 - browser-control ([[EVA_BROWSER]]), desktop-control ([[EVA_DESKTOP]]), camera-vision ([[EVA_LOOK]])
-- signal-messaging ([[EVA_SIGNAL]])
+- trusted alert Signal delivery (not invokable from model text)
 - file-creation ([[EVA_ACTION]] file.download)
 - image-search, image-generation
 - persistent-memory (table list)
@@ -620,7 +664,7 @@ Falls back to lexical keyword matching if embeddings are unavailable.
 
 ### Entity Extraction
 
-Post-response reflection extracts facts using strict regex patterns:
+Synchronous durable finalization projects explicit facts using strict regex patterns:
 
 | Pattern | Relation | Confidence |
 |---|---|---|
@@ -678,11 +722,14 @@ Browser -> POST /v1/aig/chat -> ACP Bridge
   +-- Step 4: Generate response
   |   +-- Route: GitHub Models API (PAT) | ACP (Copilot CLI) | LM Studio
   |
-  +-- Step 5: Background reflection (async thread)
-      +-- Log to Conversations table
-      +-- Extract entities -> Knowledge table
-      +-- Update HeuristicsIndex
-      +-- Compute emotion vector -> EmotionState table
+    +-- Step 5: Exactly-once durable finalization (before render)
+      +-- Append immutable user/assistant events and closed action receipts
+      +-- Project the conversation and explicit evidence-linked facts atomically
+      +-- Commit or roll back the complete turn
+    |
+    +-- Separate governed background loop
+      +-- Build consolidation/reflection proposals from durable evidence
+      +-- Require policy or human approval before applying inferred memory
 ```
 
 ### AIG Request Classification
@@ -717,9 +764,11 @@ The bridge classifies each user message to determine routing and prompt tuning:
 ## Cognition Layer
 
 Eva has two complementary cognitive systems. The **bridge cognition layer** runs
-server-side and adds persistent intelligence (memory injection, emotion tracking,
-post-response reflection). The **browser cognitive layer** runs in the page and
-adds an optional multi-agent draft/review loop.
+server-side and adds persistent intelligence. SQLite is canonical; ADX/Kusto is
+an optional consent-aware projection. Each turn is durably finalized exactly
+once before rendering, while inferred consolidation remains proposal-based. The
+**browser cognitive layer** runs in the page and adds an optional multi-agent
+draft/review loop.
 
 ### Browser Cognitive Layer (`core/js/cognition.js`)
 
@@ -766,8 +815,14 @@ Capabilities are registered functions that Eva can invoke via action blocks:
 Cognition.registerCapability({
   id: 'my.capability',
   description: 'What it does and when to use it.',
+  effectful: true,
+  validate: function (args) {
+    // Pure validation/normalization; no I/O or mutation.
+    return normalizedArgs;
+  },
   run: async function (args) {
-    // Return { html: '...' } to replace the action block
+    // Execute only after the complete batch passes validation.
+    return structuredResult;
   }
 });
 ```
@@ -777,23 +832,23 @@ Cognition.registerCapability({
 | Capability | Args | Description |
 |---|---|---|
 | `file.download` | filename, content, mime? | Create downloadable artifact. Genuine PDF for `.pdf` or `application/pdf`. Writes to bridge ARTIFACTS_DIR via `/v1/files/write`. |
-| `file.open` | filename | Open existing artifact with system viewer via `/v1/files/<name>?open=1` (xdg-open). |
+| `file.open` | filename | Surface a Download control for an existing registry-authorized artifact. Server-side Open is disabled. |
 
 **Action protocol:**
 ```
 [[EVA_ACTION]]{"id":"file.download","args":{"filename":"report.pdf","content":"..."}}[[/EVA_ACTION]]
 ```
 
-The regex also handles unclosed blocks (local models often forget `[[/EVA_ACTION]]`):
-```javascript
-/\[\[EVA_ACTION\]\]([\s\S]*?)\[\[\/EVA_ACTION\]\]|\[\[EVA_ACTION\]\]([\s\S]+)$/g
-```
+Action blocks must be standalone and closed. Fenced code is inert. The complete
+batch is count-, byte-, shape-, and capability-argument-validated before the
+first execution. At most one action/control surface is accepted per turn; malformed,
+unclosed, conflicting, or multi-effect batches execute nothing.
 
 **File behavior defaults:**
 - Inline answers by default. Eva only creates file artifacts when the user
   explicitly asks for a file format ("create a PDF", "download as markdown").
 - "Give me a briefing" = inline text. "Create a PDF report" = file.download.
-- Asking to open an already-created file uses file.open (not re-create).
+- Asking to view an already-created file uses file.open to surface its verified Download control (not re-create it).
 
 ### Marker Protocol
 
@@ -801,37 +856,71 @@ Eva uses marker blocks for agent capabilities:
 
 | Marker | Purpose | Example |
 |---|---|---|
-| `[[EVA_BROWSER]]` | Launch Playwright browser agent | `[[EVA_BROWSER]]{"goal":"search for cats","start_url":"https://example.com"}[[/EVA_BROWSER]]` |
-| `[[EVA_DESKTOP]]` | Launch desktop vision agent | `[[EVA_DESKTOP]]{"goal":"open GIMP and create canvas"}[[/EVA_DESKTOP]]` |
-| `[[EVA_LOOK]]` | Capture webcam frame | `[[EVA_LOOK]]{"question":"what am I holding?"}[[/EVA_LOOK]]` |
-| `[[EVA_SIGNAL]]` | Send Signal text message | `[[EVA_SIGNAL]]{"message":"hello world"}[[/EVA_SIGNAL]]` |
-| `[[EVA_FILE]]` | Artifact download/open links | `[[EVA_FILE]] report.pdf` (rendered by `renderEvaResponse`) |
+| `[[EVA_BROWSER]]` | Request a bounded Playwright browser run | `[[EVA_BROWSER]]{"goal":"open the result page","start_url":"https://example.com","postcondition":{"type":"browser.url_match","origin":"https://example.com","path":"/done"}}[[/EVA_BROWSER]]` |
+| `[[EVA_DESKTOP]]` | Request a bounded desktop run | `[[EVA_DESKTOP]]{"goal":"open GIMP","postcondition":{"type":"desktop.process_spawned","executable":"gimp","state":"started"}}[[/EVA_DESKTOP]]` |
+| `[[EVA_LOOK]]` | Propose one webcam frame for an explicit camera request | `[[EVA_LOOK]]{"question":"what am I holding?"}[[/EVA_LOOK]]` |
+| `[[EVA_SIGNAL]]` | Inert legacy text; stripped and never dispatched | Not an executable capability |
+| Trusted Artifact Registry | Immutable artifact-download authorization | System-owned structured metadata persisted with the session; model/user `[[EVA_FILE]]` text grants no authority |
 
-## Autonomous Agents
+All control closing markers are mandatory, standalone, top-level, and inert in
+code/action regions. Model markers propose intent but grant no authority.
+Electron main displays the complete browser, desktop, or camera specification
+and mints a one-use, 60-second HMAC capability only after an explicit native
+dialog decision. Camera capture additionally requires a fresh bridge-observed
+frame sequence and returns a closed receipt. Every browser/desktop effect uses
+a distinct one-use approval gate.
+
+## Bounded Action Agents
 
 ### Browser Agent (`tools/browser_agent.py`)
 
-Autonomous web browsing via Playwright with a persistent Chrome profile.
+Playwright browsing in an isolated persistent profile. Each run is forced
+through a loopback DNS-pinning proxy that accepts only public-unicast A/AAAA
+answers, rewrites HTTP authority, rejects ambiguous framing, and disables
+non-proxied WebRTC UDP. The agent never attaches to an existing user browser.
 
 **Architecture:**
 - Director agent (Claude via ACP): text-only, high-level planning
 - Executor agent (GPT-4o via OpenAI): vision-based, concrete actions
 - Re-consult director every 4 executor steps
-- Long-lived Chrome via CDP on port 9333, persistent profile at `~/.config/eva-standalone/browser_profile`
+- Per-run isolated context with persistent profile at `~/.config/eva-standalone/browser_profile`
 
-**Action types:** click, double_click, click_ref, type, type_ref, press, scroll, navigate, wait, done, ask
+**Action types:** click, double_click, click_ref, type_ref, scroll, navigate,
+wait, done, ask. Raw keyboard actions are unavailable until the capability
+broker can authorize their semantics.
 
-**Safety:** Sensitive actions (buy, purchase, payment, checkout) require user confirmation before execution. The run parks and waits for approval via `/v1/browser/<id>/confirm`.
+**Safety:** `auto` is rejected. `pause` and `confirm_all` both confirm every
+effectful action. A gate binds a frozen action digest and fresh semantic target
+fingerprint, expires after 60 seconds, and is consumed once. Cancellation uses
+an execution lease: an in-flight effect is recorded before terminalization.
 
-**Trajectories:** Each step logged as JSONL + PNG screenshot to `~/.config/eva-standalone/browser_trajectories/` for fine-tuning.
+**Outcomes:** lifecycle `status=done` is not success. A model `done` claim is
+`indeterminate` unless a user-authorized request postcondition changed from a
+fresh tool-observed `not_observed` baseline to an `observed` final state after
+at least one approved, ordered effect receipt. Step/runtime exhaustion aborts.
+Supported browser checks are exact URL origin/path and bounded element state.
+
+**Artifacts:** Trajectories contain salted hashes and typed results rather than
+raw goals, model output, action text, or URL paths. Screenshots and JSONL use
+private permissions and are removed after ten minutes; abandoned prior-process
+directories are scavenged at startup.
 
 ### Desktop Agent (`tools/desktop_agent.py`)
 
-Autonomous desktop control via pyautogui screenshot-and-act loop.
+Launch-only desktop containment via a pyautogui screenshot-and-verify loop.
 
-**Architecture:** Same director/executor pattern as browser agent. `pyautogui.FAILSAFE = True` (mouse to corner = emergency stop).
+**Architecture:** Same director/executor pattern as browser agent. PyAutoGUI is
+used only for private screenshots. GUI launch is limited to root-owned,
+non-writable native binaries in a curated allowlist;
+model-supplied arguments, pointer actions, keyboard actions, terminal helpers,
+and arbitrary window helpers are structurally unavailable until the capability
+broker is implemented.
 
-**Safety:** Broader sensitive action set includes delete, sudo, rm, shutdown, reboot, transfer money, send email/message. All require user confirmation.
+**Verified outcome:** the run must have no prior spawn receipt; an approved
+launch records the exact canonical binary and PID; success requires that same
+live `/proc/<pid>/exe` to be observed after the effect. This is explicitly a
+run-scoped spawn attestation, not a claim that no matching process existed
+elsewhere on the system.
 
 ### Camera Presence (`tools/camera_sense.py`)
 
@@ -841,7 +930,11 @@ Local webcam face and motion detection.
 
 **Detection:** OpenCV Haar cascade for faces, frame-difference for motion. Hysteresis: 2 frames to detect presence, 8 to lose it.
 
-**Privacy:** Camera off by default. Only activates on explicit `POST /v1/camera/start`.
+**Privacy:** Camera is off by default. Presence mode is an explicit UI setting.
+Each model-proposed one-shot look must match an explicit user camera request,
+pass strict top-level parsing, receive a native Electron decision, and consume a
+question/device-bound HMAC capability. The bridge releases only one frame newer
+than its captured baseline and returns a closed `eva.camera-capture/1` receipt.
 
 ## Skills System
 
@@ -882,11 +975,14 @@ instructions, tools, and tags as a JSON object. Parsing handles `<think>` blocks
 (Qwen, DeepSeek), code fences, and balanced-brace extraction. Falls back to
 LM Studio when ACP is unavailable.
 
-### Auto-Learn
+### Governed Learning
 
-After complex tasks, Eva can auto-extract a skill from the conversation
-context via `/v1/skills/auto-learn`. The extracted skill is stored as a draft for
-user review.
+The Phase 3 learning pipeline is default-off, local, shadow-only, and cannot
+activate behavior. It records verified outcomes, proposes restricted immutable
+candidates, and evaluates them deterministically. The older provider-backed
+`/v1/skills/auto-learn` draft path is separately default-off behind
+`EVA_LEGACY_SKILL_AUTO_LEARN`; drafts require explicit review and grant no
+activation authority.
 
 ## Background System
 
@@ -950,37 +1046,38 @@ Alert rules trigger on conditions and deliver notifications:
 Cooldown: 1-20160 minutes (default 1440/24 hours). Rate limit: 8 per hour.
 Quiet hours configurable. Channels: `chat`, `voice`, or `signal`.
 
-### Signal Messaging
+### Signal Alert Delivery
 
-Eva can send text messages via Signal using signal-cli (native binary, no Java).
+Eva can deliver configured trusted alerts through Signal using signal-cli
+(native binary, no Java).
 
 **Setup:**
 1. Install signal-cli (v0.14.5+ native binary at `~/.local/bin/signal-cli`, or let `install.sh` handle it)
 2. Link to your Signal account: `signal-cli link -n "Eva"` and scan the QR code from Signal mobile
 3. Enter sender and recipient numbers in Settings > Auth
 
-**How it works:**
-- The `[[EVA_SIGNAL]]` marker in the system prompt tells the model to emit `[[EVA_SIGNAL]]{"message":"..."}[[/EVA_SIGNAL]]`
-- The bridge parses the marker, calls `signal-cli -u <sender> send -m <message> <recipient>`
-- The frontend strips the marker and shows "Signal message sent."
-- For local models that refuse to emit the marker, keyword-triggered fallback injects it automatically and replaces the model's refusal text
-
-**Signal keywords** (trigger REMINDER injection and fallback): `signal`, `text me`, `text message`, `send me a message`, `send a message`, `notify me`, `message me`
+**How it works:** Trusted alert records pass the configured quiet-hour,
+salience, cooldown, and rate-limit policy before the alert subsystem invokes
+signal-cli. `[[EVA_SIGNAL]]` text is always inert and stripped by the canonical
+renderer. Local/provider model output, keywords, prompts, and response parsing
+cannot invoke signal-cli. General on-demand model-authored Signal messages are
+not part of this containment release.
 
 **Configuration persisted to:** `~/.config/eva-standalone/alerts.json` (signal_sender, signal_recipient fields)
 
-**Camera/Signal conflict prevention:** When signal keywords match, camera REMINDER and camera fallback injection are suppressed to prevent spurious `[[EVA_LOOK]]` markers.
-
 ## Telemetry
 
-Structured, privacy-safe event logging. Records durations, model names, and
-routing decisions only. Never records message content, tokens, keys, or MCP env values.
+Structured, privacy-safe event logging. Records numeric counts/durations and a
+closed set of bounded enum labels only. Never records message content, queries,
+tool arguments, child stderr, tokens, keys, or MCP environment values.
 
-**Events:** `acp_pool` (hit/warm/evict/miss), `acp_prompt` (model, ms, chars), `error` (category, message), `cognition_turn` (draft/review/revise timing)
+**Events:** `acp_pool` (hit/warm/evict/miss), `acp_prompt` (model, ms, chars), `cognition_turn` (draft/review/revise timing)
 
 **Storage:** JSONL file at `~/.config/eva-standalone/telemetry.jsonl` (rotates at 5 MB). In-memory ring buffer (300 events) for `/v1/telemetry`.
 
-**Debug log:** `~/.config/eva-standalone/bridge_debug.log` (rotates at 10 MB). In-memory ring buffer (200 lines) for `/v1/logs`.
+**Debug log:** Free-form stdout/stderr persistence and the legacy `/v1/logs`
+ring are disabled. The retired `bridge_debug.log` is truncated to an empty file;
+Electron does not mirror bridge stream content.
 
 ## Settings Panel
 
@@ -999,21 +1096,14 @@ Eight tabs in a modal overlay:
 
 ## Deployment
 
-### Browser only
+### Browser-only deployment
 
-```bash
-cp config.example.json config.json   # add your API keys
-xdg-open index.html                  # or open in any browser
-```
-
-For `file://` usage without a JSON loader, copy `config.local.example.js` to `config.local.js`.
-
-Plain browser mode supports direct provider models only. It does not authenticate
-to Eva's privileged `/v1/*` bridge and therefore does not expose persistent
-memory, ACP/MCP, scheduling, camera, browser, or desktop controls. Use Eva
-Standalone for those capabilities. A hosted deployment must terminate HTTPS and
-inject an authenticated bridge identity through a trusted reverse proxy; opaque
-`file://` origins and renderer-stored bearer tokens are intentionally unsupported.
+Standalone browser/file mode is not supported by this containment release.
+Direct provider requests require authenticated process-global leases issued by
+the local bridge, and the bearer remains outside renderer memory. Use Eva
+Standalone. A future hosted deployment must provide the equivalent trusted
+network broker and authenticated bridge identity; renderer-stored bearer tokens
+and unbrokered direct-provider transport are intentionally unsupported.
 
 ### Manual ACP bridge
 
@@ -1038,7 +1128,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.3.0.AppImage'
+./dist/'Eva Standalone-5.4.0.AppImage'
 ```
 
 **Electron lifecycle:**
@@ -1176,7 +1266,8 @@ models/providers/external network, and explicit non-activation checks).
 ### ACP Infrastructure Roadmap (tracking)
 
 Current state (2026-06-15):
-- Static web tier can run on legacy 32-bit hosts.
+- A legacy static web tier may remain deployed on 32-bit hosts, but it cannot use
+  this release's direct providers without an equivalent trusted network broker.
 - ACP Bridge currently runs on a separate compatible machine.
 - Single-host deployment is blocked until new hardware is available.
 - Local mode (LM Studio + direct MCP) works on supported `x86_64` or `arm64`/`aarch64` machines without Copilot CLI.
@@ -1187,7 +1278,7 @@ Current state (2026-06-15):
 | Provision bridge-capable server | planned | 2+ vCPU, 4+ GB RAM |
 | Install runtime baseline | planned | Node.js 24+, Python 3.12+ |
 | Authenticate Copilot CLI | planned | `copilot auth login` on target |
-| Deploy bridge as systemd service | planned | `tools/acp_setup.sh` |
+| Deploy bridge as systemd service | planned | Manual authenticated API infrastructure only. Install Eva at `~/.eva`, authenticate Copilot as that user, then run `tools/acp_setup.sh` without sudo; the user unit intentionally disables journal output. Eva Standalone uses its own per-launch bridge instead. |
 | Single-host ACP deployment | planned | Keep localhost fallback until complete |
 | Post-migration validation | planned | `/health` ok + AIG smoke + `test_eva.py` |
 | macOS standalone build | planned | Needs Apple Developer ID + notarization |
@@ -1203,7 +1294,10 @@ Current state (2026-06-15):
 - Skill import treats source text as untrusted data (explicit anti-injection prompt)
 - LM Studio base URL is restricted to loopback in `offline`, and loopback/private IP literals in `local-network`, on whitelisted ports (1234, 8000, 8080, 11434); redirects are rejected
 - Camera off by default, subprocess-isolated, state read-only from bridge
-- Sensitive browser/desktop actions require user confirmation
+- Browser/desktop launches require native Electron authorization; every effectful action then requires an exact, expiring, one-use approval
+- Browser egress uses a per-run public-unicast DNS-pinning proxy; local/private/multicast targets, URL credentials, ambiguous HTTP framing, and non-proxied WebRTC UDP are blocked
+- Model completion and step exhaustion never imply success; only a causal baseline → approved effect receipt → fresh tool observation can produce `succeeded`
+- Desktop keyboard, shell, arbitrary arguments, and window-helper paths remain unavailable until the capability broker is implemented
 - `pyautogui.FAILSAFE = True` (mouse to corner = emergency stop)
 - Background proposals honor per-job governance: review-required outputs remain pending; explicit auto-apply maintenance outputs are audited
 
@@ -1217,6 +1311,11 @@ Runs on every PR to `main`:
 |---|---|
 | **static-checks** | Secret scanning, HTML structure, JS syntax, Python syntax, model routing, config templates, .gitignore |
 | **python-tests** | `tools/test_static.py`: file integrity, config safety, CSV logic, model selector, seed validation |
+
+The Python 3.12 job also runs Phase 0–3 plus
+`tools/test_action_plane.py` (deterministic, no providers/GUI/network), covering
+launch capabilities, one-use gates, causal proofs, cancellation leases,
+public-egress pinning, strict model actions, frontend outcomes, and privacy.
 
 ### Test Files
 

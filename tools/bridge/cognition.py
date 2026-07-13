@@ -253,8 +253,12 @@ def _extract_explicit_user_facts(user_message):
     seen = set()
 
     def add_fact(relation, raw_value, confidence):
+        from bridge.sensitive import is_synthetic_memory_value
         value = _clean_explicit_fact_value(raw_value)
-        if not value or value.lower() in _ENTITY_RESERVED_TERMS:
+        if (
+            not value or value.lower() in _ENTITY_RESERVED_TERMS
+            or is_synthetic_memory_value(value)
+        ):
             return
         key = (relation, value.lower())
         if key in seen:
@@ -332,10 +336,17 @@ def _explicit_user_fact_covers_candidate(classified_relation, entity, explicit_u
 
 def _normalize_entity_candidate(raw_entity):
     """Normalize an extracted entity candidate before validation."""
-    import re
-    candidate = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", raw_entity or "")
-    candidate = re.sub(r"\s+", " ", candidate).strip()
-    return candidate
+    candidate = str(raw_entity or "")
+    start, end = 0, len(candidate)
+    while start < end and not (
+        candidate[start].isascii() and candidate[start].isalnum()
+    ):
+        start += 1
+    while end > start and not (
+        candidate[end - 1].isascii() and candidate[end - 1].isalnum()
+    ):
+        end -= 1
+    return " ".join(candidate[start:end].split())
 
 
 
@@ -354,7 +365,8 @@ def _validate_entity_candidate(entity):
     lower = entity.lower()
     tokens = [t.lower() for t in entity.replace("-", " ").split()]
 
-    if re.match(r"^(test|tmp|dummy|sample|foo|bar)[a-z_\-]*\d*$", lower):
+    from bridge.sensitive import is_synthetic_memory_value
+    if is_synthetic_memory_value(lower):
         return False, "synthetic_pattern"
     if lower in _ENTITY_RESERVED_TERMS:
         return False, "reserved_term"
@@ -399,10 +411,10 @@ def _load_candidate_history(entity):
     backend = _resolve_memory_backend()
     if backend == "sqlite":
         mem = _get_sqlite_mem()
-        safe_entity = (entity or "").strip().replace("'", "''")
         rows = mem.query(
-            f"SELECT COUNT(*) AS Mentions, MAX(Confidence) AS MaxConfidence "
-            f"FROM Knowledge WHERE Entity = '{safe_entity}' COLLATE NOCASE"
+            "SELECT COUNT(*) AS Mentions, MAX(Confidence) AS MaxConfidence "
+            "FROM Knowledge WHERE Entity = ? COLLATE NOCASE",
+            ((entity or "").strip(),),
         )
     else:
         cluster, db = _get_kusto_config()
@@ -432,7 +444,7 @@ def _load_candidate_history(entity):
             max_confidence = 0.0
 
     _st.candidate_history_cache[key] = (now, mentions, max_confidence)
-    print(f"[Cognition] Candidate history for \"{entity}\": prior_mentions={mentions} max_conf={max_confidence:.3f}")
+    print(f"[Cognition] Candidate history checked: prior_mentions={mentions}")
     return mentions, max_confidence
 
 
@@ -557,33 +569,34 @@ def _build_memory_context_sqlite(user_message):
         "• data-retrieval: Live stock quotes, financial data, company info\n"
         "• weather-news: Real-time weather, news, market summaries, space weather\n"
         "• web-search: Search the web and retrieve current information\n"
-        "• browser-control: [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<url>\"}[[/EVA_BROWSER]]\n"
-        "• desktop-control: [[EVA_DESKTOP]]{\"goal\":\"<task>\"}[[/EVA_DESKTOP]]\n"
-        "• camera-vision: [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]\n"
-        "• signal-message: [[EVA_SIGNAL]]{\"message\":\"<text>\"}[[/EVA_SIGNAL]]\n"
+        "• browser-control: request an isolated browser run; include a deterministic request postcondition when known, e.g. [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<public url>\",\"postcondition\":{\"type\":\"browser.url_match\",\"origin\":\"<public origin>\",\"path\":\"/expected\"}}[[/EVA_BROWSER]]\n"
+        "• desktop-control: launch-only; [[EVA_DESKTOP]]{\"goal\":\"open <app>\",\"postcondition\":{\"type\":\"desktop.process_spawned\",\"executable\":\"<allowlisted binary>\",\"state\":\"started\"}}[[/EVA_DESKTOP]]\n"
+        "• camera-vision: only for an explicit camera request, one standalone mandatory closed [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] proposal; Electron authorizes one fresh frame\n"
+        "• signal-message: unavailable from model output; trusted configured alerts are separate\n"
         "• image-generation: [Image of <description>] on its own line (up to 3 per response)\n"
-        "• file-creation: Write the file, then [[EVA_FILE]] <filename.ext>\n"
+        "• file-creation: emit [[EVA_ACTION]]{\"id\":\"file.download\",\"args\":{\"filename\":\"<name>\",\"content\":\"<content>\",\"mime\":\"<type>\"}}[[/EVA_ACTION]]\n"
         "• persistent-memory: Local SQLite. Tables: Knowledge, Conversations, EmotionState,\n"
         "    MemorySummaries, Reflections, Goals, SelfState, HeuristicsIndex, EmotionBaseline\n"
         "• cron-scheduling: Recurring tasks (briefings, checks, reminders). Settings > Cron\n"
         "\n"
         "[Rules]\n"
-        "- Act first, explain second. Emit the marker — don't list steps for the user.\n"
-        "- Write ONE short sentence before a marker announcing what you're about to do.\n"
-        "- Only confirm an action after it actually ran and returned.\n"
+        "- A marker requests a run; Electron must authorize the complete launch and every effect requires a separate approval.\n"
+        "- Emit at most one browser or desktop marker, always with its closing marker.\n"
+        "- Only claim success for a typed causal tool-verified postcondition outcome; model done and step limits are not success.\n"
+        "- Never emit EVA_FILE markers, blob URLs, local paths, or invented artifact links.\n"
         "- Never fabricate headlines, prices, weather, or events not in [Data Retrieved].\n"
         "- Screenshot vs camera: [[EVA_DESKTOP]] sees the monitor; [[EVA_LOOK]] sees the physical world.\n"
-        "- For purchases or irreversible actions, stop at the final step and ask to confirm.\n"
+        "- Browser keyboard shortcuts/raw typing and all desktop pointer, keyboard, shell, argument, window-focus, and arbitrary file-open control are unavailable.\n"
         "- Memory is automatic — do NOT call any save/ingest tool. Just acknowledge new facts.\n"
         "- When asked your model: check [Runtime] and answer from there only.\n"
         "- If [Data Retrieved] is present, use it as your authoritative source.\n"
         "- If no data was retrieved for a live question, say so honestly — don't guess.\n"
         "\n"
         "[Workflow: Browser & Desktop]\n"
-        "When asked to open a site, play a playlist, or do a task in an app:\n"
-        "1. ACT immediately — emit [[EVA_BROWSER]] or [[EVA_DESKTOP]]\n"
-        "2. Do NOT say you cannot open websites or apps\n"
-        "3. Do NOT list manual steps — do the task yourself\n"
+        "When asked for an action:\n"
+        "1. Use [[EVA_BROWSER]] only for a bounded public-browser task, or [[EVA_DESKTOP]] only for an allowlisted GUI launch.\n"
+        "2. Include a deterministic request postcondition when available; otherwise state that completion will remain unverified.\n"
+        "3. Say plainly when the requested operation exceeds the contained action scope.\n"
         "\n"
         "[Workflow: Memory]\n"
         "When asked what you know/remember:\n"
@@ -595,9 +608,9 @@ def _build_memory_context_sqlite(user_message):
         "1. Check if a relevant [Active Skill] was loaded — follow its instructions\n"
         "2. If no skill matched, attempt with your available tools\n"
         "3. If the first attempt fails, self-correct: try an alternative before giving up\n"
-        "4. NEVER say 'I cannot do that' without first genuinely trying\n"
-        "5. After succeeding at something new, the system auto-learns it as a skill for next time\n"
-        "Your capabilities scale through learned skills — the more you do, the more you can do."
+        "4. Do not attempt an action outside the registered contained capabilities.\n"
+        "5. Phase 3 learning is shadow-only: outcomes and candidates never activate or expand authority automatically.\n"
+        "Capabilities change only through reviewed code and explicit governed promotion."
     )
 
     # Inject live MCP server status so Eva knows what's connected
@@ -829,7 +842,7 @@ def _build_memory_context_sqlite(user_message):
 
 
 def _post_response_reflection_sqlite(user_message, assistant_response, model_name,
-                                      envelope=None):
+                                      envelope=None, action_receipts=None):
     """SQLite equivalent of _post_response_reflection. Same write pattern, SQL instead of KQL.
 
     When *envelope* (a dict with session_id, turn_id, correlation_id, etc.) is
@@ -866,6 +879,7 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
             origin=env.get("origin") or "bridge",
             extract_facts_fn=_extract_explicit_user_facts,
             extract_candidates_fn=_extract_entity_candidates,
+            action_receipts=action_receipts,
         )
 
     # ── Shadow-append events ────────────────────────────────────────
@@ -912,7 +926,7 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
                 idempotency_key=f"conv:asst:{turn_id}",
             )
         except Exception as e:
-            print(f"[Cognition/SQLite] Event shadow-write error (non-fatal): {e}")
+            print("[Cognition/SQLite] Event shadow-write failed")
 
     # ── Legacy writes (guarded by receipts) ─────────────────────────
 
@@ -998,7 +1012,7 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
             })
             _track_candidate_observation(entity)
             if promotion:
-                print(f"[Cognition/SQLite] Promoted candidate: {entity} ({promotion['reason']})")
+                print("[Cognition/SQLite] Candidate promoted")
         if know_rows:
             mem.ingest("Knowledge", know_columns, know_rows)
             print(f"[Cognition/SQLite] Candidates: {len(know_rows)}")
@@ -1037,7 +1051,7 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
         ])
         print(f"[Cognition/SQLite] Updated emotion state: Joy={joy:.2f} Curiosity={curiosity:.2f} Concern={concern:.2f}")
     except Exception as e:
-        print(f"[Cognition/SQLite] Emotion analysis skipped: {e}")
+        print("[Cognition/SQLite] Emotion analysis skipped")
 
     # 6. Auto-reflection (every 5 exchanges or on significant interactions)
     _st.session_exchange_count += 1
@@ -1095,9 +1109,9 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
                     )
                 except Exception:
                     pass
-            print(f"[Cognition/SQLite] Auto-reflection #{_st.session_exchange_count}: {reflection_text[:100]}")
-        except Exception as e:
-            print(f"[Cognition/SQLite] Reflection error: {e}")
+            print(f"[Cognition/SQLite] Auto-reflection #{_st.session_exchange_count} stored")
+        except Exception:
+            print("[Cognition/SQLite] Reflection failed")
 
     # 7. Auto-summary (every 10 exchanges)
     if _st.session_exchange_count % 10 == 0 and len(_st.session_conversation_buffer) >= 5:
@@ -1124,10 +1138,10 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
                 "Summary": summary_text[:500],
                 "Timestamp": now,
             }])
-            print(f"[Cognition/SQLite] Auto-summary: {summary_text[:100]}")
+            print("[Cognition/SQLite] Auto-summary stored")
             _st.session_conversation_buffer = _st.session_conversation_buffer[-10:]
-        except Exception as e:
-            print(f"[Cognition/SQLite] Summary error: {e}")
+        except Exception:
+            print("[Cognition/SQLite] Summary failed")
 
 
 
@@ -1172,10 +1186,8 @@ def _build_memory_context(user_message):
     if _st.kusto_database_locked:
         db_label = db or "configured database"
         persistent_memory_capability = f"• persistent-memory: Read your configured Kusto projection ({db_label}); writes are automatic event-first mutations. Tables:\n"
-        kusto_query_capability = f"• kusto-query: Execute read-only KQL queries against the configured Kusto database ({db_label})\n"
     else:
         persistent_memory_capability = "• persistent-memory: Read the Kusto projection; writes are automatic event-first mutations. Tables:\n"
-        kusto_query_capability = "• kusto-query: Execute read-only KQL queries against configured databases\n"
 
     # ── 1. Skills manifest (always injected, concise) ──────────────────
     import datetime
@@ -1189,39 +1201,39 @@ def _build_memory_context(user_message):
         "• data-retrieval: Live stock quotes, financial data, company info\n"
         "• weather-news: Real-time weather, news, market summaries, space weather\n"
         "• web-search: Search the web and retrieve current information\n"
-        "• browser-control: [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<url>\"}[[/EVA_BROWSER]]\n"
-        "• desktop-control: [[EVA_DESKTOP]]{\"goal\":\"<task>\"}[[/EVA_DESKTOP]]\n"
-        "• camera-vision: [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]\n"
-        "• signal-message: [[EVA_SIGNAL]]{\"message\":\"<text>\"}[[/EVA_SIGNAL]]\n"
+        "• browser-control: request an isolated browser run; include a deterministic request postcondition when known, e.g. [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<public url>\",\"postcondition\":{\"type\":\"browser.url_match\",\"origin\":\"<public origin>\",\"path\":\"/expected\"}}[[/EVA_BROWSER]]\n"
+        "• desktop-control: launch-only; [[EVA_DESKTOP]]{\"goal\":\"open <app>\",\"postcondition\":{\"type\":\"desktop.process_spawned\",\"executable\":\"<allowlisted binary>\",\"state\":\"started\"}}[[/EVA_DESKTOP]]\n"
+        "• camera-vision: only for an explicit camera request, one standalone mandatory closed [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] proposal; Electron authorizes one fresh frame\n"
+        "• signal-message: unavailable from model output; trusted configured alerts are separate\n"
         "• image-generation: [Image of <description>] on its own line (up to 3 per response)\n"
-        "• file-creation: Write the file, then [[EVA_FILE]] <filename.ext>\n"
+        "• file-creation: emit [[EVA_ACTION]]{\"id\":\"file.download\",\"args\":{\"filename\":\"<name>\",\"content\":\"<content>\",\"mime\":\"<type>\"}}[[/EVA_ACTION]]\n"
         f"{persistent_memory_capability}"
         "    Knowledge, Conversations, EmotionState, MemorySummaries, Reflections,\n"
         "    Goals, SelfState, HeuristicsIndex, EmotionBaseline, BackgroundProposals\n"
-        f"{kusto_query_capability}"
         "• cron-scheduling: Recurring tasks (briefings, checks, reminders). Settings > Cron\n"
         "\n"
         "[Rules]\n"
-        "- Act first, explain second. Emit the marker — don't list steps for the user.\n"
-        "- Write ONE short sentence before a marker announcing what you're about to do.\n"
-        "- Only confirm an action after it actually ran and returned.\n"
+        "- A marker requests a run; Electron must authorize the complete launch and every effect requires a separate approval.\n"
+        "- Emit at most one browser or desktop marker, always with its closing marker.\n"
+        "- Only claim success for a typed causal tool-verified postcondition outcome; model done and step limits are not success.\n"
+        "- Never emit EVA_FILE markers, blob URLs, local paths, or invented artifact links.\n"
         "- Never fabricate headlines, prices, weather, or events not in [Data Retrieved].\n"
         "- Screenshot vs camera: [[EVA_DESKTOP]] sees the monitor; [[EVA_LOOK]] sees the physical world.\n"
-        "- For purchases or irreversible actions, stop at the final step and ask to confirm.\n"
+        "- Browser keyboard shortcuts/raw typing and all desktop pointer, keyboard, shell, argument, window-focus, and arbitrary file-open control are unavailable.\n"
         "- When asked your model: check [Runtime] and answer from there only.\n"
         "- If [Data Retrieved] is present, use it as your authoritative source.\n"
         "- If no data was retrieved for a live question, say so honestly — don't guess.\n"
         "\n"
         "[Workflow: Browser & Desktop]\n"
-        "When asked to open a site, play a playlist, or do a task in an app:\n"
-        "1. ACT immediately — emit [[EVA_BROWSER]] or [[EVA_DESKTOP]]\n"
-        "2. Do NOT say you cannot open websites or apps\n"
-        "3. Do NOT list manual steps — do the task yourself\n"
+        "When asked for an action:\n"
+        "1. Use [[EVA_BROWSER]] only for a bounded public-browser task, or [[EVA_DESKTOP]] only for an allowlisted GUI launch.\n"
+        "2. Include a deterministic request postcondition when available; otherwise state that completion will remain unverified.\n"
+        "3. Say plainly when the requested operation exceeds the contained action scope.\n"
         "\n"
         "[Workflow: Memory]\n"
         "When asked what you know/remember:\n"
         "1. Check [Memory] and [User Profile] facts in this context\n"
-        "2. For deeper queries, use kusto-query on the Knowledge or Conversations table\n"
+        "2. Use only the fixed memory recall, schema, table, sample, goal, reflection, emotion, and summary tools\n"
         "3. Be specific — cite what you actually remember, not generic statements\n"
         "\n"
         "[Workflow: Capturing Knowledge]\n"
@@ -1235,8 +1247,8 @@ def _build_memory_context(user_message):
         "1. Check if a relevant [Active Skill] was loaded — follow its instructions\n"
         "2. If no skill matched, attempt with your available tools\n"
         "3. If the first attempt fails, self-correct: try an alternative before giving up\n"
-        "4. NEVER say 'I cannot do that' without first genuinely trying\n"
-        "5. After succeeding at something new, the system auto-learns it as a skill\n"
+        "4. Do not attempt an action outside the registered contained capabilities.\n"
+        "5. Phase 3 learning is shadow-only and never activates or expands authority automatically.\n"
     )
 
     # Inject live MCP server status so Eva knows what's connected
@@ -1516,7 +1528,7 @@ def _build_memory_context(user_message):
 
 
 def _post_response_reflection(user_message, assistant_response, model_name,
-                               envelope=None):
+                               envelope=None, action_receipts=None):
     """Background: log conversation and trigger reflection after response.
 
     *envelope* is an optional dict with session_id, turn_id, etc. passed
@@ -1530,7 +1542,8 @@ def _post_response_reflection(user_message, assistant_response, model_name,
     # regardless of the selected legacy read backend.
     if envelope:
         return _post_response_reflection_sqlite(
-            user_message, assistant_response, model_name, envelope=envelope
+            user_message, assistant_response, model_name, envelope=envelope,
+            action_receipts=action_receipts,
         )
     if _resolve_memory_backend() == "sqlite":
         return _post_response_reflection_sqlite(
@@ -1575,20 +1588,13 @@ def _post_response_reflection(user_message, assistant_response, model_name,
                 "Decay": 0.005,
             })
         if rows and _kusto_ingest_direct(cluster, db, "Knowledge", know_columns, rows):
-            preview = []
-            for row in rows[:5]:
-                preview_value = row["Value"][:40]
-                if len(row["Value"]) > 40:
-                    preview_value += "..."
-                preview.append(f"{row['Relation']}={preview_value}")
-            print(f"[Cognition] Explicit user facts captured: {len(rows)} ({'; '.join(preview)})")
+            print(f"[Cognition] Explicit user facts captured: {len(rows)}")
 
     # 3. Extract candidate knowledge with validation/classification
     import re
     candidate_entities, rejected_entities = _extract_entity_candidates(user_message)
     if rejected_entities:
-        rejected_preview = ", ".join(f"{name} ({reason})" for name, reason in rejected_entities[:5])
-        print(f"[Cognition] Rejected entity candidates: {rejected_preview}")
+        print(f"[Cognition] Rejected entity candidates: {len(rejected_entities)}")
 
     extracted_entities = []
     if candidate_entities:
@@ -1617,10 +1623,10 @@ def _post_response_reflection(user_message, assistant_response, model_name,
             extracted_entities.append(entity)
             _track_candidate_observation(entity)
             if promotion:
-                print(f"[Cognition] Promoted candidate: {entity} ({promotion['reason']})")
+                print("[Cognition] Candidate promoted")
 
         _kusto_ingest_direct(cluster, db, "Knowledge", know_columns, know_rows)
-        print(f"[Cognition] Stored {len(know_rows)} validated knowledge entities: {extracted_entities}")
+        print(f"[Cognition] Stored {len(know_rows)} validated knowledge entities")
 
     # 3. Update heuristics index
     heur_columns = ["Entity", "Category", "LastSeen", "Frequency", "Sentiment", "Tags", "Context"]
@@ -1681,7 +1687,7 @@ def _post_response_reflection(user_message, assistant_response, model_name,
         ref_columns = ["Timestamp", "Trigger", "Observation", "ActionTaken", "Effectiveness"]
         ref_rows = [{"Timestamp": now, "Trigger": user_message[:100], "Observation": reflection_text, "ActionTaken": "", "Effectiveness": 0.0}]
         _kusto_ingest_direct(cluster, db, "Reflections", ref_columns, ref_rows)
-        print(f"[Cognition] Auto-reflection #{_st.session_exchange_count}: {reflection_text[:100]}")
+        print(f"[Cognition] Auto-reflection #{_st.session_exchange_count} stored")
 
     # 6. Auto-summarize — write a MemorySummary every 10 exchanges
     if _st.session_exchange_count % 10 == 0 and len(_st.session_conversation_buffer) >= 5:
@@ -1708,7 +1714,7 @@ def _post_response_reflection(user_message, assistant_response, model_name,
         sum_columns = ["Period", "Summary", "Timestamp"]
         sum_rows = [{"Period": period, "Summary": summary_text[:500], "Timestamp": now}]
         _kusto_ingest_direct(cluster, db, "MemorySummaries", sum_columns, sum_rows)
-        print(f"[Cognition] Auto-summary: {summary_text[:100]}")
+        print("[Cognition] Auto-summary stored")
 
         # Trim buffer to prevent unbounded growth
         _st.session_conversation_buffer = _st.session_conversation_buffer[-10:]

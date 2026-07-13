@@ -15,5 +15,20 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   egressMode: readArg('eva-egress-mode') || 'cloud',
   minimize: function() { ipcRenderer.send('win-minimize'); },
   maximize: function() { ipcRenderer.send('win-maximize'); },
-  close: function() { ipcRenderer.send('win-close'); }
+  close: function() { ipcRenderer.send('win-close'); },
+  authorizeAgentLaunch: function(agent, specification) {
+    return ipcRenderer.invoke('eva-authorize-agent-launch', {
+      agent: agent,
+      specification: specification
+    });
+  },
+  authorizeCameraLook: function(question, device) {
+    return ipcRenderer.invoke('eva-authorize-camera-look', {
+      question: question,
+      device: device
+    });
+  },
+  providerFetch: function(request) {
+    return ipcRenderer.invoke('eva-provider-fetch', request);
+  }
 }));

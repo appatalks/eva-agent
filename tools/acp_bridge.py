@@ -18,7 +18,9 @@ if _tools_dir not in sys.path:
 # importlib.util.spec_from_file_location("acp_bridge", "tools/acp_bridge.py")
 # usage in tests.
 from bridge.core import *  # noqa: F401,F403
-from bridge.core import main, _valid_artifact_name  # noqa: F401
+from bridge.core import (  # noqa: F401
+    main, _valid_artifact_name, _SKILL_COLUMNS, _GOAL_COLUMNS,
+)
 
 if __name__ == "__main__":
     main()

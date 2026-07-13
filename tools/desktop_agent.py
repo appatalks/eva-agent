@@ -1,58 +1,73 @@
-"""Vision-driven desktop agent for Eva ("computer use").
+"""Vision-assisted, launch-only desktop agent for Eva.
 
-A closed loop: screenshot -> multimodal model -> structured action JSON ->
-pyautogui executes on the real desktop -> new screenshot -> repeat. It mirrors
-browser_agent.py but drives the whole desktop (and can launch applications)
-instead of a Chromium page.
+A contained loop: screenshot -> multimodal model -> allowlisted GUI launch ->
+fresh process verification. Pointer, keyboard, shell, arguments, arbitrary
+window helpers, and arbitrary file opening are structurally unavailable until
+the capability broker is implemented.
 
 Two roles:
   - Director (text only): high level planner, wired by the bridge to Claude via
     ACP. Sees a text state summary, sets the current subgoal.
-  - Executor (vision): looks at the screenshot and emits the next concrete
-    action. Defaults to an OpenAI vision model.
+    - Executor (vision): looks at the screenshot and may request one allowlisted
+        GUI launch, wait, ask for input, or request terminal verification.
 
 pyautogui (and PIL) are imported lazily so a missing install never breaks bridge
-import. pyautogui's FAILSAFE stays ON: slamming the mouse into a screen corner
-aborts the run as an emergency stop.
+import. It is used only for private screenshots in this release.
 
-SAFETY: this controls the user's real machine. App launches and any action whose
-intent matches the destructive/sensitive pattern park for confirmation when
-autonomy == "pause".
+SAFETY: Electron authorizes the complete launch spec, the exact launch receives
+a separate one-use approval, and success requires no prior run-scoped spawn
+receipt followed by the same live canonical process receipt.
 """
 
 import os
+import io
 import re
 import json
 import time
 import base64
 import shutil
+import stat
 import subprocess
 import threading
 import uuid
 from datetime import datetime, timezone
 
 from bridge import config as _bridge_config
-
-_TRAJ_DIR = os.path.expanduser("~/.config/eva-standalone/desktop_trajectories")
-_DEFAULT_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o")
-_MAX_STEPS_DEFAULT = 25
-_DIRECTOR_INTERVAL = 4  # re-consult the director every N executor steps
-
-# Action intent matching this pattern parks for confirmation under autonomy
-# "pause". Covers purchases/auth (as in the browser agent) plus desktop-level
-# destructive operations.
-_SENSITIVE_RE = re.compile(
-    r"\b(buy|purchase|place\s+order|order\s+now|add\s+to\s+cart|pay|payment|"
-    r"checkout|complete\s+(?:order|purchase)|confirm\s+(?:order|purchase|payment)|"
-    r"log\s*in|sign\s*in|password|delete|remove|uninstall|format|erase|wipe|"
-    r"shut\s*down|shutdown|reboot|restart|power\s*off|sudo|rm\s+-|overwrite|"
-    r"transfer\s+(?:money|funds)|wire\b|send\s+(?:email|message))",
-    re.I,
+from bridge.action_runs import (
+    ActionRunValidationError,
+    ActionRunCancelled,
+    ActionRunTimeout,
+    admit_action_run,
+    begin_effect,
+    bounded_text,
+    cancel_run,
+    effectful_action,
+    finite_int,
+    finish_effect,
+    initialize_run,
+    launch_spec,
+    observation,
+    open_gate,
+    public_snapshot,
+    resolve_gate,
+    runtime_expired,
+    run_bounded_call,
+    set_postcondition_baseline,
+    sha256,
+    strict_json_object,
+    terminalize,
+    typed_action_result,
+    unknown_postcondition,
+    update_run,
 )
 
+_TRAJ_DIR = os.path.expanduser("~/.config/eva-standalone/desktop_trajectories")
+_MAX_STEPS_DEFAULT = 25
+_DIRECTOR_INTERVAL = 4  # re-consult the director every N executor steps
+_ARTIFACT_TTL_SECONDS = 600
+
 _ACTION_KINDS = {
-    "launch_app", "focus_window", "click", "double_click", "right_click", "move",
-    "type", "press", "hotkey", "scroll", "wait", "done", "ask",
+    "launch_app", "wait", "done", "ask",
 }
 
 # run_id -> run record. Guarded by _runs_lock.
@@ -70,9 +85,9 @@ def pyautogui_available():
         return False, "no display server (DISPLAY/WAYLAND_DISPLAY unset)"
     try:
         import pyautogui  # noqa: F401
-    except Exception as e:
-        return False, f"pyautogui not installed: {e}"
-    return True, "ok"
+    except Exception:
+        return False, "pyautogui is not installed or could not be loaded"
+    return True, "launch-only desktop containment available"
 
 
 def _get_pyautogui():
@@ -86,7 +101,8 @@ def _get_pyautogui():
 # Run registry
 # ---------------------------------------------------------------------------
 
-def _new_run(goal):
+def _new_run(goal, autonomy="pause", postcondition=None):
+    _scavenge_artifacts()
     run_id = uuid.uuid4().hex[:16]
     rec = {
         "id": run_id,
@@ -104,11 +120,15 @@ def _new_run(goal):
         "started": datetime.now(timezone.utc).isoformat(),
         "finished": None,
         "steps": [],
+        "capabilities": ["launch_app"],
         "_cancel": threading.Event(),
         "_gate": threading.Event(),
         "_decision": None,
         "_thread": None,
+        "_process_receipts": [],
+        "_launch_consumed": False,
     }
+    initialize_run(rec, "desktop", autonomy, postcondition)
     with _runs_lock:
         _runs[run_id] = rec
     return rec
@@ -118,9 +138,7 @@ def latest_screenshot_path(run_id):
     with _runs_lock:
         rec = _runs.get(run_id)
         shot = rec.get("last_screenshot") if rec else None
-    if shot and os.path.isfile(shot):
-        return shot
-    return None
+    return shot if isinstance(shot, str) and shot else None
 
 
 def public_status(run_id):
@@ -128,43 +146,49 @@ def public_status(run_id):
         rec = _runs.get(run_id)
         if not rec:
             return None
-        return {
-            k: rec[k] for k in (
-                "id", "goal", "status", "step", "active_app", "subgoal",
-                "result", "error", "pending_action", "pending_question",
-                "last_screenshot", "screen", "started", "finished", "steps",
-            )
-        }
+    return public_snapshot(rec, (
+        "id", "goal", "status", "step", "active_app", "subgoal",
+        "result", "error", "pending_question", "screen", "started", "finished",
+        "steps", "capabilities",
+    ))
 
 
 def cancel(run_id):
     with _runs_lock:
         rec = _runs.get(run_id)
     if not rec:
-        return False
-    rec["_cancel"].set()
-    rec["_gate"].set()
-    return True
+        return False, "unknown_run"
+    return cancel_run(rec)
 
 
-def resolve(run_id, approve=True, text=""):
+def has_active_runs():
+    with _runs_lock:
+        return any(
+            int(rec.get("_bounded_operations", 0)) > 0
+            or (
+                not rec.get("_terminalized")
+                and rec.get("_thread") is not None
+                and rec["_thread"].is_alive()
+            )
+            for rec in _runs.values()
+        )
+
+
+def resolve(run_id, *, gate_id, kind, decision=None, text=None):
     with _runs_lock:
         rec = _runs.get(run_id)
     if not rec:
-        return False
-    if rec["status"] == "awaiting_confirmation":
-        rec["_decision"] = bool(approve)
-    elif rec["status"] == "awaiting_input":
-        rec["_decision"] = text or ""
-    else:
-        return False
-    rec["_gate"].set()
-    return True
+        return False, "unknown_run"
+    return resolve_gate(
+        rec, gate_id=gate_id, kind=kind, decision=decision, text=text
+    )
 
 
 # ---------------------------------------------------------------------------
 # Vision executor (OpenAI multimodal)
 # ---------------------------------------------------------------------------
+
+_OPENAI_VISION_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 
 def _executor_system(w, h):
     return (
@@ -173,31 +197,17 @@ def _executor_system(w, h):
         "SINGLE next action to make progress on the current subgoal. Reply with ONE "
         "JSON object and nothing else.\n\n"
         "Schema (pick one action):\n"
-        '  {"action":"launch_app","app":"<binary name, e.g. gimp>","args":["..."],"reason":"..."}\n'
-        '  {"action":"focus_window","match":"<window title substring, e.g. Chrome>","reason":"..."}\n'
-        '  {"action":"click","x":<int>,"y":<int>,"reason":"<intent>"}\n'
-        '  {"action":"double_click","x":<int>,"y":<int>,"reason":"..."}\n'
-        '  {"action":"right_click","x":<int>,"y":<int>,"reason":"..."}\n'
-        '  {"action":"move","x":<int>,"y":<int>,"reason":"..."}\n'
-        '  {"action":"type","text":"<text>","reason":"..."}   (types into the focused field; click it first)\n'
-        '  {"action":"press","key":"<enter|tab|esc|down|up|ctrl|...>","reason":"..."}\n'
-        '  {"action":"hotkey","keys":["ctrl","s"],"reason":"..."}   (chord, e.g. ctrl+s to save)\n'
-        '  {"action":"scroll","dy":<int>,"reason":"..."}      (positive scrolls up, negative down)\n'
+        '  {"action":"launch_app","app":"<allowlisted GUI name, e.g. gimp>","args":[],"reason":"..."}\n'
         '  {"action":"wait","ms":<int>,"reason":"..."}\n'
         '  {"action":"ask","question":"<what you need from the user>"}\n'
         '  {"action":"done","summary":"<what was accomplished>"}\n\n'
-        "Rules: coordinates are absolute screen pixels. Put the real intent in "
-        "reason (e.g. 'click the Tools menu') so it can be reviewed. To start an "
-        "application, use launch_app with its binary name. Operate the target "
-        "application window; do NOT interact with Eva's own assistant window. "
-        "Prefer clicking visible controls. Emit done only when the goal is fully "
-        "achieved, and ask when blocked or needing info only the user has.\n"
-        "WEB TASKS: if the user already has a browser open (e.g. Chrome) and is "
-        "signed in, USE IT instead of launching a new one: focus_window with "
-        'match \"Chrome\" (or \"Firefox\") to raise the existing window, then open '
-        "a NEW TAB with hotkey ctrl+t, focus the address bar with hotkey ctrl+l, "
-        "type the URL or search, and press enter. This reuses the user's logged-in "
-        "session (Amazon, etc.). Only launch_app a browser if none is open.\n"
+        "Rules: put the real intent in reason so it can be reviewed. To start an "
+        "application, use launch_app with an allowlisted GUI name and an empty args "
+        "list. Pointer, keyboard, shell, arguments, and window control are unavailable. "
+        "Emit done only when the launch goal is fully "
+        "achieved, and ask when blocked or needing info only the user has. "
+        "Keyboard entry and shortcuts are unavailable until the capability broker "
+        "can authorize their command semantics.\n"
         "Never output prose outside the JSON."
     )
 
@@ -206,7 +216,34 @@ def _b64_png(data):
     return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
 
 
-def _call_executor(api_key, model, goal, subgoal, history, active_app, png_bytes, w, h):
+def _post_vision_request(requests_module, api_key, payload, *, endpoint=None):
+    target = endpoint or _OPENAI_VISION_ENDPOINT
+    if target != _OPENAI_VISION_ENDPOINT:
+        raise ActionRunValidationError("vision endpoint is not allowed")
+    session = requests_module.Session()
+    session.trust_env = False
+    try:
+        response = session.post(
+            target,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=60,
+            allow_redirects=False,
+            verify=True,
+        )
+    finally:
+        session.close()
+    if 300 <= response.status_code < 400:
+        raise RuntimeError("vision endpoint redirect was blocked")
+    return response
+
+
+def _call_executor(
+    api_key, model, goal, subgoal, history, active_app, png_bytes, w, h,
+):
     import requests as _req
 
     hist_lines = []
@@ -236,50 +273,52 @@ def _call_executor(api_key, model, goal, subgoal, history, active_app, png_bytes
             ]},
         ],
     }
-    resp = _req.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=60,
-    )
+    resp = _post_vision_request(_req, api_key, payload)
     if resp.status_code != 200:
-        raise RuntimeError(f"vision model {resp.status_code}: {resp.text[:200]}")
+        raise RuntimeError(
+            f"vision model request failed (HTTP {resp.status_code})"
+        )
     raw = resp.json()["choices"][0]["message"]["content"] or ""
     return _parse_action(raw), raw
 
 
 def _parse_action(raw):
     text = (raw or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text).strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return {"action": "ask", "question": "Model returned no actionable JSON."}
-    try:
-        action = json.loads(text[start:end + 1])
-    except Exception:
-        return {"action": "ask", "question": "Model returned malformed action JSON."}
-    if action.get("action") not in _ACTION_KINDS:
-        return {"action": "ask", "question": f"Unknown action: {action.get('action')!r}."}
+    if not text.startswith("{") or not text.endswith("}"):
+        raise ActionRunValidationError("model returned no desktop action JSON")
+    action = strict_json_object(text)
+    kind = action.get("action")
+    schemas = {
+        "launch_app": (
+            {"action", "app", "args", "reason"}, {"action", "app", "args"}
+        ),
+        "click": ({"action", "x", "y", "reason"}, {"action", "x", "y"}),
+        "double_click": ({"action", "x", "y", "reason"}, {"action", "x", "y"}),
+        "right_click": ({"action", "x", "y", "reason"}, {"action", "x", "y"}),
+        "move": ({"action", "x", "y", "reason"}, {"action", "x", "y"}),
+        "scroll": ({"action", "dy", "reason"}, {"action", "dy"}),
+        "wait": ({"action", "ms", "reason"}, {"action"}),
+        "done": ({"action", "summary"}, {"action"}),
+        "ask": ({"action", "question"}, {"action", "question"}),
+    }
+    if kind not in _ACTION_KINDS or kind not in schemas:
+        raise ActionRunValidationError("model returned an unsupported desktop action")
+    allowed, required = schemas[kind]
+    if set(action) - allowed or not required.issubset(action):
+        raise ActionRunValidationError("model desktop action fields are invalid")
+    for field in ("reason", "app", "summary", "question"):
+        if field in action and not isinstance(action[field], str):
+            raise ActionRunValidationError(f"model desktop action {field} must be text")
+    for field in ("x", "y", "dy", "ms"):
+        if field in action and (
+            isinstance(action[field], bool) or not isinstance(action[field], int)
+        ):
+            raise ActionRunValidationError(f"model desktop action {field} must be an integer")
+    if kind == "launch_app" and (
+        not isinstance(action.get("args"), list) or action["args"]
+    ):
+        raise ActionRunValidationError("desktop application arguments must be an empty list")
     return action
-
-
-# ---------------------------------------------------------------------------
-# Sensitivity
-# ---------------------------------------------------------------------------
-
-def _is_sensitive(action):
-    # Launching a PATH-resolved application with no shell is low-risk, and
-    # gating every launch made the agent feel stuck behind an approval prompt.
-    # Launches now proceed automatically; the destructive-intent scan below
-    # still gates genuinely risky actions (delete, shutdown, purchase, etc.),
-    # including a launch whose name/args carry destructive intent.
-    probe = " ".join(str(action.get(k, "")) for k in ("reason", "text", "question", "app"))
-    if isinstance(action.get("keys"), list):
-        probe += " " + " ".join(str(k) for k in action["keys"])
-    return bool(_SENSITIVE_RE.search(probe))
 
 
 # ---------------------------------------------------------------------------
@@ -287,32 +326,70 @@ def _is_sensitive(action):
 # ---------------------------------------------------------------------------
 
 def _run_dir(run_id):
+    _bridge_config.ensure_private_directory(_TRAJ_DIR)
     d = os.path.join(_TRAJ_DIR, run_id)
-    os.makedirs(d, exist_ok=True)
-    return d
+    return _bridge_config.ensure_private_directory(d)
+
+
+def _scavenge_artifacts(remove_all=False):
+    cutoff = datetime.now(timezone.utc).timestamp() - _ARTIFACT_TTL_SECONDS
+    try:
+        return _bridge_config.scavenge_private_directories(
+            _TRAJ_DIR, r"[0-9a-f]{16}", cutoff, remove_all=remove_all
+        )
+    except (OSError, _bridge_config.PrivateStorageError):
+        return 0
 
 
 def _log_step(run_id, record):
     try:
-        with open(os.path.join(_run_dir(run_id), "trajectory.jsonl"), "a") as f:
+        path = os.path.join(_run_dir(run_id), "trajectory.jsonl")
+        with _bridge_config.open_private_file(path, "a") as f:
             f.write(json.dumps(record) + "\n")
-    except Exception as e:
-        print(f"[DesktopAgent] log write failed: {e}")
+    except Exception:
+        print("[DesktopAgent] trajectory write failed")
+
+
+def _schedule_artifact_cleanup(rec):
+    def cleanup():
+        try:
+            _bridge_config.remove_private_subdirectory(_TRAJ_DIR, rec["id"])
+        except (FileNotFoundError, OSError, _bridge_config.PrivateStorageError):
+            pass
+        with rec["_record_lock"]:
+            rec["last_screenshot"] = None
+
+    timer = threading.Timer(_ARTIFACT_TTL_SECONDS, cleanup)
+    timer.daemon = True
+    timer.start()
 
 
 def _record(rec, step, shot_path, subgoal, raw, action, result):
+    def private_hash(value):
+        return sha256({"salt": rec["_log_salt"], "value": value})
+    try:
+        with _bridge_config.open_private_file(shot_path, "rb") as handle:
+            screenshot_hash = sha256(handle.read())
+    except (OSError, TypeError, _bridge_config.PrivateStorageError):
+        screenshot_hash = ""
+    action_view = {
+        "kind": action.get("action", "unknown"),
+        "digest": private_hash(action),
+    }
     entry = {
+        "contract_version": "eva.action-step/1",
         "step": step,
         "ts": datetime.now(timezone.utc).isoformat(),
-        "active_app": rec["active_app"],
-        "goal": rec["goal"],
-        "subgoal": subgoal,
-        "model_raw": raw[:1000] if isinstance(raw, str) else "",
-        "action": action,
+        "active_app_hash": private_hash(rec["active_app"] or ""),
+        "goal_hash": private_hash(rec["goal"]),
+        "subgoal_hash": private_hash(subgoal or ""),
+        "model_output_hash": private_hash(raw or ""),
+        "action": action_view,
         "result": result,
-        "screenshot": shot_path,
+        "screenshot_hash": screenshot_hash,
     }
-    rec["steps"].append({"step": step, "action": action, "result": result})
+    with rec["_record_lock"]:
+        rec["steps"].append({"step": step, "action": action_view, "result": result})
     _log_step(rec["id"], entry)
 
 
@@ -320,31 +397,36 @@ def _record(rec, step, shot_path, subgoal, raw, action, result):
 # Execution
 # ---------------------------------------------------------------------------
 
-def _park(rec, status, **fields):
-    rec["_gate"].clear()
-    rec["_decision"] = None
-    rec["status"] = status
-    for k, v in fields.items():
-        rec[k] = v
-    rec["_gate"].wait()
-    decision = rec["_decision"]
-    rec["pending_action"] = None
-    rec["pending_question"] = None
-    rec["status"] = "running"
-    return decision
+def _park_approval(rec, action, binding=None):
+    return open_gate(rec, "approval", action=action, binding=binding)
 
 
-# Keys allowed for press/hotkey, mapped to pyautogui names where they differ.
-_KEY_ALIASES = {
-    "esc": "esc", "escape": "esc", "return": "enter", "enter": "enter",
-    "del": "delete", "delete": "delete", "ctrl": "ctrl", "control": "ctrl",
-    "cmd": "command", "win": "winleft", "super": "winleft", "opt": "alt",
-}
+def _park_input(rec, question):
+    return open_gate(rec, "input", question=question)
 
 
-def _norm_key(k):
-    k = str(k or "").strip().lower()
-    return _KEY_ALIASES.get(k, k)
+def _desktop_action_binding(rec, action):
+    kind = action.get("action")
+    binding = {
+        "kind": kind,
+        "screen": rec.get("screen", ""),
+        "target_valid": True,
+    }
+    for field in ("app",):
+        if field in action:
+            binding[field] = action[field]
+    if kind == "launch_app":
+        binary = _resolve_app_binary(str(action.get("app", "")))
+        with rec["_record_lock"]:
+            launch_available = not rec.get("_launch_consumed", False)
+        binding["binary"] = binary or ""
+        binding["launch_available"] = launch_available
+        binding["target_valid"] = bool(binary and launch_available)
+    return binding
+
+
+def _fresh_desktop_binding(gui, rec, action):
+    return _desktop_action_binding(rec, action)
 
 
 # Common friendly names that vision models reach for, mapped to the candidate
@@ -356,7 +438,6 @@ _APP_ALIASES = {
     "files": ["nautilus", "dolphin", "nemo", "thunar", "pcmanfm", "caja"],
     "file manager": ["nautilus", "dolphin", "nemo", "thunar", "pcmanfm", "caja"],
     "filemanager": ["nautilus", "dolphin", "nemo", "thunar", "pcmanfm", "caja"],
-    "terminal": ["gnome-terminal", "konsole", "xterm", "alacritty", "kitty", "xfce4-terminal"],
     "text editor": ["gedit", "kate", "gnome-text-editor", "mousepad", "xed"],
     "editor": ["gedit", "kate", "gnome-text-editor", "mousepad", "xed"],
     "browser": ["firefox", "google-chrome", "chromium", "chromium-browser", "brave-browser"],
@@ -364,8 +445,49 @@ _APP_ALIASES = {
     "screenshot": ["gnome-screenshot", "spectacle", "flameshot", "scrot"],
     "image editor": ["gimp", "krita", "pinta"],
     "paint": ["gimp", "krita", "pinta", "kolourpaint"],
-    "settings": ["gnome-control-center", "systemsettings5", "systemsettings"],
 }
+_ALLOWED_GUI_BINARIES = frozenset(
+    candidate for candidates in _APP_ALIASES.values() for candidate in candidates
+)
+_NATIVE_MAGICS = (
+    b"\x7fELF", b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+    b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+)
+
+
+def _trusted_native_path(found, expected_basename):
+    if not found or os.path.basename(found) != expected_basename or os.path.islink(found):
+        return None
+    real = os.path.realpath(found)
+    trusted_roots = ("/usr/bin/", "/usr/lib/", "/usr/libexec/", "/opt/")
+    if not real.startswith(trusted_roots):
+        return None
+    try:
+        info = os.stat(real)
+        forbidden = stat.S_IWGRP | stat.S_IWOTH | stat.S_ISUID | stat.S_ISGID
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_mode & forbidden
+            or not info.st_mode & stat.S_IXUSR
+        ):
+            return None
+        parent = os.path.dirname(real)
+        while parent and parent != "/":
+            parent_info = os.stat(parent)
+            if (
+                parent_info.st_uid != 0
+                or parent_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            ):
+                return None
+            parent = os.path.dirname(parent)
+        with open(real, "rb") as handle:
+            magic = handle.read(4)
+        if magic not in _NATIVE_MAGICS:
+            return None
+    except OSError:
+        return None
+    return real
 
 
 def _resolve_app_binary(app):
@@ -376,225 +498,432 @@ def _resolve_app_binary(app):
     curated alias table, then a couple of common naming variants. Returns the
     absolute binary path or None.
     """
-    direct = shutil.which(app)
-    if direct:
-        return direct
     key = app.strip().lower()
-    for cand in _APP_ALIASES.get(key, []):
-        found = shutil.which(cand)
-        if found:
-            return found
-    # Try common variants: gnome-<app>, hyphenated, and stripped 'app' suffix.
-    for variant in ("gnome-" + key, key.replace(" ", "-"), key.replace(" app", "").strip()):
-        if variant and variant != app:
-            found = shutil.which(variant)
-            if found:
-                return found
+    candidates = [key] if key in _ALLOWED_GUI_BINARIES else _APP_ALIASES.get(key, [])
+    for cand in candidates:
+        trusted = _trusted_native_path(shutil.which(cand), cand)
+        if trusted:
+            return trusted
     return None
 
 
-def _launch_app(action):
+def _process_start_ticks(pid):
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+            raw = handle.read(4096)
+        close = raw.rfind(")")
+        fields = raw[close + 2:].split() if close >= 0 else []
+        ticks = int(fields[19])
+        return ticks if ticks >= 0 else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _launch_app(action, binding=None):
     app = str(action.get("app", "")).strip()
     if not app or not re.fullmatch(r"[A-Za-z0-9._+-]{1,64}", app):
-        return "error: invalid app name"
+        return typed_action_result("rejected", "invalid_app", "Invalid application name.")
     binary = _resolve_app_binary(app)
     if not binary:
-        return f"error: '{app}' is not installed / not on PATH"
-    args = action.get("args") or []
-    if not isinstance(args, list):
-        args = []
-    cmd = [binary] + [str(a) for a in args][:12]
+        return typed_action_result(
+            "rejected", "app_not_allowlisted",
+            "Application is not installed or is not in the GUI allowlist.",
+        )
+    expected_binary = (binding or {}).get("binary", binary)
+    if expected_binary != binary:
+        return typed_action_result(
+            "rejected", "app_identity_changed",
+            "The approved application identity changed before launch.",
+        )
+    args = action.get("args", [])
+    if not isinstance(args, list) or args:
+        return typed_action_result(
+            "rejected", "app_arguments_forbidden",
+            "Model-supplied application arguments are disabled.",
+        )
+    cmd = [binary]
     try:
         # No shell; arguments passed as a list so nothing is interpreted.
-        subprocess.Popen(
+        process = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=_bridge_config.child_process_env(),
+            env=_bridge_config.child_process_env(profile="gui"),
         )
-        return f"launched {app}"
-    except Exception as e:
-        return f"error launching {app}: {e}"
-
-
-def _focus_window(action):
-    """Raise and focus an existing window whose title contains `match`.
-
-    Lets the agent reuse the user's already-open, signed-in browser instead of
-    launching a new one. Uses wmctrl (preferred) or xdotool; no shell, args as a
-    list, and the match string is constrained so it cannot inject options.
-    """
-    match = str(action.get("match", "")).strip()
-    if not match or len(match) > 64 or not re.fullmatch(r"[A-Za-z0-9 ._+:/-]{1,64}", match):
-        return "error: invalid window match"
-    wmctrl = shutil.which("wmctrl")
-    if wmctrl:
+        start_ticks = _process_start_ticks(process.pid)
         try:
-            # -F + exact would be too strict; -i not needed. Use substring match
-            # via wmctrl's built-in -a (activates a window by title substring).
-            r = subprocess.run([wmctrl, "-a", match],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               timeout=5, env=_bridge_config.child_process_env())
-            if r.returncode == 0:
-                time.sleep(0.6)
-                return f"focused window matching '{match}'"
-        except Exception:
-            pass
-    xdotool = shutil.which("xdotool")
-    if xdotool:
-        try:
-            out = subprocess.run([xdotool, "search", "--name", match],
-                                 capture_output=True, text=True, timeout=5,
-                                 env=_bridge_config.child_process_env())
-            wid = (out.stdout or "").split("\n")[0].strip()
-            if wid.isdigit():
-                subprocess.run([xdotool, "windowactivate", wid],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               timeout=5, env=_bridge_config.child_process_env())
-                time.sleep(0.6)
-                return f"focused window matching '{match}'"
-        except Exception:
-            pass
-    return f"error: no window matching '{match}' (or no window tool available)"
+            live_binary = os.path.realpath(f"/proc/{process.pid}/exe")
+        except OSError:
+            live_binary = ""
+        if process.poll() is not None or start_ticks is None or live_binary != binary:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+            except Exception:
+                pass
+            return typed_action_result(
+                "failed", "app_identity_unavailable",
+                "The launched application identity could not be attested.",
+            )
+        result = typed_action_result(
+            "executed", "app_started", f"Started {os.path.basename(binary)}."
+        )
+        result["_launch_receipt"] = {
+            "requested_app": app.lower(),
+            "binary": binary,
+            "pid": int(process.pid),
+            "started_monotonic": time.monotonic(),
+            "process_start_ticks": start_ticks,
+            "process_handle": process,
+        }
+        return result
+    except Exception:
+        return typed_action_result("failed", "app_launch_failed", "Application launch failed.")
 
 
-def _execute(gui, action, rec):
+def _execute(gui, action, rec, binding=None):
     kind = action["action"]
     if kind == "launch_app":
-        result = _launch_app(action)
-        rec["active_app"] = str(action.get("app", "")) or rec["active_app"]
-        time.sleep(1.5)  # give the window time to appear
+        with rec["_record_lock"]:
+            if rec.get("_launch_consumed", False):
+                return typed_action_result(
+                    "rejected", "launch_already_consumed",
+                    "This desktop run has already consumed its one launch.",
+                )
+            rec["_launch_consumed"] = True
+        result = _launch_app(action, binding)
+        if result["state"] == "executed":
+            receipt = result.pop("_launch_receipt", None)
+            app = str(action.get("app", "")).strip()
+            with rec["_record_lock"]:
+                rec["active_app"] = app or rec["active_app"]
+                if receipt:
+                    rec["_process_receipts"].append(receipt)
+            time.sleep(1.5)  # give the window time to appear
         return result
-    if kind == "focus_window":
-        result = _focus_window(action)
-        if not result.startswith("error"):
-            rec["active_app"] = str(action.get("match", "")) or rec["active_app"]
-        return result
-    if kind in ("click", "double_click", "right_click", "move"):
-        x, y = int(action.get("x", 0)), int(action.get("y", 0))
-        if kind == "click":
-            gui.click(x, y)
-        elif kind == "double_click":
-            gui.doubleClick(x, y)
-        elif kind == "right_click":
-            gui.click(x, y, button="right")
-        else:
-            gui.moveTo(x, y)
-        return f"{kind} at ({x},{y})"
-    if kind == "type":
-        gui.write(str(action.get("text", "")), interval=0.02)
-        return "typed text"
-    if kind == "press":
-        gui.press(_norm_key(action.get("key", "enter")))
-        return f"pressed {action.get('key')}"
-    if kind == "hotkey":
-        keys = [_norm_key(k) for k in (action.get("keys") or []) if str(k).strip()][:5]
-        if keys:
-            gui.hotkey(*keys)
-            return "hotkey " + "+".join(keys)
-        return "noop (empty hotkey)"
-    if kind == "scroll":
-        dy = int(action.get("dy", 0))
-        gui.scroll(dy)
-        return f"scrolled {dy}"
     if kind == "wait":
-        time.sleep(min(int(action.get("ms", 500)) / 1000.0, 5.0))
-        return "waited"
-    return "noop"
+        ms = finite_int(action.get("ms", 500), "ms", 0, 5000)
+        time.sleep(ms / 1000.0)
+        return typed_action_result("executed", "waited", "Waited for the desktop to settle.")
+    return typed_action_result("rejected", "unsupported_action", "Unsupported desktop action.")
+
+
+def _verify_postcondition(rec, step):
+    spec = rec.get("_postcondition")
+    if not spec:
+        return unknown_postcondition()
+    try:
+        executable = spec["executable"].lower()
+        with rec["_record_lock"]:
+            receipts = list(rec.get("_process_receipts", []))
+        matched = False
+        verified_pid = 0
+        for receipt in receipts if len(receipts) == 1 else ():
+            pid = receipt.get("pid")
+            binary = receipt.get("binary")
+            process = receipt.get("process_handle")
+            start_ticks = receipt.get("process_start_ticks")
+            started_monotonic = receipt.get("started_monotonic")
+            if (
+                not isinstance(binary, str)
+                or os.path.basename(binary).lower() != executable
+                or isinstance(start_ticks, bool)
+                or not isinstance(start_ticks, int)
+                or start_ticks < 0
+                or not isinstance(started_monotonic, (int, float))
+                or isinstance(started_monotonic, bool)
+                or not rec.get("_started_monotonic", 0) <= started_monotonic <= time.monotonic()
+            ):
+                continue
+            if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+                continue
+            try:
+                if (
+                    process is None or getattr(process, "pid", None) != pid
+                    or process.poll() is not None
+                    or _process_start_ticks(pid) != start_ticks
+                ):
+                    continue
+                live_binary = os.path.realpath(f"/proc/{pid}/exe")
+            except (OSError, AttributeError):
+                continue
+            if live_binary == binary:
+                matched = True
+                verified_pid = pid
+                break
+        facts = {
+            "executable": executable,
+            "started": matched,
+            "pid": verified_pid,
+        }
+        check = observation(
+            "desktop-process", "desktop.process_spawned",
+            "observed" if matched else "not_observed", facts, step,
+        )
+        return {
+            "verdict": check["verdict"],
+            "spec_source": "request",
+            "verified_by": "tool",
+            "spec_hash": sha256(spec),
+            "checks": [check],
+        }
+    except Exception:
+        return unknown_postcondition(spec)
+
+
+def _finish_with_postcondition(rec, cause, model_summary=""):
+    postcondition = _verify_postcondition(rec, rec.get("step", 0))
+    verdict = postcondition["verdict"]
+    if cause in ("step_limit", "timeout"):
+        terminalize(
+            rec, "aborted", "budget_exhausted" if cause == "step_limit" else "timed_out",
+            cause, result="The desktop run stopped before completion could be verified.",
+            model_summary=model_summary, postcondition=postcondition,
+        )
+    elif verdict == "observed":
+        terminalize(
+            rec, "succeeded", "postcondition_observed", cause,
+            result="Verified the requested desktop postcondition.",
+            model_summary=model_summary, postcondition=postcondition,
+        )
+    elif verdict == "not_observed":
+        terminalize(
+            rec, "failed", "postcondition_not_observed", cause,
+            error="The requested desktop postcondition was not observed.",
+            model_summary=model_summary, postcondition=postcondition,
+        )
+    else:
+        terminalize(
+            rec, "indeterminate", "unverified_completion_claim", cause,
+            result=(
+                "The desktop agent stopped after claiming completion, but the "
+                "result was not independently verified."
+            ),
+            model_summary=model_summary, postcondition=postcondition,
+        )
 
 
 # ---------------------------------------------------------------------------
 # Worker
 # ---------------------------------------------------------------------------
 
-def _worker(rec, api_key, vision_model, director, autonomy, max_steps):
+def _worker(rec, api_key, vision_model, director, max_steps):
     run_id = rec["id"]
     history = rec["steps"]
     subgoal = ""
     try:
+        _bridge_config.ensure_private_directory(_TRAJ_DIR)
         gui = _get_pyautogui()
         w, h = gui.size()
-        rec["screen"] = f"{w}x{h}"
-        rec["status"] = "running"
+        rec["_screen_size"] = (int(w), int(h))
+        update_run(
+            rec, screen=f"{w}x{h}", status="running", capabilities=["launch_app"]
+        )
+        set_postcondition_baseline(rec, _verify_postcondition(rec, 0))
 
         if director:
             try:
-                subgoal = director(rec["goal"], f"Desktop is {w}x{h}. Nothing launched yet.") or ""
-            except Exception as e:
-                print(f"[DesktopAgent] director error: {e}")
-        rec["subgoal"] = subgoal
+                subgoal = run_bounded_call(
+                    rec,
+                    lambda: director(
+                        rec["goal"], f"Desktop is {w}x{h}. Nothing launched yet."
+                    ),
+                    timeout_seconds=30,
+                ) or ""
+            except (ActionRunCancelled, ActionRunTimeout):
+                raise
+            except Exception:
+                print("[DesktopAgent] director request failed")
+        update_run(rec, subgoal=subgoal)
 
         step = 0
         while step < max_steps:
             if rec["_cancel"].is_set():
-                rec["status"] = "cancelled"
+                terminalize(rec, "aborted", "user_cancelled", "cancel")
+                break
+            if runtime_expired(rec):
+                _finish_with_postcondition(rec, "timeout")
+                break
+            if runtime_expired(rec):
+                _finish_with_postcondition(rec, "timeout")
                 break
 
             try:
-                # Pass an explicit path: pyautogui's Linux backend (scrot) writes
-                # its intermediate file to the CURRENT WORKING DIRECTORY when no
-                # filename is given, which fails when cwd is read-only (e.g. an
-                # AppImage mount). Writing straight to the run dir avoids that.
                 shot_path = os.path.join(_run_dir(run_id), f"step_{step:02d}.png")
-                img = gui.screenshot(shot_path)
-                with open(shot_path, "rb") as f:
-                    png = f.read()
-            except Exception as e:
-                rec["status"] = "error"
-                rec["error"] = f"screenshot failed: {e}"
+                def capture():
+                    image = gui.screenshot()
+                    buffer = io.BytesIO()
+                    image.save(buffer, format="PNG")
+                    png = buffer.getvalue()
+                    with _bridge_config.open_private_file(shot_path, "xb") as handle:
+                        handle.write(png)
+                    return png
+
+                png = run_bounded_call(rec, capture, timeout_seconds=10)
+            except (ActionRunCancelled, ActionRunTimeout):
+                raise
+            except Exception:
+                terminalize(
+                    rec, "failed", "screenshot_failed", "tool_error",
+                    error="Desktop screenshot capture failed.",
+                )
                 break
-            rec["last_screenshot"] = shot_path
+            update_run(rec, last_screenshot=shot_path)
 
             try:
-                action, raw = _call_executor(
-                    api_key, vision_model, rec["goal"], subgoal,
-                    history, rec["active_app"], png, w, h,
+                action, raw = run_bounded_call(
+                    rec,
+                    lambda: _call_executor(
+                        api_key, vision_model, rec["goal"], subgoal,
+                        history, rec["active_app"], png, w, h,
+                    ),
+                    timeout_seconds=65,
                 )
-            except Exception as e:
-                rec["status"] = "error"
-                rec["error"] = str(e)
+            except (ActionRunCancelled, ActionRunTimeout):
+                raise
+            except Exception:
+                terminalize(
+                    rec, "failed", "executor_call_failed", "model_error",
+                    error="The desktop vision executor request failed.",
+                )
+                break
+
+            if rec["_cancel"].is_set():
+                terminalize(rec, "aborted", "user_cancelled", "cancel")
                 break
 
             kind = action.get("action")
 
             if kind == "done":
-                rec["result"] = action.get("summary", "Task complete.")
-                rec["status"] = "done"
-                _record(rec, step, shot_path, subgoal, raw, action, "done")
+                update_run(rec, step=step)
+                claim = bounded_text(action.get("summary", ""), 300)
+                _record(
+                    rec, step, shot_path, subgoal, raw, action,
+                    typed_action_result(
+                        "skipped", "model_completion_claim",
+                        "Model requested terminal verification.",
+                    ),
+                )
+                _finish_with_postcondition(rec, "model_done", claim)
                 break
 
             if kind == "ask":
-                answer = _park(rec, "awaiting_input",
-                               pending_question=action.get("question", "Need input."))
+                decision = _park_input(rec, action.get("question", "Need input."))
                 if rec["_cancel"].is_set():
-                    rec["status"] = "cancelled"
+                    terminalize(rec, "aborted", "user_cancelled", "cancel")
                     break
+                if runtime_expired(rec):
+                    _finish_with_postcondition(rec, "timeout")
+                    break
+                if decision.get("state") != "answered":
+                    reason = (
+                        "user_cancelled" if decision.get("state") == "cancelled"
+                        else "approval_expired"
+                    )
+                    terminalize(
+                        rec, "aborted", reason, "input_gate",
+                        result="The desktop run stopped because required input was not received.",
+                    )
+                    break
+                answer = decision["text"]
                 subgoal = (subgoal + f"\nUser said: {answer}").strip()
-                rec["subgoal"] = subgoal
-                _record(rec, step, shot_path, subgoal, raw, action, "asked user")
+                update_run(rec, subgoal=subgoal)
+                _record(
+                    rec, step, shot_path, subgoal, raw, action,
+                    typed_action_result("executed", "input_received", "Received bounded user input."),
+                )
                 step += 1
                 continue
 
-            if _is_sensitive(action) and autonomy == "pause":
-                approved = _park(rec, "awaiting_confirmation", pending_action=action)
+            execution_action = action
+            effect_lease = False
+            current_binding = None
+            if effectful_action(action):
+                if action.get("action") == "launch_app":
+                    with rec["_record_lock"]:
+                        launch_consumed = bool(rec.get("_launch_consumed"))
+                    if launch_consumed:
+                        result = typed_action_result(
+                            "rejected", "launch_already_consumed",
+                            "This desktop run has already consumed its one launch.",
+                        )
+                        _record(
+                            rec, step, shot_path, subgoal, raw, action, result
+                        )
+                        terminalize(
+                            rec, "failed", result["code"], "action_execution",
+                            error=result["summary"],
+                        )
+                        break
+                binding = _desktop_action_binding(rec, action)
+                if not binding.get("target_valid", False):
+                    terminalize(
+                        rec, "failed", "target_not_attestable", "target_binding",
+                        error="The desktop target could not be bound safely.",
+                    )
+                    break
+                decision = _park_approval(rec, action, binding)
                 if rec["_cancel"].is_set():
-                    rec["status"] = "cancelled"
+                    terminalize(rec, "aborted", "user_cancelled", "cancel")
                     break
-                if not approved:
-                    _record(rec, step, shot_path, subgoal, raw, action, "declined")
-                    rec["result"] = "Stopped: user declined a sensitive action."
-                    rec["status"] = "done"
+                if runtime_expired(rec):
+                    _finish_with_postcondition(rec, "timeout")
                     break
-
+                if decision.get("state") != "approved":
+                    reason = (
+                        "user_denied" if decision.get("state") == "denied"
+                        else "approval_expired"
+                    )
+                    _record(
+                        rec, step, shot_path, subgoal, raw, action,
+                        typed_action_result("rejected", reason, "Action was not approved."),
+                    )
+                    terminalize(
+                        rec, "aborted", reason, "approval_gate",
+                        result="The desktop run stopped before the action was executed.",
+                    )
+                    break
+                current_binding = _fresh_desktop_binding(
+                    gui, rec, decision.get("action") or action
+                )
+                if runtime_expired(rec):
+                    _finish_with_postcondition(rec, "timeout")
+                    break
+                leased, lease_reason, execution_action = begin_effect(
+                    rec, decision, current_binding
+                )
+                if not leased:
+                    terminalize(
+                        rec, "aborted", lease_reason, "execution_lease",
+                        result="The approved desktop target changed before execution.",
+                    )
+                    break
+                effect_lease = True
             try:
-                result = _execute(gui, action, rec)
-            except Exception as e:
-                result = f"error: {e}"
-            _record(rec, step, shot_path, subgoal, raw, action, result)
+                result = _execute(
+                    gui, execution_action, rec, current_binding
+                )
+            except Exception:
+                result = typed_action_result(
+                    "failed", "action_exception", "The desktop action failed."
+                )
+            _record(rec, step, shot_path, subgoal, raw, execution_action, result)
+            cancellation_pending = False
+            if effect_lease:
+                _finished, cancellation_pending = finish_effect(rec, result)
+            if cancellation_pending:
+                terminalize(rec, "aborted", "user_cancelled", "cancel")
+                break
+            if result["state"] in ("failed", "rejected"):
+                terminalize(
+                    rec, "failed", result["code"], "action_execution",
+                    error=result["summary"],
+                )
+                break
 
             # Loop guard: if the same action keeps producing the same result
             # (e.g. a launch that errors, or a click that changes nothing), the
             # executor is stuck. After a few identical repeats, stop and ask the
             # user rather than burning the whole step budget in a tight loop.
-            sig = json.dumps(action, sort_keys=True) + "|" + str(result)
+            sig = json.dumps(execution_action, sort_keys=True) + "|" + str(result)
             if sig == rec.get("_last_sig"):
                 rec["_repeat"] = rec.get("_repeat", 0) + 1
             else:
@@ -602,41 +931,67 @@ def _worker(rec, api_key, vision_model, director, autonomy, max_steps):
                 rec["_last_sig"] = sig
             if rec["_repeat"] >= 2:
                 q = "I'm repeating the same step without progress"
-                if isinstance(result, str) and result.startswith("error"):
-                    q += " (" + result + ")"
+                if result["state"] == "failed":
+                    q += " (" + result["summary"] + ")"
                 q += ". How would you like me to proceed, or should I stop?"
-                answer = _park(rec, "awaiting_input", pending_question=q)
+                decision = _park_input(rec, q)
                 if rec["_cancel"].is_set():
-                    rec["status"] = "cancelled"
+                    terminalize(rec, "aborted", "user_cancelled", "cancel")
                     break
+                if decision.get("state") != "answered":
+                    reason = (
+                        "user_cancelled" if decision.get("state") == "cancelled"
+                        else "approval_expired"
+                    )
+                    terminalize(rec, "aborted", reason, "input_gate")
+                    break
+                answer = decision["text"]
                 rec["_repeat"] = 0
                 rec["_last_sig"] = None
                 subgoal = (subgoal + f"\nUser said: {answer}").strip()
-                rec["subgoal"] = subgoal
+                update_run(rec, subgoal=subgoal)
 
             time.sleep(0.4)
             step += 1
-            rec["step"] = step
+            update_run(rec, step=step)
 
             if director and step % _DIRECTOR_INTERVAL == 0:
                 try:
                     summary = f"Active app: {rec['active_app'] or 'unknown'}. Last action: {json.dumps(action)} -> {result}."
-                    new_sub = director(rec["goal"], summary)
+                    new_sub = run_bounded_call(
+                        rec, lambda: director(rec["goal"], summary),
+                        timeout_seconds=30,
+                    )
                     if new_sub:
                         subgoal = new_sub
-                        rec["subgoal"] = subgoal
-                except Exception as e:
-                    print(f"[DesktopAgent] director error: {e}")
+                        update_run(rec, subgoal=subgoal)
+                except (ActionRunCancelled, ActionRunTimeout):
+                    raise
+                except Exception:
+                    print("[DesktopAgent] director request failed")
         else:
-            if rec["status"] not in ("error", "cancelled"):
-                rec["status"] = "done"
-            if rec["result"] is None:
-                rec["result"] = f"Reached step limit ({max_steps})."
-    except Exception as e:
-        rec["status"] = "error"
-        rec["error"] = str(e)
+            if not rec.get("_terminalized"):
+                update_run(rec, step=max_steps)
+                _finish_with_postcondition(rec, "step_limit")
+    except ActionRunCancelled:
+        terminalize(rec, "aborted", "user_cancelled", "cancel")
+    except ActionRunTimeout:
+        _finish_with_postcondition(rec, "timeout")
+    except Exception:
+        terminalize(
+            rec, "failed", "desktop_runtime_error", "runtime_exception",
+            error="The desktop runtime failed.",
+        )
     finally:
-        rec["finished"] = datetime.now(timezone.utc).isoformat()
+        if not rec.get("_terminalized"):
+            if rec["_cancel"].is_set():
+                terminalize(rec, "aborted", "user_cancelled", "cancel")
+            else:
+                terminalize(
+                    rec, "indeterminate", "runtime_ended_without_outcome",
+                    "runtime_exit",
+                )
+        _schedule_artifact_cleanup(rec)
 
 
 # ---------------------------------------------------------------------------
@@ -644,33 +999,42 @@ def _worker(rec, api_key, vision_model, director, autonomy, max_steps):
 # ---------------------------------------------------------------------------
 
 def start_run(goal, api_key, vision_model=None, director=None, autonomy="pause",
-              max_steps=_MAX_STEPS_DEFAULT):
+              max_steps=_MAX_STEPS_DEFAULT, postcondition=None,
+              use_director=None):
     """Launch a desktop agent run in a background thread. Returns the run record's
     public status (including its id). Raises if pyautogui or the key is missing."""
+    raw_spec = {
+        "goal": goal,
+        "use_director": director is not None if use_director is None else use_director,
+        "autonomy": autonomy,
+        "max_steps": max_steps,
+        "postcondition": postcondition,
+    }
+    if vision_model is not None:
+        raw_spec["vision_model"] = vision_model
+    spec = launch_spec("desktop", raw_spec)
+    goal = spec["goal"]
+    requested_autonomy = spec["autonomy"]
+    max_steps = spec["max_steps"]
+    postcondition = spec["postcondition"]
+    vision_model = spec["vision_model"]
     ok, detail = pyautogui_available()
     if not ok:
         raise RuntimeError(detail)
     if not api_key:
         raise RuntimeError("OpenAI API key required for the vision executor.")
 
-    goal = (goal or "").strip()
-    if not goal:
-        raise RuntimeError("goal is required.")
-
-    vision_model = vision_model or _DEFAULT_VISION_MODEL
-    try:
-        max_steps = max(1, min(int(max_steps), 60))
-    except Exception:
-        max_steps = _MAX_STEPS_DEFAULT
-    if autonomy not in ("pause", "confirm_all", "auto"):
-        autonomy = "pause"
-
-    rec = _new_run(goal)
+    rec = _new_run(goal, requested_autonomy, postcondition)
+    admit_action_run(rec)
     t = threading.Thread(
         target=_worker,
-        args=(rec, api_key, vision_model, director, autonomy, max_steps),
+        args=(rec, api_key, vision_model, director, max_steps),
         daemon=True,
     )
     rec["_thread"] = t
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        terminalize(rec, "failed", "worker_start_failed", "runtime_start")
+        raise
     return public_status(rec["id"])

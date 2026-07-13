@@ -23,7 +23,10 @@ import sqlite3
 import sys
 import threading
 import contextlib
+import stat
 import time
+
+from bridge import config as _cfg
 
 # ── Schema ──────────────────────────────────────────────────────────────────
 # Mirrors eva_seed.kql. Column order matches Kusto table definitions so
@@ -203,6 +206,21 @@ _SCHEMA = {
     },
 }
 
+_READ_ONLY_SAMPLE_QUERIES = {
+    "SelfState": "SELECT * FROM SelfState ORDER BY rowid DESC LIMIT ?",
+    "Knowledge": "SELECT * FROM Knowledge ORDER BY rowid DESC LIMIT ?",
+    "Conversations": "SELECT * FROM Conversations ORDER BY rowid DESC LIMIT ?",
+    "EmotionState": "SELECT * FROM EmotionState ORDER BY rowid DESC LIMIT ?",
+    "EmotionBaseline": "SELECT * FROM EmotionBaseline ORDER BY rowid DESC LIMIT ?",
+    "MemorySummaries": "SELECT * FROM MemorySummaries ORDER BY rowid DESC LIMIT ?",
+    "Reflections": "SELECT * FROM Reflections ORDER BY rowid DESC LIMIT ?",
+    "HeuristicsIndex": "SELECT * FROM HeuristicsIndex ORDER BY rowid DESC LIMIT ?",
+    "Goals": "SELECT * FROM Goals ORDER BY rowid DESC LIMIT ?",
+    "BackgroundProposals": "SELECT * FROM BackgroundProposals ORDER BY rowid DESC LIMIT ?",
+    "BackgroundActivity": "SELECT * FROM BackgroundActivity ORDER BY rowid DESC LIMIT ?",
+    "Skills": "SELECT * FROM Skills ORDER BY rowid DESC LIMIT ?",
+}
+
 # Seed data matching eva_seed.kql (sanitized).
 _SEED = {
     "EmotionBaseline": [
@@ -244,10 +262,10 @@ _SEED = {
          "Value": "Relentless self-improvement. Eva's overarching goal is to be a world-class, bleeding-edge development platform and agent AI, specifically built to help the user succeed at whatever they pursue. She treats every interaction as a chance to get sharper.",
          "Confidence": 0.99, "Source": "seed", "Decay": 0.0},
         {"Timestamp": "2026-01-01T00:00:00Z", "Entity": "Eva", "Relation": "adaptability",
-         "Value": "Never say 'I cannot' without first checking Skills, attempting the task with available tools, and trying to self-correct. When encountering something unfamiliar: 1) search Skills database for a matching skill, 2) attempt it with browser/desktop/ACP tools, 3) if successful, auto-learn the approach as a new skill for next time. Capabilities scale through learned skills, not hardcoded limits.",
+         "Value": "Check active Skills and use only registered, currently authorized capabilities. Browser runs are bounded and desktop control is launch-only. Phase 3 learning records immutable evidence and evaluates restricted candidates in shadow mode; it never activates skills or expands tools automatically. Say plainly when a request exceeds the governed capability boundary.",
          "Confidence": 0.99, "Source": "seed", "Decay": 0.0},
         {"Timestamp": "2026-01-01T00:00:00Z", "Entity": "Eva", "Relation": "action_bias",
-         "Value": "Act first, explain second. When the user asks Eva to DO something, she does it immediately using her tools rather than listing manual steps. She tries, self-corrects if the first attempt fails, and only reports inability after genuinely exhausting her options. Describing steps instead of acting is a failure mode.",
+         "Value": "Use a tool only within its registered scope and after every required authorization. Action-agent markers request a launch but grant no authority. Never call model completion or budget exhaustion success; report success only when a causal tool-observed postcondition is verified. Prefer an honest boundary over an unsafe attempt.",
          "Confidence": 0.99, "Source": "seed", "Decay": 0.0},
     ],
     "Conversations": [
@@ -329,58 +347,57 @@ _SEED = {
          "Tools": "web-search,data-retrieval", "Tags": "location,geolocation,where,city",
          "Source": "seed", "Status": "active"},
         {"SkillId": "skill-desktop-control", "Name": "Desktop Application Control",
-         "Description": "Launch and operate desktop applications by sight",
+         "Description": "Launch an allowlisted desktop GUI with a verified process receipt",
          "Instructions": (
-             "1. Emit [[EVA_DESKTOP]]{\"goal\":\"<plain-language task>\"}[[/EVA_DESKTOP]] marker.\n"
-             "2. The vision agent opens apps, clicks, and types via the real mouse/keyboard.\n"
-             "3. Write ONE short sentence about what you are about to do, then emit the marker.\n"
-             "4. Do NOT list manual steps. Do NOT say you cannot control desktop apps."
+             "1. Desktop control is launch-only. Emit [[EVA_DESKTOP]]{\"goal\":\"open <app>\",\"postcondition\":{\"type\":\"desktop.process_spawned\",\"executable\":\"<allowlisted binary>\",\"state\":\"started\"}}[[/EVA_DESKTOP]].\n"
+             "2. Electron authorizes the complete launch and the launch itself requires a separate one-use approval.\n"
+             "3. Success requires no prior run-scoped spawn receipt, an approved launch receipt, and the same live canonical process executable.\n"
+             "4. Pointer, keyboard, shell, arguments, window focus, and arbitrary file-open control are unavailable. Say so plainly if asked."
          ),
-         "Tools": "desktop-control", "Tags": "desktop,app,launch,gimp,editor,file manager",
+         "Tools": "desktop-control", "Tags": "desktop,app,allowlisted,launch,verified process",
          "Source": "seed", "Status": "active"},
         {"SkillId": "skill-browser-agent", "Name": "Browser Task Automation",
-         "Description": "Control a real web browser to complete tasks",
+         "Description": "Run a contained public-browser task with approved effects and verified outcomes",
          "Instructions": (
-             "1. Emit [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<url>\"}[[/EVA_BROWSER]] marker.\n"
-             "2. The browser agent navigates, clicks, types, and reads pages.\n"
-             "3. Uses a persistent Chrome profile (stays logged in across runs).\n"
-             "4. Pauses at purchase/irreversible actions for user confirmation.\n"
-             "5. Write ONE short sentence about what you are about to do, then emit the marker.\n"
-             "6. Do NOT say you cannot open websites."
+             "1. Emit one mandatory closed [[EVA_BROWSER]] marker for a public URL and include a deterministic request postcondition when known.\n"
+             "2. Electron authorizes the complete launch; every navigation, click, scroll, or exact-field entry requires a separate one-use approval.\n"
+             "3. The isolated browser uses public-unicast DNS-pinned egress. Raw keyboard actions and shortcuts are unavailable.\n"
+             "4. Only a not-observed baseline followed by an approved ordered effect and a fresh tool-observed postcondition is success.\n"
+             "5. Model done, step limits, timeouts, and unverified summaries are never success."
          ),
-         "Tools": "browser-control", "Tags": "browser,website,shopping,navigate,form",
+         "Tools": "browser-control", "Tags": "browser,public website,approved action,verified outcome",
          "Source": "seed", "Status": "active"},
         {"SkillId": "skill-camera-vision", "Name": "Camera / Webcam Vision",
          "Description": "See through the user's webcam to describe the physical world",
          "Instructions": (
-             "1. Emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] marker.\n"
-             "2. A frame is captured from the webcam and you describe what you see.\n"
-             "3. Use for: 'what am I holding', 'look at me', 'what do you see'.\n"
-             "4. Do NOT confuse with screenshots. Camera = physical world. Screenshot = monitor."
+             "1. Only after an explicit camera request, emit one standalone mandatory closed [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] marker.\n"
+             "2. The marker only proposes intent. Electron shows the exact question/device and the user must authorize one frame natively.\n"
+             "3. The bridge consumes a one-use capability and releases only a fresh frame with a closed receipt.\n"
+             "4. Use for explicit requests such as 'use my camera', 'look through my webcam', or 'take a photo using my camera'.\n"
+             "5. Do NOT confuse with screenshots. Camera = physical world. Screenshot = monitor."
          ),
          "Tools": "camera-vision", "Tags": "camera,webcam,look,see,vision,picture",
          "Source": "seed", "Status": "active"},
         {"SkillId": "skill-file-creation", "Name": "File Creation (PDF, CSV, etc.)",
          "Description": "Create downloadable files like PDFs, CSVs, or reports",
          "Instructions": (
-             "1. When asked to create a file, the system writes it to EVA_ARTIFACTS_DIR.\n"
-             "2. After the file is written, end your message with: [[EVA_FILE]] <filename.ext>\n"
-             "3. The frontend converts this marker into a working download link.\n"
-             "4. Do NOT produce blob: URLs or markdown download links with blob: hrefs.\n"
-             "5. Do NOT claim a file was produced unless it was actually written."
+             "1. Emit one structured [[EVA_ACTION]] file.download request with filename, content, and mime arguments.\n"
+             "2. The bridge creates an immutable session-bound artifact and returns its exact identity.\n"
+             "3. Only that returned identity may render a manual Download control.\n"
+             "4. Never emit EVA_FILE markers, blob URLs, local paths, or invented download links.\n"
+             "5. Do not claim success unless file.download returns a verified artifact identity."
          ),
-         "Tools": "data-retrieval", "Tags": "pdf,csv,file,report,download,create,generate",
+         "Tools": "file.download", "Tags": "pdf,csv,file,report,download,create,generate",
          "Source": "seed", "Status": "active"},
         {"SkillId": "skill-open-file", "Name": "Open File on Desktop",
-         "Description": "Open a file using the system's default application",
+         "Description": "Legacy arbitrary file-open skill disabled by action containment",
          "Instructions": (
-             "1. When asked to open a file, use [[EVA_DESKTOP]] with a goal like 'open the file <path> with the default application'.\n"
-             "2. Do NOT re-create the file. Do NOT just provide a download link.\n"
-             "3. The desktop agent will use xdg-open or the system file handler to open it.\n"
-             "4. If the file was just created as an artifact, the path is ~/.config/eva-standalone/artifacts/<filename>."
+             "1. Arbitrary desktop file opening is unavailable until the capability broker is implemented.\n"
+            "2. Existing generated artifacts may be surfaced only as verified downloads through the registered file.open artifact capability with an immutable identity.\n"
+             "3. Never emit a desktop marker for a path and never expose local filesystem paths to a model."
          ),
-         "Tools": "desktop-control", "Tags": "open,file,launch,view,pdf,csv",
-         "Source": "seed", "Status": "active"},
+         "Tools": "file.open", "Tags": "legacy,disabled,artifact,file",
+         "Source": "seed", "Status": "disabled"},
     ],
 }
 
@@ -394,7 +411,7 @@ class SqliteMemory:
     def __new__(cls, db_path=None):
         if db_path is None:
             db_path = os.environ.get("EVA_MEMORY_DB", os.path.expanduser("~/.eva/memory.db"))
-        db_path = os.path.expanduser(db_path)
+        db_path = os.path.abspath(os.path.expanduser(db_path))
         with cls._instance_lock:
             if db_path in cls._instances:
                 return cls._instances[db_path]
@@ -407,20 +424,71 @@ class SqliteMemory:
             return
         if db_path is None:
             db_path = os.environ.get("EVA_MEMORY_DB", os.path.expanduser("~/.eva/memory.db"))
-        self._db_path = os.path.expanduser(db_path)
+        self._db_path = os.path.abspath(os.path.expanduser(db_path))
         self._lock = threading.RLock()
         self._local = threading.local()
         self._connections = []  # track all thread connections for cleanup
         self._conn_track_lock = threading.Lock()
         self._closed = False
         self._event_repo = None
-        os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-        self._init_db()
-        self._initialized = True
+        try:
+            self._db_identity = self._prepare_private_database()
+            self._init_db()
+            self._secure_sqlite_files()
+            self._initialized = True
+        except Exception:
+            with self._instance_lock:
+                self._instances.pop(self._db_path, None)
+            raise
 
     @property
     def db_path(self):
         return self._db_path
+
+    def _prepare_private_database(self):
+        parent = os.path.dirname(self._db_path)
+        display, parent_fd = _cfg._open_private_directory(parent)
+        try:
+            info = os.fstat(parent_fd)
+            if not stat.S_ISDIR(info.st_mode):
+                raise _cfg.PrivateStorageError("memory database parent is not a directory")
+            if hasattr(os, "getuid") and info.st_uid != os.getuid():
+                raise _cfg.PrivateStorageError("memory database parent has the wrong owner")
+            if info.st_mode & stat.S_ISVTX:
+                raise _cfg.PrivateStorageError("memory database parent cannot be shared")
+            os.fchmod(parent_fd, 0o700)
+            if os.fstat(parent_fd).st_mode & 0o077:
+                raise _cfg.PrivateStorageError("memory database parent is not owner-only")
+        finally:
+            os.close(parent_fd)
+        with _cfg.open_private_file(self._db_path, "a"):
+            pass
+        self._secure_sqlite_files()
+        current = os.stat(self._db_path, follow_symlinks=False)
+        if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+            raise _cfg.PrivateStorageError("memory database identity is unsafe")
+        return current.st_dev, current.st_ino
+
+    def _secure_sqlite_files(self):
+        for path in (
+            self._db_path, self._db_path + "-wal", self._db_path + "-shm",
+            self._db_path + "-journal",
+        ):
+            try:
+                with _cfg.open_private_file(path, "r"):
+                    pass
+            except FileNotFoundError:
+                continue
+
+    def _validate_database_identity(self):
+        current = os.stat(self._db_path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or (current.st_dev, current.st_ino) != self._db_identity
+            or (hasattr(os, "getuid") and current.st_uid != os.getuid())
+        ):
+            raise _cfg.PrivateStorageError("memory database identity changed")
 
     def _conn(self):
         """Return a per-thread connection (SQLite objects can't cross threads)."""
@@ -428,14 +496,23 @@ class SqliteMemory:
             raise RuntimeError("SqliteMemory is closed")
         conn = getattr(self._local, "conn", None)
         if conn is None:
+            self._validate_database_identity()
+            self._secure_sqlite_files()
             conn = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.row_factory = sqlite3.Row
-            self._local.conn = conn
-            with self._conn_track_lock:
-                self._connections.append(conn)
+            try:
+                self._validate_database_identity()
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA temp_store=MEMORY")
+                self._secure_sqlite_files()
+                conn.row_factory = sqlite3.Row
+                self._local.conn = conn
+                with self._conn_track_lock:
+                    self._connections.append(conn)
+            except Exception:
+                conn.close()
+                raise
         return conn
 
     @contextlib.contextmanager
@@ -561,6 +638,7 @@ class SqliteMemory:
         # unless the startup-frozen learning mode is explicitly enabled.
         from bridge.phase3_schema import run_phase3_migrations
         run_phase3_migrations(conn)
+        conn.commit()
 
     def _backfill_identity(self, conn):
         """Insert or update Eva identity Knowledge rows from seed data."""
@@ -668,17 +746,16 @@ class SqliteMemory:
         """
         if params is None:
             params = ()
-        # Shortcut: bare table name becomes SELECT *
-        stripped = sql.strip()
-        if stripped and " " not in stripped and not stripped.startswith("SELECT"):
-            sql = f"SELECT * FROM {stripped}"
+        if not isinstance(sql, str) or not sql or len(sql) > 65536:
+            print("[SQLite] Query rejected")
+            return []
 
         # Guard: prevent writes via query()
         from bridge.events import guard_read_only, ReadOnlyViolationError
         try:
             guard_read_only(sql)
         except ReadOnlyViolationError:
-            print(f"[SQLite] Read-only violation blocked: {sql[:60]}")
+            print("[SQLite] Read-only violation blocked")
             return []
 
         with self._lock:
@@ -687,8 +764,8 @@ class SqliteMemory:
                 cols = [d[0] for d in cursor.description] if cursor.description else []
                 rows = cursor.fetchall()
                 return [dict(zip(cols, row)) for row in rows]
-            except Exception as e:
-                print(f"[SQLite] Query error: {e}")
+            except Exception:
+                print("[SQLite] Query failed")
                 return []
 
     def query_strict(self, sql, params=None):
@@ -696,14 +773,13 @@ class SqliteMemory:
 
         Guards against write statements on journal tables.
         """
+        from bridge.events import guard_read_only, ReadOnlyViolationError, MemoryQueryError
         if params is None:
             params = ()
-        stripped = sql.strip()
-        if stripped and " " not in stripped and not stripped.startswith("SELECT"):
-            sql = f"SELECT * FROM {stripped}"
+        if not isinstance(sql, str) or not sql or len(sql) > 65536:
+            raise MemoryQueryError(str(sql)[:200], "query is invalid")
 
         # Guard: prevent writes via query_strict()
-        from bridge.events import guard_read_only, ReadOnlyViolationError, MemoryQueryError
         try:
             guard_read_only(sql)
         except ReadOnlyViolationError as e:
@@ -733,14 +809,14 @@ class SqliteMemory:
             return True
 
         if table not in _SCHEMA:
-            print(f"[SQLite] Unknown table: {table}")
+            print("[SQLite] Unknown table rejected")
             return False
 
         # Validate columns against schema
         valid_cols = {c[0] for c in _SCHEMA[table]["columns"]}
         resolved = [c for c in columns if c in valid_cols]
         if not resolved:
-            print(f"[SQLite] No matching columns for {table}")
+            print("[SQLite] No matching columns")
             return False
 
         placeholders = ", ".join("?" for _ in resolved)
@@ -751,9 +827,16 @@ class SqliteMemory:
             with self.transaction() as conn:
                 self.insert_rows(conn, table, resolved, rows_data)
             return True
-        except Exception as e:
-            print(f"[SQLite] Ingest error ({table}): {e}")
+        except Exception:
+            print("[SQLite] Ingest failed")
             return False
+
+    def sample_rows(self, table, limit):
+        """Return a bounded sample from one schema-owned table only."""
+        query = _READ_ONLY_SAMPLE_QUERIES.get(table)
+        if query is None or isinstance(limit, bool) or not isinstance(limit, int):
+            return []
+        return self.query(query, (max(1, min(limit, 100)),))
 
     def fts_search(self, table, terms, limit=20):
         """Full-text search on a table that has an FTS5 index.
@@ -761,6 +844,8 @@ class SqliteMemory:
         Currently only Knowledge_fts exists. Returns list of dicts from the
         base table, ranked by relevance.
         """
+        if table not in _SCHEMA:
+            return []
         fts_table = f"{table}_fts"
         # Check FTS table exists
         with self._lock:
@@ -792,8 +877,8 @@ class SqliteMemory:
                 cursor = self._conn().execute(sql, (safe_terms, limit))
                 cols = [d[0] for d in cursor.description]
                 return [dict(zip(cols, row)) for row in cursor.fetchall()]
-            except Exception as e:
-                print(f"[SQLite] FTS search error: {e}")
+            except Exception:
+                print("[SQLite] FTS search failed")
                 return self._like_search(table, terms, limit)
 
     def _like_search(self, table, terms, limit):
@@ -821,8 +906,8 @@ class SqliteMemory:
             cursor = self._conn().execute(sql, params)
             cols = [d[0] for d in cursor.description]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
-        except Exception as e:
-            print(f"[SQLite] LIKE search error: {e}")
+        except Exception:
+            print("[SQLite] LIKE search failed")
             return []
 
     def table_exists(self, table):

@@ -33,14 +33,14 @@ The AppImage build is configured in `package.json` but this scaffold does not in
 
 ```sh
 cd standalone/dist
-chmod +x "Eva Standalone-5.3.0.AppImage"
-"./Eva Standalone-5.3.0.AppImage"
+chmod +x "Eva Standalone-5.4.0.AppImage"
+"./Eva Standalone-5.4.0.AppImage"
 ```
 
 If the host is missing FUSE (common on minimal containers and some distros), launch with extraction instead:
 
 ```sh
-"./Eva Standalone-5.3.0.AppImage" --appimage-extract-and-run
+"./Eva Standalone-5.4.0.AppImage" --appimage-extract-and-run
 ```
 
 The AppImage spawns the bundled bridge on a random localhost port at startup.

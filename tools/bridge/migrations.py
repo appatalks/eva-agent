@@ -96,6 +96,11 @@ _MIGRATION_MANIFESTS = {
         "repair": "canonical logical event hashes",
         "algorithm": "bridge.events.canonical_event_hash",
     },
+    5: {
+        "repair": "legacy runtime privacy cleanup",
+        "discard": ["alert-derived events", "free-form failure text"],
+        "preserve": "canonical immutable event schema",
+    },
 }
 
 
@@ -503,8 +508,66 @@ def _rehash_temp_events(conn, *, version, description):
         )
 
 
+def _closed_background_activity(status):
+    normalized = str(status or "").strip().lower()
+    if normalized in ("completed", "succeeded", "ok"):
+        return "completed", "completed"
+    if normalized == "paused":
+        return "paused", "user_active"
+    if normalized == "skipped":
+        return "skipped", "skipped"
+    if normalized == "running":
+        return "running", "running"
+    return "failed", "failed"
+
+
+def _closed_background_proposal_note(status):
+    normalized = str(status or "").strip().lower()
+    return {
+        "pending": "generated", "approved": "approved",
+        "rejected": "rejected", "applying": "applying",
+        "applied": "applied", "failed": "failed",
+    }.get(normalized, "updated")
+
+
+def _sanitize_temp_background_events(conn):
+    rows = conn.execute(
+        "SELECT rowid,EventType,Payload FROM _eva_m2_events "
+        "WHERE EventType IN ('background.activity_recorded','background.proposal_recorded')"
+    ).fetchall()
+    for rowid, event_type, raw_payload in rows:
+        try:
+            payload = json.loads(raw_payload)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if event_type == "background.activity_recorded":
+            status, note = _closed_background_activity(payload.get("Status"))
+            payload["Status"] = status
+            payload["Notes"] = note
+            allowed_jobs = {
+                "memory_consolidation", "goal_checkin", "daily_digest",
+                "knowledge_hygiene", "reflection_synthesis", "emotion_drift",
+                "token_telemetry", "proactive_briefing", "market_snapshot",
+                "sec_filing_watch", "space_weather_alert", "research_deepdive",
+                "adx_projection",
+            }
+            if payload.get("JobType") not in allowed_jobs:
+                payload["JobType"] = "memory_consolidation"
+        else:
+            payload["Notes"] = _closed_background_proposal_note(
+                payload.get("Status")
+            )
+        conn.execute(
+            "UPDATE _eva_m2_events SET Payload=? WHERE rowid=?",
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")), rowid),
+        )
+
+
 def _rebuild_draft_event_support(
-    conn, *, version=2, description="phase1 draft upgrade"
+    conn, *, version=2, description="phase1 draft upgrade",
+    exclude_event_ids=(), sanitize_background_metadata=False,
 ):
     """Rebuild the draft journal into the exact canonical schema atomically."""
     event_names = list(_COLUMN_MANIFESTS["MemoryEvents"])
@@ -523,10 +586,18 @@ def _rebuild_draft_event_support(
         event_columns, event_names, {"EventHash": "PayloadHash"},
         version=version, description=description,
     )
-    conn.execute(
+    event_query = (
         f"CREATE TEMP TABLE _eva_m2_events AS "
         f"SELECT {event_select} FROM MemoryEvents"
     )
+    excluded = tuple(exclude_event_ids)
+    if excluded:
+        event_query += " WHERE EventId NOT IN (" + ",".join(
+            "?" for _ in excluded
+        ) + ")"
+    conn.execute(event_query, excluded)
+    if sanitize_background_metadata:
+        _sanitize_temp_background_events(conn)
     _rehash_temp_events(conn, version=version, description=description)
 
     outbox_columns = _columns(conn, "MemoryOutbox")
@@ -541,10 +612,13 @@ def _rebuild_draft_event_support(
         },
         version=version, description=description,
     )
-    conn.execute(
+    outbox_query = (
         f"CREATE TEMP TABLE _eva_m2_outbox AS "
         f"SELECT {outbox_select} FROM MemoryOutbox"
     )
+    if excluded:
+        outbox_query += " WHERE EventId IN (SELECT EventId FROM _eva_m2_events)"
+    conn.execute(outbox_query)
 
     has_legacy = _table_exists(conn, "LegacyProjectionReceipts")
     if has_legacy:
@@ -553,10 +627,13 @@ def _rebuild_draft_event_support(
             {"ProjectedAt": _SQL_NOW_DEFAULT, "RowCount": "0"},
             version=version, description=description,
         )
-        conn.execute(
+        legacy_query = (
             f"CREATE TEMP TABLE _eva_m2_legacy_receipts AS "
             f"SELECT {legacy_select} FROM LegacyProjectionReceipts"
         )
+        if excluded:
+            legacy_query += " WHERE EventId IN (SELECT EventId FROM _eva_m2_events)"
+        conn.execute(legacy_query)
     has_projection = _table_exists(conn, "MemoryProjectionReceipts")
     if has_projection:
         projection_select = _draft_select_list(
@@ -564,10 +641,13 @@ def _rebuild_draft_event_support(
             {"ProjectedAt": _SQL_NOW_DEFAULT},
             version=version, description=description,
         )
-        conn.execute(
+        projection_query = (
             f"CREATE TEMP TABLE _eva_m2_projection_receipts AS "
             f"SELECT {projection_select} FROM MemoryProjectionReceipts"
         )
+        if excluded:
+            projection_query += " WHERE EventId IN (SELECT EventId FROM _eva_m2_events)"
+        conn.execute(projection_query)
 
     conn.execute("DROP TABLE IF EXISTS MemoryProjectionReceipts")
     conn.execute("DROP TABLE IF EXISTS LegacyProjectionReceipts")
@@ -636,12 +716,156 @@ def _m4_canonical_event_hashes(conn):
     )
 
 
+def _legacy_private_runtime_content_exists(conn):
+    checks = (
+        ("MemoryOutbox", {"LastError"}, "SELECT 1 FROM MemoryOutbox WHERE LastError<>'' LIMIT 1"),
+        ("BackgroundActivity", {"Status", "Notes"}, "SELECT 1 FROM BackgroundActivity LIMIT 1"),
+        ("BackgroundProposals", {"JobType", "Notes"}, "SELECT 1 FROM BackgroundProposals LIMIT 1"),
+        ("Reflections", {"Trigger"}, "SELECT 1 FROM Reflections WHERE Trigger LIKE 'alert_watch:%' LIMIT 1"),
+    )
+    return bool(_legacy_alert_event_ids(conn)) or any(
+        _table_exists(conn, table)
+        and required.issubset(_columns(conn, table))
+        and conn.execute(query).fetchone() is not None
+        for table, required, query in checks
+    )
+
+
+def _legacy_alert_event_ids(conn):
+    if not _table_exists(conn, "MemoryEvents") or not {
+        "EventId", "StreamId", "Payload", "EventType"
+    }.issubset(_columns(conn, "MemoryEvents")):
+        return ()
+    rows = conn.execute(
+        "SELECT EventId,StreamId,EventType,Payload FROM MemoryEvents "
+        "WHERE EventType IN ("
+        "'background.reflection_recorded',"
+        "'background.activity_recorded',"
+        "'background.proposal_recorded')"
+    ).fetchall()
+    event_ids = []
+    for event_id, stream_id, event_type, raw_payload in rows:
+        if not all(isinstance(value, str) for value in (
+            event_id, stream_id, event_type, raw_payload
+        )):
+            continue
+        try:
+            payload = json.loads(raw_payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        is_alert = (
+            event_type == "background.reflection_recorded"
+            and stream_id.startswith("background:reflection:alert_watch:")
+            and isinstance(payload.get("Trigger"), str)
+            and payload["Trigger"].startswith("alert_watch:")
+        ) or (
+            event_type == "background.activity_recorded"
+            and stream_id.startswith("background:activity:")
+            and payload.get("JobType") == "alert_watch"
+        ) or (
+            event_type == "background.proposal_recorded"
+            and stream_id.startswith("background:proposal:")
+            and payload.get("JobType") == "alert_watch"
+        )
+        if is_alert:
+            event_ids.append(event_id)
+    return tuple(event_ids)
+
+
+def _m5_legacy_runtime_privacy(conn):
+    allowed_jobs = (
+        "memory_consolidation", "goal_checkin", "daily_digest",
+        "knowledge_hygiene", "reflection_synthesis", "emotion_drift",
+        "token_telemetry", "proactive_briefing", "market_snapshot",
+        "sec_filing_watch", "space_weather_alert", "research_deepdive",
+        "adx_projection",
+    )
+    if _table_exists(conn, "BackgroundActivity") and {
+        "Status", "Notes"
+    }.issubset(_columns(conn, "BackgroundActivity")):
+        rows = conn.execute(
+            "SELECT rowid,Status FROM BackgroundActivity"
+        ).fetchall()
+        for rowid, status in rows:
+            safe_status, note = _closed_background_activity(status)
+            conn.execute(
+                "UPDATE BackgroundActivity SET Status=?,Notes=? WHERE rowid=?",
+                (safe_status, note, rowid),
+            )
+        if "JobType" in _columns(conn, "BackgroundActivity"):
+            conn.execute(
+                "UPDATE BackgroundActivity SET JobType='memory_consolidation' "
+                "WHERE JobType NOT IN (" + ",".join("?" for _ in allowed_jobs) + ")",
+                allowed_jobs,
+            )
+    if _table_exists(conn, "BackgroundProposals") and {
+        "JobType", "Notes"
+    }.issubset(_columns(conn, "BackgroundProposals")):
+        conn.execute(
+            "DELETE FROM BackgroundProposals "
+            "WHERE JobType='alert_watch'"
+        )
+        if "Status" in _columns(conn, "BackgroundProposals"):
+            rows = conn.execute(
+                "SELECT rowid,Status FROM BackgroundProposals"
+            ).fetchall()
+            for rowid, status in rows:
+                conn.execute(
+                    "UPDATE BackgroundProposals SET Notes=? WHERE rowid=?",
+                    (_closed_background_proposal_note(status), rowid),
+                )
+        conn.execute(
+            "UPDATE BackgroundProposals SET JobType='memory_consolidation' "
+            "WHERE JobType NOT IN (" + ",".join("?" for _ in allowed_jobs) + ")",
+            allowed_jobs,
+        )
+    if _table_exists(conn, "Reflections") and {
+        "Trigger"
+    }.issubset(_columns(conn, "Reflections")):
+        conn.execute(
+            "DELETE FROM Reflections WHERE Trigger LIKE 'alert_watch:%'"
+        )
+
+    event_ids = _legacy_alert_event_ids(conn)
+    if event_ids:
+        _rebuild_draft_event_support(
+            conn, version=5, description="legacy runtime privacy cleanup",
+            exclude_event_ids=event_ids,
+            sanitize_background_metadata=True,
+        )
+    elif _table_exists(conn, "MemoryEvents"):
+        _rebuild_draft_event_support(
+            conn, version=5, description="legacy runtime privacy cleanup",
+            sanitize_background_metadata=True,
+        )
+
+    if _table_exists(conn, "MemoryOutbox"):
+        closed_codes = (
+            "destination_query_exception", "destination_query_failed",
+            "destination_ingest_exception", "destination_ingest_failed",
+            "not_cloud_consented", "secret_projection_forbidden",
+            "projection_receipt_failed", "event_not_found",
+            "ingest_returned_false", "adx_projection_exception",
+            "unknown_failure",
+        )
+        conn.execute(
+            "UPDATE MemoryOutbox SET LastError='unknown_failure' "
+            "WHERE LastError<>'' AND LastError NOT IN (" + ",".join(
+                "?" for _ in closed_codes
+            ) + ")",
+            closed_codes,
+        )
+
+
 _MIGRATIONS = [
     (0, "baseline legacy schema", _manifest_hash(0), _m0_baseline),
     (1, "immutable event kernel", _manifest_hash(1), _m1_event_kernel),
     (2, "phase1 draft upgrade", _manifest_hash(2), _m2_draft_upgrade),
     (3, "canonical event schema repair", _manifest_hash(3), _m3_canonical_repair),
     (4, "canonical event hash repair", _manifest_hash(4), _m4_canonical_event_hashes),
+    (5, "legacy runtime privacy cleanup", _manifest_hash(5), _m5_legacy_runtime_privacy),
 ]
 
 
@@ -777,6 +1001,7 @@ def run_migrations(conn):
     # the same referential guarantees as SqliteMemory-managed connections.
     conn.commit()
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA secure_delete=ON")
     if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
         raise MigrationError(-1, "foreign-key enforcement", "PRAGMA foreign_keys could not be enabled")
     conn.execute(_META_DDL)
@@ -788,6 +1013,9 @@ def run_migrations(conn):
         if known.get(version) != (description, checksum):
             raise MigrationError(version, description, "migration metadata checksum drift")
     current = _current_version(conn)
+    privacy_cleanup_needed = (
+        current < 5 and _legacy_private_runtime_content_exists(conn)
+    )
     applied = 0
     for version, description, checksum, up in _MIGRATIONS:
         if version <= current:
@@ -817,6 +1045,9 @@ def run_migrations(conn):
                 raise
             raise MigrationError(version, description, str(exc)) from exc
     conn.commit()
+    if privacy_cleanup_needed:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("VACUUM")
     if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
         raise MigrationError(
             _current_version(conn), "foreign-key enforcement",

@@ -6,26 +6,37 @@ page content extraction. Designed for Eva's local mode where the Copilot CLI
 (and its built-in Bing) is not available.
 
 Tools:
-  web_search       — Search DuckDuckGo and return results with snippets
-  web_fetch        — Fetch a URL and extract readable text content
-  web_search_news  — Search DuckDuckGo News for recent headlines
+    web_search       — Search DuckDuckGo and return results with snippets
+    web_search_news  — Search DuckDuckGo News for recent headlines
 
 Runs as a stdio MCP server (JSON-RPC over stdin/stdout).
 """
 
 import html
 import json
-import os
 import re
+import ssl
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
+from bridge.mcp_protocol import (
+    MCPProtocolError,
+    MAX_MCP_FRAME_BYTES,
+    decode_request_line,
+    encode_response_line,
+    fixed_tool_schema,
+    validate_fixed_tool_arguments,
+)
+
 _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+_SEARCH_HOSTS = frozenset({
+    "html.duckduckgo.com", "lite.duckduckgo.com", "www.google.com",
+})
 
 TOOLS = [
     {
@@ -93,35 +104,57 @@ TOOLS = [
         },
     },
 ]
+TOOLS = [tool for tool in TOOLS if tool.get("name") != "web_fetch"]
+for _tool in TOOLS:
+    _tool["inputSchema"] = fixed_tool_schema(_tool["name"])
 
 
 # ---------------------------------------------------------------------------
 # DuckDuckGo search (HTML scraping, no API key)
 # ---------------------------------------------------------------------------
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _http_get(url, timeout=15):
-    """Fetch a URL and return (status, body_text)."""
+    """Fetch one fixed search-provider HTTPS URL without redirects."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return 0, "Error: invalid search URL"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _SEARCH_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+        or parsed.fragment
+    ):
+        return 0, "Error: search destination is not allowed"
     req = urllib.request.Request(url, headers={
         "User-Agent": _USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     })
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        import certifi
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        tls_context.load_verify_locations(cafile=certifi.where())
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=tls_context),
+            _NoRedirect(),
+        )
+        with opener.open(req, timeout=timeout) as resp:
             # Read up to 512KB
             body = resp.read(512 * 1024)
             charset = resp.headers.get_content_charset() or "utf-8"
             # DuckDuckGo sometimes returns 202 with valid content
             return 200, body.decode(charset, errors="replace")
     except urllib.error.HTTPError as e:
-        # Some "errors" still have useful bodies (e.g. 202)
-        try:
-            body = e.read(512 * 1024)
-            charset = e.headers.get_content_charset() or "utf-8"
-            if len(body) > 500:
-                return 200, body.decode(charset, errors="replace")
-        except Exception:
-            pass
         return e.code, f"HTTP {e.code}: {e.reason}"
     except Exception as e:
         return 0, f"Error: {e}"
@@ -161,9 +194,25 @@ def _extract_readable(html_text, max_length=6000):
     text = _strip_html(html_text)
     # Remove nav-like short lines
     lines = text.split("\n")
-    content_lines = [l for l in lines if len(l.strip()) > 40]
+    content_lines = [line for line in lines if len(line.strip()) > 40]
     result = "\n".join(content_lines)
     return result[:max_length] if result else text[:max_length]
+
+
+def _is_google_control_url(raw_url):
+    """Return True for Google-owned navigation/challenge URLs, not by substring."""
+    try:
+        parsed = urllib.parse.urlsplit(raw_url)
+    except (TypeError, ValueError):
+        return True
+    if parsed.scheme not in ("http", "https"):
+        return True
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        return True
+    is_google = host == "google.com" or host.endswith(".google.com")
+    is_youtube = host == "youtube.com" or host.endswith(".youtube.com")
+    return is_google or (is_youtube and parsed.path.startswith("/sorry"))
 
 
 def _google_fallback(query, max_results=5):
@@ -187,7 +236,7 @@ def _google_fallback(query, max_results=5):
         title = _strip_html(title_html).strip()
         if not title or len(title) < 5 or raw_url in seen:
             continue
-        if "google.com" in raw_url or "youtube.com/sorry" in raw_url:
+        if _is_google_control_url(raw_url):
             continue
         seen.add(raw_url)
         results.append({"title": title, "url": raw_url, "snippet": ""})
@@ -268,25 +317,8 @@ def ddg_news(query, max_results=8):
 
 
 def web_fetch(url, max_length=6000):
-    """Fetch a URL and return extracted text."""
-    max_length = min(max(100, max_length), 20000)
-    # Basic URL validation
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return {"error": "Only http/https URLs are supported"}
-    if not parsed.hostname:
-        return {"error": "Invalid URL"}
-
-    status, body = _http_get(url, timeout=20)
-    if status != 200:
-        return {"error": f"HTTP {status}", "body": body[:500]}
-
-    text = _extract_readable(body, max_length)
-    return {
-        "url": url,
-        "length": len(text),
-        "content": text,
-    }
+    """Arbitrary page retrieval is disabled until brokered DNS pinning exists."""
+    return {"error": "web_fetch is disabled by Eva's public-egress policy"}
 
 
 # ---------------------------------------------------------------------------
@@ -295,14 +327,14 @@ def web_fetch(url, max_length=6000):
 
 def _respond(rid, result):
     msg = {"jsonrpc": "2.0", "id": rid, "result": result}
-    line = json.dumps(msg) + "\n"
+    line = encode_response_line(msg)
     sys.stdout.write(line)
     sys.stdout.flush()
 
 
 def _respond_error(rid, code, message):
     msg = {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
-    line = json.dumps(msg) + "\n"
+    line = encode_response_line(msg)
     sys.stdout.write(line)
     sys.stdout.flush()
 
@@ -328,12 +360,21 @@ def handle_request(msg):
         return  # no response needed for notifications
 
     if method == "tools/list":
+        if params:
+            _respond_error(rid, -32602, "MCP pagination is unsupported")
+            return
         _respond(rid, {"tools": TOOLS})
         return
 
     if method == "tools/call":
         name = params.get("name", "")
-        args = params.get("arguments", {})
+        try:
+            args = validate_fixed_tool_arguments(
+                name, params.get("arguments", {})
+            )
+        except MCPProtocolError:
+            _respond_error(rid, -32602, "Invalid tool arguments")
+            return
 
         if name == "web_search":
             query = args.get("query", "")
@@ -353,15 +394,6 @@ def handle_request(msg):
             _respond(rid, _tool_result(json.dumps(results, indent=2)))
             return
 
-        if name == "web_fetch":
-            url = args.get("url", "")
-            if not url:
-                _respond(rid, _tool_result("Error: url is required"))
-                return
-            result = web_fetch(url, args.get("max_length", 6000))
-            _respond(rid, _tool_result(json.dumps(result, indent=2)))
-            return
-
         _respond_error(rid, -32601, f"Unknown tool: {name}")
         return
 
@@ -375,21 +407,25 @@ def handle_request(msg):
 
 def main():
     print("[WebSearch MCP] Starting...", file=sys.stderr)
-    for line in sys.stdin:
-        line = line.strip()
+    while True:
+        line = sys.stdin.buffer.readline(MAX_MCP_FRAME_BYTES + 1)
         if not line:
+            break
+        if len(line) > MAX_MCP_FRAME_BYTES or not line.endswith(b"\n"):
+            break
+        if not line.strip():
             continue
         try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
+            msg = decode_request_line(line)
+        except MCPProtocolError:
             continue
         try:
             handle_request(msg)
-        except Exception as e:
+        except Exception:
             rid = msg.get("id")
             if rid is not None:
-                _respond_error(rid, -32603, f"Internal error: {e}")
-            print(f"[WebSearch MCP] Error: {e}", file=sys.stderr)
+                _respond_error(rid, -32603, "Internal error")
+            print("[WebSearch MCP] Request failed", file=sys.stderr)
 
 
 if __name__ == "__main__":

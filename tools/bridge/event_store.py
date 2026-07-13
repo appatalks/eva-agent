@@ -21,6 +21,7 @@ from bridge.events import (
     canonical_json,
     deterministic_event_id,
     deterministic_outbox_id,
+    outbox_error_code,
     payload_hash,
 )
 from bridge.sensitive import redact_credentials, should_create_outbox
@@ -600,7 +601,7 @@ class EventRepositoryV2:
             conn.execute(
                 "UPDATE MemoryOutbox SET Status=?,Attempts=?,LastError=?,NextAttemptAt=?,LeaseUntil='',UpdatedAt=? "
                 "WHERE EventId=? AND Destination=?",
-                (status, attempts, str(error)[:1000], next_attempt_at, now, event_id, destination),
+                (status, attempts, outbox_error_code(error), next_attempt_at, now, event_id, destination),
             )
 
     def outbox_status(self, connection=None):

@@ -12,6 +12,8 @@
   <!-- Optional local config override (prevents file:// fetch issues) -->
   <script src="config.local.js"></script>
   <!-- Scripts -->
+  <script src="core/js/agent-markers.js"></script>
+  <script src="core/js/action-outcomes.js"></script>
   <script src="core/js/options.js"></script> 
   <script src="core/js/external.js"></script>
   <script src="core/js/gpt-core.js"></script>
@@ -164,29 +166,19 @@
       <button id="skillsPanelClose" aria-label="Close skills">&times;</button>
     </div>
     <div class="skills-panel-body">
-      <p class="cog-help">Import a skill from any source. Eva normalizes ("Eva'rises") it into her own format, stores it in ADX, and applies it automatically when a request matches.</p>
+      <p class="cog-help">Import a locally supplied skill by pasting text or uploading a file. Eva normalizes ("Eva'rises") it into her own format and stores it through canonical SQLite, with optional ADX projection. Reviewed active skills may be matched into later context.</p>
 
       <div class="skills-import">
         <div class="auth-field">
           <label for="skillSourceType">Source</label>
           <select id="skillSourceType">
             <option value="paste" selected>Paste text / markdown</option>
-            <option value="url">Fetch from URL</option>
-            <option value="github">GitHub repo or SKILL.md</option>
             <option value="file">Upload a file</option>
           </select>
         </div>
         <div class="auth-field" id="skillPasteWrap">
           <label for="skillPasteInput">Skill content</label>
           <textarea id="skillPasteInput" rows="5" placeholder="Paste a SKILL.md, instructions, or any document describing the skill..."></textarea>
-        </div>
-        <div class="auth-field" id="skillUrlWrap" style="display:none;">
-          <label for="skillUrlInput">URL</label>
-          <input type="text" id="skillUrlInput" placeholder="https://example.com/skill.md">
-        </div>
-        <div class="auth-field" id="skillRepoWrap" style="display:none;">
-          <label for="skillRepoInput">GitHub reference</label>
-          <input type="text" id="skillRepoInput" placeholder="owner/repo, a subdir (owner/repo/skills/pdf), or a github.com tree/blob URL">
         </div>
         <div class="auth-field" id="skillFileWrap" style="display:none;">
           <label for="skillFileInput">File (.md, .txt, .json)</label>
@@ -395,7 +387,7 @@
         <hr style="margin:14px 0;border:none;border-top:1px solid rgba(127,127,127,0.25)">
         <div class="auth-note" style="margin:0">
           <strong>About</strong><br>
-          Eva AI Assistant <span id="evaAppVersion">v5.3.0</span><br>
+          Eva AI Assistant <span id="evaAppVersion">v5.4.0</span><br>
           <span>Active goals: <span id="evaActiveGoalsCount">0</span></span><br>
           <span id="evaStandaloneVersion" style="display:none"></span>
         </div>
@@ -886,15 +878,6 @@
             <button type="button" id="mcpEnsureTablesButton" class="auth-toggle" style="margin-top:6px;width:100%;text-align:center" disabled>Create missing tables</button>
             <div id="mcpSeedStatus" class="mcp-status" aria-live="polite" style="margin-top:8px"></div>
           </div>
-        </div>
-
-        <div class="mcp-preset">
-          <label>
-            <input type="checkbox" id="mcpComputerUse"> <strong>Computer Use Linux (Desktop MCP)</strong>
-          </label>
-          <p class="prompt-hint">AT-SPI accessibility trees, screenshots, clicks, scrolls, keystrokes. Wayland-first, X11 fallback.<br>
-            Semantic selectors (role/name) instead of pixel coordinates. Replaces PyAutoGUI for desktop control.<br>
-            Install: <code>npm install -g @agent-sh/computer-use-linux</code> then <code>computer-use-linux setup</code></p>
         </div>
 
         <div id="mcpStatus" class="mcp-status"></div>

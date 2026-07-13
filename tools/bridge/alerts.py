@@ -6,7 +6,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 import uuid
 from bridge import config as _cfg
 from bridge import state as _st
@@ -20,8 +19,6 @@ _ALERT_CHANNELS = _cfg.ALERT_CHANNELS
 _ALERT_TYPES = _cfg.ALERT_TYPES
 _DEFAULT_ALERT_SETTINGS = _cfg.DEFAULT_ALERT_SETTINGS
 _NOTIFY_CRITICAL_SALIENCE = _cfg.NOTIFY_CRITICAL_SALIENCE
-_NOTIFY_MAX_BYTES = _cfg.NOTIFY_MAX_BYTES
-_NOTIFY_PATH = _cfg.NOTIFY_PATH
 _NOTIFY_RING_MAX = _cfg.NOTIFY_RING_MAX
 _SIGNAL_CLI_PATH = _cfg.SIGNAL_CLI_PATH
 _SIGNAL_SENDER = _cfg.SIGNAL_SENDER
@@ -46,18 +43,18 @@ def _signal_send(message):
             [_SIGNAL_CLI_PATH, "-u", sender, "send",
              "-m", message, recipient],
             capture_output=True, text=True, timeout=_SIGNAL_SEND_TIMEOUT,
-            check=True, env=_cfg.child_process_env(),
+            check=True, env=_cfg.child_process_env(profile="notification"),
         )
-        print(f"[Signal] Sent to {recipient[:4]}...")
+        print("[Signal] Delivery succeeded")
         return True
     except FileNotFoundError:
-        print(f"[Signal] signal-cli not found at: {_SIGNAL_CLI_PATH}", file=sys.stderr)
+        print("[Signal] Delivery unavailable", file=sys.stderr)
         return False
     except subprocess.TimeoutExpired:
         print("[Signal] Send timed out", file=sys.stderr)
         return False
-    except subprocess.CalledProcessError as exc:
-        print(f"[Signal] Send failed: {exc.stderr[:200] if exc.stderr else exc}", file=sys.stderr)
+    except subprocess.CalledProcessError:
+        print("[Signal] Delivery failed", file=sys.stderr)
         return False
 
 
@@ -71,9 +68,10 @@ def _load_alerts():
     'alerts' (list) and 'settings' (dict). Never raises."""
     doc = _alerts_default_doc()
     try:
-        if os.path.isfile(_ALERTS_CONFIG_PATH):
-            with open(_ALERTS_CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
+        with _cfg.open_private_file(
+            _ALERTS_CONFIG_PATH, "r", encoding="utf-8"
+        ) as f:
+            data = json.load(f)
             if isinstance(data, dict):
                 rules = data.get("alerts")
                 if isinstance(rules, list):
@@ -87,7 +85,7 @@ def _load_alerts():
                     for k in ("signal_sender", "signal_recipient"):
                         if k in settings:
                             doc["settings"][k] = settings[k]
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, _cfg.PrivateStorageError) as exc:
         print(f"[Bridge] Could not load alerts config: {exc}", file=sys.stderr)
     return doc
 
@@ -96,13 +94,13 @@ def _load_alerts():
 def _save_alerts(doc):
     """Persist the alert rules document atomically. Never raises."""
     try:
-        os.makedirs(os.path.dirname(_ALERTS_CONFIG_PATH), exist_ok=True)
-        tmp = _ALERTS_CONFIG_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        _cfg.ensure_private_directory(os.path.dirname(_ALERTS_CONFIG_PATH))
+        with _cfg.open_private_file(
+            _ALERTS_CONFIG_PATH, "w", encoding="utf-8"
+        ) as f:
             json.dump(doc, f, indent=2)
-        os.replace(tmp, _ALERTS_CONFIG_PATH)
         return True
-    except (OSError, TypeError) as exc:
+    except (OSError, TypeError, _cfg.PrivateStorageError) as exc:
         print(f"[Bridge] Could not save alerts config: {exc}", file=sys.stderr)
         return False
 
@@ -354,20 +352,9 @@ def _notify_enqueue(title, body, source, salience, channels, settings=None):
             _st.notify_ring.append(record)
             if len(_st.notify_ring) > _NOTIFY_RING_MAX:
                 del _st.notify_ring[:-_NOTIFY_RING_MAX]
-            try:
-                os.makedirs(os.path.dirname(_NOTIFY_PATH), exist_ok=True)
-                if os.path.isfile(_NOTIFY_PATH) and os.path.getsize(_NOTIFY_PATH) >= _NOTIFY_MAX_BYTES:
-                    try:
-                        os.replace(_NOTIFY_PATH, _NOTIFY_PATH + ".1")
-                    except OSError:
-                        pass
-                with open(_NOTIFY_PATH, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(record) + "\n")
-            except OSError:
-                pass
         _telemetry_emit("notify", result="emit", source=source, salience=salience,
                         channels=",".join(record["channels"]))
-        print(f"[Notify] {record['title']} (salience {salience}, {source})")
+        print(f"[Notify] Notification emitted (salience {salience})")
         # Dispatch to Signal when requested
         if "signal" in record["channels"]:
             _signal_send(f"{record['title']}\n{record['body']}".strip())

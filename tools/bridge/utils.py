@@ -18,6 +18,7 @@ from bridge.sensitive import redact_credentials
 _HTTP_CONTENT_TYPE_RE = _cfg.HTTP_CONTENT_TYPE_RE
 _LMSTUDIO_ALLOWED_PORTS = _cfg.LMSTUDIO_ALLOWED_PORTS
 _MCP_CONFIG_CACHE_PATH = _cfg.MCP_CONFIG_CACHE_PATH
+_RUNTIME_STATE_PATH = _cfg.RUNTIME_STATE_PATH
 
 def _env_truthy(name):
     """Return True when an environment flag uses the shared truthy form."""
@@ -48,19 +49,36 @@ def _safe_content_type(value):
 
 
 def _is_local_or_private(host):
-    """Return True if host is localhost or an RFC 1918 / link-local address."""
-    if host in ("localhost", "127.0.0.1", "::1"):
+    """Return True only for localhost, loopback, RFC1918, or IPv6 ULA."""
+    if host == "localhost":
         return True
     try:
-        import ipaddress
         addr = ipaddress.ip_address(host)
-        return addr.is_private or addr.is_loopback or addr.is_link_local
+        if isinstance(addr, ipaddress.IPv6Address) and (
+            addr.ipv4_mapped is not None
+            or addr.sixtofour is not None
+            or addr.teredo is not None
+        ):
+            return False
+        if addr.is_loopback:
+            return True
+        if addr.is_unspecified or addr.is_multicast or addr.is_reserved:
+            return False
+        if isinstance(addr, ipaddress.IPv4Address):
+            return any(addr in network for network in (
+                ipaddress.ip_network("10.0.0.0/8"),
+                ipaddress.ip_network("172.16.0.0/12"),
+                ipaddress.ip_network("192.168.0.0/16"),
+            ))
+        return addr in ipaddress.ip_network("fc00::/7")
     except ValueError:
         return False
 
 
 
 def _validate_lmstudio_base_url(raw):
+    if not isinstance(raw, str):
+        return "", "lmstudio_base_url must be a string"
     value = (raw or "").strip().rstrip("/")
     if not value:
         return "", "lmstudio_base_url is required"
@@ -74,8 +92,8 @@ def _validate_lmstudio_base_url(raw):
         return "", "lmstudio_base_url must use http or https"
     if parsed.username or parsed.password:
         return "", "lmstudio_base_url must not include userinfo"
-    if parsed.query or parsed.fragment:
-        return "", "lmstudio_base_url must not include query or fragment"
+    if parsed.params or parsed.query or parsed.fragment:
+        return "", "lmstudio_base_url must not include params, query, or fragment"
 
     host = (parsed.hostname or "").lower()
     if not _is_local_or_private(host):
@@ -96,8 +114,7 @@ def _validate_lmstudio_base_url(raw):
     host_for_url = host
     if ":" in host_for_url and not host_for_url.startswith("["):
         host_for_url = "[" + host_for_url + "]"
-    normalized_path = "/v1" if parsed.path in ("/v1", "/v1/") else ""
-    return f"{parsed.scheme}://{host_for_url}:{port}{normalized_path}", ""
+    return f"{parsed.scheme}://{host_for_url}:{port}/v1", ""
 
 
 
@@ -114,6 +131,7 @@ def _sanitize_mcp_for_persist(mcp_servers):
         env = safe_srv.get("env")
         if isinstance(env, dict):
             cleaned = {}
+            had_github_pat = "GITHUB_PERSONAL_ACCESS_TOKEN" in env
             for k, v in env.items():
                 if not isinstance(k, str):
                     continue
@@ -136,6 +154,8 @@ def _sanitize_mcp_for_persist(mcp_servers):
                 ):
                     continue
                 cleaned[k] = v
+            if srv_name == "github-mcp-server" and had_github_pat:
+                cleaned["_useGitHubPAT"] = True
             safe_srv["env"] = cleaned
         safe_name = redact_credentials(str(srv_name))
         redacted_srv = redact_credentials(safe_srv)
@@ -151,33 +171,82 @@ def _sanitize_mcp_for_persist(mcp_servers):
 
 
 
+def _load_runtime_state():
+    status, data = _cfg.load_runtime_state_document_status(
+        _RUNTIME_STATE_PATH
+    )
+    if status == "invalid":
+        try:
+            with _cfg.open_private_file(
+                _RUNTIME_STATE_PATH, "w", encoding="utf-8"
+            ) as revoked:
+                revoked.write("{}")
+        except (OSError, _cfg.PrivateStorageError):
+            pass
+    if status != "valid" or data is None:
+        return None
+    safe = _sanitize_mcp_for_persist(data["mcp_servers"])
+    safe, _rejected = _cfg.mcp_config_for_egress(safe, "cloud")
+    return {"version": 1, "mode": data["mode"], "mcp_servers": safe}
+
+
+def _persist_runtime_state(mode, mcp_servers):
+    if mode not in ("local", "cloud"):
+        return False
+    try:
+        state = {
+            "version": 1, "mode": mode,
+            "mcp_servers": _sanitize_mcp_for_persist(mcp_servers),
+        }
+        with _cfg.open_private_file(
+            _RUNTIME_STATE_PATH, "w", encoding="utf-8"
+        ) as handle:
+            json.dump(state, handle, sort_keys=True, separators=(",", ":"))
+        return True
+    except (OSError, TypeError, _cfg.PrivateStorageError):
+        print("[Bridge] Could not persist runtime state", file=sys.stderr)
+        return False
+
+
 def _persist_mcp_config(mcp_servers):
     """Persist the front-end MCP server selection so it survives bridge restarts
     even when the Electron file:// localStorage is cleared. Secrets are stripped
     before writing."""
-    try:
-        os.makedirs(os.path.dirname(_MCP_CONFIG_CACHE_PATH), exist_ok=True)
-        with open(_MCP_CONFIG_CACHE_PATH, "w", encoding="utf-8") as f:
-            json.dump(_sanitize_mcp_for_persist(mcp_servers), f)
-    except (OSError, TypeError) as exc:
-        print(f"[Bridge] Could not persist MCP config: {exc}", file=sys.stderr)
+    state = _load_runtime_state()
+    mode = state["mode"] if state else ("local" if _st.local_mode else "cloud")
+    return _persist_runtime_state(mode, mcp_servers)
 
 
 
 def _load_persisted_mcp_config():
     """Load the persisted MCP server selection (no secrets)."""
+    state = _load_runtime_state()
+    if state is not None:
+        return state["mcp_servers"]
     try:
-        if os.path.isfile(_MCP_CONFIG_CACHE_PATH):
-            with open(_MCP_CONFIG_CACHE_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                safe = _sanitize_mcp_for_persist(data)
-                if safe != data:
-                    _persist_mcp_config(safe)
-                return safe
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"[Bridge] Could not load persisted MCP config: {exc}", file=sys.stderr)
+        with _cfg.open_private_file(
+            _MCP_CONFIG_CACHE_PATH, "r", encoding="utf-8"
+        ):
+            pass
+        with _cfg.open_private_file(
+            _MCP_CONFIG_CACHE_PATH, "w", encoding="utf-8"
+        ) as revoked:
+            revoked.write("{}")
+    except FileNotFoundError:
+        pass
+    except (OSError, _cfg.PrivateStorageError):
+        print("[Bridge] Could not revoke legacy MCP config", file=sys.stderr)
     return {}
+
+
+def _load_persisted_mode():
+    state = _load_runtime_state()
+    if state is not None:
+        return state["mode"]
+    status, _data = _cfg.load_runtime_state_document_status(
+        _RUNTIME_STATE_PATH
+    )
+    return "unknown" if status == "invalid" else "cloud"
 
 
 # Small client preferences store (non-secret UI toggles) that survives the
@@ -190,12 +259,35 @@ _CLIENT_PREFS_PATH = os.path.expanduser("~/.config/eva-standalone/client_prefs.j
 
 def _load_client_prefs():
     try:
-        if os.path.isfile(_CLIENT_PREFS_PATH):
-            with open(_CLIENT_PREFS_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
+        with _cfg.open_private_file(
+            _CLIENT_PREFS_PATH, "r", encoding="utf-8"
+        ) as f:
+            data = json.load(f)
             if isinstance(data, dict):
-                return data
-    except (OSError, json.JSONDecodeError):
+                safe = {}
+                if isinstance(data.get("cameraPresence"), bool):
+                    safe["cameraPresence"] = data["cameraPresence"]
+                base, error = _validate_lmstudio_base_url(
+                    data.get("lmstudio_base_url")
+                )
+                if not error:
+                    safe["lmstudio_base_url"] = base
+                model = data.get("lmstudio_model")
+                if (
+                    isinstance(model, str) and 0 < len(model) <= 256
+                    and re.search(r"[\x00-\x1f\x7f]", model) is None
+                ):
+                    safe["lmstudio_model"] = model
+                if safe != data:
+                    with _cfg.open_private_file(
+                        _CLIENT_PREFS_PATH, "w", encoding="utf-8"
+                    ) as rewritten:
+                        json.dump(
+                            safe, rewritten, sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                return safe
+    except (OSError, json.JSONDecodeError, _cfg.PrivateStorageError):
         pass
     return {}
 
@@ -203,28 +295,39 @@ def _load_client_prefs():
 
 def _save_client_prefs(prefs):
     try:
-        os.makedirs(os.path.dirname(_CLIENT_PREFS_PATH), exist_ok=True)
+        _cfg.ensure_private_directory(os.path.dirname(_CLIENT_PREFS_PATH))
         cur = _load_client_prefs()
-        # Only store small scalar values (booleans, strings, numbers) so this can
-        # never become a secrets sink.
         for k, v in (prefs or {}).items():
-            if isinstance(v, (bool, int, float)) or (isinstance(v, str) and len(v) <= 200):
-                cur[str(k)[:64]] = v
-        with open(_CLIENT_PREFS_PATH, "w", encoding="utf-8") as f:
+            if k == "cameraPresence" and isinstance(v, bool):
+                cur[k] = v
+            elif k == "lmstudio_base_url":
+                base, error = _validate_lmstudio_base_url(v)
+                if error:
+                    raise ValueError(error)
+                cur[k] = base
+            elif (
+                k == "lmstudio_model" and isinstance(v, str)
+                and 0 < len(v) <= 256
+                and re.search(r"[\x00-\x1f\x7f]", v) is None
+            ):
+                cur[k] = v
+            else:
+                raise ValueError("unsupported client preference")
+        with _cfg.open_private_file(
+            _CLIENT_PREFS_PATH, "w", encoding="utf-8"
+        ) as f:
             json.dump(cur, f)
         return cur
-    except (OSError, TypeError) as exc:
+    except (OSError, TypeError, ValueError, _cfg.PrivateStorageError) as exc:
         print(f"[Bridge] Could not persist client prefs: {exc}", file=sys.stderr)
-        return _load_client_prefs()
+        return None
 
-
-# ---------------------------------------------------------------------------
 # Telemetry — structured, privacy-safe event log for latency/behavior analysis
 # ---------------------------------------------------------------------------
 # Events are appended as JSONL to _TELEMETRY_PATH and mirrored to an in-memory
-# ring buffer for the GET /v1/telemetry endpoint. We record durations, model
-# names, routing/decision labels, and character COUNTS only — never the user
-# message, the response text, tokens, keys, or any MCP env values.
+# ring buffer for the GET /v1/telemetry endpoint. Only numeric measures, closed
+# enums, and hashed model identifiers are retained—never free-form labels,
+# prompts, responses, tokens, keys, exceptions, or MCP environment values.
 
 _TELEMETRY_PATH = _cfg.TELEMETRY_PATH
 _TELEMETRY_MAX_BYTES = _cfg.TELEMETRY_MAX_BYTES
