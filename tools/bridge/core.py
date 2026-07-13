@@ -6446,11 +6446,19 @@ def main():
     # global statement removed — writes go to _st.*
     try:
         _cfg.ensure_private_runtime_storage()
-        _st.artifact_generation = _cfg.advance_artifact_epoch()
+        (
+            _st.artifact_generation,
+            legacy_artifacts_revoked,
+        ) = _cfg.initialize_artifact_epoch()
+        _st.artifact_namespace_blocked = _cfg.artifact_namespace_blocked()
     except Exception as exc:
         print(f"[Bridge] ERROR: private runtime storage unavailable: {exc}", file=sys.stderr)
         sys.exit(2)
     _install_log_tee()
+    if legacy_artifacts_revoked:
+        print(
+            "[Bridge] Revoked legacy flat artifacts during secure store upgrade"
+        )
 
     ready_nonce = os.environ.pop("EVA_BRIDGE_READY_NONCE", "").strip()
     if ready_nonce and not re.fullmatch(r"[A-Za-z0-9_-]{43}", ready_nonce):

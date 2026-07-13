@@ -882,62 +882,146 @@ def ensure_private_runtime_storage():
     return root
 
 
+def _advance_artifact_epoch_locked(lock_handle):
+    """Advance the epoch while the caller holds the durable epoch lock."""
+    initialized = os.fstat(lock_handle.fileno()).st_size > 0
+    current = 0
+    epoch_exists = False
+    try:
+        with open_private_file(ARTIFACT_EPOCH_PATH, "r") as handle:
+            raw = handle.read().strip()
+        if re.fullmatch(r"0|[1-9][0-9]{0,39}", raw) is None:
+            raise PrivateStorageError("artifact epoch is malformed")
+        current = int(raw)
+        epoch_exists = True
+    except FileNotFoundError:
+        pass
+
+    marker_exists = False
+    try:
+        with open_private_file(
+            ARTIFACT_STORE_MARKER_PATH, "r"
+        ) as marker_handle:
+            marker = marker_handle.read().strip()
+        if re.fullmatch(r"[0-9a-f]{64}", marker) is None:
+            raise PrivateStorageError("artifact store marker is malformed")
+        marker_exists = True
+    except FileNotFoundError:
+        pass
+
+    if not epoch_exists:
+        retained_artifacts = False
+        try:
+            retained_artifacts = bool(visit_private_files(
+                ARTIFACTS_DIR, lambda _parts, _handle, _info: True
+            ))
+        except FileNotFoundError:
+            pass
+        if initialized or marker_exists or retained_artifacts:
+            raise PrivateStorageError("artifact epoch is missing")
+
+    if not marker_exists:
+        with open_private_file(
+            ARTIFACT_STORE_MARKER_PATH, "x"
+        ) as marker_handle:
+            marker_handle.write(secrets.token_hex(32))
+    next_epoch = current + 1
+    if next_epoch >= 10 ** 40:
+        raise PrivateStorageError("artifact epoch exhausted")
+    with open_private_file(ARTIFACT_EPOCH_PATH, "w") as handle:
+        handle.write(str(next_epoch))
+    if not initialized:
+        lock_handle.write("initialized\n")
+        lock_handle.flush()
+        os.fsync(lock_handle.fileno())
+    return str(next_epoch)
+
+
 def advance_artifact_epoch():
     """Atomically advance and return a durable non-reusable decimal epoch."""
     with open_private_file(ARTIFACT_EPOCH_LOCK_PATH, "a") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         try:
-            initialized = os.fstat(lock_handle.fileno()).st_size > 0
-            current = 0
-            epoch_exists = False
+            return _advance_artifact_epoch_locked(lock_handle)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _legacy_flat_artifact_store_present(lock_handle):
+    """Return True only for the pre-identity flat artifact layout.
+
+    The legacy release wrote regular files directly beneath ``artifacts/`` and
+    had no epoch or store marker. A missing epoch in any newer/nested layout is
+    still treated as corruption and must fail closed.
+    """
+    for path in (ARTIFACT_EPOCH_PATH, ARTIFACT_STORE_MARKER_PATH):
+        try:
+            with open_private_file(path, "rb"):
+                return False
+        except FileNotFoundError:
+            pass
+
+    if os.fstat(lock_handle.fileno()).st_size > 0:
+        return False
+
+    _display, artifacts_fd = _open_private_directory(
+        ARTIFACTS_DIR, create=False
+    )
+    try:
+        names = os.listdir(artifacts_fd)
+        if not names:
+            return False
+        for name in names:
+            info = os.stat(
+                name, dir_fd=artifacts_fd, follow_symlinks=False
+            )
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or hasattr(os, "getuid") and info.st_uid != os.getuid()
+            ):
+                return False
+        return True
+    finally:
+        os.close(artifacts_fd)
+
+
+def initialize_artifact_epoch():
+    """Advance the epoch, revoking a verified pre-epoch flat store once.
+
+    Legacy bytes are atomically detached into the existing private quarantine
+    namespace and are never re-authorized. Any failure leaves the durable
+    namespace block in place. Missing epochs for current/nested stores continue
+    to fail closed rather than cycling authority.
+    """
+    with open_private_file(ARTIFACT_EPOCH_LOCK_PATH, "a") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
             try:
-                with open_private_file(ARTIFACT_EPOCH_PATH, "r") as handle:
-                    raw = handle.read().strip()
-                if re.fullmatch(r"0|[1-9][0-9]{0,39}", raw) is None:
-                    raise PrivateStorageError("artifact epoch is malformed")
-                current = int(raw)
-                epoch_exists = True
-            except FileNotFoundError:
-                pass
+                return _advance_artifact_epoch_locked(lock_handle), False
+            except PrivateStorageError as exc:
+                if (
+                    str(exc) != "artifact epoch is missing"
+                    or not _legacy_flat_artifact_store_present(lock_handle)
+                ):
+                    raise
 
-            marker_exists = False
+            set_artifact_namespace_blocked(True)
             try:
-                with open_private_file(
-                    ARTIFACT_STORE_MARKER_PATH, "r"
-                ) as marker_handle:
-                    marker = marker_handle.read().strip()
-                if re.fullmatch(r"[0-9a-f]{64}", marker) is None:
-                    raise PrivateStorageError("artifact store marker is malformed")
-                marker_exists = True
-            except FileNotFoundError:
-                pass
-
-            if not epoch_exists:
-                retained_artifacts = False
-                try:
-                    retained_artifacts = bool(visit_private_files(
-                        ARTIFACTS_DIR, lambda _parts, _handle, _info: True
-                    ))
-                except FileNotFoundError:
-                    pass
-                if initialized or marker_exists or retained_artifacts:
-                    raise PrivateStorageError("artifact epoch is missing")
-
-            if not marker_exists:
-                with open_private_file(
-                    ARTIFACT_STORE_MARKER_PATH, "x"
-                ) as marker_handle:
-                    marker_handle.write(secrets.token_hex(32))
-            next_epoch = current + 1
-            if next_epoch >= 10 ** 40:
-                raise PrivateStorageError("artifact epoch exhausted")
-            with open_private_file(ARTIFACT_EPOCH_PATH, "w") as handle:
-                handle.write(str(next_epoch))
-            if not initialized:
-                lock_handle.write("initialized\n")
-                lock_handle.flush()
-                os.fsync(lock_handle.fileno())
-            return str(next_epoch)
+                _parent, detached = detach_private_directory(
+                    ARTIFACTS_DIR, prefix=".artifact-revoked-"
+                )
+                if not detached:
+                    raise PrivateStorageError(
+                        "legacy artifact detachment failed"
+                    )
+                generation = _advance_artifact_epoch_locked(lock_handle)
+                set_artifact_namespace_blocked(False)
+                return generation, True
+            except Exception:
+                # The durable block was committed before detachment and
+                # intentionally remains until successful recovery.
+                raise
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 

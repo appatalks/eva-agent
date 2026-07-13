@@ -4007,6 +4007,91 @@ process.stdout.write(JSON.stringify({first,second}));
         self.assertNotEqual(data["first"], "9007199254740991")
         self.assertNotEqual(data["first"], data["second"])
 
+    def test_legacy_flat_artifacts_are_revoked_before_epoch_initialization(self):
+        from bridge import config
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            config, "EVA_CONFIG_DIR", tmp
+        ), mock.patch.object(
+            config, "ARTIFACTS_DIR", os.path.join(tmp, "artifacts")
+        ), mock.patch.object(
+            config, "ARTIFACT_EPOCH_PATH", os.path.join(tmp, "epoch.txt")
+        ), mock.patch.object(
+            config, "ARTIFACT_EPOCH_LOCK_PATH", os.path.join(tmp, "epoch.lock")
+        ), mock.patch.object(
+            config, "ARTIFACT_STORE_MARKER_PATH", os.path.join(tmp, "store.marker")
+        ), mock.patch.object(
+            config, "ARTIFACT_NAMESPACE_BLOCK_PATH", os.path.join(tmp, "blocked")
+        ):
+            config.ensure_private_directory(config.ARTIFACTS_DIR)
+            for name in ("legacy.txt", "legacy.pdf"):
+                with config.open_private_file(
+                    os.path.join(config.ARTIFACTS_DIR, name), "x"
+                ) as handle:
+                    handle.write("legacy")
+
+            outcomes = []
+            errors = []
+
+            def initialize():
+                try:
+                    outcomes.append(config.initialize_artifact_epoch())
+                except Exception as exc:
+                    errors.append(exc)
+
+            workers = [threading.Thread(target=initialize) for _ in range(2)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=2)
+
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                sorted(outcomes), [("1", True), ("2", False)]
+            )
+            self.assertEqual(os.listdir(config.ARTIFACTS_DIR), [])
+            self.assertFalse(config.artifact_namespace_blocked())
+            quarantines = config.list_private_subdirectories(
+                tmp, ".artifact-revoked-"
+            )
+            self.assertEqual(len(quarantines), 1)
+            self.assertEqual(
+                sorted(os.listdir(os.path.join(tmp, quarantines[0]))),
+                ["legacy.pdf", "legacy.txt"],
+            )
+
+    def test_legacy_artifact_migration_failure_stays_durably_blocked(self):
+        from bridge import config
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            config, "EVA_CONFIG_DIR", tmp
+        ), mock.patch.object(
+            config, "ARTIFACTS_DIR", os.path.join(tmp, "artifacts")
+        ), mock.patch.object(
+            config, "ARTIFACT_EPOCH_PATH", os.path.join(tmp, "epoch.txt")
+        ), mock.patch.object(
+            config, "ARTIFACT_EPOCH_LOCK_PATH", os.path.join(tmp, "epoch.lock")
+        ), mock.patch.object(
+            config, "ARTIFACT_STORE_MARKER_PATH", os.path.join(tmp, "store.marker")
+        ), mock.patch.object(
+            config, "ARTIFACT_NAMESPACE_BLOCK_PATH", os.path.join(tmp, "blocked")
+        ):
+            config.ensure_private_directory(config.ARTIFACTS_DIR)
+            with config.open_private_file(
+                os.path.join(config.ARTIFACTS_DIR, "legacy.txt"), "x"
+            ) as handle:
+                handle.write("legacy")
+            with mock.patch.object(
+                config, "detach_private_directory",
+                side_effect=config.PrivateStorageError("synthetic failure"),
+            ):
+                with self.assertRaises(config.PrivateStorageError):
+                    config.initialize_artifact_epoch()
+            self.assertTrue(config.artifact_namespace_blocked())
+
+    def test_artifact_registry_rebind_preserves_creation_generation(self):
+        sessions_path = os.path.join(PROJECT_ROOT, "core", "js", "sessions.js")
         rebind_script = r"""
 const fs=require('fs'),vm=require('vm');const source=fs.readFileSync(process.argv[1],'utf8');
     global.localStorage={getItem:()=>null,setItem:()=>{}};
