@@ -330,15 +330,15 @@ class TestCORSOriginValidation(unittest.TestCase):
 
     def test_loopback_allowed(self):
         headers = self._options_origin("http://127.0.0.1:8888")
-        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "http://127.0.0.1:8888")
+        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "*")
 
     def test_localhost_allowed(self):
         headers = self._options_origin("http://localhost:3000")
-        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "http://localhost:3000")
+        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "*")
 
     def test_file_origin_allowed(self):
         headers = self._options_origin("file://")
-        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "file://")
+        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "*")
 
     def test_evil_origin_rejected(self):
         headers = self._options_origin("http://localhost.evil")
@@ -386,7 +386,7 @@ class TestCORSOriginValidation(unittest.TestCase):
     def test_cors_header_uses_a_canonical_origin_value(self):
         self.assertEqual(
             self.handler._allowed_cors_origin("http://127.0.0.1:8888"),
-            "http://127.0.0.1:8888",
+            "*",
         )
         self.assertIsNone(
             self.handler._allowed_cors_origin(

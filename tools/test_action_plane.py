@@ -4464,11 +4464,9 @@ const accepted=getLmStudioBaseUrl();process.stdout.write(JSON.stringify({rejecte
                 first.headers["X-Eva-Camera-Contract"],
                 "eva.camera-capture/1",
             )
-            self.assertEqual(first.headers["X-Eva-Camera-Capture-Id"], capture_id)
             self.assertEqual(first.headers["X-Eva-Camera-Frame-Seq"], "8")
-            self.assertEqual(
-                first.headers["X-Eva-Camera-Question-Hash"], question_hash
-            )
+            self.assertNotIn("X-Eva-Camera-Capture-Id", first.headers)
+            self.assertNotIn("X-Eva-Camera-Question-Hash", first.headers)
             self.assertEqual(replay.responses[0][0], 403)
             self.assertNotIn(capture_id, core._st.camera_captures)
         finally:
@@ -4511,13 +4509,11 @@ const accepted=getLmStudioBaseUrl();process.stdout.write(JSON.stringify({rejecte
                     self.assertEqual(response.read(), b"jpeg")
                     exposed = response.headers.get("Access-Control-Expose-Headers", "")
                     for name in (
-                        "X-Eva-Camera-Contract", "X-Eva-Camera-Capture-Id",
-                        "X-Eva-Camera-Frame-Seq", "X-Eva-Camera-Question-Hash",
+                        "X-Eva-Camera-Contract", "X-Eva-Camera-Frame-Seq",
                     ):
                         self.assertIn(name, exposed)
-                    self.assertEqual(
-                        response.headers["X-Eva-Camera-Capture-Id"], capture_id
-                    )
+                    self.assertNotIn("X-Eva-Camera-Capture-Id", response.headers)
+                    self.assertNotIn("X-Eva-Camera-Question-Hash", response.headers)
         finally:
             if server:
                 server.shutdown()

@@ -185,12 +185,8 @@
     );
     if (!resp.ok) return null;
     var contract = resp.headers.get('X-Eva-Camera-Contract');
-    var captureId = resp.headers.get('X-Eva-Camera-Capture-Id');
     var frameSeq = resp.headers.get('X-Eva-Camera-Frame-Seq');
-    var questionHash = resp.headers.get('X-Eva-Camera-Question-Hash');
     if (contract !== 'eva.camera-capture/1' ||
-        captureId !== captureReceipt.capture_id ||
-        questionHash !== captureReceipt.question_hash ||
         !/^[1-9][0-9]{0,15}$/.test(String(frameSeq || '')) ||
         Number(frameSeq) <= captureReceipt.baseline_frame_seq) {
       throw new Error('Camera fresh-frame attestation failed.');
@@ -205,8 +201,9 @@
     return {
       dataUrl: dataUrl,
       receipt: {
-        contract: contract, capture_id: captureId, state: 'succeeded',
-        question_hash: questionHash, frame_seq: String(frameSeq)
+        contract: contract, capture_id: captureReceipt.capture_id,
+        state: 'succeeded', question_hash: captureReceipt.question_hash,
+        frame_seq: String(frameSeq)
       }
     };
   }

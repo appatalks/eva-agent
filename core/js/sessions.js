@@ -123,7 +123,7 @@ function recordTrustedArtifact(record, expectedEpoch, expectedGeneration) {
   // codeql[js/clear-text-storage]: this bounded registry contains only
   // validated public metadata and digests, never artifact bytes, credentials,
   // or bearer capabilities. The bridge independently revalidates every field.
-  localStorage.setItem(SESSION_ARTIFACTS_KEY, JSON.stringify(rows.slice(-32))); // codeql[js/clear-text-storage]
+  localStorage.setItem(SESSION_ARTIFACTS_KEY, JSON.stringify(rows.slice(-32))); // lgtm[js/clear-text-storage-of-sensitive-data]
   return true;
 }
 

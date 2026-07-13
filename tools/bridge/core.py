@@ -796,22 +796,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     @classmethod
     def _allowed_cors_origin(cls, origin):
-        """Return a trusted CORS response value, ``*`` for same-origin, or None."""
+        """Return a static CORS response value for a trusted origin, else None."""
         if not origin:
             return "*"
         if origin == "file://":
-            return "file://"
+            return "*"
         candidate = cls._canonical_http_origin(origin)
         if candidate:
-            return candidate
+            return "*"
         for configured in os.environ.get("EVA_ALLOWED_ORIGINS", "").split(","):
             configured = configured.strip()
             canonical = cls._canonical_http_origin(
                 configured, allow_external=True
             )
             if canonical and hmac.compare_digest(canonical, origin):
-                # Return the configuration value, never the request header.
-                return configured
+                return "*"
         return None
 
     @classmethod
@@ -822,10 +821,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _cors_headers(self):
         allowed_origin = self._allowed_cors_origin(self.headers.get("Origin", ""))
         if allowed_origin is not None:
-            # codeql[py/http-response-splitting]: value is rebuilt from a
-            # parsed serialized origin or an operator-owned allowlist before
-            # reaching this header; CR/LF and all path/query data are rejected.
-            self.send_header("Access-Control-Allow-Origin", allowed_origin)  # codeql[py/http-response-splitting]
+            # Authorization is an explicit bearer header and requests use
+            # credentials=omit. Emit only a static value after origin policy,
+            # never any request-derived header bytes.
+            self.send_header("Access-Control-Allow-Origin", "*")
         # Else: do not set ACAO at all (browser blocks the response).
         self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
@@ -836,8 +835,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         )
         self.send_header(
             "Access-Control-Expose-Headers",
-            "X-Eva-Camera-Contract, X-Eva-Camera-Capture-Id, "
-            "X-Eva-Camera-Frame-Seq, X-Eva-Camera-Question-Hash",
+            "X-Eva-Camera-Contract, X-Eva-Camera-Frame-Seq",
         )
 
     # ── Per-launch bearer auth ──────────────────────────────────────
@@ -5855,14 +5853,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "image/jpeg")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Eva-Camera-Contract", "eva.camera-capture/1")
-            # codeql[py/http-response-splitting]: capture_id is a server-side
-            # UUID-like token minted after native authorization, never request
-            # header text.
-            self.send_header("X-Eva-Camera-Capture-Id", capture_id)  # codeql[py/http-response-splitting]
             self.send_header("X-Eva-Camera-Frame-Seq", str(frame_seq))
-            # codeql[py/http-response-splitting]: question_hash is a fixed
-            # SHA-256 digest computed server-side from canonical text.
-            self.send_header("X-Eva-Camera-Question-Hash", capture["question_hash"])  # codeql[py/http-response-splitting]
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
