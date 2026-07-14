@@ -1931,7 +1931,7 @@ function onModelSettingsChange() {
   // Show/hide temperature (hidden for reasoning models, gpt-5 family, latest, copilot-acp)
   var tempOpt = document.getElementById('opt-temperature');
   if (tempOpt) {
-    var hideTemp = ['o3-mini', 'copilot-o3-mini', 'copilot-o4-mini', 'copilot-deepseek-r1', 'copilot-gpt-5', 'gpt-5-mini', 'latest', 'copilot-acp', 'aig'].indexOf(model) >= 0;
+    var hideTemp = ['o3-mini', 'copilot-o3-mini', 'copilot-o4-mini', 'copilot-deepseek-r1', 'copilot-gpt-5', 'copilot-gpt-5.6-sol', 'copilot-gpt-5.6-terra', 'copilot-gpt-5.6-luna', 'gpt-5-mini', 'latest', 'copilot-acp', 'aig'].indexOf(model) >= 0;
     tempOpt.style.display = hideTemp ? 'none' : 'block';
   }
   // Show/hide AIG backend model selector (only for aig)
@@ -4574,6 +4574,9 @@ const MODEL_CONTEXT_WINDOWS = {
   'copilot-o3-mini': 200000,
   'copilot-gpt-4.1': 1048576,
   'copilot-gpt-5': 200000,
+  'copilot-gpt-5.6-sol': 1000000,
+  'copilot-gpt-5.6-terra': 200000,
+  'copilot-gpt-5.6-luna': 200000,
   'copilot-o4-mini': 200000,
   'copilot-deepseek-r1': 128000,
   'copilot-llama-4-maverick': 1000000,

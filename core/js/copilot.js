@@ -218,6 +218,9 @@ async function _copilotSendModelsAPI(messages, modelValue, txtOutput, storageKey
     'gpt-4o': 'openai/gpt-4o',
     'gpt-4o-mini': 'openai/gpt-4o-mini',
     'gpt-4.1': 'openai/gpt-4.1',
+    'gpt-5.6-sol': 'openai/gpt-5.6-sol',
+    'gpt-5.6-terra': 'openai/gpt-5.6-terra',
+    'gpt-5.6-luna': 'openai/gpt-5.6-luna',
     'gpt-5': 'openai/gpt-5',
     'gpt-5-mini': 'openai/gpt-5-mini',
     'gpt-5-nano': 'openai/gpt-5-nano',
@@ -246,7 +249,7 @@ async function _copilotSendModelsAPI(messages, modelValue, txtOutput, storageKey
   }
 
   // GPT-5 family: use max_completion_tokens, remove temperature and stop
-  if (model === 'gpt-5') {
+  if (model === 'gpt-5' || (model && model.indexOf('gpt-5.') === 0)) {
     delete payload.temperature;
   }
 
