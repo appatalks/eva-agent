@@ -110,12 +110,6 @@ function saveAuthKeys() {
   } else if (lmsModelEl) {
     localStorage.removeItem('aig_lmstudio_model');
   }
-  var localVoicesEl = document.getElementById('localVoicesBridgeUrl');
-  if (localVoicesEl && localVoicesEl.value.trim()) {
-    localStorage.setItem('local_voices_bridge_url', localVoicesEl.value.trim());
-  } else if (localVoicesEl) {
-    localStorage.removeItem('local_voices_bridge_url');
-  }
   var localVoicesProfileEl = document.getElementById('localVoicesProfile');
   if (localVoicesProfileEl) {
     localStorage.setItem('local_voices_profile', localVoicesProfileEl.value || 'eva');
@@ -209,10 +203,6 @@ function populateAuthFields() {
   if (lmsModelEl) {
     lmsModelEl.value = (typeof getLmStudioModel === 'function') ? getLmStudioModel() : (localStorage.getItem('aig_lmstudio_model') || 'granite-3.1-8b-instruct');
   }
-  var localVoicesEl = document.getElementById('localVoicesBridgeUrl');
-  if (localVoicesEl) {
-    localVoicesEl.value = (typeof getLocalVoicesBridgeUrl === 'function') ? getLocalVoicesBridgeUrl() : (localStorage.getItem('local_voices_bridge_url') || 'http://localhost:8090');
-  }
   // Signal fields: prefer localStorage, but if empty, hydrate from the bridge
   // (the bridge persists numbers in alerts.json, which survives AppImage rebuilds).
   var sigSender = document.getElementById('authSignalSender');
@@ -235,17 +225,7 @@ function getLmStudioModel() {
 }
 
 function getLocalVoicesBridgeUrl() {
-  var fallback = 'http://localhost:8090';
-  var raw = (localStorage.getItem('local_voices_bridge_url') || fallback).trim();
-  try {
-    var parsed = new URL(raw);
-    var isLoopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
-    var port = Number(parsed.port);
-    if (!isLoopback || parsed.protocol !== 'http:' || !Number.isInteger(port) || port < 1024 || port > 65535) return fallback;
-    return parsed.origin;
-  } catch (e) {
-    return fallback;
-  }
+  return 'http://localhost:8090';
 }
 
 function getLocalVoicesProfile() {
@@ -304,7 +284,7 @@ async function importLocalVoicesProfile() {
     if (!result || result.canceled) return;
     localStorage.setItem('local_voices_profile', result.selected || 'eva');
     await refreshLocalVoicesProfiles();
-    setLocalVoicesBridgeStatus('Voice added. Start the bridge to use it.', false);
+    await syncLocalVoicesEngine(true);
   } catch (error) {
     setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Voice import failed.', true);
   } finally {
@@ -320,51 +300,54 @@ function setLocalVoicesBridgeStatus(text, isError) {
 }
 
 async function refreshLocalVoicesBridgeControl() {
-  var controls = document.getElementById('localVoicesBridgeControls');
-  var button = document.getElementById('localVoicesBridgeButton');
-  if (!controls || !button) return;
-  if (!window.evaStandalone || !window.evaStandalone.isStandalone) {
-    controls.style.display = 'none';
-    return;
-  }
-  controls.style.display = '';
-  button.disabled = true;
-  setLocalVoicesBridgeStatus('Checking bridge...', false);
+  if (!window.evaStandalone || !window.evaStandalone.isStandalone) return null;
   try {
     _localVoicesBridgeState = await window.evaStandalone.localVoicesStatus(getLocalVoicesBridgeUrl());
     if (_localVoicesBridgeState.running) {
-      button.textContent = _localVoicesBridgeState.managed ? 'Stop bridge' : 'Bridge running';
-      button.disabled = !_localVoicesBridgeState.managed;
       setLocalVoicesBridgeStatus(_localVoicesBridgeState.managed ? 'Running locally.' : 'Running outside Eva.', false);
     } else {
-      button.textContent = 'Start bridge';
-      button.disabled = false;
       setLocalVoicesBridgeStatus('Stopped.', false);
     }
+    return _localVoicesBridgeState;
   } catch (error) {
     _localVoicesBridgeState = null;
-    button.textContent = 'Start bridge';
-    button.disabled = false;
     setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Bridge status unavailable.', true);
+    return null;
   }
 }
 
-async function toggleLocalVoicesBridge() {
-  var button = document.getElementById('localVoicesBridgeButton');
-  if (!button || !window.evaStandalone || !window.evaStandalone.isStandalone) return;
-  button.disabled = true;
-  setLocalVoicesBridgeStatus('Working...', false);
+async function syncLocalVoicesEngine(restartForProfile) {
+  var engine = document.getElementById('selEngine');
+  if (!window.evaStandalone || !window.evaStandalone.isStandalone || !engine) return;
+  var baseUrl = getLocalVoicesBridgeUrl();
+  var state = await refreshLocalVoicesBridgeControl();
+
+  if (engine.value !== 'local-voices') {
+    try {
+      if (state && state.running && state.managed) {
+        setLocalVoicesBridgeStatus('Stopping Local Voices...', false);
+        await window.evaStandalone.localVoicesStop(baseUrl);
+      }
+      setLocalVoicesBridgeStatus('', false);
+    } catch (error) {
+      setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Local Voices could not stop.', true);
+    }
+    return;
+  }
+
   try {
-    var baseUrl = getLocalVoicesBridgeUrl();
-    if (_localVoicesBridgeState && _localVoicesBridgeState.running && _localVoicesBridgeState.managed) {
+    if (restartForProfile && state && state.running && state.managed) {
+      setLocalVoicesBridgeStatus('Switching voice model...', false);
       await window.evaStandalone.localVoicesStop(baseUrl);
-    } else {
+      state = null;
+    }
+    if (!state || !state.running) {
+      setLocalVoicesBridgeStatus('Starting Local Voices...', false);
       await window.evaStandalone.localVoicesStart(baseUrl, '', getLocalVoicesProfile());
     }
     await refreshLocalVoicesBridgeControl();
   } catch (error) {
-    setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Bridge action failed.', true);
-    button.disabled = false;
+    setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Local Voices could not start.', true);
   }
 }
 
@@ -2325,7 +2308,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (overlay) overlay.classList.add('open');
       populateAuthFields();
       refreshLocalVoicesProfiles();
-      refreshLocalVoicesBridgeControl();
+      syncLocalVoicesEngine(false);
       if (typeof loadBackgroundData === 'function') loadBackgroundData(true);
       if (typeof loadDataMode === 'function') loadDataMode();
     }
@@ -2437,7 +2420,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (overlay) overlay.classList.add('open');
       populateAuthFields();
       refreshLocalVoicesProfiles();
-      refreshLocalVoicesBridgeControl();
+      syncLocalVoicesEngine(false);
       if (typeof loadBackgroundData === 'function') loadBackgroundData(true);
     }
     if (tabName) {
@@ -2513,15 +2496,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  ['aigLmStudioBaseUrl', 'aigLmStudioModel', 'localVoicesBridgeUrl', 'localVoicesProfile', 'authSignalSender', 'authSignalRecipient'].forEach(function(id) {
+  ['aigLmStudioBaseUrl', 'aigLmStudioModel', 'localVoicesProfile', 'authSignalSender', 'authSignalRecipient'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) {
       el.addEventListener('change', saveAuthKeys);
-      if (id === 'localVoicesBridgeUrl' || id === 'localVoicesProfile') el.addEventListener('change', refreshLocalVoicesBridgeControl);
+      if (id === 'localVoicesProfile') el.addEventListener('change', function() { syncLocalVoicesEngine(true); });
     }
   });
-  var localVoicesBridgeButton = document.getElementById('localVoicesBridgeButton');
-  if (localVoicesBridgeButton) localVoicesBridgeButton.addEventListener('click', toggleLocalVoicesBridge);
   var localVoicesImportButton = document.getElementById('localVoicesImportButton');
   if (localVoicesImportButton) localVoicesImportButton.addEventListener('click', importLocalVoicesProfile);
 
@@ -2529,7 +2510,9 @@ document.addEventListener('DOMContentLoaded', () => {
   loadAuthOverrides();
   populateAuthFields();
   refreshLocalVoicesProfiles();
-  refreshLocalVoicesBridgeControl();
+  var ttsEngine = document.getElementById('selEngine');
+  if (ttsEngine) ttsEngine.addEventListener('change', function() { syncLocalVoicesEngine(false); });
+  syncLocalVoicesEngine(false);
   initSystemPrompt();
   onModelSettingsChange();
   // Now enable auto-switch for user-initiated model changes and seed

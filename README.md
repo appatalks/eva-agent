@@ -61,7 +61,7 @@ For Signal notifications, install [signal-cli](https://github.com/AsamK/signal-c
 
 ### Local Voices
 
-Eva's **Local Voices** TTS engine uses the bundled [`core/audio/eva-voice.wav`](core/audio/eva-voice.wav) recording by default. In Eva Standalone, select **Local Voices**, choose a **Voice model**, and use **Start bridge**. Eva uses its managed Local Voices runtime automatically.
+Eva's **Local Voices** TTS engine uses the bundled [`core/audio/eva-voice.wav`](core/audio/eva-voice.wav) recording by default. In Eva Standalone, select **Local Voices** and choose a **Voice model**. Eva starts its managed local bridge automatically, then stops that bridge when you select another TTS engine.
 
 ```bash
 ~/.local/share/eva/local-voices/.venv/bin/python tools/local_voices_bridge.py

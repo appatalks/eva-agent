@@ -355,8 +355,6 @@
         <label for="autoSpeak">Auto Speak:</label>
         <input type="checkbox" id="autoSpeak">
 
-        <label for="localVoicesBridgeUrl">Local Voices bridge URL:</label>
-        <input type="text" id="localVoicesBridgeUrl" placeholder="http://localhost:8090" autocomplete="off">
         <label for="localVoicesProfile">Voice model:</label>
         <select id="localVoicesProfile">
           <option value="eva">Eva (bundled)</option>
@@ -367,10 +365,7 @@
         <div class="background-actions" id="localVoicesProfileControls" style="margin:6px 0 2px">
           <button type="button" class="auth-toggle" id="localVoicesImportButton">Add voice</button>
         </div>
-        <div class="background-actions" id="localVoicesBridgeControls" style="margin:6px 0 10px">
-          <button type="button" class="auth-toggle" id="localVoicesBridgeButton">Start bridge</button>
-          <span class="auth-note" id="localVoicesBridgeStatus" aria-live="polite"></span>
-        </div>
+        <div class="auth-note" id="localVoicesBridgeStatus" aria-live="polite" style="margin:4px 0 10px"></div>
 
         <label for="cameraPresence">Camera presence (auto-wake):</label>
         <input type="checkbox" id="cameraPresence">
