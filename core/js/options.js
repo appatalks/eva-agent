@@ -110,6 +110,16 @@ function saveAuthKeys() {
   } else if (lmsModelEl) {
     localStorage.removeItem('aig_lmstudio_model');
   }
+  var localVoicesEl = document.getElementById('localVoicesBridgeUrl');
+  if (localVoicesEl && localVoicesEl.value.trim()) {
+    localStorage.setItem('local_voices_bridge_url', localVoicesEl.value.trim());
+  } else if (localVoicesEl) {
+    localStorage.removeItem('local_voices_bridge_url');
+  }
+  var localVoicesProfileEl = document.getElementById('localVoicesProfile');
+  if (localVoicesProfileEl) {
+    localStorage.setItem('local_voices_profile', localVoicesProfileEl.value || 'eva');
+  }
   // Save Signal sender/recipient to localStorage and push to bridge
   var sigSender = document.getElementById('authSignalSender');
   var sigRecip = document.getElementById('authSignalRecipient');
@@ -199,6 +209,10 @@ function populateAuthFields() {
   if (lmsModelEl) {
     lmsModelEl.value = (typeof getLmStudioModel === 'function') ? getLmStudioModel() : (localStorage.getItem('aig_lmstudio_model') || 'granite-3.1-8b-instruct');
   }
+  var localVoicesEl = document.getElementById('localVoicesBridgeUrl');
+  if (localVoicesEl) {
+    localVoicesEl.value = (typeof getLocalVoicesBridgeUrl === 'function') ? getLocalVoicesBridgeUrl() : (localStorage.getItem('local_voices_bridge_url') || 'http://localhost:8090');
+  }
   // Signal fields: prefer localStorage, but if empty, hydrate from the bridge
   // (the bridge persists numbers in alerts.json, which survives AppImage rebuilds).
   var sigSender = document.getElementById('authSignalSender');
@@ -220,17 +234,137 @@ function getLmStudioModel() {
   return v || 'granite-3.1-8b-instruct';
 }
 
+function getLocalVoicesBridgeUrl() {
+  var fallback = 'http://localhost:8090';
+  var raw = (localStorage.getItem('local_voices_bridge_url') || fallback).trim();
+  try {
+    var parsed = new URL(raw);
+    var isLoopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+    var port = Number(parsed.port);
+    if (!isLoopback || parsed.protocol !== 'http:' || !Number.isInteger(port) || port < 1024 || port > 65535) return fallback;
+    return parsed.origin;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function getLocalVoicesProfile() {
+  return (localStorage.getItem('local_voices_profile') || 'eva').trim() || 'eva';
+}
+
 function getSafeBridgeBaseUrl() {
   var fallback = 'http://localhost:8888';
   var raw = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : fallback;
   try {
     var parsed = new URL(raw || fallback);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      return fallback;
-    }
+    var isLoopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '::1';
+    if (!isLoopback || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) return fallback;
     return (parsed.origin + parsed.pathname).replace(/\/+$/, '');
   } catch (e) {
     return fallback;
+  }
+}
+
+var _localVoicesBridgeState = null;
+
+async function refreshLocalVoicesProfiles() {
+  var select = document.getElementById('localVoicesProfile');
+  var controls = document.getElementById('localVoicesProfileControls');
+  if (!select) return;
+  if (!window.evaStandalone || !window.evaStandalone.isStandalone) {
+    if (controls) controls.style.display = 'none';
+    return;
+  }
+  if (controls) controls.style.display = '';
+  var selected = getLocalVoicesProfile();
+  try {
+    var profiles = await window.evaStandalone.localVoicesList();
+    select.innerHTML = '';
+    profiles.forEach(function(profile) {
+      var option = document.createElement('option');
+      option.value = profile.id;
+      option.textContent = profile.label;
+      select.appendChild(option);
+    });
+    var found = Array.from(select.options).some(function(option) { return option.value === selected; });
+    select.value = found ? selected : 'eva';
+    localStorage.setItem('local_voices_profile', select.value);
+  } catch (error) {
+    select.value = 'eva';
+    setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Voice profiles unavailable.', true);
+  }
+}
+
+async function importLocalVoicesProfile() {
+  if (!window.evaStandalone || !window.evaStandalone.isStandalone) return;
+  var button = document.getElementById('localVoicesImportButton');
+  if (button) button.disabled = true;
+  try {
+    var result = await window.evaStandalone.localVoicesImport();
+    if (!result || result.canceled) return;
+    localStorage.setItem('local_voices_profile', result.selected || 'eva');
+    await refreshLocalVoicesProfiles();
+    setLocalVoicesBridgeStatus('Voice added. Start the bridge to use it.', false);
+  } catch (error) {
+    setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Voice import failed.', true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function setLocalVoicesBridgeStatus(text, isError) {
+  var statusEl = document.getElementById('localVoicesBridgeStatus');
+  if (!statusEl) return;
+  statusEl.textContent = text || '';
+  statusEl.style.color = isError ? 'var(--danger,#c33)' : '';
+}
+
+async function refreshLocalVoicesBridgeControl() {
+  var controls = document.getElementById('localVoicesBridgeControls');
+  var button = document.getElementById('localVoicesBridgeButton');
+  if (!controls || !button) return;
+  if (!window.evaStandalone || !window.evaStandalone.isStandalone) {
+    controls.style.display = 'none';
+    return;
+  }
+  controls.style.display = '';
+  button.disabled = true;
+  setLocalVoicesBridgeStatus('Checking bridge...', false);
+  try {
+    _localVoicesBridgeState = await window.evaStandalone.localVoicesStatus(getLocalVoicesBridgeUrl());
+    if (_localVoicesBridgeState.running) {
+      button.textContent = _localVoicesBridgeState.managed ? 'Stop bridge' : 'Bridge running';
+      button.disabled = !_localVoicesBridgeState.managed;
+      setLocalVoicesBridgeStatus(_localVoicesBridgeState.managed ? 'Running locally.' : 'Running outside Eva.', false);
+    } else {
+      button.textContent = 'Start bridge';
+      button.disabled = false;
+      setLocalVoicesBridgeStatus('Stopped.', false);
+    }
+  } catch (error) {
+    _localVoicesBridgeState = null;
+    button.textContent = 'Start bridge';
+    button.disabled = false;
+    setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Bridge status unavailable.', true);
+  }
+}
+
+async function toggleLocalVoicesBridge() {
+  var button = document.getElementById('localVoicesBridgeButton');
+  if (!button || !window.evaStandalone || !window.evaStandalone.isStandalone) return;
+  button.disabled = true;
+  setLocalVoicesBridgeStatus('Working...', false);
+  try {
+    var baseUrl = getLocalVoicesBridgeUrl();
+    if (_localVoicesBridgeState && _localVoicesBridgeState.running && _localVoicesBridgeState.managed) {
+      await window.evaStandalone.localVoicesStop(baseUrl);
+    } else {
+      await window.evaStandalone.localVoicesStart(baseUrl, '', getLocalVoicesProfile());
+    }
+    await refreshLocalVoicesBridgeControl();
+  } catch (error) {
+    setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Bridge action failed.', true);
+    button.disabled = false;
   }
 }
 
@@ -1748,11 +1882,10 @@ function applyStandaloneSimplifications() {
   }
 
   var engineSelect = document.getElementById('selEngine');
-  var barkOption = document.querySelector('#selEngine option[value="bark"]');
   if (engineSelect) {
     var current = engineSelect.value;
     var pollyEngine = (current === 'standard' || current === 'neural' || current === 'generative');
-    if (!current || current === 'bark' || pollyEngine) {
+    if (!current || pollyEngine) {
       var hasOpenAIKey = (typeof getAuthKey === 'function') ? !!getAuthKey('OPENAI_API_KEY') : !!window.OPENAI_API_KEY;
       engineSelect.value = hasOpenAIKey ? 'openai' : 'browser';
     }
@@ -1762,7 +1895,6 @@ function applyStandaloneSimplifications() {
     var opt = document.querySelector('#selEngine option[value="' + val + '"]');
     if (opt) opt.remove();
   });
-  if (barkOption) barkOption.remove();
 
   var standaloneVersionEl = document.getElementById('evaStandaloneVersion');
   if (standaloneVersionEl && window.evaStandalone && window.evaStandalone.version) {
@@ -2192,6 +2324,8 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsMenu.classList.add('open');
       if (overlay) overlay.classList.add('open');
       populateAuthFields();
+      refreshLocalVoicesProfiles();
+      refreshLocalVoicesBridgeControl();
       if (typeof loadBackgroundData === 'function') loadBackgroundData(true);
       if (typeof loadDataMode === 'function') loadDataMode();
     }
@@ -2302,6 +2436,8 @@ document.addEventListener('DOMContentLoaded', () => {
       settingsMenu.classList.add('open');
       if (overlay) overlay.classList.add('open');
       populateAuthFields();
+      refreshLocalVoicesProfiles();
+      refreshLocalVoicesBridgeControl();
       if (typeof loadBackgroundData === 'function') loadBackgroundData(true);
     }
     if (tabName) {
@@ -2377,14 +2513,23 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  ['aigLmStudioBaseUrl', 'aigLmStudioModel', 'authSignalSender', 'authSignalRecipient'].forEach(function(id) {
+  ['aigLmStudioBaseUrl', 'aigLmStudioModel', 'localVoicesBridgeUrl', 'localVoicesProfile', 'authSignalSender', 'authSignalRecipient'].forEach(function(id) {
     var el = document.getElementById(id);
-    if (el) el.addEventListener('change', saveAuthKeys);
+    if (el) {
+      el.addEventListener('change', saveAuthKeys);
+      if (id === 'localVoicesBridgeUrl' || id === 'localVoicesProfile') el.addEventListener('change', refreshLocalVoicesBridgeControl);
+    }
   });
+  var localVoicesBridgeButton = document.getElementById('localVoicesBridgeButton');
+  if (localVoicesBridgeButton) localVoicesBridgeButton.addEventListener('click', toggleLocalVoicesBridge);
+  var localVoicesImportButton = document.getElementById('localVoicesImportButton');
+  if (localVoicesImportButton) localVoicesImportButton.addEventListener('click', importLocalVoicesProfile);
 
   // Init auth, system prompt, and model settings
   loadAuthOverrides();
   populateAuthFields();
+  refreshLocalVoicesProfiles();
+  refreshLocalVoicesBridgeControl();
   initSystemPrompt();
   onModelSettingsChange();
   // Now enable auto-switch for user-initiated model changes and seed
@@ -3472,7 +3617,7 @@ function _vvStartWhisperListening() {
       clearInterval(_vv._whisperWatchdog); _vv._whisperWatchdog = null;
       return;
     }
-    if (_vv.phase === 'thinking' || _vv.phase === 'speaking') return;
+    if (_vv.phase === 'thinking') return;
     var recActive = _vv.mediaRecorder && _vv.mediaRecorder.state === 'recording';
     if (!recActive && !_vv._whisperInflight) {
       console.warn('[VoiceView] Whisper watchdog: recording loop stalled, restarting');
@@ -3483,7 +3628,7 @@ function _vvStartWhisperListening() {
 
 function _vvWhisperRecord() {
   if (!_vv.open || !_vv.whisperMode || !_vv.micStream) return;
-  if (_vv.phase === 'thinking' || _vv.phase === 'speaking') return;
+  if (_vv.phase === 'thinking') return;
 
   var mimeType = 'audio/webm';
   if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported) {
@@ -3540,7 +3685,7 @@ function _vvWhisperMonitor() {
     if (!_vv.open || !_vv.whisperMode || !_vv.analyser || !_vv.dataArray) {
       clearInterval(_vv._energyMonitor); _vv._energyMonitor = null; return;
     }
-    if (_vv.phase === 'thinking' || _vv.phase === 'speaking') return;
+    if (_vv.phase === 'thinking') return;
     if (!_vv.mediaRecorder || _vv.mediaRecorder.state !== 'recording') return;
 
     _vv.analyser.getByteFrequencyData(_vv.dataArray);
@@ -3595,7 +3740,7 @@ function _vvWhisperTranscribe(blob) {
     if (data.text && data.text.trim()) {
       _vvHandleTranscript(data.text.trim());
     }
-    if (_vv.open && _vv.whisperMode && _vv.phase !== 'thinking' && _vv.phase !== 'speaking') {
+    if (_vv.open && _vv.whisperMode && _vv.phase !== 'thinking') {
       _vvWhisperRecord();
     }
   }).catch(function(err) {
@@ -3722,51 +3867,18 @@ function _vvAfterBarge() {
   if (_vv.whisperMode) _vvWhisperRecord();
 }
 
-// Watch the mic during the speaking phase. With echo cancellation removing
-// Eva's own voice, sustained mic energy that also clears the current playback
-// level means the user is talking over her, so we trigger a barge-in. A short
-// startup grace avoids self-triggering on Eva's first syllable.
+// Raw microphone energy is intentionally not enough to interrupt Eva. Voice
+// recognition or Whisper must transcribe the wake name before playback stops.
 function _vvStartBargeMonitor() {
   _vvStopBargeMonitor();
-  if (!_vv.analyser || !_vv.dataArray) return;
-  var aboveSince = 0;
-  var NEED_MS = 220;   // sustained user speech before interrupting
-  var THRESH = 22;     // min average mic energy (0-255) to consider speech
-  var graceUntil = performance.now() + 600;
-  function loop() {
-    if (_vv.phase !== 'speaking' || !_vv.open || !_vv.analyser) { _vv.bargeRAF = null; return; }
-    _vv.analyser.getByteFrequencyData(_vv.dataArray);
-    var sum = 0;
-    for (var i = 0; i < _vv.dataArray.length; i++) sum += _vv.dataArray[i];
-    var micAvg = sum / _vv.dataArray.length;
-
-    // Current TTS playback level. With echo cancellation already removing Eva's
-    // own voice from the mic, this only needs to be a light guard against any
-    // residual echo, so the bar to interrupt stays low enough for a normal
-    // speaking voice picked up at a distance.
-    var ttsAvg = 0;
-    if (_vv.ttsAnalyser && _vv.ttsDataArray) {
-      _vv.ttsAnalyser.getByteFrequencyData(_vv.ttsDataArray);
-      var ts = 0;
-      for (var j = 0; j < _vv.ttsDataArray.length; j++) ts += _vv.ttsDataArray[j];
-      ttsAvg = ts / _vv.ttsDataArray.length;
-    }
-
-    var now = performance.now();
-    var isUser = now > graceUntil && micAvg > THRESH && micAvg > (ttsAvg * 0.35 + 5);
-    if (isUser) {
-      if (!aboveSince) aboveSince = now;
-      else if (now - aboveSince >= NEED_MS) { _vv.bargeRAF = null; _vvBargeIn(); return; }
-    } else {
-      aboveSince = 0;
-    }
-    _vv.bargeRAF = requestAnimationFrame(loop);
-  }
-  _vv.bargeRAF = requestAnimationFrame(loop);
 }
 
 function _vvStopBargeMonitor() {
   if (_vv.bargeRAF) { cancelAnimationFrame(_vv.bargeRAF); _vv.bargeRAF = null; }
+}
+
+function _vvWakeWordIndex(transcript) {
+  return String(transcript || '').search(/\beva\b/i);
 }
 
 function _vvHandleTranscript(transcript) {
@@ -3784,12 +3896,12 @@ function _vvHandleTranscript(transcript) {
       return;
     }
   }
-  // Spoken interruption while Eva is talking: barge in, then process the phrase
-  // as the redirect. (Whisper mode does not record during speaking, so this
-  // branch is reached only by the Web Speech recognizer; the energy monitor
-  // covers whisper.)
+  // Speaking only yields to an explicit wake name. This keeps room noise and
+  // side conversations from stopping playback while preserving "Eva, ..." as
+  // an immediate redirect.
   if (_vv.phase === 'speaking') {
     if (!transcript || transcript.trim().length <= 1) return;
+    if (_vvWakeWordIndex(transcript) < 0) return;
     _vvBargeIn();
   }
 
@@ -3798,7 +3910,7 @@ function _vvHandleTranscript(transcript) {
   if (transcriptEl) transcriptEl.textContent = transcript;
 
   var lower = transcript.toLowerCase();
-  var evaIdx = lower.indexOf('eva');
+  var evaIdx = _vvWakeWordIndex(lower);
 
   if (evaIdx >= 0) {
     var command = transcript.substring(evaIdx + 3).trim().replace(/^[,.\s]+/, '').trim();
@@ -3949,6 +4061,7 @@ function _vvWatchForResponse() {
     _vvSetStatus('speaking');
     _vvConnectTTSAnalyser();
     _vvStartBargeMonitor();
+    if (_vv.whisperMode) _vvWhisperRecord();
 
     // Single finalizer for the speaking phase, reachable from both the natural
     // speech-end and a user barge-in. Idempotent so whichever path wins runs the
@@ -5261,7 +5374,10 @@ function _ttsSpeakOpenAIChunked(text, key, voice) {
     synth(i).then(function () {
       if (_ttsChunk.cancelled) { finish(); return; }
       synth(i + 1); // prefetch the next chunk while this one plays
-      if (src) src.src = urls[i];
+      if (src) {
+        src.src = urls[i];
+        src.type = 'audio/mpeg';
+      }
       audio.load();
       audio.setAttribute('autoplay', 'true');
       try { audio.play(); } catch (_) {}
@@ -5392,46 +5508,34 @@ function speakText() {
     }
 
 
-    // If selEngine is "bark", call barkTTS function
-    if (speechParams.Engine === "bark") {
-
-      const barkHost = localStorage.getItem('barkTTSHost') || 'localhost';
-      const barkBase = 'https://' + barkHost;
-      const url = barkBase + '/send-string';
-      const data = "WOMAN: " + ((typeof textArr !== 'undefined' && textArr[1]) ? textArr[1] : speechParams.Text);
-      const xhr = new XMLHttpRequest();
-      xhr.responseType = 'blob';
-
-      xhr.onload = function() {
-      const audioElement = new Audio("./audio/bark_audio.wav");
-      audioElement.addEventListener("ended", function() {
-      // Delete the previous recording
-      const deleteRequest = new XMLHttpRequest();
-      deleteRequest.open('DELETE', barkBase + '/audio/bark_audio.wav', true);
-      deleteRequest.send();
+    if (speechParams.Engine === "local-voices") {
+      var bridgeUrl = (typeof getLocalVoicesBridgeUrl === 'function') ? getLocalVoicesBridgeUrl() : 'http://localhost:8090';
+      fetch(bridgeUrl + '/v1/speech', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: speechParams.Text })
+      }).then(function(response) {
+        if (response.ok) return response.blob();
+        return response.text().then(function(text) {
+          throw new Error(text || ('Local Voices bridge returned HTTP ' + response.status));
+        });
+      }).then(function(blob) {
+        var audio = document.getElementById('audioPlayback');
+        var source = document.getElementById('audioSource');
+        if (!audio || !source) return;
+        if (typeof _ttsChunk !== 'undefined') _ttsChunk.cancelled = true;
+        var objectUrl = URL.createObjectURL(blob);
+        source.src = objectUrl;
+        source.type = 'audio/wav';
+        audio.load();
+        audio.addEventListener('ended', function() { URL.revokeObjectURL(objectUrl); }, { once: true });
+        audio.setAttribute('autoplay', 'true');
+        audio.play().catch(function() {});
+      }).catch(function(error) {
+        var message = 'Local Voices unavailable: ' + (error && error.message ? error.message : error);
+        if (typeof setStatus === 'function') setStatus('error', message);
+        else console.warn(message);
       });
-    
-      //audioElement.play();
-      // Check if the old audio file exists and delete it
-      const checkRequest = new XMLHttpRequest();
-      checkRequest.open('HEAD', barkBase + '/audio/bark_audio.wav', true);
-      checkRequest.onreadystatechange = function() {
-        if (checkRequest.readyState === 4) {
-          if (checkRequest.status === 200) {
-            // File exists, send delete request
-	      const deleteRequest = new XMLHttpRequest(); 
-    	      deleteRequest.open('DELETE', barkBase + '/audio/bark_audio.wav', true);
-              deleteRequest.send();
-          }
-          // Start playing the new audio
-          audioElement.play();
-        }
-      };
-      checkRequest.send();
-      }
-      xhr.open('POST', url, true);
-      xhr.setRequestHeader('Content-Type', 'text/plain');
-      xhr.send(data);
       return;
     }
 
@@ -5450,6 +5554,7 @@ function speakText() {
             }
         } else {
             document.getElementById('audioSource').src = url;
+            document.getElementById('audioSource').type = 'audio/mpeg';
             document.getElementById('audioPlayback').load();
             var resultEl2 = document.getElementById('result');
             if (resultEl2) { resultEl2.textContent = ""; }

@@ -13,6 +13,8 @@ core/external/*.data
 audio/
 *.wav
 *.mp3
+!core/audio/
+!core/audio/eva-voice.wav
 
 # OS files
 .DS_Store

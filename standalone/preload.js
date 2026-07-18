@@ -14,5 +14,10 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   version: readArg('eva-version'),
   minimize: function() { ipcRenderer.send('win-minimize'); },
   maximize: function() { ipcRenderer.send('win-maximize'); },
-  close: function() { ipcRenderer.send('win-close'); }
+  close: function() { ipcRenderer.send('win-close'); },
+  localVoicesStatus: function(baseUrl) { return ipcRenderer.invoke('local-voices-status', baseUrl); },
+  localVoicesStart: function(baseUrl, pythonPath, voiceId) { return ipcRenderer.invoke('local-voices-start', baseUrl, pythonPath, voiceId); },
+  localVoicesStop: function(baseUrl) { return ipcRenderer.invoke('local-voices-stop', baseUrl); },
+  localVoicesList: function() { return ipcRenderer.invoke('local-voices-list'); },
+  localVoicesImport: function() { return ipcRenderer.invoke('local-voices-import'); }
 }));

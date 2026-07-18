@@ -226,7 +226,7 @@ tools/
   browser_agent.py         Autonomous web browsing (Playwright + CDP)
   desktop_agent.py         Autonomous desktop control (pyautogui + vision)
   camera_sense.py          Webcam presence detection (OpenCV face + motion)
-  barkTTS_server.py        Suno Bark TTS engine server (GPU)
+  local_voices_bridge.py   Local Voices engine bridge (bundled default recording)
   eva_seed.kql             Sanitized database seed (public-safe)
   acp_bridge.service       Systemd unit file
   acp_setup.sh             One-command installer

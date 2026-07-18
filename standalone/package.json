@@ -40,6 +40,7 @@
           "mcp.json",
           "core/**",
           "tools/acp_bridge.py",
+          "tools/local_voices_bridge.py",
           "tools/bridge/**",
           "tools/browser_agent.py",
           "tools/desktop_agent.py",

@@ -2,16 +2,19 @@ const { app, BrowserWindow, dialog, ipcMain, session, shell } = require('electro
 const http = require('http');
 const net = require('net');
 const path = require('path');
+const fs = require('fs');
 const { spawn } = require('child_process');
 
 let bridgeProcess = null;
 let readyBridgeProcess = null;
 let bridgeStopTimer = null;
 let bridgeStoppingProcess = null;
+let localVoicesProcess = null;
 let shuttingDown = false;
 let stoppingBridge = false;
 
 const BRIDGE_READY_TIMEOUT_MS = 60000;
+const LOCAL_VOICES_READY_TIMEOUT_MS = 10000;
 const BRIDGE_PORT_RETRY_LIMIT = 2;
 const ADDRESS_IN_USE_PATTERN = /Address already in use|EADDRINUSE/i;
 
@@ -80,6 +83,87 @@ function getAppRoot() {
     return path.join(process.resourcesPath, 'app');
   }
   return path.resolve(__dirname, '..');
+}
+
+function getLocalVoicesDirectory() {
+  return path.join(process.env.HOME || '', '.local', 'share', 'eva', 'local-voices', 'voices');
+}
+
+function getLocalVoiceProfiles() {
+  const profiles = [{ id: 'eva', label: 'Eva (bundled)', bundled: true }];
+  const directory = getLocalVoicesDirectory();
+  try {
+    fs.mkdirSync(directory, { recursive: true });
+    fs.readdirSync(directory).filter(function(name) {
+      return name.toLowerCase().endsWith('.wav');
+    }).sort().forEach(function(name) {
+      profiles.push({
+        id: 'custom:' + name,
+        label: path.basename(name, path.extname(name)),
+        bundled: false
+      });
+    });
+  } catch (_) {}
+  return profiles;
+}
+
+function readWavDuration(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  if (buffer.length < 44 || buffer.toString('ascii', 0, 4) !== 'RIFF' || buffer.toString('ascii', 8, 12) !== 'WAVE') {
+    throw new Error('Choose a PCM WAV file.');
+  }
+  let offset = 12;
+  let byteRate = 0;
+  let dataLength = 0;
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString('ascii', offset, offset + 4);
+    const chunkLength = buffer.readUInt32LE(offset + 4);
+    const dataOffset = offset + 8;
+    if (chunkId === 'fmt ' && chunkLength >= 16) {
+      if (buffer.readUInt16LE(dataOffset) !== 1) throw new Error('Choose an uncompressed PCM WAV file.');
+      byteRate = buffer.readUInt32LE(dataOffset + 8);
+    } else if (chunkId === 'data') {
+      dataLength = chunkLength;
+      break;
+    }
+    offset = dataOffset + chunkLength + (chunkLength % 2);
+  }
+  if (!byteRate || !dataLength) throw new Error('Choose a valid PCM WAV file.');
+  return dataLength / byteRate;
+}
+
+async function importLocalVoiceProfile() {
+  const result = await dialog.showOpenDialog({
+    title: 'Add Local Voice',
+    properties: ['openFile'],
+    filters: [{ name: 'WAV audio', extensions: ['wav'] }]
+  });
+  if (result.canceled || !result.filePaths[0]) return { canceled: true, profiles: getLocalVoiceProfiles() };
+  const source = result.filePaths[0];
+  const duration = readWavDuration(source);
+  if (duration > 10.01) throw new Error('Voice samples must be 10 seconds or shorter.');
+  if (duration < 5) throw new Error('Voice samples must be at least 5 seconds long.');
+  const directory = getLocalVoicesDirectory();
+  fs.mkdirSync(directory, { recursive: true });
+  const base = path.basename(source, path.extname(source)).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'voice';
+  let name = base + '.wav';
+  let index = 2;
+  while (fs.existsSync(path.join(directory, name))) {
+    name = base + '-' + index + '.wav';
+    index += 1;
+  }
+  fs.copyFileSync(source, path.join(directory, name));
+  return { canceled: false, selected: 'custom:' + name, profiles: getLocalVoiceProfiles() };
+}
+
+function resolveLocalVoiceReference(voiceId) {
+  if (!voiceId || voiceId === 'eva') return path.join(getAppRoot(), 'core', 'audio', 'eva-voice.wav');
+  if (!voiceId.startsWith('custom:')) throw new Error('Unknown Local Voices profile.');
+  const name = voiceId.slice('custom:'.length);
+  if (path.basename(name) !== name || !name.toLowerCase().endsWith('.wav')) throw new Error('Invalid Local Voices profile.');
+  const reference = path.join(getLocalVoicesDirectory(), name);
+  if (!fs.existsSync(reference)) throw new Error('The selected Local Voices profile is unavailable.');
+  return reference;
 }
 
 function getFreeLocalPort() {
@@ -311,6 +395,7 @@ function forceKillBridgeSync() {
 
 function stopBridge() {
   shuttingDown = true;
+  stopManagedLocalVoices();
   if (stoppingBridge) return;
   if (!bridgeProcess) return;
 
@@ -324,6 +409,150 @@ function stopBridge() {
     }
   }, 3000);
 }
+
+function isChildRunning(child) {
+  return !!child && child.exitCode === null && child.signalCode === null;
+}
+
+function parseLocalVoicesUrl(baseUrl) {
+  const parsed = new URL(String(baseUrl || ''));
+  const hostname = parsed.hostname.toLowerCase();
+  if (parsed.protocol !== 'http:' || (hostname !== 'localhost' && hostname !== '127.0.0.1')) {
+    throw new Error('Local Voices can only run on an http://localhost URL.');
+  }
+  const port = Number(parsed.port);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new Error('Local Voices needs a localhost port from 1024 to 65535.');
+  }
+  return { baseUrl: parsed.origin, port: port };
+}
+
+function requestLocalVoicesHealth(baseUrl) {
+  return new Promise(function(resolve, reject) {
+    const req = http.get(baseUrl.replace(/\/+$/, '') + '/health', function(res) {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', function(chunk) { body += chunk; });
+      res.on('end', function() {
+        if (res.statusCode !== 200) {
+          reject(new Error('Local Voices health returned HTTP ' + res.statusCode));
+          return;
+        }
+        try {
+          const data = JSON.parse(body);
+          if (data.ok === true && data.backend_available === true) resolve(data);
+          else reject(new Error(data.backend_error || 'Local Voices backend is unavailable.'));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+    req.setTimeout(2000, function() {
+      req.destroy(new Error('Local Voices health timed out.'));
+    });
+    req.on('error', reject);
+  });
+}
+
+function waitForLocalVoices(baseUrl, child, timeoutMs) {
+  const startedAt = Date.now();
+  return new Promise(function(resolve, reject) {
+    function poll() {
+      if (!isChildRunning(child)) {
+        reject(new Error('Local Voices stopped before it was ready (' + formatExitDetails(child.exitCode, child.signalCode) + ').'));
+        return;
+      }
+      requestLocalVoicesHealth(baseUrl).then(resolve).catch(function(err) {
+        if (Date.now() - startedAt >= timeoutMs) {
+          reject(new Error('Timed out waiting for Local Voices: ' + err.message));
+          return;
+        }
+        setTimeout(poll, 300);
+      });
+    }
+    poll();
+  });
+}
+
+async function getLocalVoicesStatus(baseUrl) {
+  const target = parseLocalVoicesUrl(baseUrl);
+  try {
+    const health = await requestLocalVoicesHealth(target.baseUrl);
+    return { running: true, managed: isChildRunning(localVoicesProcess), health: health };
+  } catch (_) {
+    return { running: false, managed: isChildRunning(localVoicesProcess), health: null };
+  }
+}
+
+async function startLocalVoices(baseUrl, pythonPath, voiceId) {
+  const target = parseLocalVoicesUrl(baseUrl);
+  const status = await getLocalVoicesStatus(target.baseUrl);
+  if (status.running) return status;
+  if (isChildRunning(localVoicesProcess)) {
+    throw new Error('Local Voices is already starting on another localhost port.');
+  }
+
+  const appRoot = getAppRoot();
+  const bridgePath = path.join(appRoot, 'tools', 'local_voices_bridge.py');
+  const managedPython = path.join(process.env.HOME || '', '.local', 'share', 'eva', 'local-voices', '.venv', 'bin', 'python');
+  const pythonCmd = String(pythonPath || process.env.LOCAL_VOICES_PYTHON || process.env.EVA_PYTHON || (fs.existsSync(managedPython) ? managedPython : 'python3')).trim() || 'python3';
+  const reference = resolveLocalVoiceReference(voiceId);
+  const child = spawn(pythonCmd, [bridgePath, '--host', '127.0.0.1', '--port', String(target.port), '--reference', reference], {
+    cwd: appRoot,
+    env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1' }),
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  localVoicesProcess = child;
+
+  child.stdout.on('data', function(chunk) {
+    process.stdout.write('[eva-local-voices] ' + chunk.toString());
+  });
+  child.stderr.on('data', function(chunk) {
+    process.stderr.write('[eva-local-voices] ' + chunk.toString());
+  });
+  child.on('exit', function() {
+    if (localVoicesProcess === child) localVoicesProcess = null;
+  });
+
+  try {
+    const health = await waitForLocalVoices(target.baseUrl, child, LOCAL_VOICES_READY_TIMEOUT_MS);
+    return { running: true, managed: true, health: health };
+  } catch (err) {
+    groupSignal(child, 'SIGTERM');
+    throw err;
+  }
+}
+
+async function stopLocalVoices(baseUrl) {
+  parseLocalVoicesUrl(baseUrl);
+  const child = localVoicesProcess;
+  if (!isChildRunning(child)) return { running: false, managed: false, health: null };
+  groupSignal(child, 'SIGTERM');
+  await waitForBridgeExit(child, 3000);
+  if (isChildRunning(child)) groupSignal(child, 'SIGKILL');
+  return { running: false, managed: false, health: null };
+}
+
+function stopManagedLocalVoices() {
+  if (isChildRunning(localVoicesProcess)) groupSignal(localVoicesProcess, 'SIGTERM');
+}
+
+ipcMain.handle('local-voices-status', function(_event, baseUrl) {
+  return getLocalVoicesStatus(baseUrl);
+});
+ipcMain.handle('local-voices-start', function(_event, baseUrl, pythonPath, voiceId) {
+  return startLocalVoices(baseUrl, pythonPath, voiceId);
+});
+ipcMain.handle('local-voices-stop', function(_event, baseUrl) {
+  return stopLocalVoices(baseUrl);
+});
+ipcMain.handle('local-voices-list', function() {
+  return getLocalVoiceProfiles();
+});
+ipcMain.handle('local-voices-import', function() {
+  return importLocalVoiceProfile();
+});
 
 function createWindow(acpBaseUrl) {
   const appRoot = getAppRoot();

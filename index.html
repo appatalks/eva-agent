@@ -340,7 +340,7 @@
           <option value="generative">Generative</option>
           <option value="openai" selected>OpenAI</option>
           <option value="browser">Browser (offline)</option>
-          <option value="bark">Bark</option>
+          <option value="local-voices">Local Voices</option>
         </select>
 
         <label for="selVoice">Voice:</label>
@@ -354,6 +354,23 @@
 
         <label for="autoSpeak">Auto Speak:</label>
         <input type="checkbox" id="autoSpeak">
+
+        <label for="localVoicesBridgeUrl">Local Voices bridge URL:</label>
+        <input type="text" id="localVoicesBridgeUrl" placeholder="http://localhost:8090" autocomplete="off">
+        <label for="localVoicesProfile">Voice model:</label>
+        <select id="localVoicesProfile">
+          <option value="eva">Eva (bundled)</option>
+        </select>
+        <div class="auth-note" style="margin:4px 0 0;font-size:11px;opacity:0.75">
+          Choose a bundled voice or add a 5-10 second PCM WAV reference recording.
+        </div>
+        <div class="background-actions" id="localVoicesProfileControls" style="margin:6px 0 2px">
+          <button type="button" class="auth-toggle" id="localVoicesImportButton">Add voice</button>
+        </div>
+        <div class="background-actions" id="localVoicesBridgeControls" style="margin:6px 0 10px">
+          <button type="button" class="auth-toggle" id="localVoicesBridgeButton">Start bridge</button>
+          <span class="auth-note" id="localVoicesBridgeStatus" aria-live="polite"></span>
+        </div>
 
         <label for="cameraPresence">Camera presence (auto-wake):</label>
         <input type="checkbox" id="cameraPresence">
