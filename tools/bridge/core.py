@@ -2076,7 +2076,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # has the draft and the user message, so it must NOT re-run web/Kusto/MCP
         # tools (that duplicated the draft's retrieval and doubled latency).
         no_tools = bool(data.get("no_tools"))
-        model_for_response = data.get("model", "claude-opus-4.8")  # frontend-selectable, default claude-opus-4.8
+        model_for_response = data.get("model", "gpt-5.6-luna")  # frontend-selectable, default gpt-5.6-luna
         raw_reasoning_effort = data.get("acp_reasoning_effort", "")
         if not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort not in ACP_REASONING_EFFORTS | {""}:
             self._json_response(400, {"error": {"message": "Unsupported acp_reasoning_effort"}})

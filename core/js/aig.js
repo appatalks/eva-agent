@@ -166,7 +166,7 @@ async function aigSend() {
 
     // Prefer cognition evaModel when cognition is configured,
     // otherwise fall back to the AIG backend selector dropdown.
-    var aigModel = (document.getElementById('selAIGBackend') || {}).value || 'claude-opus-4.8';
+    var aigModel = (document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna';
     if (typeof Cognition !== 'undefined' && Cognition.getCfg) {
       var cogModelCfg = Cognition.getCfg();
       if (cogModelCfg.enabled && cogModelCfg.evaModel) {

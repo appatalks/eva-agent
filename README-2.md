@@ -316,10 +316,11 @@ catalog evolves; this list reflects a recent `copilot --list-models` output.
 | | `claude-opus-4.7` | Variants: `-high`, `-xhigh` |
 | | `claude-opus-4.6` | Variant: `-1m` (1M context) |
 | | `claude-opus-4.5` | |
-| | `claude-sonnet-4.6` | Default AIG backend |
+| | `claude-sonnet-4.6` | |
 | | `claude-sonnet-4.5`, `claude-sonnet-4` | |
 | | `claude-haiku-4.5` | Fastest Claude |
-| **OpenAI** | `gpt-5.5` | |
+| **OpenAI** | `gpt-5.6-luna` | Default AIG backend (High reasoning) |
+| | `gpt-5.5` | |
 | | `gpt-5.4`, `gpt-5.4-mini` | |
 | | `gpt-5.3-codex`, `gpt-5.2-codex` | |
 | | `gpt-5.2`, `gpt-5-mini` | |

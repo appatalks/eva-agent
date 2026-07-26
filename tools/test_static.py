@@ -318,6 +318,12 @@ def test_reasoning_effort_contract():
     values = re.findall(r'value="([^"]+)"', match.group(1)) if match else []
     expected = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
     report("reasoning_effort_options", values == expected, f"got: {values}")
+    selected_effort = re.search(r'<option value="([^"]+)" selected>', match.group(1)) if match else None
+    report("reasoning_effort_default_high", bool(selected_effort and selected_effort.group(1) == "high"))
+
+    aig_match = re.search(r'<select id="selAIGBackend"[^>]*>(.*?)</select>', html, re.DOTALL)
+    selected_aig = re.search(r'<option value="([^"]+)" selected>', aig_match.group(1)) if aig_match else None
+    report("aig_default_gpt_5_6_luna", bool(selected_aig and selected_aig.group(1) == "gpt-5.6-luna"))
 
     with open("core/js/copilot.js") as f:
         copilot_js = f.read()
@@ -336,6 +342,11 @@ def test_reasoning_effort_contract():
         acp_client = f.read()
     with open("tools/bridge/core.py") as f:
         bridge_core = f.read()
+    report("reasoning_effort_js_default_high", "DEFAULT_REASONING_EFFORT = 'high'" in options_js)
+    report("aig_js_default_gpt_5_6_luna", "|| 'gpt-5.6-luna'" in aig_js)
+    report("cognition_default_gpt_5_6_luna", "? el.value : 'gpt-5.6-luna'" in cognition_js)
+    report("bridge_default_gpt_5_6_luna", 'data.get("model", "gpt-5.6-luna")' in bridge_core)
+    report("aig_default_not_overridden_by_lmstudio", "LM Studio detected, set as default backend" not in options_js)
     report("reasoning_effort_cli_flag", 'cmd.extend(["--reasoning-effort", self.reasoning_effort])' in acp_client)
     report("reasoning_effort_bridge_validation", "ACP_REASONING_EFFORTS" in bridge_core and "acp_reasoning_effort" in bridge_core)
     report("reasoning_effort_strict_type_validation", "raw_reasoning_effort" in bridge_core and "isinstance(raw_reasoning_effort, str)" in bridge_core)

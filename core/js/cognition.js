@@ -132,7 +132,7 @@
 
   function getDefaultModel() {
     var el = document.getElementById('selAIGBackend');
-    return (el && el.value) ? el.value : 'claude-sonnet-4.6';
+    return (el && el.value) ? el.value : 'gpt-5.6-luna';
   }
 
   function getCfg() {

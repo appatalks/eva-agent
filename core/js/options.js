@@ -2017,6 +2017,8 @@ function initSystemPrompt() {
 }
 
 // --- Model Settings Helpers ---
+var DEFAULT_REASONING_EFFORT = 'high';
+
 function getModelTemperature() {
   var el = document.getElementById('sldTemperature');
   return el ? parseFloat(el.value) : 0.7;
@@ -2029,8 +2031,8 @@ function getModelMaxTokens() {
 
 function getReasoningEffort() {
   var el = document.getElementById('selReasoningEffort');
-  var value = el ? el.value : 'default';
-  return ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].indexOf(value) >= 0 ? value : 'default';
+  var value = el ? el.value : DEFAULT_REASONING_EFFORT;
+  return ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].indexOf(value) >= 0 ? value : DEFAULT_REASONING_EFFORT;
 }
 
 function getReasoningEffortForModel(model) {
@@ -2060,14 +2062,14 @@ function onModelSettingsChange() {
     reOpt.style.display = supportsReasoning ? 'block' : 'none';
     var reasoningSelect = document.getElementById('selReasoningEffort');
     if (reasoningSelect) {
-      var savedEffort = localStorage.getItem('reasoningEffort') || 'default';
+      var savedEffort = localStorage.getItem('reasoningEffort') || DEFAULT_REASONING_EFFORT;
       var hasSavedEffort = Array.from(reasoningSelect.options).some(function (option) { return option.value === savedEffort; });
-      if (!hasSavedEffort) savedEffort = 'default';
+      if (!hasSavedEffort) savedEffort = DEFAULT_REASONING_EFFORT;
       var supportsFullReasoningRange = model === 'copilot-acp' || model === 'aig';
       Array.from(reasoningSelect.options).forEach(function (option) {
         option.disabled = !supportsFullReasoningRange && ['default', 'low', 'medium', 'high'].indexOf(option.value) < 0;
       });
-      reasoningSelect.value = supportsFullReasoningRange || ['low', 'medium', 'high'].indexOf(savedEffort) >= 0 ? savedEffort : 'default';
+      reasoningSelect.value = supportsFullReasoningRange || ['low', 'medium', 'high'].indexOf(savedEffort) >= 0 ? savedEffort : DEFAULT_REASONING_EFFORT;
     }
   }
   // Show/hide temperature (hidden for reasoning models, gpt-5 family, latest, copilot-acp)
@@ -2221,9 +2223,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Persist and restore the AIG backend selection across restarts.
   var reasoningEffortSel = document.getElementById('selReasoningEffort');
   if (reasoningEffortSel) {
-    var savedReasoningEffort = localStorage.getItem('reasoningEffort') || 'default';
+    var savedReasoningEffort = localStorage.getItem('reasoningEffort') || DEFAULT_REASONING_EFFORT;
     var hasReasoningOption = Array.from(reasoningEffortSel.options).some(function (option) { return option.value === savedReasoningEffort; });
-    reasoningEffortSel.value = hasReasoningOption ? savedReasoningEffort : 'default';
+    reasoningEffortSel.value = hasReasoningOption ? savedReasoningEffort : DEFAULT_REASONING_EFFORT;
     reasoningEffortSel.addEventListener('change', function () {
       localStorage.setItem('reasoningEffort', getReasoningEffort());
     });
@@ -2244,22 +2246,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (typeof onModelSettingsChange === 'function') onModelSettingsChange();
     });
 
-    // Auto-detect LM Studio: if the user has never explicitly picked a backend,
-    // probe the LM Studio endpoint and switch to it when reachable.
-    if (!savedAigBackend) {
-      var lmsUrl = (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : 'http://localhost:1234/v1';
-      fetch(lmsUrl + '/models', { signal: AbortSignal.timeout(2000) })
-        .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
-        .then(function (data) {
-          if (data && data.data && data.data.length > 0) {
-            aigBackendSel.value = 'lmstudio';
-            localStorage.setItem('aigBackend', 'lmstudio');
-            aigBackendSel.dispatchEvent(new Event('change', { bubbles: true }));
-            console.log('[Eva] LM Studio detected, set as default backend');
-          }
-        })
-        .catch(function () { /* LM Studio not running, keep current default */ });
-    }
   }
 
   // Camera presence (auto-wake): toggle the local webcam sensor. Restore the
