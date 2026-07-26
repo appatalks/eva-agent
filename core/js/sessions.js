@@ -477,7 +477,11 @@ function loadAssetsList() {
       ul.appendChild(li);
     });
   }).catch(function(e) {
-    ul.innerHTML = '<li class="session-empty">Could not load assets: ' + (e.message || e) + '</li>';
+    ul.textContent = '';
+    var errorItem = document.createElement('li');
+    errorItem.className = 'session-empty';
+    errorItem.textContent = 'Could not load assets: ' + (e.message || e);
+    ul.appendChild(errorItem);
   });
 }
 

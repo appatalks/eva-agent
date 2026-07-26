@@ -15,7 +15,7 @@
   },
   "devDependencies": {
     "electron": "^39.8.5",
-    "electron-builder": "^26.8.1",
+    "electron-builder": "^26.15.3",
     "tmp": "^0.2.7"
   },
   "_comment": "Electron files stay in standalone/. electron-builder copies the parent web UI and bridge with extraResources into resources/app.",

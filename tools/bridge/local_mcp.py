@@ -17,6 +17,58 @@ import urllib.request
 import urllib.error
 
 _ARTIFACTS_DIR = os.path.expanduser("~/.config/eva-standalone/artifacts")
+_TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+_MCP_ENV_KEYS = {
+    "playwright": set(),
+    "azure-mcp-server": {"AZURE_MCP_COLLECT_TELEMETRY"},
+    "github-mcp-server": {"_useGitHubPAT", "GITHUB_PERSONAL_ACCESS_TOKEN"},
+    "kusto-mcp-server": {
+        "KUSTO_ACCESS_TOKEN", "KUSTO_CLUSTER_URL", "KUSTO_DATABASE",
+        "KUSTO_DATABASE_LOCKED",
+    },
+    "computer-use-linux": set(),
+    "eva-web-search": set(),
+}
+
+
+def _mcp_launch_spec(name):
+    """Return a fixed executable and arguments for a supported MCP server."""
+    if name == "playwright":
+        return "npx", ["-y", "@playwright/mcp@latest"]
+    if name == "azure-mcp-server":
+        return "npx", ["-y", "@azure/mcp@latest", "server", "start"]
+    if name == "github-mcp-server":
+        return "docker", [
+            "run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "ghcr.io/github/github-mcp-server",
+        ]
+    if name == "kusto-mcp-server":
+        return sys.executable, [os.path.join(_TOOLS_DIR, "kusto_mcp.py")]
+    if name == "computer-use-linux":
+        return "computer-use-linux", ["mcp"]
+    if name == "eva-web-search":
+        return sys.executable, [os.path.join(_TOOLS_DIR, "web_search_mcp.py")]
+    return None
+
+
+def normalize_mcp_config(mcp_config):
+    """Discard user-supplied commands and retain allowlisted server settings."""
+    normalized = {}
+    if not isinstance(mcp_config, dict):
+        return normalized
+    for name, config in mcp_config.items():
+        spec = _mcp_launch_spec(name)
+        if spec is None or not isinstance(config, dict):
+            continue
+        command, args = spec
+        source_env = config.get("env", {})
+        if not isinstance(source_env, dict):
+            source_env = {}
+        allowed_env = _MCP_ENV_KEYS[name]
+        env = {key: value for key, value in source_env.items() if key in allowed_env}
+        normalized[name] = {"command": command, "args": args, "env": env}
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +95,7 @@ class MCPServer:
         """Spawn the MCP server process and initialize."""
         cmd = [self.command] + self.args
         process_env = os.environ.copy()
+        process_env.pop("EVA_BRIDGE_TOKEN", None)
         process_env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
         for k, v in self.env.items():
             process_env[k] = str(v) if not isinstance(v, str) else v
@@ -200,10 +253,14 @@ class LocalMCPManager:
 
     def start_servers(self, mcp_config):
         """Start MCP servers from config dict (same format as mcp.json mcpServers)."""
-        for name, cfg in mcp_config.items():
-            cmd = cfg.get("command", "")
-            args = cfg.get("args", [])
+        for name, cfg in normalize_mcp_config(mcp_config).items():
+            cmd = cfg["command"]
+            args = cfg["args"]
             env = cfg.get("env", {})
+            unresolved_flags = [key for key in env if str(key).startswith("_")]
+            if unresolved_flags:
+                print(f"[LocalMCP] Skipping {name}: credentials are not resolved yet")
+                continue
             try:
                 srv = MCPServer(name, cmd, args, env)
                 srv.start()

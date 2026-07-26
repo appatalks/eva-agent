@@ -548,17 +548,38 @@ class SqliteMemory:
         # Shortcut: bare table name becomes SELECT *
         stripped = sql.strip()
         if stripped and " " not in stripped and not stripped.startswith("SELECT"):
+            if stripped not in _SCHEMA:
+                return []
             sql = f"SELECT * FROM {stripped}"
+        normalized = sql.lstrip().upper()
+        if not normalized.startswith(("SELECT ", "WITH ")) or ";" in sql:
+            return []
+
+        allowed_actions = {
+            sqlite3.SQLITE_SELECT,
+            sqlite3.SQLITE_READ,
+            sqlite3.SQLITE_FUNCTION,
+        }
+        recursive_action = getattr(sqlite3, "SQLITE_RECURSIVE", None)
+        if recursive_action is not None:
+            allowed_actions.add(recursive_action)
+
+        def authorize(action, _arg1, _arg2, _database, _source):
+            return sqlite3.SQLITE_OK if action in allowed_actions else sqlite3.SQLITE_DENY
 
         with self._lock:
+            connection = self._conn()
             try:
-                cursor = self._conn().execute(sql, params)
+                connection.set_authorizer(authorize)
+                cursor = connection.execute(sql, params)
                 cols = [d[0] for d in cursor.description] if cursor.description else []
                 rows = cursor.fetchall()
                 return [dict(zip(cols, row)) for row in rows]
             except Exception as e:
                 print(f"[SQLite] Query error: {e}")
                 return []
+            finally:
+                connection.set_authorizer(None)
 
     def ingest(self, table, columns, rows_data):
         """Insert rows into a table (same signature as _kusto_ingest_direct).

@@ -3,6 +3,9 @@ name: Accessibility Test
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   accessibility:
     runs-on: ubuntu-20.04

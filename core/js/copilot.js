@@ -9,9 +9,6 @@
 
 // --- Helpers ---
 
-// Track last user message for post-response reflection (cognition layer)
-var _copilotLastUserMsg = '';
-
 function getCopilotMode(modelValue) {
   if (modelValue === 'copilot-acp') return 'acp';
   if (modelValue.indexOf('copilot-') === 0) return 'models-api';
@@ -161,20 +158,17 @@ async function copilotSend() {
   existingMessages = existingMessages.concat(newMessages);
   localStorage.setItem(storageKey, JSON.stringify(existingMessages));
 
-  // Track for post-response reflection
-  _copilotLastUserMsg = sQuestion;
-
   // Route to the appropriate backend
   if (mode === 'acp') {
     await _copilotSendACP(existingMessages, sQuestion, txtOutput, storageKey);
   } else {
-    await _copilotSendModelsAPI(existingMessages, selModel.value, txtOutput, storageKey);
+    await _copilotSendModelsAPI(existingMessages, selModel.value, sQuestion, txtOutput, storageKey);
   }
 }
 
 // --- GitHub Models API mode ---
 
-async function _copilotSendModelsAPI(messages, modelValue, txtOutput, storageKey) {
+async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, storageKey) {
   var githubToken = getAuthKey('GITHUB_PAT');
   var model = modelValue.replace(/^copilot-/, '');
 
@@ -276,7 +270,7 @@ async function _copilotSendModelsAPI(messages, modelValue, txtOutput, storageKey
     }
 
     var data = await resp.json();
-    _copilotRenderResponse(data, txtOutput, model);
+    _copilotRenderResponse(data, txtOutput, model, question);
 
   } catch (err) {
     _copilotHandleFetchError(err, txtOutput);
@@ -315,7 +309,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey) {
     }
 
     var data = await resp.json();
-    _copilotRenderResponse(data, txtOutput, modelLabel);
+    _copilotRenderResponse(data, txtOutput, modelLabel, question);
 
   } catch (err) {
     var errorMessage = err.message || String(err);
@@ -328,11 +322,13 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey) {
 
 // --- Shared response rendering ---
 
-async function _copilotRenderResponse(data, txtOutput, modelLabel) {
+async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage) {
   var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
 
   // Use unified renderer
-  await renderEvaResponse(content, txtOutput);
+  await renderEvaResponse(content, txtOutput, {
+    signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(userMessage)
+  });
 
   if (content) {
     lastResponse = content;
@@ -344,21 +340,20 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel) {
   setStatus('info', 'Response received from ' + modelLabel);
 
   // --- Cognition: Trigger post-response reflection via bridge ---
-  if (content && typeof _copilotLastUserMsg !== 'undefined' && _copilotLastUserMsg) {
+  if (content && userMessage) {
     try {
       var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
       fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/reflect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          user_message: _copilotLastUserMsg,
+          user_message: userMessage,
           assistant_message: content.substring(0, 500),
           model: modelLabel
         }),
         signal: AbortSignal.timeout(5000)
       }).catch(function() {}); // fire-and-forget
     } catch (e) {}
-    _copilotLastUserMsg = '';
   }
 
   // Auto-speak
@@ -430,7 +425,17 @@ function populateMCPForm(cfg) {
 // so without this the user would have to re-Configure Kusto/Azure/GitHub MCP
 // after each restart. Reads the persisted config directly from localStorage so
 // it does not depend on the Settings form fields being populated yet.
-async function autoApplySavedMCPConfig() {
+var _lastAutoAppliedMCPPat = null;
+var _autoApplyMCPQueue = Promise.resolve();
+function autoApplySavedMCPConfig() {
+  var requestedPat = (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : '';
+  _autoApplyMCPQueue = _autoApplyMCPQueue.catch(function() {}).then(function() {
+    return _applySavedMCPConfig(requestedPat);
+  });
+  return _autoApplyMCPQueue;
+}
+
+async function _applySavedMCPConfig(githubPat) {
   var saved;
   try {
     saved = JSON.parse(localStorage.getItem('mcp_config') || 'null');
@@ -466,6 +471,7 @@ async function autoApplySavedMCPConfig() {
   }
 
   if (!saved || typeof saved !== 'object' || Object.keys(saved).length === 0) return;
+  if (_lastAutoAppliedMCPPat === githubPat) return;
 
   // The standalone window only loads after the bridge reports healthy, but allow
   // a few short retries in case MCP server startup lags the health check.
@@ -477,10 +483,11 @@ async function autoApplySavedMCPConfig() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mcp_servers: saved,
-          github_pat: (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : ''
+          github_pat: githubPat
         })
       });
       if (resp.ok) {
+        _lastAutoAppliedMCPPat = githubPat;
         var data = await resp.json();
         setStatus('info', 'MCP restored: ' + ((data.active_servers || []).join(', ') || 'none'));
         if (typeof refreshMCPStatus === 'function') refreshMCPStatus();

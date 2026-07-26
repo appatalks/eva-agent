@@ -54,6 +54,7 @@ function applyConfig(config) {
   AWS.config.credentials = new AWS.Credentials(config.AWS_ACCESS_KEY_ID, config.AWS_SECRET_ACCESS_KEY);
   // Apply any localStorage auth overrides
   loadAuthOverrides();
+  if (typeof autoApplySavedMCPConfig === 'function') autoApplySavedMCPConfig();
 }
 
 // --- Auth Key Management ---
@@ -129,6 +130,7 @@ function saveAuthKeys() {
   }
   _pushSignalSettingsToBridge();
   if (typeof _acpBridgeCache !== 'undefined') _acpBridgeCache = null;
+  if (typeof autoApplySavedMCPConfig === 'function') autoApplySavedMCPConfig();
   if (typeof loadGoals === 'function') loadGoals(true);
   if (typeof loadBackgroundData === 'function') loadBackgroundData(true);
   setStatus('info', 'API keys saved to browser storage.');
@@ -243,6 +245,26 @@ function getSafeBridgeBaseUrl() {
   } catch (e) {
     return fallback;
   }
+}
+
+function getBridgeCapabilityHeaders() {
+  var token = (window.evaStandalone && window.evaStandalone.bridgeToken) || '';
+  return {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + token
+  };
+}
+
+function isAffirmativeSignalSendRequest(text) {
+  var value = String(text || '').toLowerCase();
+  if (/\b(?:do not|don't|dont|never|cancel|stop)\b[^.!?]{0,80}\b(?:send|text|message|signal|notify)\b/.test(value)) return false;
+  return /\b(?:send|text|message|notify)\b[^.!?]{0,60}\b(?:me|my|signal|phone|number|recipient)\b/.test(value) ||
+    /\bsignal\s+me\b/.test(value) ||
+    /\bsignal\b[^.!?]{0,40}\b(?:send|text|message|notify)\b/.test(value);
+}
+
+function canAuthorizeSignalDelivery(text) {
+  return isAffirmativeSignalSendRequest(text) && !!(window.evaStandalone && window.evaStandalone.bridgeToken);
 }
 
 var _localVoicesBridgeState = null;
@@ -5761,7 +5783,7 @@ async function _generateImage(prompt) {
  * Detects [Image of ...] placeholders, routes to DALL-E (generation)
  * or Wikimedia (search) based on the user's original request.
  */
-async function renderEvaResponse(content, txtOutput) {
+async function renderEvaResponse(content, txtOutput, renderOptions) {
   if (!content || !content.trim()) {
     txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> Sorry, can you please ask me in another way?</div>';
     txtOutput.scrollTop = txtOutput.scrollHeight;
@@ -5769,6 +5791,7 @@ async function renderEvaResponse(content, txtOutput) {
   }
 
   var text = content.trim();
+  renderOptions = renderOptions || {};
   var artifactNames = [];
   var surfacedAssets = [];
 
@@ -5823,20 +5846,45 @@ async function renderEvaResponse(content, txtOutput) {
     text = text.replace(/\n{3,}/g, '\n\n').trim();
   }
 
-  // Strip [[EVA_SIGNAL]] — the bridge dispatches via signal-cli before
-  // returning the response. Only show confirmation if the marker was the
-  // *entire* response (AIG bridge path). If it appears inside a longer
-  // response the model hallucinated it — strip silently so a false
-  // "Signal message sent" never shows for lm-studio or other direct paths.
-  var _sigRe = /\[\[EVA_SIGNAL\]\]\s*(?:\{[\s\S]*?\})?\s*(?:\[\[\/EVA_SIGNAL\]\])?/g;
-  if (/\[\[EVA_SIGNAL\]\]/.test(text)) {
-    var _sigStripped = text.replace(_sigRe, '').trim();
-    if (_sigStripped.length === 0) {
-      // Whole response was the marker — bridge actually sent the message.
-      text = '\n_Signal message sent._\n';
+  // Execute Signal only from the final response. Cognition drafts and reviews
+  // may contain markers too, so bridge-side draft execution would duplicate sends.
+  var signalSendResult = null;
+  var signalMessage = '';
+  var _sigRe = /\[\[EVA_SIGNAL\]\]\s*([\s\S]*?)\s*\[\[\/EVA_SIGNAL\]\]/g;
+  text = text.replace(_sigRe, function(full, json) {
+    if (!signalMessage) {
+      try {
+        var signalData = JSON.parse(json);
+        if (signalData && typeof signalData.message === 'string') signalMessage = signalData.message.trim();
+      } catch (e) { /* handled as an invalid payload below */ }
+    }
+    return '';
+  });
+  if (signalMessage && renderOptions.signalAuthorized === true) {
+    try {
+      var signalResponse = await fetch(getSafeBridgeBaseUrl() + '/v1/signal/send', {
+        method: 'POST',
+        headers: getBridgeCapabilityHeaders(),
+        body: JSON.stringify({ message: signalMessage })
+      });
+      var signalData = await signalResponse.json().catch(function() { return {}; });
+      signalSendResult = { ok: signalResponse.ok, message: signalData && signalData.error ? signalData.error.message : '' };
+    } catch (signalError) {
+      signalSendResult = { ok: false, message: signalError && signalError.message ? signalError.message : 'bridge unavailable' };
+    }
+  } else if (/\[\[EVA_SIGNAL\]\]/.test(content)) {
+    signalSendResult = {
+      ok: false,
+      message: signalMessage && !(window.evaStandalone && window.evaStandalone.bridgeToken)
+        ? 'Signal delivery requires Eva Standalone'
+        : (signalMessage ? 'current request did not authorize Signal delivery' : 'invalid Signal message payload')
+    };
+  }
+  if (signalSendResult) {
+    if (signalSendResult.ok) {
+      text = (text.trim() ? text.trim() + '\n\n' : '') + '_Signal message sent._';
     } else {
-      // Marker embedded in a longer response — hallucination, strip silently.
-      text = text.replace(/\[\[EVA_SIGNAL\]\]\s*(?:\{[\s\S]*?\})?\s*(?:\[\[\/EVA_SIGNAL\]\])?/g, '');
+      text = (text.trim() ? text.trim() + '\n\n' : '') + '_Signal message failed: ' + (signalSendResult.message || 'delivery failed') + '._';
     }
   }
   text = text.replace(/\n{3,}/g, '\n\n').trim();

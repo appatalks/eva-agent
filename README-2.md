@@ -937,11 +937,11 @@ Eva can send text messages via Signal using signal-cli (native binary, no Java).
 
 **How it works:**
 - The `[[EVA_SIGNAL]]` marker in the system prompt tells the model to emit `[[EVA_SIGNAL]]{"message":"..."}[[/EVA_SIGNAL]]`
-- The bridge parses the marker, calls `signal-cli -u <sender> send -m <message> <recipient>`
-- The frontend strips the marker and shows "Signal message sent."
-- For local models that refuse to emit the marker, keyword-triggered fallback injects it automatically and replaces the model's refusal text
+- The final-response renderer accepts the marker only for an affirmative Signal request and posts it to the authenticated loopback bridge
+- The bridge calls `signal-cli -u <sender> send -m <message> <recipient>` exactly once
+- The frontend strips the marker and reports the real delivery success or failure
 
-**Signal keywords** (trigger REMINDER injection and fallback): `signal`, `text me`, `text message`, `send me a message`, `send a message`, `notify me`, `message me`
+**Signal request examples:** `send me a Signal message`, `text my phone`, `notify me on Signal`, `Signal me the result`, `message me on Signal`
 
 **Configuration persisted to:** `~/.config/eva-standalone/alerts.json` (signal_sender, signal_recipient fields)
 

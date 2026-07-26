@@ -3,6 +3,7 @@ const http = require('http');
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 let bridgeProcess = null;
@@ -10,6 +11,7 @@ let readyBridgeProcess = null;
 let bridgeStopTimer = null;
 let bridgeStoppingProcess = null;
 let localVoicesProcess = null;
+let bridgeCapabilityToken = '';
 let shuttingDown = false;
 let stoppingBridge = false;
 
@@ -296,12 +298,13 @@ function waitForBridgeExit(childProcess, timeoutMs) {
   });
 }
 
-function startBridge(port) {
+function startBridge(port, bridgeToken) {
   const appRoot = getAppRoot();
   const bridgePath = path.join(appRoot, 'tools', 'acp_bridge.py');
   const args = [bridgePath, '--bind', '127.0.0.1', '--port', String(port), '--cwd', appRoot];
   const env = Object.assign({}, process.env, {
     EVA_ACP_PORT: String(port),
+    EVA_BRIDGE_TOKEN: bridgeToken,
     KUSTO_DATABASE_LOCKED: '1',
     PYTHONUNBUFFERED: '1'
   });
@@ -553,6 +556,9 @@ ipcMain.handle('local-voices-list', function() {
 ipcMain.handle('local-voices-import', function() {
   return importLocalVoiceProfile();
 });
+ipcMain.on('bridge-capability-token', function(event) {
+  event.returnValue = bridgeCapabilityToken;
+});
 
 function createWindow(acpBaseUrl) {
   const appRoot = getAppRoot();
@@ -638,10 +644,11 @@ function createWindow(acpBaseUrl) {
 }
 
 async function boot() {
+  bridgeCapabilityToken = crypto.randomBytes(32).toString('hex');
   for (let attempt = 0; attempt <= BRIDGE_PORT_RETRY_LIMIT; attempt += 1) {
     const port = await getFreeLocalPort();
     const acpBaseUrl = 'http://127.0.0.1:' + port;
-    const child = startBridge(port);
+    const child = startBridge(port, bridgeCapabilityToken);
     try {
       await waitForBridge(acpBaseUrl, child, BRIDGE_READY_TIMEOUT_MS);
       readyBridgeProcess = child;

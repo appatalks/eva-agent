@@ -10,6 +10,7 @@ function readArg(name) {
 
 contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   acpBaseUrl: readArg('eva-acp-base-url'),
+  bridgeToken: ipcRenderer.sendSync('bridge-capability-token'),
   isStandalone: true,
   version: readArg('eva-version'),
   minimize: function() { ipcRenderer.send('win-minimize'); },

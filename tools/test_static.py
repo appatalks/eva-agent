@@ -370,6 +370,88 @@ def test_reasoning_effort_contract():
     report("reasoning_effort_request_local_client", "with _acquire_acp_client" in bridge_core and "selected_client.prompt" in bridge_core)
     report("reasoning_effort_prompt_serialized", "with self.prompt_lock:" in acp_client)
     report("reasoning_effort_client_pinning", "def _pin_acp_client" in acp_client and "def _release_acp_client" in acp_client)
+def test_signal_and_github_mcp_contract():
+    """Signal executes after the final response and GitHub MCP restores its PAT flag."""
+    with open("core/js/options.js") as f:
+        options_js = f.read()
+    with open("core/js/cognition.js") as f:
+        cognition_js = f.read()
+    with open("core/js/copilot.js") as f:
+        copilot_js = f.read()
+    with open("core/js/aig.js") as f:
+        aig_js = f.read()
+    with open("core/js/gpt-core.js") as f:
+        gpt_core_js = f.read()
+    with open("core/js/gl-google.js") as f:
+        google_js = f.read()
+    with open("core/js/lm-studio.js") as f:
+        lm_studio_js = f.read()
+    with open("tools/bridge/core.py") as f:
+        bridge_core = f.read()
+    with open("tools/bridge/utils.py") as f:
+        bridge_utils = f.read()
+    with open("tools/bridge/local_mcp.py") as f:
+        local_mcp = f.read()
+    with open("standalone/main.js") as f:
+        standalone_main = f.read()
+    with open("standalone/preload.js") as f:
+        standalone_preload = f.read()
+
+    report("signal_final_response_endpoint", '"/v1/signal/send"' in bridge_core and "def _signal_send_request" in bridge_core)
+    report("signal_renderer_checks_result", "signalSendResult" in options_js and "/v1/signal/send" in options_js)
+    report("signal_endpoint_capability_token", "EVA_BRIDGE_TOKEN" in bridge_core and "bridgeToken" in standalone_main and "bridgeToken" in standalone_preload)
+    report("signal_capability_not_in_renderer_argv", "eva-bridge-token" not in standalone_main and "bridge-capability-token" in standalone_main and "bridge-capability-token" in standalone_preload)
+    report("signal_endpoint_requires_json", 'content_type != "application/json"' in bridge_core)
+    report("signal_marker_parses_to_closing_tag", "([\\s\\S]*?)\\s*\\[\\[\\/EVA_SIGNAL\\]\\]" in options_js)
+    report("signal_cognition_directive", "signalDirective" in cognition_js and "[[EVA_SIGNAL]]" in cognition_js)
+    report("signal_requires_affirmative_intent", "isAffirmativeSignalSendRequest" in options_js and "signalAuthorized" in options_js)
+    report("signal_documented_phrases", "notify" in options_js and "signal\\s+me" in options_js)
+    report("signal_all_provider_renderers", all("canAuthorizeSignalDelivery" in source for source in (aig_js, copilot_js, gpt_core_js, google_js, lm_studio_js)))
+    report("signal_finalization_does_not_fallback", "cognitionFinalizing" in aig_js and "Eva could not finalize the response" in aig_js)
+    report("signal_bridge_requires_affirmative_intent", "def _is_affirmative_signal_request" in bridge_core and bridge_core.count("_is_affirmative_signal_request(user_message)") >= 2)
+    report("signal_not_dispatched_in_draft", "_signal_send(_sig_msg)" not in bridge_core)
+    report("github_mcp_pat_flag_persisted", "_useGitHubPAT" in bridge_utils)
+    with open("tools/bridge/acp_client.py") as f:
+        acp_client = f.read()
+    report("local_mcp_skips_unresolved_credentials", "unresolved_flags" in local_mcp and "credentials are not resolved yet" in local_mcp)
+    report("local_mcp_refreshes_after_auth", "Refreshed LOCAL mode" in bridge_core and "previous_manager.stop_all()" in bridge_core)
+    report("github_mcp_omitted_without_pat", "unresolved_servers.append" in bridge_core and "mcp_servers.pop" in bridge_core)
+    report("github_mcp_reapplies_late_pat", "_lastAutoAppliedMCPPat" in copilot_js and "_autoApplyMCPQueue" in copilot_js and options_js.count("autoApplySavedMCPConfig()") >= 2)
+    report("signal_is_only_capability_endpoint", bridge_core.count("_require_bridge_capability()") == 1)
+    report("bridge_capability_not_in_child_env", acp_client.count('pop("EVA_BRIDGE_TOKEN", None)') >= 2 and 'pop("EVA_BRIDGE_TOKEN", None)' in local_mcp)
+    report("cors_uses_exact_loopback_host", "parsed.hostname" in bridge_core and "origin.startswith" not in bridge_core)
+
+
+def test_security_alert_contract():
+    """Patched dependency floors and CodeQL mitigations stay in place."""
+    with open("standalone/package-lock.json") as f:
+        lock = json.load(f)
+    packages = lock.get("packages", {})
+    report("security_electron_builder_patched", packages.get("node_modules/electron-builder", {}).get("version") == "26.15.3")
+    report("security_app_builder_patched", packages.get("node_modules/app-builder-lib", {}).get("version") == "26.15.3")
+    report("security_builder_runtime_patched", packages.get("node_modules/builder-util-runtime", {}).get("version") == "9.7.0")
+
+    with open("tools/bridge/local_mcp.py") as f:
+        local_mcp = f.read()
+    with open("tools/bridge/core.py") as f:
+        bridge_core = f.read()
+    with open("tools/sqlite_memory.py") as f:
+        sqlite_memory = f.read()
+    with open("core/js/sessions.js") as f:
+        sessions_js = f.read()
+    with open("tools/web_search_mcp.py") as f:
+        web_search = f.read()
+    with open(".github/workflows/pa11y_accessibility_testing.yml") as f:
+        accessibility_workflow = f.read()
+
+    report("security_mcp_fixed_launch_specs", "def normalize_mcp_config" in local_mcp and "_mcp_launch_spec(name)" in local_mcp and "normalize_mcp_config(requested_mcp_servers)" in bridge_core)
+    report("security_mcp_env_allowlist", "_MCP_ENV_KEYS" in local_mcp and "LD_PRELOAD" not in local_mcp)
+    report("security_sqlite_read_authorizer", "set_authorizer(authorize)" in sqlite_memory and 'startswith(("SELECT ", "WITH "))' in sqlite_memory)
+    report("security_linear_marker_parser", "def _strip_marker_blocks" in bridge_core and "[\\s\\S]*?" not in bridge_core)
+    report("security_artifact_dirfd_write", "dir_fd=directory_fd" in bridge_core and "def _existing_artifact_path" in bridge_core)
+    report("security_dom_error_text_only", "errorItem.textContent" in sessions_js)
+    report("security_search_exact_hostname", "result_host.endswith(\".google.com\")" in web_search)
+    report("security_workflow_read_only", "permissions:\n  contents: read" in accessibility_workflow)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -575,6 +657,8 @@ def main():
         ("HTML Model Selector", [test_model_selector]),
         ("JS Routing Functions", [test_js_routing_functions]),
         ("Reasoning Effort", [test_reasoning_effort_contract]),
+        ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract]),
+        ("Security Alerts", [test_security_alert_contract]),
         ("Seed File", [test_seed_file]),
         ("Goals Static Contract", [test_goals_static_contract]),
         ("Background Static Contract", [test_background_static_contract]),

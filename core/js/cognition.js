@@ -611,6 +611,14 @@
     var _turnStart = Date.now();
     var _draftMs = 0, _reviewMs = 0, _reviseMs = 0;
     var capDesc = describeCapabilities();
+    var isSignalRequest = (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(userMsg);
+    var signalDirective = isSignalRequest ? [
+      '',
+      'SIGNAL SEND REQUEST:',
+      'Your final answer MUST include exactly one valid marker with the complete message to deliver:',
+      '[[EVA_SIGNAL]]{"message":"<complete message text>"}[[/EVA_SIGNAL]]',
+      'Do not claim the message was sent. The application executes the marker and reports the real result.'
+    ].join('\n') : '';
 
     var actionHelp = [
       '',
@@ -643,6 +651,7 @@
       'When the user asks to OPEN or VIEW a file that was already created earlier in this conversation,',
       'use file.open with the existing filename. Do NOT recreate the file as a PDF or any other format.',
       'Never simulate or describe phases. Never print PHASE headers. Just answer.',
+      signalDirective,
       '',
       'After your answer, on the very last line, append a SILENT self-review signal the user never sees:',
       '[[REVIEW]]{"want":true|false,"reason":"<=12 words"}[[/REVIEW]]',
@@ -746,6 +755,7 @@
         actionHelp,
         '',
         'Produce the revised final answer for the user. Apply the reviewer\'s concrete points.',
+        signalDirective,
         'Do not mention the review process or any internal pipeline.'
       ].join('\n');
       var _reviseStart = Date.now();

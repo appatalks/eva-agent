@@ -58,6 +58,7 @@ class ACPClient:
             # (copilot spawns MCP servers as children, inheriting the env)
             os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
             process_env = os.environ.copy()
+            process_env.pop("EVA_BRIDGE_TOKEN", None)
             for srv_name, srv_cfg in self.mcp_config.items():
                 for k, v in srv_cfg.get('env', {}).items():
                     # subprocess.Popen env requires all values to be strings
@@ -326,6 +327,7 @@ class ACPClient:
 
         # Build environment
         env = os.environ.copy()
+        env.pop("EVA_BRIDGE_TOKEN", None)
         for ev in env_vars:
             if isinstance(ev, dict) and "name" in ev and "value" in ev:
                 env[ev["name"]] = ev["value"]

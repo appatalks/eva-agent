@@ -62,8 +62,6 @@ async function aigSend() {
   var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
 
   setStatus('info', 'Eva (AIG) processing...');
-  if (typeof _copilotLastUserMsg !== 'undefined') { _copilotLastUserMsg = sQuestion; }
-
   // Optional cognitive layer (eva / reviewer).
   // Runs when the Settings toggle is on OR the user message contains an
   // explicit trigger phrase like "trigger the chain" / "use cognition".
@@ -75,6 +73,7 @@ async function aigSend() {
     if (cogDecision.reason === 'phrase') {
       setStatus('info', 'Eva cognition force-enabled by phrase trigger...');
     }
+    var cognitionFinalizing = false;
     try {
       var cogResult = await Cognition.run({
         userMessage: sQuestion,
@@ -90,7 +89,8 @@ async function aigSend() {
         cogContent = execRes.content;
         actionsRun = execRes.actions || [];
       }
-      await renderEvaResponse(cogContent, txtOutput);
+      cognitionFinalizing = true;
+      await renderEvaResponse(cogContent, txtOutput, { signalAuthorized: canAuthorizeSignalDelivery(sQuestion) });
       if (Cognition.getCfg && Cognition.getCfg().showTrace && Cognition.renderTraceHtml) {
         try {
           txtOutput.innerHTML += Cognition.renderTraceHtml(cogResult.trace || []);
@@ -133,6 +133,10 @@ async function aigSend() {
       return;
     } catch (cogErr) {
       var cogMsg = (cogErr && cogErr.message) ? cogErr.message : String(cogErr);
+      if (cognitionFinalizing) {
+        setStatus('error', 'Eva could not finalize the response: ' + cogMsg);
+        return;
+      }
       setStatus('warn', 'Cognition failed, falling back: ' + cogMsg);
       // fall through to single-shot path
     }
@@ -204,7 +208,7 @@ async function aigSend() {
     var modelUsed = data.model || 'aig';
 
     // Render response
-    await renderEvaResponse(content, txtOutput);
+    await renderEvaResponse(content, txtOutput, { signalAuthorized: canAuthorizeSignalDelivery(sQuestion) });
 
     if (content) {
       lastResponse = content;

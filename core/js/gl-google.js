@@ -98,7 +98,9 @@ function geminiSend() {
                     (async () => {
                         let mainResponse = nonThoughts.map(part => part.text).join("\n").trim();
                         const out = document.getElementById("txtOutput");
-                        await renderEvaResponse(mainResponse, out);
+                        await renderEvaResponse(mainResponse, out, {
+                            signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion)
+                        });
                     })();
 
                     // Update conversation history: log both thoughts and non-thoughts

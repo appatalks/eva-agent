@@ -187,7 +187,10 @@ def _google_fallback(query, max_results=5):
         title = _strip_html(title_html).strip()
         if not title or len(title) < 5 or raw_url in seen:
             continue
-        if "google.com" in raw_url or "youtube.com/sorry" in raw_url:
+        result_host = (urllib.parse.urlparse(raw_url).hostname or "").lower().rstrip(".")
+        if (result_host == "google.com" or result_host.endswith(".google.com")
+                or (result_host in ("youtube.com", "www.youtube.com")
+                    and urllib.parse.urlparse(raw_url).path.startswith("/sorry"))):
             continue
         seen.add(raw_url)
         results.append({"title": title, "url": raw_url, "snippet": ""})

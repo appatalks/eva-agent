@@ -31,8 +31,8 @@ import base64
 import copy
 import datetime
 import hashlib
+import hmac
 import json
-import mimetypes
 import os
 import platform
 import re
@@ -52,6 +52,38 @@ from bridge import config as _cfg
 from bridge import state as _st
 
 ACP_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+
+def _is_affirmative_signal_request(text):
+    value = str(text or "").lower()
+    if re.search(r"\b(?:do not|don't|dont|never|cancel|stop)\b[^.!?]{0,80}\b(?:send|text|message|signal|notify)\b", value):
+        return False
+    return bool(
+        re.search(r"\b(?:send|text|message|notify)\b[^.!?]{0,60}\b(?:me|my|signal|phone|number|recipient)\b", value)
+        or re.search(r"\bsignal\s+me\b", value)
+        or re.search(r"\bsignal\b[^.!?]{0,40}\b(?:send|text|message|notify)\b", value)
+    )
+
+
+def _strip_marker_blocks(text, marker):
+    """Remove marker blocks with a single forward scan."""
+    opening = "[[" + marker + "]]"
+    closing = "[[/" + marker + "]]"
+    parts = []
+    cursor = 0
+    while cursor < len(text):
+        start = text.find(opening, cursor)
+        if start < 0:
+            parts.append(text[cursor:])
+            break
+        parts.append(text[cursor:start])
+        close_at = text.find(closing, start + len(opening))
+        if close_at >= 0:
+            cursor = close_at + len(closing)
+        else:
+            line_end = text.find("\n", start + len(opening))
+            cursor = len(text) if line_end < 0 else line_end
+    return "".join(parts)
 
 
 # Domain modules
@@ -219,7 +251,6 @@ from bridge.utils import (  # noqa: F401
     _env_truthy,
     _is_loopback_bind,
     _valid_artifact_name,
-    _safe_content_type,
     _is_local_or_private,
     _validate_lmstudio_base_url,
     _sanitize_mcp_for_persist,
@@ -290,16 +321,44 @@ except Exception as _cam_err:  # pragma: no cover - defensive
 class BridgeHandler(BaseHTTPRequestHandler):
     """HTTP handler that bridges browser requests to ACP."""
 
-    def _cors_headers(self):
+    def _trusted_origin(self):
+        return self._normalized_cors_origin() is not None
+
+    def _normalized_cors_origin(self):
         origin = self.headers.get("Origin", "")
-        # Reject any origin containing CRLF or null bytes to prevent HTTP response splitting
+        if not origin:
+            return "*"
+        if origin == "null":
+            return "null"
         if "\r" in origin or "\n" in origin or "\x00" in origin:
-            origin = ""
-        allowed = not origin or origin.startswith("file://") or origin.startswith("http://127.0.0.1") or origin.startswith("http://localhost") or origin.startswith("http://[::1]")
-        if allowed:
-            self.send_header("Access-Control-Allow-Origin", origin if origin else "*")
-        else:
-            self.send_header("Access-Control-Allow-Origin", "null")
+            return None
+        try:
+            parsed = urllib.parse.urlparse(origin)
+            if parsed.scheme == "file":
+                return "null"
+            hostname = (parsed.hostname or "").lower()
+            if parsed.scheme not in ("http", "https") or hostname not in ("localhost", "127.0.0.1", "::1"):
+                return None
+            host_text = "[::1]" if hostname == "::1" else hostname
+            port = parsed.port
+            return f"{parsed.scheme}://{host_text}" + (f":{port}" if port else "")
+        except (TypeError, ValueError):
+            return None
+
+    def _require_bridge_capability(self):
+        expected_token = os.environ.get("EVA_BRIDGE_TOKEN", "")
+        supplied_token = self.headers.get("Authorization", "")
+        if not expected_token or not hmac.compare_digest(supplied_token, "Bearer " + expected_token):
+            self._json_response(401, {"error": {"message": "Bridge authorization failed"}})
+            return False
+        if not self._trusted_origin():
+            self._json_response(403, {"error": {"message": "Request origin is not allowed"}})
+            return False
+        return True
+
+    def _cors_headers(self):
+        normalized_origin = self._normalized_cors_origin()
+        self.send_header("Access-Control-Allow-Origin", normalized_origin or "null")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
@@ -432,6 +491,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._alerts_upsert()
         elif parsed_path == "/v1/alerts/settings":
             self._alerts_settings_update()
+        elif parsed_path == "/v1/signal/send":
+            self._signal_send_request()
         elif parsed_path == "/v1/notifications/seen":
             self._notifications_mark_seen()
         elif re.fullmatch(r"/v1/background/proposals/[^/]+/(approve|reject)", parsed_path):
@@ -1238,6 +1299,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
         items.sort(key=lambda x: x["modified"], reverse=True)
         self._json_response(200, {"files": items})
 
+    @staticmethod
+    def _existing_artifact_path(requested_name):
+        """Resolve an existing regular artifact without joining user input."""
+        if not _valid_artifact_name(requested_name):
+            return None
+        os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
+        with os.scandir(_ARTIFACTS_DIR) as entries:
+            for entry in entries:
+                if entry.name == requested_name and entry.is_file(follow_symlinks=False):
+                    return entry.path
+        return None
+
     def _open_artifact(self, requested_name):
         """Open an artifact file with the system's default application."""
         if not _is_loopback_bind():
@@ -1246,9 +1319,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not _valid_artifact_name(requested_name):
             self._json_response(400, {"error": {"message": "invalid filename"}})
             return
-        base = os.path.realpath(_ARTIFACTS_DIR)
-        target = os.path.realpath(os.path.join(_ARTIFACTS_DIR, requested_name))
-        if not target.startswith(base + os.sep) or not os.path.isfile(target):
+        target = self._existing_artifact_path(requested_name)
+        if target is None:
             self._json_response(404, {"error": {"message": "file not found"}})
             return
         import subprocess
@@ -1279,26 +1351,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
         content = data.get("content", "")
         is_pdf = bool(data.get("is_pdf", False))
         os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
-        target = os.path.join(_ARTIFACTS_DIR, filename)
-        base = os.path.realpath(_ARTIFACTS_DIR)
-        if not os.path.realpath(target).startswith(base + os.sep):
-            self._json_response(400, {"error": {"message": "path traversal"}})
-            return
+        payload = self._render_text_pdf(content) if is_pdf else str(content or "").encode("utf-8")
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        file_flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        directory_fd = os.open(_ARTIFACTS_DIR, directory_flags)
         try:
-            if is_pdf:
-                self._write_text_pdf(target, content)
-            else:
-                with open(target, "w", encoding="utf-8") as f:
-                    f.write(content)
-            size = os.path.getsize(target)
+            file_fd = os.open(filename, file_flags, 0o600, dir_fd=directory_fd)
+            with os.fdopen(file_fd, "wb") as artifact_file:
+                artifact_file.write(payload)
+                size = artifact_file.tell()
             print(f"[Artifact] Wrote {filename} ({size} bytes, pdf={is_pdf})")
             self._json_response(200, {"ok": True, "filename": filename, "size": size})
         except Exception as e:
             self._json_response(500, {"error": {"message": f"write failed: {e}"}})
+        finally:
+            os.close(directory_fd)
 
     @staticmethod
-    def _write_text_pdf(path, text):
-        """Generate a minimal valid PDF from plain text and write to path."""
+    def _render_text_pdf(text):
+        """Generate minimal valid PDF bytes from plain text."""
         text = str(text or "")
         font_size = 11
         leading = round(font_size * 1.35)
@@ -1365,8 +1436,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         for m in range(1, max_num + 1):
             out += f"{offsets[m]:010d} 00000 n \n"
         out += f"trailer\n<< /Size {max_num + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF"
-        with open(path, "wb") as f:
-            f.write(bytes(ord(c) & 0xFF for c in out))
+        return bytes(ord(c) & 0xFF for c in out)
 
     def _serve_artifact(self, requested_name):
         if not _is_loopback_bind():
@@ -1377,13 +1447,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": {"message": "invalid filename"}})
             return
 
-        base = os.path.realpath(_ARTIFACTS_DIR)
-        target = os.path.realpath(os.path.join(_ARTIFACTS_DIR, requested_name))
-        if not target.startswith(base + os.sep) or not os.path.isfile(target):
+        target = self._existing_artifact_path(requested_name)
+        if target is None:
             self._json_response(404, {"error": {"message": "file not found"}})
             return
 
-        content_type = _safe_content_type(mimetypes.guess_type(requested_name)[0])
+        content_type = {
+            ".csv": "text/csv",
+            ".html": "text/html",
+            ".json": "application/json",
+            ".md": "text/markdown",
+            ".pdf": "application/pdf",
+            ".txt": "text/plain",
+        }.get(os.path.splitext(requested_name)[1].lower(), "application/octet-stream")
         content_length = os.path.getsize(target)
         self.send_response(200)
         self._cors_headers()
@@ -2016,6 +2092,34 @@ class BridgeHandler(BaseHTTPRequestHandler):
             _save_alerts(doc)
         self._json_response(200, {"status": "ok", "settings": doc["settings"]})
 
+    def _signal_send_request(self):
+        """Send one final-response Signal message from a loopback UI request."""
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "Signal sending is restricted to loopback bind"}})
+            return
+        if not self._require_bridge_capability():
+            return
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            self._json_response(415, {"error": {"message": "Content-Type must be application/json"}})
+            return
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        message = data.get("message") if isinstance(data, dict) else None
+        if not isinstance(message, str) or not message.strip():
+            self._json_response(400, {"error": {"message": "message must be a non-empty string"}})
+            return
+        message = message.strip()
+        if len(message) > 4000:
+            self._json_response(400, {"error": {"message": "message must be 4000 characters or fewer"}})
+            return
+        if not _signal_send(message):
+            self._json_response(502, {"error": {"message": "signal-cli could not deliver the message"}})
+            return
+        self._json_response(200, {"status": "sent"})
+
     def _mcp_status(self):
         """Return current MCP server configuration status."""
         config = _st.acp_client.mcp_config if _st.acp_client else {}
@@ -2258,6 +2362,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "- Use the context below naturally as your own knowledge.\n\n"
         )
 
+        _is_signal_request = bool(os.environ.get("EVA_BRIDGE_TOKEN")) and _is_affirmative_signal_request(user_message)
+        if _is_signal_request and not no_tools:
+            eva_system += (
+                "SIGNAL SEND REQUEST:\n"
+                "Your final answer MUST include exactly one valid marker containing the message to deliver:\n"
+                "[[EVA_SIGNAL]]{\"message\":\"<complete message text>\"}[[/EVA_SIGNAL]]\n"
+                "Do not claim it was sent. The application executes the marker and reports the real result.\n\n"
+            )
+
         if no_tools:
             # Judge/review mode: prepend a hard directive so the reviewer model
             # evaluates only the provided text and does not call any MCP tools.
@@ -2309,8 +2422,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # local models (which struggle with long system prompts) still know
             # about the camera.  This is ephemeral and not persisted.
             _camera_keywords = {'look', 'see', 'holding', 'camera', 'webcam', 'picture', 'photo', 'show me', 'what am i'}
-            _signal_keywords = {'signal', 'text me', 'text message', 'send me a message', 'send a message', 'notify me', 'message me'}
-            _is_signal_request = any(kw in user_message.lower() for kw in _signal_keywords)
+            _is_signal_request = bool(os.environ.get("EVA_BRIDGE_TOKEN")) and _is_affirmative_signal_request(user_message)
             # Skip camera reminder when the user is asking for a Signal message
             if any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request:
                 lms_messages.append({"role": "system", "content": (
@@ -2323,9 +2435,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 lms_messages.append({"role": "system", "content": (
                     "CRITICAL INSTRUCTION: You have Signal messaging capability. "
                     "When the user asks you to send a message, text, or notification, "
-                    "respond ONLY with the marker and a brief confirmation. Example:\n"
+                    "respond ONLY with the marker. Example:\n"
                     "[[EVA_SIGNAL]]{\"message\":\"hello world\"}[[/EVA_SIGNAL]]\n"
-                    "Done! I sent that to your Signal.\n\n"
+                    "Do not claim the message was sent; the application reports the real result.\n\n"
                     "Do NOT say you cannot send messages. Do NOT explain limitations. "
                     "Do NOT offer alternatives. Just emit the marker."
                 )})
@@ -2367,29 +2479,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 response_text += f'\n\n[[EVA_LOOK]]{{"question":"{_look_q}"}}[[/EVA_LOOK]]'
                 print("[AIG] Camera fallback: injected [[EVA_LOOK]] for local model")
 
-            # Signal: parse [[EVA_SIGNAL]]{"message":"..."}[[/EVA_SIGNAL]] and
-            # dispatch via signal-cli before the response reaches the frontend.
-            # No fallback injection — the model decides whether to emit the
-            # marker based on the system prompt. If it doesn't, the user's
-            # message was not a Signal request.
-            _sig_match = _re.search(
-                r'\[\[EVA_SIGNAL\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[/EVA_SIGNAL\]\])?',
-                response_text
-            )
-            if _sig_match:
-                try:
-                    _sig_data = json.loads(_sig_match.group(1))
-                    _sig_msg = _sig_data.get("message", "").strip()
-                    if _sig_msg:
-                        _signal_send(_sig_msg)
-                except (json.JSONDecodeError, AttributeError):
-                    print("[AIG] EVA_SIGNAL marker had invalid JSON")
+            # Signal dispatch happens only after the final response reaches the
+            # renderer. Draft-stage execution here could duplicate sends when
+            # cognition reviews or revises a response.
+            if "[[EVA_SIGNAL]]" in response_text:
                 # Strip spurious [[EVA_LOOK]] if the user asked for messaging,
                 # not camera.  The model sometimes emits both by mistake.
                 if not any(kw in user_message.lower() for kw in _camera_keywords):
-                    response_text = _re.sub(
-                        r'\[\[EVA_LOOK\]\]\s*(?:\{[\s\S]*?\})?\s*(?:\[\[/EVA_LOOK\]\])?',
-                        '', response_text)
+                    response_text = _strip_marker_blocks(response_text, "EVA_LOOK")
 
             # Post-process: convert blob/download links to [[EVA_FILE]] markers.
             # ACP or the model may produce blob:file:/// URLs or markdown download links
@@ -3007,7 +3104,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": {"message": "Invalid JSON"}})
             return
 
-        mcp_servers = data.get("mcp_servers", {})
+        requested_mcp_servers = data.get("mcp_servers", {})
+        if not isinstance(requested_mcp_servers, dict):
+            self._json_response(400, {"error": {"message": "mcp_servers must be an object"}})
+            return
+        from bridge.local_mcp import normalize_mcp_config
+        mcp_servers = normalize_mcp_config(requested_mcp_servers)
+        unsupported_servers = sorted(set(requested_mcp_servers) - set(mcp_servers))
+        if unsupported_servers:
+            self._json_response(400, {"error": {"message": "unsupported MCP server: " + ", ".join(unsupported_servers)}})
+            return
 
         # Persist the raw selection (secrets stripped) so it survives bridge
         # restarts even if the Electron file:// localStorage is cleared.
@@ -3016,6 +3122,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Resolve internal flags in MCP server env before passing to copilot
         # If the browser sent a github_pat, use it for _useGitHubPAT resolution
         request_github_pat = data.get('github_pat', '')
+        unresolved_servers = []
         for srv_name, srv_cfg in mcp_servers.items():
             env = srv_cfg.get('env', {})
             resolved_env = {}
@@ -3027,6 +3134,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         resolved_env['GITHUB_PERSONAL_ACCESS_TOKEN'] = pat
                     else:
                         print(f"[MCP] Warning: GitHub PAT not available for {srv_name}. Set it in Settings > Auth.")
+                        unresolved_servers.append(srv_name)
                     continue
                 # Skip any other internal flags (prefixed with _)
                 if k.startswith('_'):
@@ -3034,6 +3142,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 # Ensure all env values are strings (subprocess.Popen requirement)
                 resolved_env[k] = str(v) if not isinstance(v, str) else v
             srv_cfg['env'] = resolved_env
+        for srv_name in unresolved_servers:
+            mcp_servers.pop(srv_name, None)
 
         if _st.kusto_database_locked and "kusto-mcp-server" in mcp_servers:
             kusto_env = mcp_servers["kusto-mcp-server"].setdefault("env", {})
@@ -3064,6 +3174,26 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # MCP config changed: drop stale warm clients so the pool only holds
             # clients built with the new server set.
             _reset_acp_pool(_st.acp_client)
+            if _st.local_mode:
+                try:
+                    from bridge.local_mcp import LocalMCPManager
+                    local_config = dict(mcp_servers)
+                    if "eva-web-search" not in local_config:
+                        web_search_path = os.path.join(
+                            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "web_search_mcp.py",
+                        )
+                        if os.path.isfile(web_search_path):
+                            local_config["eva-web-search"] = {"command": sys.executable, "args": [web_search_path]}
+                    replacement_manager = LocalMCPManager()
+                    replacement_manager.start_servers(local_config)
+                    previous_manager = _st.local_mcp_manager
+                    _st.local_mcp_manager = replacement_manager
+                    if previous_manager:
+                        previous_manager.stop_all()
+                    print(f"[Mode] Refreshed LOCAL mode: {replacement_manager.tool_count} tools")
+                except Exception as local_error:
+                    print(f"[Mode] Could not refresh local MCP servers: {local_error}")
             if not _st.cognition_enabled:
                 _reload_backend = _resolve_memory_backend()
                 if _reload_backend == "sqlite":
