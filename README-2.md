@@ -239,7 +239,7 @@ tools/
 standalone/
   main.js                  Electron shell: port allocation, bridge spawn, health polling
   preload.js               Context bridge (exposes evaStandalone API to renderer)
-  package.json             Electron + electron-builder config (v5.3.0)
+  package.json             Electron + electron-builder config (v5.4.0)
 ```
 
 ## Dependencies
@@ -1005,7 +1005,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.3.0.AppImage'
+./dist/'Eva Standalone-5.4.0.AppImage'
 ```
 
 **Electron lifecycle:**

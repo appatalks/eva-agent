@@ -280,6 +280,22 @@ def test_model_selector():
     report("aig_backend_lmstudio_option", "lmstudio" in aig_values,
            "missing" if "lmstudio" not in aig_values else "")
 
+    chats_button = re.search(r'<button id="evaChatsBtn"[^>]*title="([^"]+)"[^>]*>(.*?)</button>', html, re.DOTALL)
+    report("sidebar_sessions_label", bool(chats_button and chats_button.group(1) == "Sessions" and "Sessions" in chats_button.group(2)))
+
+    with open("standalone/package.json") as f:
+        package = json.load(f)
+    with open("standalone/package-lock.json") as f:
+        package_lock = json.load(f)
+    app_version = re.search(r'id="evaAppVersion">v([^<]+)<', html)
+    versions = [
+        app_version.group(1) if app_version else None,
+        package.get("version"),
+        package_lock.get("version"),
+        package_lock.get("packages", {}).get("", {}).get("version"),
+    ]
+    report("app_version_consistent", versions == ["5.4.0"] * 4, f"got: {versions}")
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  Section 6: JavaScript Function Routing
