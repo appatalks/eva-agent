@@ -2029,7 +2029,14 @@ function getModelMaxTokens() {
 
 function getReasoningEffort() {
   var el = document.getElementById('selReasoningEffort');
-  return el ? el.value : 'medium';
+  var value = el ? el.value : 'default';
+  return ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].indexOf(value) >= 0 ? value : 'default';
+}
+
+function getReasoningEffortForModel(model) {
+  var effort = getReasoningEffort();
+  if (model === 'copilot-acp') return effort;
+  return ['low', 'medium', 'high'].indexOf(effort) >= 0 ? effort : 'default';
 }
 
 var _modeInitDone = false;
@@ -2040,8 +2047,18 @@ function onModelSettingsChange() {
   // Show/hide reasoning effort (for reasoning models)
   var reOpt = document.getElementById('opt-reasoningEffort');
   if (reOpt) {
-    var reasoningModels = ['o3-mini', 'copilot-o3-mini', 'copilot-o4-mini', 'copilot-deepseek-r1'];
+    var reasoningModels = ['o3-mini', 'copilot-o3-mini', 'copilot-o4-mini', 'copilot-deepseek-r1', 'copilot-gpt-5', 'copilot-gpt-5.6-sol', 'copilot-gpt-5.6-terra', 'copilot-gpt-5.6-luna', 'copilot-acp'];
     reOpt.style.display = reasoningModels.indexOf(model) >= 0 ? 'block' : 'none';
+    var reasoningSelect = document.getElementById('selReasoningEffort');
+    if (reasoningSelect) {
+      var savedEffort = localStorage.getItem('reasoningEffort') || 'default';
+      var hasSavedEffort = Array.from(reasoningSelect.options).some(function (option) { return option.value === savedEffort; });
+      if (!hasSavedEffort) savedEffort = 'default';
+      Array.from(reasoningSelect.options).forEach(function (option) {
+        option.disabled = model !== 'copilot-acp' && ['default', 'low', 'medium', 'high'].indexOf(option.value) < 0;
+      });
+      reasoningSelect.value = model === 'copilot-acp' || ['low', 'medium', 'high'].indexOf(savedEffort) >= 0 ? savedEffort : 'default';
+    }
   }
   // Show/hide temperature (hidden for reasoning models, gpt-5 family, latest, copilot-acp)
   var tempOpt = document.getElementById('opt-temperature');
@@ -2192,6 +2209,16 @@ document.addEventListener('DOMContentLoaded', () => {
   initStandaloneFirstRun();
 
   // Persist and restore the AIG backend selection across restarts.
+  var reasoningEffortSel = document.getElementById('selReasoningEffort');
+  if (reasoningEffortSel) {
+    var savedReasoningEffort = localStorage.getItem('reasoningEffort') || 'default';
+    var hasReasoningOption = Array.from(reasoningEffortSel.options).some(function (option) { return option.value === savedReasoningEffort; });
+    reasoningEffortSel.value = hasReasoningOption ? savedReasoningEffort : 'default';
+    reasoningEffortSel.addEventListener('change', function () {
+      localStorage.setItem('reasoningEffort', getReasoningEffort());
+    });
+  }
+
   var aigBackendSel = document.getElementById('selAIGBackend');
   if (aigBackendSel) {
     var savedAigBackend = localStorage.getItem('aigBackend');

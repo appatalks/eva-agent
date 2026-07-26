@@ -261,7 +261,8 @@ async function trboSend() {
               delete data.stop; // Exclude stop for gpt-5/latest
             }
     if (sModel === "o3-mini") {
-      data.reasoning_effort = (typeof getReasoningEffort === 'function') ? getReasoningEffort() : "medium";
+              var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel(sModel) : "default";
+      if (reasoningEffort !== 'default') data.reasoning_effort = reasoningEffort;
       delete data.temperature; // Exclude temperature for o3-mini
     }   
 

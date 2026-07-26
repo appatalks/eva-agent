@@ -51,6 +51,8 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from bridge import config as _cfg
 from bridge import state as _st
 
+ACP_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
 
 # Domain modules
 from bridge.acp_client import (  # noqa: F401
@@ -61,6 +63,7 @@ from bridge.acp_client import (  # noqa: F401
     _acp_pool_evict_if_needed,
     _reset_acp_pool,
     _ensure_acp_model,
+    _acquire_acp_client,
 )
 from bridge.kusto import (  # noqa: F401
     _refresh_kusto_token,
@@ -3045,10 +3048,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         old_path = _st.acp_client.copilot_path if _st.acp_client else "copilot"
         old_cwd = _st.acp_client.cwd if _st.acp_client else os.getcwd()
         old_model = _st.acp_client.model if _st.acp_client else None
+        old_reasoning_effort = _st.acp_client.reasoning_effort if _st.acp_client else None
         if _st.acp_client:
             _st.acp_client.stop()
 
-        _st.acp_client = ACPClient(copilot_path=old_path, cwd=old_cwd, model=old_model, mcp_config=mcp_servers)
+        _st.acp_client = ACPClient(copilot_path=old_path, cwd=old_cwd, model=old_model, mcp_config=mcp_servers,
+                                   reasoning_effort=old_reasoning_effort)
         try:
             _st.acp_client.start()
             # MCP config changed: drop stale warm clients so the pool only holds
@@ -3095,9 +3100,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         _set_openai_key_from(data)  # cache key for semantic recall
         requested_model = data.get("acp_model", "") or ""
-        switched, switch_info = _ensure_acp_model(requested_model)
-        if not switched:
-            self._json_response(503, {"error": {"message": switch_info}})
+        reasoning_effort = data.get("acp_reasoning_effort", "") or ""
+        if not isinstance(reasoning_effort, str) or reasoning_effort not in ACP_REASONING_EFFORTS | {""}:
+            self._json_response(400, {"error": {"message": "Unsupported acp_reasoning_effort"}})
             return
 
         # Build prompt text from messages (combine for context)
@@ -3137,7 +3142,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             print(f"[Cognition] Injected {len(memory_context)} chars of memory context")
 
         # Send to ACP
-        result = _st.acp_client.prompt(prompt_text, timeout=180)
+        with _acquire_acp_client(requested_model, reasoning_effort or None) as (selected_client, acquire_detail):
+            if not selected_client:
+                self._json_response(503, {"error": {"message": acquire_detail}})
+                return
+            result = selected_client.prompt(prompt_text, timeout=180)
 
         if "error" in result:
             error_detail = result["error"]

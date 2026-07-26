@@ -310,6 +310,30 @@ def test_js_routing_functions():
                f"not found in {expected_file}" if not found else "")
 
 
+def test_reasoning_effort_contract():
+    """Reasoning levels flow from settings through ACP to the Copilot CLI."""
+    with open("index.html") as f:
+        html = f.read()
+    match = re.search(r'<select id="selReasoningEffort"[^>]*>(.*?)</select>', html, re.DOTALL)
+    values = re.findall(r'value="([^"]+)"', match.group(1)) if match else []
+    expected = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    report("reasoning_effort_options", values == expected, f"got: {values}")
+
+    with open("core/js/copilot.js") as f:
+        copilot_js = f.read()
+    report("reasoning_effort_acp_payload", "payload.acp_reasoning_effort" in copilot_js)
+
+    with open("tools/bridge/acp_client.py") as f:
+        acp_client = f.read()
+    with open("tools/bridge/core.py") as f:
+        bridge_core = f.read()
+    report("reasoning_effort_cli_flag", 'cmd.extend(["--reasoning-effort", self.reasoning_effort])' in acp_client)
+    report("reasoning_effort_bridge_validation", "ACP_REASONING_EFFORTS" in bridge_core and "acp_reasoning_effort" in bridge_core)
+    report("reasoning_effort_request_local_client", "with _acquire_acp_client" in bridge_core and "selected_client.prompt" in bridge_core)
+    report("reasoning_effort_prompt_serialized", "with self.prompt_lock:" in acp_client)
+    report("reasoning_effort_client_pinning", "def _pin_acp_client" in acp_client and "def _release_acp_client" in acp_client)
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Section 7: Seed File Validation
 # ═══════════════════════════════════════════════════════════════════
@@ -512,6 +536,7 @@ def main():
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
         ("HTML Model Selector", [test_model_selector]),
         ("JS Routing Functions", [test_js_routing_functions]),
+        ("Reasoning Effort", [test_reasoning_effort_contract]),
         ("Seed File", [test_seed_file]),
         ("Goals Static Contract", [test_goals_static_contract]),
         ("Background Static Contract", [test_background_static_contract]),

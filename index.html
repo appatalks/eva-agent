@@ -468,10 +468,16 @@
           <div id="opt-reasoningEffort" class="model-opt" style="display:none">
             <label for="selReasoningEffort">Reasoning Effort:</label>
             <select id="selReasoningEffort">
+              <option value="default" selected>Model default</option>
+              <option value="none">None</option>
+              <option value="minimal">Minimal</option>
               <option value="low">Low</option>
-              <option value="medium" selected>Medium</option>
+              <option value="medium">Medium</option>
               <option value="high">High</option>
+              <option value="xhigh">Extra high</option>
+              <option value="max">Maximum</option>
             </select>
+            <p class="auth-note" style="margin-top:4px">Higher levels can increase response time and premium usage. Availability depends on the selected model.</p>
           </div>
           <div id="opt-aigBackend" class="model-opt" style="display:none">
             <label for="selAIGBackend">Eva Backend Model:</label>

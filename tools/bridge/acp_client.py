@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from bridge import config as _cfg
 from bridge import state as _st
 from bridge.kusto import _inject_kusto_token
@@ -20,20 +21,23 @@ class ACPClient:
 
     PROTOCOL_VERSION = 1  # ACP protocol major version
 
-    def __init__(self, copilot_path="copilot", cwd=None, model=None, mcp_config=None):
+    def __init__(self, copilot_path="copilot", cwd=None, model=None, mcp_config=None, reasoning_effort=None):
         self.copilot_path = copilot_path
         self.cwd = cwd or os.getcwd()
         self.model = model  # None = use CLI default
+        self.reasoning_effort = reasoning_effort  # None = use model default
         self.mcp_config = mcp_config or {}  # MCP servers config dict
         self.process = None
         self.request_id = 0
         self.lock = threading.Lock()
+        self.prompt_lock = threading.Lock()
         self.pending = {}           # id -> {"event": Event, "result": None, "error": None}
         self.session_id = None
         self.response_chunks = {}   # prompt_id -> accumulated text
         self.reader_thread = None
         self.agent_info = {}
         self.alive = False
+        self.active_requests = 0
         self.terminals = {}  # terminal_id -> {"process": Popen, "output": str}
 
     # --- Lifecycle ---
@@ -43,6 +47,8 @@ class ACPClient:
         cmd = [self.copilot_path, "--acp", "--stdio", "--allow-all-tools"]
         if self.model:
             cmd.extend(["--model", self.model])
+        if self.reasoning_effort:
+            cmd.extend(["--reasoning-effort", self.reasoning_effort])
         # Pass MCP server config via --additional-mcp-config
         if self.mcp_config:
             mcp_json = json.dumps({"mcpServers": self.mcp_config})
@@ -402,6 +408,13 @@ class ACPClient:
     # --- Public API ---
 
     def prompt(self, text, timeout=120):
+        with _pin_acp_client(self) as acquired:
+            if not acquired:
+                return {"error": "ACP client is unavailable"}
+            with self.prompt_lock:
+                return self._prompt(text, timeout)
+
+    def _prompt(self, text, timeout=120):
         """Send a text prompt and return the accumulated response text."""
         if not self.session_id:
             return {"error": "No active ACP session"}
@@ -438,6 +451,13 @@ class ACPClient:
         return {"text": response_text, "stop_reason": "end_turn"}
 
     def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120):
+        with _pin_acp_client(self) as acquired:
+            if not acquired:
+                return {"error": "ACP client is unavailable"}
+            with self.prompt_lock:
+                return self._prompt_with_image(text, image_b64, mime, timeout)
+
+    def _prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120):
         """Send a text + image prompt and return the accumulated response text.
 
         Uses the ACP content-block image type (the agent advertised
@@ -486,9 +506,11 @@ class ACPClient:
 # ---------------------------------------------------------------------------
 
 
-def _acp_model_key(model):
-    """Normalize a model name into a pool key. Empty/None -> the CLI default."""
-    return (model or "").strip() or "__default__"
+def _acp_model_key(model, reasoning_effort=None):
+    """Normalize model and reasoning effort into a warm-client pool key."""
+    model_key = (model or "").strip() or "__default__"
+    effort_key = (reasoning_effort or "").strip() or "__default__"
+    return f"{model_key}::{effort_key}"
 
 
 
@@ -507,7 +529,7 @@ def _acp_pool_register(client):
     reconfigured client) into the pool under its model key. Caller holds the lock."""
     if not client:
         return
-    key = _acp_model_key(client.model)
+    key = _acp_model_key(client.model, client.reasoning_effort)
     _st.acp_pool[key] = client
     _acp_pool_touch(key)
 
@@ -523,6 +545,8 @@ def _acp_pool_evict_if_needed(protect_key):
             if k == protect_key:
                 continue
             if _st.acp_client is not None and _st.acp_pool.get(k) is _st.acp_client:
+                continue
+            if getattr(_st.acp_pool.get(k), "active_requests", 0) > 0:
                 continue
             victim_key = k
             break
@@ -540,6 +564,30 @@ def _acp_pool_evict_if_needed(protect_key):
                 victim.stop()
             except Exception:
                 pass
+
+
+def _release_acp_client(client):
+    """Release a request pin and trim any temporary pool overflow."""
+    with _st.acp_pool_lock:
+        client.active_requests = max(0, client.active_requests - 1)
+        current_key = None
+        if _st.acp_client is not None:
+            current_key = _acp_model_key(_st.acp_client.model, _st.acp_client.reasoning_effort)
+        _acp_pool_evict_if_needed(current_key)
+
+
+@contextmanager
+def _pin_acp_client(client):
+    """Keep an existing client alive for one prompt lifecycle."""
+    with _st.acp_pool_lock:
+        acquired = bool(client and client.alive)
+        if acquired:
+            client.active_requests += 1
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            _release_acp_client(client)
 
 
 
@@ -561,7 +609,7 @@ def _reset_acp_pool(keep_client):
 
 
 
-def _ensure_acp_model(requested_model):
+def _ensure_acp_model(requested_model, reasoning_effort=None):
     """Ensure a warm ACP client for requested_model is selected as _st.acp_client.
 
     Uses a warm pool so switching between the cognition draft model and the
@@ -571,13 +619,13 @@ def _ensure_acp_model(requested_model):
 
     with _st.acp_pool_lock:
         # Seed the pool with the startup singleton on first use.
-        if _st.acp_client and _acp_model_key(_st.acp_client.model) not in _st.acp_pool:
+        if _st.acp_client and _acp_model_key(_st.acp_client.model, _st.acp_client.reasoning_effort) not in _st.acp_pool:
             _acp_pool_register(_st.acp_client)
 
         if not _st.acp_client and not _st.acp_pool:
             return False, "ACP bridge not connected to Copilot"
 
-        key = _acp_model_key(requested_model)
+        key = _acp_model_key(requested_model, reasoning_effort)
 
         # Fast path: a live warm client already exists for this model.
         existing = _st.acp_pool.get(key)
@@ -623,6 +671,7 @@ def _ensure_acp_model(requested_model):
                 cwd=template.cwd,
                 model=(requested_model or None),
                 mcp_config=_inject_kusto_token(template.mcp_config),
+                reasoning_effort=reasoning_effort,
             )
             _warm_t0 = time.perf_counter()
             new_client.start()
@@ -638,6 +687,28 @@ def _ensure_acp_model(requested_model):
         _telemetry_emit("acp_pool", result="warm", model=key, pool_size=len(_st.acp_pool),
                         warm_ms=round((time.perf_counter() - _warm_t0) * 1000.0, 1))
         return True, new_client.model or "default"
+
+
+@contextmanager
+def _acquire_acp_client(requested_model, reasoning_effort=None):
+    """Atomically select and pin a model/effort client from the warm pool."""
+    selected_client = None
+    detail = "ACP bridge not connected to Copilot"
+    with _st.acp_pool_lock:
+        switched, detail = _ensure_acp_model(requested_model, reasoning_effort)
+        if switched:
+            key = _acp_model_key(requested_model, reasoning_effort)
+            candidate = _st.acp_pool.get(key)
+            if candidate and candidate.alive:
+                candidate.active_requests += 1
+                selected_client = candidate
+            else:
+                detail = "Selected ACP client is unavailable"
+    try:
+        yield selected_client, detail
+    finally:
+        if selected_client:
+            _release_acp_client(selected_client)
 
 
 

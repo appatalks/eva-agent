@@ -241,10 +241,10 @@ async function _copilotSendModelsAPI(messages, modelValue, txtOutput, storageKey
   };
 
   // Reasoning models: add reasoning_effort, remove temperature
-  var reasoningModels = ['o3-mini', 'o4-mini', 'deepseek-r1'];
+  var reasoningModels = ['o3-mini', 'o4-mini', 'deepseek-r1', 'gpt-5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
   if (reasoningModels.indexOf(model) >= 0) {
-    var re = (typeof getReasoningEffort === 'function') ? getReasoningEffort() : 'medium';
-    payload.reasoning_effort = re;
+    var re = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel(modelValue) : 'default';
+    if (re !== 'default') payload.reasoning_effort = re;
     delete payload.temperature;
   }
 
@@ -300,6 +300,8 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey) {
 
     var payload = { messages: messages, model: 'copilot-acp' };
     if (acpModel) payload.acp_model = acpModel;
+    var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel('copilot-acp') : 'default';
+    if (reasoningEffort !== 'default') payload.acp_reasoning_effort = reasoningEffort;
 
     var resp = await fetch(url, {
       method: 'POST',

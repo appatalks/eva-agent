@@ -972,6 +972,8 @@ Eight tabs in a modal overlay:
 | **Cron** | Cron task list with create/edit/delete, schedule expression, prompt, last/next run timestamps |
 | **MCP** | Azure MCP, GitHub MCP, Kusto MCP toggles with config fields. Apply/refresh buttons |
 
+Reasoning-capable models expose **Model default**, **None**, **Minimal**, **Low**, **Medium**, **High**, **Extra high**, and **Maximum**. The selection is saved locally and passed to OpenAI, GitHub Models, or Copilot CLI ACP when supported. Higher levels can increase response time and premium usage.
+
 ## Deployment
 
 ### Browser only
