@@ -27,23 +27,27 @@ npm run dist
 
 Output lands in `standalone/dist/`, named like `Eva Standalone-<version>.AppImage` (the version comes from `package.json`).
 
-The AppImage build is configured in `package.json` but this scaffold does not include generated output or a lockfile.
+The AppImage build is configured in `package.json`; `package-lock.json` is
+tracked, while generated `dist/` output is ignored.
 
 ## Launch The AppImage
 
 ```sh
 cd standalone/dist
-chmod +x "Eva Standalone-5.4.0.AppImage"
-"./Eva Standalone-5.4.0.AppImage"
+chmod +x "Eva Standalone-5.5.0.AppImage"
+"./Eva Standalone-5.5.0.AppImage"
 ```
 
 If the host is missing FUSE (common on minimal containers and some distros), launch with extraction instead:
 
 ```sh
-"./Eva Standalone-5.4.0.AppImage" --appimage-extract-and-run
+"./Eva Standalone-5.5.0.AppImage" --appimage-extract-and-run
 ```
 
-The AppImage is self-contained: it spawns the bundled ACP bridge on a random localhost port at startup. The host still needs Copilot CLI authenticated once via `copilot auth login`.
+The AppImage is self-contained: it spawns the bundled ACP bridge on a random
+localhost port at startup. Copilot-backed cloud features require Copilot CLI to
+be authenticated once via `copilot auth login`; local-only LM Studio mode does
+not.
 
 ## Runtime Notes
 

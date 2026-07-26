@@ -297,7 +297,7 @@ def test_model_selector():
         package_lock.get("version"),
         package_lock.get("packages", {}).get("", {}).get("version"),
     ]
-    report("app_version_consistent", versions == ["5.4.0"] * 4, f"got: {versions}")
+    report("app_version_consistent", versions == ["5.5.0"] * 4, f"got: {versions}")
 
 
 # ═══════════════════════════════════════════════════════════════════

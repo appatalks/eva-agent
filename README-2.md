@@ -2,6 +2,9 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
+> **Current release:** Eva 5.5.0. This document describes the matching browser UI,
+> Python bridge, and Electron package in this repository.
+
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
 > Eva experience: persistent memory, emotion tracking, proactive data retrieval, and
 > intelligent cross-model orchestration. All other models work standalone, but AIG is the
@@ -13,7 +16,7 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 |---|---|
 | Eva (AIG) | Multi-agent orchestration over GitHub Models, ACP, and LM Studio |
 | OpenAI | GPT-4o, GPT-4o Mini, o1, o1-preview, o1-mini, o3-mini, latest |
-| GitHub Copilot (PAT) | GPT-4o, GPT-4o Mini, o3-mini, GPT-5, o4-mini, DeepSeek-R1, Llama 4 Maverick |
+| GitHub Copilot (PAT) | GPT-4o, GPT-4o Mini, o3-mini, GPT-5.6 Sol/Terra/Luna, GPT-5, o4-mini, DeepSeek-R1, Llama 4 Maverick |
 | GitHub Copilot (ACP) | Claude, GPT-5.x, GPT-4.1 via Copilot CLI |
 | Google Gemini | Gemini 2.0 Flash (Thinking Exp) |
 | LM Studio | Any local OpenAI-compatible model (fully offline) |
@@ -31,11 +34,11 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 - Inline image search (Wikimedia) and generation (gpt-image-1)
 - Downloadable artifact creation (PDF, text, CSV, markdown) with auto-open
 - Skill import/normalization from paste, URL, GitHub, or file upload
-- Background memory consolidation with human-in-the-loop proposals
+- Hands-off background cognition with applied/failed proposal and activity audit trails
 - Cron scheduler for recurring tasks (briefings, checks, reminders)
 - Alert system (SEC filings, weather, space weather, keyword watch) with Signal delivery
 - Mode persistence across restarts (bridge-side mode.txt, frontend localStorage)
-- TTS: OpenAI (default), browser, Bark, Amazon Polly
+- TTS: OpenAI (default), browser, Local Voices, and Amazon Polly (standard/neural/generative)
 - LCARS and Eva themes (7 Eva variants)
 - Standalone Electron AppImage with bundled bridge
 - Full behavioral eval harness with mock and live modes
@@ -113,7 +116,8 @@ Browser -> XHR/fetch -> Provider API -> JSON response -> `renderEvaResponse()`
 2. Bridge injects memory context from SQLite/Kusto
 3. Bridge runs data retrieval via local MCP tool-calling loop (see below)
 4. Browser prepends memory + data to system prompt
-5. Browser sends directly to `http://localhost:1234/v1/chat/completions`
+5. Browser sends directly to the configured LM Studio base URL; the default is
+  `http://localhost:1234/v1/chat/completions`
 6. Response processed by `Cognition.executeActions()` for any action blocks
 7. Rendered via `renderEvaResponse()`
 
@@ -140,7 +144,8 @@ index.html                 Main UI: chat, settings modal, LCARS sidebar,
 config.json                API keys (not committed, gitignored)
 config.example.json        Template for config.json
 config.local.example.js    Template for file:// usage (inlined config)
-mcp.json                   MCP server configuration (gitignored)
+mcp.json                   Tracked default MCP server configuration; credentials
+                           are resolved from environment/local settings
 
 core/
   style.css                All styling: base theme, settings panel,
@@ -190,6 +195,9 @@ core/
                            - Built-in PDF generator (Helvetica, Latin-1, multi-page)
                            - Marker protocol: [[EVA_BROWSER]], [[EVA_DESKTOP]],
                              [[EVA_LOOK]], [[EVA_FILE]]
+    agents.js              Agent Operations scorecard, task detail, steering,
+                           keyed card updates, and memory topology canvas
+    dialogs.js             Promise-based in-app text prompt for Electron
     dalle3.js              Image generation via gpt-image-1 (dalle3Send)
     idb-store.js           IndexedDB storage backend (sessions + blobs)
     sessions.js            Session persistence and management
@@ -205,7 +213,7 @@ tools/
   bridge/
     __init__.py
     __main__.py            Allows `python -m bridge`
-    core.py                Main HTTP server, AIG pipeline, all endpoints (~3800 lines)
+    core.py                Main HTTP server, AIG pipeline, all endpoints (~4500 lines)
     acp_client.py          ACPClient: Copilot CLI subprocess, JSON-RPC, model pool
     cognition.py           Memory context builder, entity extraction, emotion computation
     memory.py              Backend switching (Kusto/SQLite), embeddings, synonyms
@@ -214,7 +222,7 @@ tools/
     config.py              All constants, paths, thresholds, table schemas
     state.py               Mutable runtime state (thread-safe)
     local_mcp.py           Local MCP client, tool-calling agent loop
-    background.py          Background job system (12 job types, proposals)
+    background.py          Background job system (13 job types, proposal audit)
     cron.py                Cron scheduler (5-field expressions)
     alerts.py              Alert/notification system (SEC, weather, space weather)
                            Signal messaging via signal-cli
@@ -231,7 +239,7 @@ tools/
   acp_bridge.service       Systemd unit file
   acp_setup.sh             One-command installer
   test_static.py           CI-safe static tests
-  test_eva.py              Integration tests (64 checks)
+  test_eva.py              Live bridge integration suite
   test_latency.py          Latency benchmarks
   test_skills_e2e.py       Skill import end-to-end tests
   eval/                    Behavioral eval harness
@@ -239,7 +247,7 @@ tools/
 standalone/
   main.js                  Electron shell: port allocation, bridge spawn, health polling
   preload.js               Context bridge (exposes evaStandalone API to renderer)
-  package.json             Electron + electron-builder config (v5.4.0)
+  package.json             Electron + electron-builder config (v5.5.0)
 ```
 
 ## Dependencies
@@ -292,9 +300,11 @@ The bridge implements the [Agent Client Protocol (ACP)](https://agentclientproto
 | `terminal/output` | Agent -> Client | Get command output |
 | `terminal/release` | Agent -> Client | Release terminal |
 
-### ACP Client Pool
+### ACP Client Lifecycles
 
-The bridge maintains a pool of up to 4 `ACPClient` instances (one per model). Each client is a separate `copilot` subprocess with its own conversation session.
+The primary AIG/chat path maintains a pool of up to 4 `ACPClient` instances, one
+per model. Each pooled client is a separate `copilot` subprocess with its own
+conversation session.
 
 ```python
 acp_pool: dict[model_key -> ACPClient]   # keyed by model name
@@ -303,7 +313,15 @@ acp_pool_lock: threading.RLock()         # thread-safe access
 ACP_POOL_MAX = 4
 ```
 
-When a request arrives for a model not in the pool, the bridge spawns a new Copilot CLI process (`copilot --acp --stdio`), runs the ACP `initialize` + `session/new` handshake, and registers it in the pool. If the pool is full, the least-recently-used client is evicted and its subprocess terminated.
+When a primary request arrives for a model not in the pool, the bridge spawns a
+new Copilot CLI process (`copilot --acp --stdio`), runs the ACP `initialize` and
+`session/new` handshake, and registers it in the pool. If the pool is full, the
+least-recently-used client is evicted and its subprocess terminated.
+
+Subagents do not use this model-keyed pool. Every accepted subagent worker owns
+a dedicated `ACPClient` and session for the task lifetime, including when other
+tasks select the same model. The worker stops that subprocess in `finally`, so
+parallel agents cannot share conversation context or leak a client after exit.
 
 ### Available ACP Models
 
@@ -363,7 +381,7 @@ Options:
 | `/v1/memory/context` | GET | Build and return memory context for injection |
 | `/v1/memory/reflect` | POST | Trigger post-response reflection (entities, emotion) |
 | `/v1/memory/backend` | GET/POST | Get or switch memory backend (kusto/sqlite) |
-| `/v1/memory/seed` | POST | Seed database tables |
+| `/v1/kusto/seed` | POST | Loopback-only Kusto schema seed |
 
 **Data Retrieval:**
 
@@ -403,9 +421,9 @@ Options:
 |---|---|---|
 | `/v1/background/status` | GET | Loop status, interval, last tick |
 | `/v1/background/control` | POST | Enable/disable, change interval, run now |
-| `/v1/background/proposals` | GET | Pending memory consolidation proposals |
-| `/v1/background/proposals/<id>/approve` | POST | Apply a proposal |
-| `/v1/background/proposals/<id>/reject` | POST | Reject a proposal |
+| `/v1/background/proposals` | GET | Proposal audit records, optionally filtered by status |
+| `/v1/background/proposals/<id>/approve` | POST | Apply a pending proposal record |
+| `/v1/background/proposals/<id>/reject` | POST | Reject a pending proposal record |
 | `/v1/background/activity` | GET | Recent background tick activity |
 
 **Cron:**
@@ -435,11 +453,16 @@ Options:
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/v1/browser/launch` | POST | Start autonomous browser task |
-| `/v1/browser/<id>/status` | GET | Run status + latest screenshot |
-| `/v1/browser/<id>/confirm` | POST | Answer confirmation prompt |
-| `/v1/desktop/launch` | POST | Start autonomous desktop task |
-| `/v1/desktop/<id>/status` | GET | Run status + latest screenshot |
+| `/v1/browser/run` | POST | Start autonomous browser task |
+| `/v1/browser/status?run_id=<id>` | GET | Status for the selected browser run |
+| `/v1/browser/screenshot?run_id=<id>` | GET | Latest screenshot for the selected browser run |
+| `/v1/browser/confirm` | POST | Answer confirmation prompt; JSON body includes `run_id`, `approve`, optional `text` |
+| `/v1/browser/cancel` | POST | Cancel a browser run; JSON body includes `run_id` |
+| `/v1/desktop/run` | POST | Start autonomous desktop task |
+| `/v1/desktop/status?run_id=<id>` | GET | Status for the selected desktop run |
+| `/v1/desktop/screenshot?run_id=<id>` | GET | Latest screenshot for the selected desktop run |
+| `/v1/desktop/confirm` | POST | Answer confirmation prompt; JSON body includes `run_id`, `approve`, optional `text` |
+| `/v1/desktop/cancel` | POST | Cancel a desktop run; JSON body includes `run_id` |
 
 **Agent Operations:**
 
@@ -567,7 +590,7 @@ Eva supports two memory backends, switchable at runtime via Settings or the
 | `SelfState` | Capability, Status, Timestamp | Active capabilities |
 | `HeuristicsIndex` | Entity, Category, Frequency, Timestamp | Pattern tracking |
 | `EmotionBaseline` | Dimension, Value, Timestamp | Emotional defaults |
-| `BackgroundProposals` | ProposalId, JobType, TargetTable, Payload, Status, ... | Human-reviewed memory proposals |
+| `BackgroundProposals` | ProposalId, JobType, TargetTable, Payload, Status, ... | Applied/failed proposal audit records; pending records remain API-compatible |
 | `BackgroundActivity` | TickId, Status, ProposalCount, Timestamp | Background loop ticks |
 | `Skills` | SkillId, Name, Description, Instructions, Tools, Tags, Source, Status, CreatedAt, UpdatedAt | Imported reusable skills |
 
@@ -809,7 +832,10 @@ Autonomous web browsing via Playwright with a persistent Chrome profile.
 
 **Action types:** click, double_click, click_ref, type, type_ref, press, scroll, navigate, wait, done, ask
 
-**Safety:** Sensitive actions (buy, purchase, payment, checkout) require user confirmation before execution. The run parks and waits for approval via `/v1/browser/<id>/confirm`.
+**Safety:** Sensitive actions (buy, purchase, payment, checkout) require user
+confirmation before execution. The run parks and waits for
+`POST /v1/browser/confirm` with `run_id`, `approve`, and optional `text` in the
+JSON body.
 
 **Trajectories:** Each step logged as JSONL + PNG screenshot to `~/.config/eva-standalone/browser_trajectories/` for fine-tuning.
 
@@ -1055,7 +1081,7 @@ user review.
 When cognition and a memory backend are configured, the bridge starts an internal
 background loop (default: every 2 hours, pauses within 120s of user activity).
 
-**Job types (12 total):**
+**Job types (13 total):**
 
 | Job | Description |
 |---|---|
@@ -1068,13 +1094,21 @@ background loop (default: every 2 hours, pauses within 120s of user activity).
 | `token_telemetry` | Aggregate token usage stats |
 | `proactive_briefing` | Suggest upcoming relevant content |
 | `market_snapshot` | Stock/crypto updates for watched symbols |
-| `space_weather` | Space weather alerts (Kp, G, R, S indices) |
+| `sec_filing_watch` | Check watched symbols for new SEC filings |
+| `space_weather_alert` | Space weather alerts (Kp, G, R, S indices) |
 | `research_deepdive` | Deep-dive on research topics |
 | `alert_watch` | Check alert rules for triggers |
 
-**Human-in-the-loop:** The loop never writes directly to memory tables. It creates
-proposals in `BackgroundProposals` with status `pending`. A human reviews them in
-Settings > Background. Approval writes the payload; rejection marks it rejected.
+The bridge runs all 13 registered jobs. Settings exposes 12 direct job toggles;
+`alert_watch` is controlled through the alert subsystem rather than a separate
+background-job checkbox.
+
+**Hands-off application:** Every job proposal is applied immediately through
+`_apply_proposal_payload()`, regardless of its legacy `auto_apply` hint. The bridge
+then stores an `applied` or `failed` row in `BackgroundProposals` and records the
+tick in `BackgroundActivity`. The proposal approval/rejection endpoints remain
+available for compatible handling of pending or historical records, but normal
+background ticks do not wait for human review.
 
 ### Cron Scheduler
 
@@ -1151,10 +1185,14 @@ Eight tabs in a modal overlay:
 | **Models** | Model selector (grouped by provider), temperature, max tokens, reasoning effort, AIG backend selector, ACP model selector, cognitive layer controls (toggle, per-agent model selectors, max cycles, editable prompts, debug trace) |
 | **Auth** | API key inputs with show/hide toggles, ACP bridge URL, Signal sender/recipient numbers. Standalone encrypts provider keys with Electron safeStorage so they survive AppImage rebuilds. |
 | **Prompts** | Personality presets (Default/Concise/Advanced/Terminal/Custom), editable system prompt textarea |
-| **Goals** | Goals list with create/edit/delete. Skills list with import (paste/URL/GitHub/file), evarise preview, edit, enable/disable |
-| **Background** | Background loop status, enable/interval controls, run-once, proposal approval/rejection, recent activity |
+| **Goals** | Goals list with create/edit/delete |
+| **Background** | Background loop status, enable/interval controls, run-once, proposal audit/history, approval/rejection controls for pending records, recent activity |
 | **Cron** | Cron task list with create/edit/delete, schedule expression, prompt, last/next run timestamps |
 | **MCP** | Azure MCP, GitHub MCP, Kusto MCP toggles with config fields. Apply/refresh buttons |
+
+Skills are managed in the dedicated **Skills** sidebar panel, which supports
+paste, URL, GitHub, and file import plus evarise preview, edit, enable/disable,
+and reimport.
 
 The sidebar profile picker keeps sessions, prompts, model choices, voice preferences, and other browser-local settings separate per user. API credentials, MCP configuration, and the selected memory backend remain shared installation settings. Sessions open fresh on launch and support persistent custom titles. Saved skills can be edited and reimported through the existing skill ID, preserving database history.
 
@@ -1190,7 +1228,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.4.0.AppImage'
+./dist/'Eva Standalone-5.5.0.AppImage'
 ```
 
 **Electron lifecycle:**
@@ -1234,7 +1272,7 @@ Current state (2026-06-15):
 - Camera off by default, subprocess-isolated, state read-only from bridge
 - Sensitive browser/desktop actions require user confirmation
 - `pyautogui.FAILSAFE = True` (mouse to corner = emergency stop)
-- Background proposals require human approval before writing to memory
+- Background writes use bounded proposal handlers and retain applied/failed audit records
 
 ## CI / Testing
 
