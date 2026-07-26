@@ -1953,6 +1953,39 @@ function applyStandaloneSurface() {
   applyStandaloneSimplifications();
 }
 
+function initAudioPreferences() {
+  var engine = document.getElementById('selEngine');
+  var voice = document.getElementById('selVoice');
+  var autoSpeak = document.getElementById('autoSpeak');
+
+  if (engine) {
+    var savedEngine = localStorage.getItem('tts_engine');
+    if (savedEngine && Array.from(engine.options).some(function(option) { return option.value === savedEngine; })) {
+      engine.value = savedEngine;
+    }
+    engine.addEventListener('change', function() {
+      localStorage.setItem('tts_engine', engine.value);
+    });
+  }
+
+  if (voice) {
+    var savedVoice = localStorage.getItem('tts_voice');
+    if (savedVoice && Array.from(voice.options).some(function(option) { return option.value === savedVoice; })) {
+      voice.value = savedVoice;
+    }
+    voice.addEventListener('change', function() {
+      localStorage.setItem('tts_voice', voice.value);
+    });
+  }
+
+  if (autoSpeak) {
+    autoSpeak.checked = localStorage.getItem('tts_auto_speak') === '1';
+    autoSpeak.addEventListener('change', function() {
+      localStorage.setItem('tts_auto_speak', autoSpeak.checked ? '1' : '0');
+    });
+  }
+}
+
 function getSavedMCPConfig() {
   try {
     return JSON.parse(localStorage.getItem('mcp_config') || '{}') || {};
@@ -2280,6 +2313,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const monitorTabs = document.getElementById('lcarsMonitorTabs');
   const monitorPanels = document.getElementById('lcarsMonitorPanels');
 
+  initAudioPreferences();
   applyStandaloneSurface();
   initStandaloneFirstRun();
 
