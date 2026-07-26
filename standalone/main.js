@@ -1,10 +1,11 @@
-const { app, BrowserWindow, dialog, ipcMain, session, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell } = require('electron');
 const http = require('http');
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { fileURLToPath } = require('url');
 
 let bridgeProcess = null;
 let readyBridgeProcess = null;
@@ -19,6 +20,46 @@ const BRIDGE_READY_TIMEOUT_MS = 60000;
 const LOCAL_VOICES_READY_TIMEOUT_MS = 10000;
 const BRIDGE_PORT_RETRY_LIMIT = 2;
 const ADDRESS_IN_USE_PATTERN = /Address already in use|EADDRINUSE/i;
+const AUTH_STORE_KEYS = ['OPENAI_API_KEY', 'GITHUB_PAT', 'GOOGLE_GL_KEY', 'GOOGLE_VISION_KEY'];
+
+function loadEncryptedAuth() {
+  if (!safeStorage.isEncryptionAvailable()) return {};
+  const authPath = path.join(app.getPath('userData'), 'auth.enc.json');
+  try {
+    const encrypted = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+    const result = {};
+    AUTH_STORE_KEYS.forEach(function(key) {
+      if (typeof encrypted[key] !== 'string') return;
+      result[key] = safeStorage.decryptString(Buffer.from(encrypted[key], 'base64'));
+    });
+    return result;
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveEncryptedAuth(values) {
+  if (!safeStorage.isEncryptionAvailable() || !values || typeof values !== 'object') return false;
+  const encrypted = {};
+  AUTH_STORE_KEYS.forEach(function(key) {
+    const value = typeof values[key] === 'string' ? values[key].trim() : '';
+    if (value) encrypted[key] = safeStorage.encryptString(value).toString('base64');
+  });
+  const authPath = path.join(app.getPath('userData'), 'auth.enc.json');
+  const temporaryPath = authPath + '.tmp';
+  fs.writeFileSync(temporaryPath, JSON.stringify(encrypted), { mode: 0o600 });
+  fs.renameSync(temporaryPath, authPath);
+  return true;
+}
+
+function isTrustedEvaRenderer(event) {
+  try {
+    const rendererPath = fileURLToPath(event.senderFrame.url);
+    return path.resolve(rendererPath) === path.resolve(getAppRoot(), 'index.html');
+  } catch (_) {
+    return false;
+  }
+}
 
 function clearBridgeStopTimer() {
   if (bridgeStopTimer) {
@@ -556,8 +597,14 @@ ipcMain.handle('local-voices-list', function() {
 ipcMain.handle('local-voices-import', function() {
   return importLocalVoiceProfile();
 });
+ipcMain.handle('auth-load', function(event) {
+  return isTrustedEvaRenderer(event) ? loadEncryptedAuth() : {};
+});
+ipcMain.handle('auth-save', function(event, values) {
+  return isTrustedEvaRenderer(event) && saveEncryptedAuth(values);
+});
 ipcMain.on('bridge-capability-token', function(event) {
-  event.returnValue = bridgeCapabilityToken;
+  event.returnValue = isTrustedEvaRenderer(event) ? bridgeCapabilityToken : '';
 });
 
 function createWindow(acpBaseUrl) {
@@ -619,18 +666,8 @@ function createWindow(acpBaseUrl) {
   // navigating the Electron window away from Eva's UI.
   mainWindow.webContents.on('will-navigate', function(event, url) {
     if (url.startsWith('http://') || url.startsWith('https://')) {
-      // Block localhost /v1/files/ navigation — these are artifact downloads,
-      // not page navigations. Without this, Electron replaces Eva's UI with
-      // raw file content, making the app appear frozen.
-      if (url.startsWith('http://127.0.0.1') || url.startsWith('http://localhost')) {
-        if (url.indexOf('/v1/files/') !== -1) {
-          event.preventDefault();
-          return;
-        }
-        return;
-      }
       event.preventDefault();
-      shell.openExternal(url);
+      if (!url.startsWith('http://127.0.0.1') && !url.startsWith('http://localhost')) shell.openExternal(url);
     }
   });
   mainWindow.webContents.setWindowOpenHandler(function(details) {

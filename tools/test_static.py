@@ -474,6 +474,10 @@ def test_sidebar_workflow_contract():
         options_js = f.read()
     with open("tools/bridge/core.py") as f:
         bridge_core = f.read()
+    with open("standalone/main.js") as f:
+        standalone_main = f.read()
+    with open("standalone/preload.js") as f:
+        standalone_preload = f.read()
 
     report("workflow_signal_marker_only", "Do NOT call /v1/signal/send" in cognition_js and "Do NOT call /v1/signal/send" in bridge_core)
     report("workflow_signal_missing_marker_fails", "Eva did not provide a Signal message payload" in options_js)
@@ -484,6 +488,9 @@ def test_sidebar_workflow_contract():
     report("workflow_profile_picker", 'id="profilePanel"' in html and 'src="core/js/profiles.js"' in html and "function switchEvaProfile" in profiles_js)
     report("workflow_profile_awaits_session_save", "async function switchEvaProfile" in profiles_js and "await saveCurrentSession()" in profiles_js)
     report("workflow_profile_scoped_sessions", "saveCurrentSession" in profiles_js and "eva_sessions" not in profiles_js)
+    report("workflow_encrypted_auth_persistence", "safeStorage.encryptString" in standalone_main and "safeStorage.decryptString" in standalone_main and "authLoad" in standalone_preload)
+    report("workflow_auth_ipc_trusted_renderer", "isTrustedEvaRenderer" in standalone_main and "fileURLToPath(event.senderFrame.url)" in standalone_main)
+    report("workflow_http_navigation_blocked", "event.preventDefault()" in standalone_main and "if (!url.startsWith('http://127.0.0.1')" in standalone_main)
 
 
 # ═══════════════════════════════════════════════════════════════════

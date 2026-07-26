@@ -966,7 +966,7 @@ Eight tabs in a modal overlay:
 |---|---|
 | **General** | Theme, TTS engine/voice, auto-speak, camera presence, vision provider, data retrieval mode (cloud/local) with status |
 | **Models** | Model selector (grouped by provider), temperature, max tokens, reasoning effort, AIG backend selector, ACP model selector, cognitive layer controls (toggle, per-agent model selectors, max cycles, editable prompts, debug trace) |
-| **Auth** | API key inputs with show/hide toggles, ACP bridge URL, Signal sender/recipient numbers |
+| **Auth** | API key inputs with show/hide toggles, ACP bridge URL, Signal sender/recipient numbers. Standalone encrypts provider keys with Electron safeStorage so they survive AppImage rebuilds. |
 | **Prompts** | Personality presets (Default/Concise/Advanced/Terminal/Custom), editable system prompt textarea |
 | **Goals** | Goals list with create/edit/delete. Skills list with import (paste/URL/GitHub/file), evarise preview, edit, enable/disable |
 | **Background** | Background loop status, enable/interval controls, run-once, proposal approval/rejection, recent activity |

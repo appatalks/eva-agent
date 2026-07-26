@@ -18,7 +18,23 @@ var maxRetries = 5;
 var retryDelay = 2420; // milliseconds
 
 // API Access[OpenAI, AWS] 
+var evaAuthReady = Promise.resolve();
+
+function loadStandaloneAuth() {
+  if (!window.evaStandalone || typeof window.evaStandalone.authLoad !== 'function') return Promise.resolve();
+  return window.evaStandalone.authLoad().then(function(values) {
+    if (!values || typeof values !== 'object') return;
+    ['OPENAI_API_KEY', 'GITHUB_PAT', 'GOOGLE_GL_KEY', 'GOOGLE_VISION_KEY'].forEach(function(key) {
+      if (!values[key]) return;
+      localStorage.setItem('auth_' + key, values[key]);
+      window[key] = values[key];
+    });
+    if (document.readyState !== 'loading') populateAuthFields();
+  }).catch(function() {});
+}
+
 function auth() {
+  evaAuthReady = loadStandaloneAuth();
   // Prefer inlined local config if provided (config.local.js)
   if (typeof window !== 'undefined' && window.__LOCAL_CONFIG__) {
     const config = window.__LOCAL_CONFIG__;
@@ -90,6 +106,14 @@ function saveAuthKeys() {
       localStorage.removeItem('auth_' + key);
     }
   });
+  if (window.evaStandalone && typeof window.evaStandalone.authSave === 'function') {
+    var encryptedValues = {};
+    Object.keys(map).forEach(function(fieldId) {
+      var field = document.getElementById(fieldId);
+      if (field && field.value.trim()) encryptedValues[map[fieldId]] = field.value.trim();
+    });
+    window.evaStandalone.authSave(encryptedValues).catch(function() {});
+  }
   // Save ACP Bridge URL separately
   var acpEl = document.getElementById('txtACPBridgeUrl');
   if (acpEl && typeof isEvaStandalone === 'function' && isEvaStandalone()) {

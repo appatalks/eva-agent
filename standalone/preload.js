@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   bridgeToken: ipcRenderer.sendSync('bridge-capability-token'),
   isStandalone: true,
   version: readArg('eva-version'),
+  authLoad: function() { return ipcRenderer.invoke('auth-load'); },
+  authSave: function(values) { return ipcRenderer.invoke('auth-save', values); },
   minimize: function() { ipcRenderer.send('win-minimize'); },
   maximize: function() { ipcRenderer.send('win-maximize'); },
   close: function() { ipcRenderer.send('win-close'); },

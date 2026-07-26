@@ -436,6 +436,10 @@ function autoApplySavedMCPConfig() {
 }
 
 async function _applySavedMCPConfig(githubPat) {
+  if (typeof evaAuthReady !== 'undefined' && evaAuthReady) {
+    await evaAuthReady;
+    githubPat = (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : githubPat;
+  }
   var saved;
   try {
     saved = JSON.parse(localStorage.getItem('mcp_config') || 'null');
