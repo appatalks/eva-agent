@@ -2492,8 +2492,10 @@ document.addEventListener('DOMContentLoaded', () => {
   if (evaNewChat) {
     evaNewChat.addEventListener('click', function() {
       if (typeof newSession === 'function') newSession();
-      else if (typeof clearMessages === 'function') clearMessages();
-      restoreEvaWelcome();
+      else {
+        if (typeof clearMessages === 'function') clearMessages();
+        restoreEvaWelcome();
+      }
     });
   }
 

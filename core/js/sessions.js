@@ -150,7 +150,8 @@ function newSession() {
 
   var txtOutput = document.getElementById('txtOutput');
   if (txtOutput) {
-    if (typeof showWelcome === 'function') showWelcome();
+    if (typeof restoreEvaWelcome === 'function') restoreEvaWelcome();
+    else if (typeof showWelcome === 'function') showWelcome();
     else txtOutput.innerHTML = '';
   }
 

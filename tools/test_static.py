@@ -484,6 +484,7 @@ def test_sidebar_workflow_contract():
     report("workflow_signal_missing_marker_fails", "Eva did not provide a Signal message payload" in options_js)
     report("workflow_session_rename", "function renameSession" in sessions_js and "customTitle" in sessions_js)
     report("workflow_new_session_on_launch", "idbMigrateFromLocalStorage().then(function() {\n    newSession();" in sessions_js)
+    report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "newSession();\n      else" in options_js)
     report("workflow_side_panels_click_outside", "function closeSidePanels" in sessions_js and "EVA_SIDE_PANEL_IDS" in sessions_js and "document.addEventListener('click'" in sessions_js)
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
     report("workflow_profile_picker", 'id="profilePanel"' in html and 'src="core/js/profiles.js"' in html and "function switchEvaProfile" in profiles_js)
