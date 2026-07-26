@@ -774,7 +774,7 @@
 <section id="compare">
   <div class="section-inner">
     <h2>Eva vs the field</h2>
-    <p class="section-sub"></p>
+    <p class="section-sub">A capability snapshot based on publicly documented product features. MCP and custom integrations can extend several products beyond their built-in experience.</p>
     <div class="compare-wrap glass reveal">
       <table class="compare-table">
         <thead>
@@ -796,6 +796,13 @@
           <tr><td>Self-improving skills</td><td class="y">Auto-learn</td><td class="y">Yes</td><td class="n">No</td><td class="n">No</td><td>Custom skills</td></tr>
           <tr><td>Scheduled tasks</td><td class="y">Cron</td><td class="y">Cron</td><td class="n">No</td><td class="n">No</td><td class="y">Automations</td></tr>
           <tr><td>Persistent memory</td><td class="y">Kusto/ADX</td><td class="y">FTS5 + files</td><td>Limited</td><td>Limited</td><td>Session history</td></tr>
+          <tr><td>Offline/local operation</td><td class="y">LM Studio + direct MCP</td><td class="y">Self-hosted + local models</td><td class="n">Cloud service</td><td class="n">Cloud service</td><td>Local workspace, cloud models</td></tr>
+          <tr><td>Memory deployment choice</td><td class="y">Local SQLite or ADX</td><td class="y">Local FTS5 + files</td><td class="n">Managed</td><td class="n">Managed</td><td>Session history</td></tr>
+          <tr><td>Multiple local user profiles</td><td class="y">Separate sessions + settings</td><td>User modeling</td><td class="n">Account-based</td><td class="n">Account-based</td><td class="n">Account-based</td></tr>
+          <tr><td>Outbound messaging</td><td class="y">Signal delivery</td><td class="y">Signal + 5 other channels</td><td class="n">Not documented</td><td>Slack integration</td><td class="n">Not documented</td></tr>
+          <tr><td>Local voice cloning</td><td class="y">Imported voice profiles</td><td>TTS + transcription</td><td>Voice conversations</td><td class="n">Not documented</td><td class="n">Not documented</td></tr>
+          <tr><td>System diagnostics</td><td class="y">Subsystem doctor</td><td class="y">Hermes doctor</td><td class="n">Not documented</td><td class="n">Not documented</td><td>Debug logs</td></tr>
+          <tr><td>Review/validation loop</td><td class="y">Configurable Eva + Reviewer</td><td>Delegated agents</td><td class="n">Not documented</td><td class="n">Not documented</td><td class="y">Built-in validation loop</td></tr>
           <tr><td>Multi-provider</td><td class="y">4+ providers</td><td class="y">200+ models</td><td class="n">OpenAI only</td><td class="n">Anthropic only</td><td class="y">Multi-model + BYOK</td></tr>
           <tr><td>No build step</td><td class="y">Yes</td><td class="n">pip install</td><td class="n">N/A</td><td class="n">N/A</td><td class="n">Desktop install</td></tr>
         </tbody>
