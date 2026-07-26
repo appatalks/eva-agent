@@ -202,11 +202,15 @@ body.theme-eva .eva-sidebar {
 }
 .eva-sidebar-user {
   display: flex;
+  width: 100%;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
   border-radius: 8px;
   cursor: pointer;
+  border: 0;
+  background: none;
+  text-align: left;
   transition: background 0.15s;
 }
 .eva-sidebar-user:hover { background: var(--eva-sidebar-item); }

@@ -617,6 +617,8 @@
       'SIGNAL SEND REQUEST:',
       'Your final answer MUST include exactly one valid marker with the complete message to deliver:',
       '[[EVA_SIGNAL]]{"message":"<complete message text>"}[[/EVA_SIGNAL]]',
+      'Do NOT call /v1/signal/send, /v1/health, curl, terminal, or any tool to test delivery.',
+      'Emit the marker only. The authenticated final renderer performs delivery exactly once.',
       'Do not claim the message was sent. The application executes the marker and reports the real result.'
     ].join('\n') : '';
 

@@ -2368,6 +2368,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "SIGNAL SEND REQUEST:\n"
                 "Your final answer MUST include exactly one valid marker containing the message to deliver:\n"
                 "[[EVA_SIGNAL]]{\"message\":\"<complete message text>\"}[[/EVA_SIGNAL]]\n"
+                "Do NOT call /v1/signal/send, /v1/health, curl, terminal, or any tool to test delivery.\n"
+                "Emit the marker only; the authenticated final renderer performs delivery exactly once.\n"
                 "Do not claim it was sent. The application executes the marker and reports the real result.\n\n"
             )
 
@@ -2437,6 +2439,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "When the user asks you to send a message, text, or notification, "
                     "respond ONLY with the marker. Example:\n"
                     "[[EVA_SIGNAL]]{\"message\":\"hello world\"}[[/EVA_SIGNAL]]\n"
+                    "Do NOT call bridge endpoints, curl, terminal, or tools to test delivery.\n"
                     "Do not claim the message was sent; the application reports the real result.\n\n"
                     "Do NOT say you cannot send messages. Do NOT explain limitations. "
                     "Do NOT offer alternatives. Just emit the marker."

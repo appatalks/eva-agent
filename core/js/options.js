@@ -2450,7 +2450,8 @@ document.addEventListener('DOMContentLoaded', () => {
   var evaNewChat = document.getElementById('evaNewChatBtn');
   if (evaNewChat) {
     evaNewChat.addEventListener('click', function() {
-      if (typeof clearMessages === 'function') clearMessages();
+      if (typeof newSession === 'function') newSession();
+      else if (typeof clearMessages === 'function') clearMessages();
       restoreEvaWelcome();
     });
   }
@@ -2481,8 +2482,6 @@ document.addEventListener('DOMContentLoaded', () => {
   if (evaModelsBtn) evaModelsBtn.addEventListener('click', function(e) { evaOpenSettings(e, 'models'); });
   var evaSettingsBtn = document.getElementById('evaSettingsBtn');
   if (evaSettingsBtn) evaSettingsBtn.addEventListener('click', function(e) { evaOpenSettings(e, null); });
-  var evaUserBtn = document.getElementById('evaUserBtn');
-  if (evaUserBtn) evaUserBtn.addEventListener('click', function(e) { evaOpenSettings(e, 'auth'); });
   var evaInputGear = document.getElementById('evaInputSettings');
   if (evaInputGear) evaInputGear.addEventListener('click', function(e) { evaOpenSettings(e, null); });
 
@@ -5879,6 +5878,9 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
         ? 'Signal delivery requires Eva Standalone'
         : (signalMessage ? 'current request did not authorize Signal delivery' : 'invalid Signal message payload')
     };
+  } else if (renderOptions.signalAuthorized === true) {
+    text = '';
+    signalSendResult = { ok: false, message: 'Eva did not provide a Signal message payload' };
   }
   if (signalSendResult) {
     if (signalSendResult.ok) {

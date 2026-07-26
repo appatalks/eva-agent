@@ -968,10 +968,12 @@ Eight tabs in a modal overlay:
 | **Models** | Model selector (grouped by provider), temperature, max tokens, reasoning effort, AIG backend selector, ACP model selector, cognitive layer controls (toggle, per-agent model selectors, max cycles, editable prompts, debug trace) |
 | **Auth** | API key inputs with show/hide toggles, ACP bridge URL, Signal sender/recipient numbers |
 | **Prompts** | Personality presets (Default/Concise/Advanced/Terminal/Custom), editable system prompt textarea |
-| **Goals** | Goals list with create/edit/delete. Skills list with import (paste/URL/GitHub/file), evarise preview, enable/disable |
+| **Goals** | Goals list with create/edit/delete. Skills list with import (paste/URL/GitHub/file), evarise preview, edit, enable/disable |
 | **Background** | Background loop status, enable/interval controls, run-once, proposal approval/rejection, recent activity |
 | **Cron** | Cron task list with create/edit/delete, schedule expression, prompt, last/next run timestamps |
 | **MCP** | Azure MCP, GitHub MCP, Kusto MCP toggles with config fields. Apply/refresh buttons |
+
+The sidebar profile picker keeps sessions, prompts, model choices, voice preferences, and other browser-local settings separate per user. API credentials, MCP configuration, and the selected memory backend remain shared installation settings. Sessions open fresh on launch and support persistent custom titles. Saved skills can be edited and reimported through the existing skill ID, preserving database history.
 
 Reasoning-capable models expose **Model default**, **None**, **Minimal**, **Low**, **Medium**, **High**, **Extra high**, and **Maximum**. The selection is saved locally and passed to OpenAI, GitHub Models, or Copilot CLI ACP when supported. Higher levels can increase response time and premium usage.
 

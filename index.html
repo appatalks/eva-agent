@@ -11,6 +11,7 @@
   <!-- Optional local config override (prevents file:// fetch issues) -->
   <script src="config.local.js"></script>
   <!-- Scripts -->
+  <script src="core/js/profiles.js"></script>
   <script src="core/js/options.js"></script> 
   <script src="core/js/external.js"></script>
   <script src="core/js/gpt-core.js"></script>
@@ -108,11 +109,11 @@
       <button class="eva-view-all" type="button" onclick="toggleSessionPanel()">View all</button>
     </div>
     <div class="eva-sidebar-footer">
-      <div class="eva-sidebar-user" id="evaUserBtn">
+      <button class="eva-sidebar-user" id="evaUserBtn" type="button" title="Switch user profile">
         <span class="eva-user-icon">&#x1F464;</span>
-        <span class="eva-user-name">You</span>
+        <span class="eva-user-name" id="evaActiveProfileName">appatalks</span>
         <span class="eva-user-arrow">&#x203A;</span>
-      </div>
+      </button>
     </div>
   </nav>
 
@@ -255,6 +256,19 @@
       <iframe id="terminalFrame" class="terminal-frame" sandbox="allow-same-origin allow-scripts allow-forms" aria-label="Terminal"></iframe>
       <p class="terminal-fallback" id="terminalFallback">Terminal is available in Electron standalone mode. In browser mode, open a system terminal and run:<br><code>copilot</code></p>
     </div>
+  </div>
+
+  <!-- Local user profile picker. Credentials and MCP configuration stay shared. -->
+  <div id="profilePanel" class="session-panel" aria-hidden="true">
+    <div class="session-panel-header">
+      <span>User profiles</span>
+      <button id="profilePanelClose" aria-label="Close user profiles">&times;</button>
+    </div>
+    <div class="session-panel-actions">
+      <button id="profileAddBtn" title="Add profile">+ Add profile</button>
+    </div>
+    <p class="cog-help">Profiles keep sessions, prompts, model choices, voice preferences, and other local UI settings separate. API credentials and MCP configuration are shared by this Eva installation.</p>
+    <ul id="profileList" class="session-list"></ul>
   </div>
 
   <div id="idContainer">

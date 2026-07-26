@@ -458,6 +458,34 @@ def test_security_alert_contract():
     report("security_web_search_mcp_bundled", '"tools/web_search_mcp.py"' in standalone_package)
 
 
+def test_sidebar_workflow_contract():
+    """Sidebar workflows remain editable, collapsible, and profile-aware."""
+    with open("index.html") as f:
+        html = f.read()
+    with open("core/js/sessions.js") as f:
+        sessions_js = f.read()
+    with open("core/js/skills.js") as f:
+        skills_js = f.read()
+    with open("core/js/profiles.js") as f:
+        profiles_js = f.read()
+    with open("core/js/cognition.js") as f:
+        cognition_js = f.read()
+    with open("core/js/options.js") as f:
+        options_js = f.read()
+    with open("tools/bridge/core.py") as f:
+        bridge_core = f.read()
+
+    report("workflow_signal_marker_only", "Do NOT call /v1/signal/send" in cognition_js and "Do NOT call /v1/signal/send" in bridge_core)
+    report("workflow_signal_missing_marker_fails", "Eva did not provide a Signal message payload" in options_js)
+    report("workflow_session_rename", "function renameSession" in sessions_js and "customTitle" in sessions_js)
+    report("workflow_new_session_on_launch", "idbMigrateFromLocalStorage().then(function() {\n    newSession();" in sessions_js)
+    report("workflow_side_panels_click_outside", "function closeSidePanels" in sessions_js and "EVA_SIDE_PANEL_IDS" in sessions_js and "document.addEventListener('click'" in sessions_js)
+    report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
+    report("workflow_profile_picker", 'id="profilePanel"' in html and 'src="core/js/profiles.js"' in html and "function switchEvaProfile" in profiles_js)
+    report("workflow_profile_awaits_session_save", "async function switchEvaProfile" in profiles_js and "await saveCurrentSession()" in profiles_js)
+    report("workflow_profile_scoped_sessions", "saveCurrentSession" in profiles_js and "eva_sessions" not in profiles_js)
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Section 7: Seed File Validation
 # ═══════════════════════════════════════════════════════════════════
@@ -663,6 +691,7 @@ def main():
         ("Reasoning Effort", [test_reasoning_effort_contract]),
         ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract]),
         ("Security Alerts", [test_security_alert_contract]),
+        ("Sidebar Workflows", [test_sidebar_workflow_contract]),
         ("Seed File", [test_seed_file]),
         ("Goals Static Contract", [test_goals_static_contract]),
         ("Background Static Contract", [test_background_static_contract]),

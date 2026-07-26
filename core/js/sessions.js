@@ -106,7 +106,7 @@ function _sessionMsgCount(data) {
 function saveCurrentSession() {
   var snapshot = _snapshotSession();
   // Only save if there's actual content
-  if (_sessionMsgCount(snapshot) === 0) return;
+  if (_sessionMsgCount(snapshot) === 0) return Promise.resolve();
 
   var id = _activeSessionId();
   var index = _getSessionIndex();
@@ -120,7 +120,7 @@ function saveCurrentSession() {
     // Update existing
     for (var i = 0; i < index.length; i++) {
       if (index[i].id === id) {
-        index[i].title = _sessionTitle(snapshot);
+        if (!index[i].customTitle) index[i].title = _sessionTitle(snapshot);
         index[i].updated = Date.now();
         break;
       }
@@ -128,11 +128,12 @@ function saveCurrentSession() {
   }
 
   // Save to IndexedDB (async, non-blocking)
-  idbSaveSession(id, snapshot).catch(function(e) {
+  var savePromise = idbSaveSession(id, snapshot).catch(function(e) {
     console.error('[Sessions] IDB save failed:', e);
   });
   _saveSessionIndex(index);
   renderSessionList();
+  return savePromise;
 }
 
 /** Start a brand new session */
@@ -187,6 +188,22 @@ function deleteSession(id) {
   renderSessionList();
 }
 
+/** Rename a session; custom titles are preserved by later autosaves. */
+function renameSession(id) {
+  var index = _getSessionIndex();
+  var entry = index.filter(function(item) { return item.id === id; })[0];
+  if (!entry) return;
+  var title = prompt('Session title:', entry.title || 'Untitled');
+  if (title === null) return;
+  title = title.trim().replace(/[\r\n\t]+/g, ' ').slice(0, 80);
+  if (!title) return;
+  entry.title = title;
+  entry.customTitle = true;
+  entry.updated = Date.now();
+  _saveSessionIndex(index);
+  renderSessionList();
+}
+
 /** Render the session list in the panel */
 function renderSessionList() {
   var ul = document.getElementById('sessionList');
@@ -235,6 +252,15 @@ function renderSessionList() {
       togglePinSession(entry.id);
     };
 
+    var renameBtn = document.createElement('button');
+    renameBtn.className = 'session-pin';
+    renameBtn.textContent = '\u270E';
+    renameBtn.title = 'Rename session';
+    renameBtn.onclick = function(e) {
+      e.stopPropagation();
+      renameSession(entry.id);
+    };
+
     var delBtn = document.createElement('button');
     delBtn.className = 'session-delete';
     delBtn.textContent = '\u00d7';
@@ -244,6 +270,7 @@ function renderSessionList() {
       deleteSession(entry.id);
     };
 
+    btnWrap.appendChild(renameBtn);
     btnWrap.appendChild(pinBtn);
     btnWrap.appendChild(delBtn);
 
@@ -261,8 +288,23 @@ function toggleSessionPanel() {
   var panel = document.getElementById('sessionPanel');
   if (!panel) return;
   var visible = panel.getAttribute('aria-hidden') !== 'true';
-  panel.setAttribute('aria-hidden', visible ? 'true' : 'false');
+  if (visible) panel.setAttribute('aria-hidden', 'true');
+  else {
+    closeSidePanels('sessionPanel');
+    panel.setAttribute('aria-hidden', 'false');
+  }
   if (!visible) renderSessionList();
+}
+
+var EVA_SIDE_PANEL_IDS = ['sessionPanel', 'skillsPanel', 'assetsPanel', 'terminalPanel', 'profilePanel'];
+var EVA_SIDE_PANEL_TRIGGER_IDS = ['evaChatsBtn', 'sidebarSessionsBtn', 'evaSkillsBtn', 'evaAssetsBtn', 'evaTerminalBtn', 'evaUserBtn'];
+
+function closeSidePanels(exceptId) {
+  EVA_SIDE_PANEL_IDS.forEach(function(id) {
+    if (id === exceptId) return;
+    var panel = document.getElementById(id);
+    if (panel) panel.setAttribute('aria-hidden', 'true');
+  });
 }
 
 /** Wire up session panel buttons + auto-save on page unload */
@@ -288,23 +330,20 @@ function initSessions() {
   var termClose = document.getElementById('terminalPanelClose');
   if (termClose) termClose.addEventListener('click', toggleTerminalPanel);
 
-  // Migrate localStorage sessions to IndexedDB, then restore active session
+  // Migrate localStorage sessions, preserve the previous turn, and always
+  // present a fresh session when Eva launches.
   idbMigrateFromLocalStorage().then(function() {
-    var activeId = _activeSessionId();
-    if (activeId) {
-      idbLoadSession(activeId).then(function(data) {
-        if (data) _restoreSession(data);
-      }).catch(function() {});
-    }
+    newSession();
   }).catch(function() {
-    // Fallback: try restoring from active localStorage state
-    var activeId = _activeSessionId();
-    if (activeId) {
-      var raw = localStorage.getItem('session_' + activeId);
-      if (raw) {
-        try { _restoreSession(JSON.parse(raw)); } catch(e) {}
-      }
-    }
+    newSession();
+  });
+
+  document.addEventListener('click', function(event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    if (target.closest('#' + EVA_SIDE_PANEL_IDS.join(',#'))) return;
+    if (target.closest('#' + EVA_SIDE_PANEL_TRIGGER_IDS.join(',#'))) return;
+    closeSidePanels();
   });
 
   // Auto-save on unload
@@ -397,7 +436,11 @@ function toggleAssetsPanel() {
   var panel = document.getElementById('assetsPanel');
   if (!panel) return;
   var visible = panel.getAttribute('aria-hidden') !== 'true';
-  panel.setAttribute('aria-hidden', visible ? 'true' : 'false');
+  if (visible) panel.setAttribute('aria-hidden', 'true');
+  else {
+    closeSidePanels('assetsPanel');
+    panel.setAttribute('aria-hidden', 'false');
+  }
   if (!visible) loadAssetsList();
 }
 
@@ -510,7 +553,11 @@ function toggleTerminalPanel() {
   var panel = document.getElementById('terminalPanel');
   if (!panel) return;
   var visible = panel.getAttribute('aria-hidden') !== 'true';
-  panel.setAttribute('aria-hidden', visible ? 'true' : 'false');
+  if (visible) panel.setAttribute('aria-hidden', 'true');
+  else {
+    closeSidePanels('terminalPanel');
+    panel.setAttribute('aria-hidden', 'false');
+  }
   if (!visible) initTerminal();
 }
 

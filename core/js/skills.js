@@ -16,7 +16,7 @@
 // Bridge calls reuse backgroundBridgeRequest() from options.js (same bridge).
 // ===========================================================================
 
-var _skillsState = { skills: [], draft: null };
+var _skillsState = { skills: [], draft: null, editingId: null };
 
 function _skillsBridge(path, options) {
   if (typeof backgroundBridgeRequest === 'function') {
@@ -119,8 +119,11 @@ function _populateSkillDraft(draft) {
 
 function cancelSkillDraft() {
   _skillsState.draft = null;
+  _skillsState.editingId = null;
   var wrap = document.getElementById('skillDraft');
   if (wrap) wrap.style.display = 'none';
+  var saveButton = document.getElementById('skillSaveButton');
+  if (saveButton) saveButton.textContent = 'Save skill';
 }
 
 async function saveSkill() {
@@ -138,16 +141,18 @@ async function saveSkill() {
   var btn = document.getElementById('skillSaveButton');
   if (btn) btn.disabled = true;
   try {
-    await _skillsBridge('/v1/skills', {
-      method: 'POST',
+    var editingId = _skillsState.editingId;
+    await _skillsBridge(editingId ? '/v1/skills/' + encodeURIComponent(editingId) : '/v1/skills', {
+      method: editingId ? 'PATCH' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(skill)
     });
     cancelSkillDraft();
     clearSkillImport();
     await loadSkills();
-    if (typeof setStatus === 'function') setStatus('info', 'Skill saved.');
-    _skillStatus('Skill saved.');
+    var message = editingId ? 'Skill updated.' : 'Skill saved.';
+    if (typeof setStatus === 'function') setStatus('info', message);
+    _skillStatus(message);
   } catch (error) {
     _skillStatus(error.message || 'Could not save skill.', true);
   } finally {
@@ -167,6 +172,26 @@ function _skillField(row, primary, alt) {
   if (row[primary] !== undefined && row[primary] !== null) return row[primary];
   if (alt && row[alt] !== undefined && row[alt] !== null) return row[alt];
   return '';
+}
+
+function editSkill(skill) {
+  var id = String(_skillField(skill, 'SkillId', 'skillId') || '');
+  if (!id) return;
+  _skillsState.editingId = id;
+  _skillsState.draft = {
+    name: String(_skillField(skill, 'Name', 'name') || ''),
+    description: String(_skillField(skill, 'Description', 'description') || ''),
+    instructions: String(_skillField(skill, 'Instructions', 'instructions') || ''),
+    tools: String(_skillField(skill, 'Tools', 'tools') || ''),
+    tags: String(_skillField(skill, 'Tags', 'tags') || ''),
+    source: String(_skillField(skill, 'Source', 'source') || 'edited')
+  };
+  _populateSkillDraft(_skillsState.draft);
+  var saveButton = document.getElementById('skillSaveButton');
+  if (saveButton) saveButton.textContent = 'Update skill';
+  _skillStatus('Editing ' + (_skillsState.draft.name || 'skill') + '. Save to reimport the updated definition.');
+  var draft = document.getElementById('skillDraft');
+  if (draft && draft.scrollIntoView) draft.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 function renderSkillsList() {
@@ -199,6 +224,12 @@ function renderSkillsList() {
     head.appendChild(title);
     var actions = document.createElement('div');
     actions.className = 'background-actions';
+    var editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'auth-save background-inline-button';
+    editBtn.textContent = 'Edit';
+    editBtn.addEventListener('click', function () { editSkill(sk); });
+    actions.appendChild(editBtn);
     var toggleBtn = document.createElement('button');
     toggleBtn.type = 'button';
     toggleBtn.className = 'auth-toggle background-inline-button';
@@ -301,6 +332,7 @@ function toggleSkillsPanel(force) {
   if (!panel) return;
   var visible = panel.getAttribute('aria-hidden') !== 'true';
   var next = (typeof force === 'boolean') ? !force : visible;
+  if (!next && typeof closeSidePanels === 'function') closeSidePanels('skillsPanel');
   panel.setAttribute('aria-hidden', next ? 'true' : 'false');
   if (!next) loadSkills();
 }
