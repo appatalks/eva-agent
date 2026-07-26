@@ -96,7 +96,8 @@ async function trboSend() {
             var s = oJson.choices[0].message;
 	    // Empty Response Handling / Render via unified renderer
 	    await renderEvaResponse(s.content, txtOutput, {
-              signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion)
+              signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion),
+              signalMessage: (typeof requestedSignalMessage === 'function') ? requestedSignalMessage(sQuestion) : ''
             });
        	
             // Send to Local Storage - possibly way to intigrate into memory

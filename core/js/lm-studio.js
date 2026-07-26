@@ -138,7 +138,8 @@ function lmsSend() {
                         // Render via unified renderer
                         const out = document.getElementById("txtOutput");
                         await renderEvaResponse(candidate, out, {
-                          signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion)
+                          signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion),
+                          signalMessage: (typeof requestedSignalMessage === 'function') ? requestedSignalMessage(sQuestion) : ''
                         });
 
                         // Keep the global last-response synced so Auto Speak

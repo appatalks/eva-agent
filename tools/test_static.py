@@ -405,6 +405,7 @@ def test_signal_and_github_mcp_contract():
     report("signal_marker_parses_to_closing_tag", "([\\s\\S]*?)\\s*\\[\\[\\/EVA_SIGNAL\\]\\]" in options_js)
     report("signal_cognition_directive", "signalDirective" in cognition_js and "[[EVA_SIGNAL]]" in cognition_js)
     report("signal_requires_affirmative_intent", "isAffirmativeSignalSendRequest" in options_js and "signalAuthorized" in options_js)
+    report("signal_deterministic_fallback", "function requestedSignalMessage" in options_js and "renderOptions.signalMessage" in options_js)
     report("signal_documented_phrases", "notify" in options_js and "signal\\s+me" in options_js)
     report("signal_all_provider_renderers", all("canAuthorizeSignalDelivery" in source for source in (aig_js, copilot_js, gpt_core_js, google_js, lm_studio_js)))
     report("signal_finalization_does_not_fallback", "cognitionFinalizing" in aig_js and "Eva could not finalize the response" in aig_js)

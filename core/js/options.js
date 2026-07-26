@@ -291,6 +291,23 @@ function canAuthorizeSignalDelivery(text) {
   return isAffirmativeSignalSendRequest(text) && !!(window.evaStandalone && window.evaStandalone.bridgeToken);
 }
 
+function requestedSignalMessage(text) {
+  var value = String(text || '').trim();
+  if (!isAffirmativeSignalSendRequest(value)) return '';
+  var quoted = value.match(/["“]([^"”]{1,4000})["”]/) || value.match(/'([^']{1,4000})'/);
+  var message = quoted ? quoted[1].trim() : '';
+  if (!message) {
+    var explicit = value.match(/\b(?:saying|that says|message\s*:|text\s*:)\s*(.{1,4000})$/i);
+    if (explicit) message = explicit[1].trim();
+  }
+  var wantsTimestamp = /\b(?:date\s+)?timestamp\b|\bdate\s+and\s+time\b/i.test(value);
+  if (wantsTimestamp) {
+    var stamp = new Date().toLocaleString();
+    message = message ? message + ' — ' + stamp : 'Eva timestamp: ' + stamp;
+  }
+  return message.slice(0, 4000);
+}
+
 var _localVoicesBridgeState = null;
 
 async function refreshLocalVoicesProfiles() {
@@ -5873,6 +5890,7 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   // may contain markers too, so bridge-side draft execution would duplicate sends.
   var signalSendResult = null;
   var signalMessage = '';
+  var usedSignalFallback = false;
   var _sigRe = /\[\[EVA_SIGNAL\]\]\s*([\s\S]*?)\s*\[\[\/EVA_SIGNAL\]\]/g;
   text = text.replace(_sigRe, function(full, json) {
     if (!signalMessage) {
@@ -5883,6 +5901,11 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     }
     return '';
   });
+  if (!signalMessage && renderOptions.signalAuthorized === true && renderOptions.signalMessage) {
+    signalMessage = String(renderOptions.signalMessage).trim().slice(0, 4000);
+    usedSignalFallback = !!signalMessage;
+    if (usedSignalFallback) text = '';
+  }
   if (signalMessage && renderOptions.signalAuthorized === true) {
     try {
       var signalResponse = await fetch(getSafeBridgeBaseUrl() + '/v1/signal/send', {

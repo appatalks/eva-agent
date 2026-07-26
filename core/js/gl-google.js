@@ -99,7 +99,8 @@ function geminiSend() {
                         let mainResponse = nonThoughts.map(part => part.text).join("\n").trim();
                         const out = document.getElementById("txtOutput");
                         await renderEvaResponse(mainResponse, out, {
-                            signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion)
+                            signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion),
+                            signalMessage: (typeof requestedSignalMessage === 'function') ? requestedSignalMessage(sQuestion) : ''
                         });
                     })();
 

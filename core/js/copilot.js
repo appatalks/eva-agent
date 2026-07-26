@@ -327,7 +327,8 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage) 
 
   // Use unified renderer
   await renderEvaResponse(content, txtOutput, {
-    signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(userMessage)
+    signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(userMessage),
+    signalMessage: (typeof requestedSignalMessage === 'function') ? requestedSignalMessage(userMessage) : ''
   });
 
   if (content) {

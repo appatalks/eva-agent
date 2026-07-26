@@ -90,7 +90,10 @@ async function aigSend() {
         actionsRun = execRes.actions || [];
       }
       cognitionFinalizing = true;
-      await renderEvaResponse(cogContent, txtOutput, { signalAuthorized: canAuthorizeSignalDelivery(sQuestion) });
+      await renderEvaResponse(cogContent, txtOutput, {
+        signalAuthorized: canAuthorizeSignalDelivery(sQuestion),
+        signalMessage: requestedSignalMessage(sQuestion)
+      });
       if (Cognition.getCfg && Cognition.getCfg().showTrace && Cognition.renderTraceHtml) {
         try {
           txtOutput.innerHTML += Cognition.renderTraceHtml(cogResult.trace || []);
@@ -208,7 +211,10 @@ async function aigSend() {
     var modelUsed = data.model || 'aig';
 
     // Render response
-    await renderEvaResponse(content, txtOutput, { signalAuthorized: canAuthorizeSignalDelivery(sQuestion) });
+    await renderEvaResponse(content, txtOutput, {
+      signalAuthorized: canAuthorizeSignalDelivery(sQuestion),
+      signalMessage: requestedSignalMessage(sQuestion)
+    });
 
     if (content) {
       lastResponse = content;
