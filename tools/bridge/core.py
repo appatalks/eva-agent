@@ -2077,6 +2077,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # tools (that duplicated the draft's retrieval and doubled latency).
         no_tools = bool(data.get("no_tools"))
         model_for_response = data.get("model", "claude-opus-4.8")  # frontend-selectable, default claude-opus-4.8
+        raw_reasoning_effort = data.get("acp_reasoning_effort", "")
+        if not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort not in ACP_REASONING_EFFORTS | {""}:
+            self._json_response(400, {"error": {"message": "Unsupported acp_reasoning_effort"}})
+            return
+        reasoning_effort = raw_reasoning_effort
         _set_openai_key_from(data)  # cache key for semantic recall (incl. background threads)
 
         if not user_message and messages:
@@ -2601,31 +2606,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # fallback path when PAT is unavailable or failed.
             print(f"[AIG] Using ACP for response generation...")
             if _st.acp_client:
-                switched, switch_info = _ensure_acp_model(acp_response_model)
-                if not switched:
-                    response_text = f"ACP model switch failed: {switch_info}"
-                    model_used = "aig:unavailable"
+                # Include conversation history so follow-up messages have context
+                history_lines = []
+                for msg in messages[-6:]:
+                    if msg.get("role") in ("user", "assistant"):
+                        role_label = "User" if msg["role"] == "user" else "Eva"
+                        history_lines.append(f"{role_label}: {msg.get('content', '')[:500]}")
+                if history_lines:
+                    full_prompt = eva_system + "\n\n[Conversation]\n" + "\n\n".join(history_lines)
+                    # Append current message if not already the last in history
+                    last_hist = history_lines[-1] if history_lines else ""
+                    if not last_hist.startswith("User: " + user_message[:50]):
+                        full_prompt += "\n\nUser: " + user_message
                 else:
-                    # Include conversation history so follow-up messages have context
-                    history_lines = []
-                    for msg in messages[-6:]:
-                        if msg.get("role") in ("user", "assistant"):
-                            role_label = "User" if msg["role"] == "user" else "Eva"
-                            history_lines.append(f"{role_label}: {msg.get('content', '')[:500]}")
-                    if history_lines:
-                        full_prompt = eva_system + "\n\n[Conversation]\n" + "\n\n".join(history_lines)
-                        # Append current message if not already the last in history
-                        last_hist = history_lines[-1] if history_lines else ""
-                        if not last_hist.startswith("User: " + user_message[:50]):
-                            full_prompt += "\n\nUser: " + user_message
+                    full_prompt = eva_system + "\n\nUser: " + user_message
+                with _acquire_acp_client(acp_response_model, reasoning_effort or None) as (response_client, acquire_detail):
+                    if not response_client:
+                        response_text = f"ACP model switch failed: {acquire_detail}"
+                        model_used = "aig:unavailable"
                     else:
-                        full_prompt = eva_system + "\n\nUser: " + user_message
-                    acp_result = _st.acp_client.prompt(full_prompt, timeout=120)
-                    response_text = acp_result.get("text", "I'm having trouble processing that right now.")
-                    active_model = _st.acp_client.model or "acp-default"
-                    model_used = f"aig:{active_model}"
-                    if acp_model_used and acp_model_used != active_model:
-                        model_used += f"+{acp_model_used}"
+                        acp_result = response_client.prompt(full_prompt, timeout=120)
+                        response_text = acp_result.get("text", "I'm having trouble processing that right now.")
+                        active_model = response_client.model or "acp-default"
+                        model_used = f"aig:{active_model}"
+                        if acp_model_used and acp_model_used != active_model:
+                            model_used += f"+{acp_model_used}"
             else:
                 response_text = "The AIG system needs either a GitHub PAT or a running ACP bridge to generate responses."
                 model_used = "aig:unavailable"
@@ -3100,10 +3105,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         _set_openai_key_from(data)  # cache key for semantic recall
         requested_model = data.get("acp_model", "") or ""
-        reasoning_effort = data.get("acp_reasoning_effort", "") or ""
-        if not isinstance(reasoning_effort, str) or reasoning_effort not in ACP_REASONING_EFFORTS | {""}:
+        raw_reasoning_effort = data.get("acp_reasoning_effort", "")
+        if not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort not in ACP_REASONING_EFFORTS | {""}:
             self._json_response(400, {"error": {"message": "Unsupported acp_reasoning_effort"}})
             return
+        reasoning_effort = raw_reasoning_effort
 
         # Build prompt text from messages (combine for context)
         # ACP doesn't have native message roles, so we format them

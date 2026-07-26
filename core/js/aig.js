@@ -173,6 +173,7 @@ async function aigSend() {
         aigModel = cogModelCfg.evaModel;
       }
     }
+    var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel('aig') : 'default';
 
     var resp = await fetch(url, {
       method: 'POST',
@@ -181,6 +182,7 @@ async function aigSend() {
         messages: existingMessages,
         user_message: sQuestion,
         model: aigModel,
+        acp_reasoning_effort: reasoningEffort === 'default' ? '' : reasoningEffort,
         lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
         lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
         github_pat: (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : '',

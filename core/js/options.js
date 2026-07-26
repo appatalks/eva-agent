@@ -2035,7 +2035,7 @@ function getReasoningEffort() {
 
 function getReasoningEffortForModel(model) {
   var effort = getReasoningEffort();
-  if (model === 'copilot-acp') return effort;
+  if (model === 'copilot-acp' || model === 'aig') return effort;
   return ['low', 'medium', 'high'].indexOf(effort) >= 0 ? effort : 'default';
 }
 
@@ -2048,16 +2048,26 @@ function onModelSettingsChange() {
   var reOpt = document.getElementById('opt-reasoningEffort');
   if (reOpt) {
     var reasoningModels = ['o3-mini', 'copilot-o3-mini', 'copilot-o4-mini', 'copilot-deepseek-r1', 'copilot-gpt-5', 'copilot-gpt-5.6-sol', 'copilot-gpt-5.6-terra', 'copilot-gpt-5.6-luna', 'copilot-acp'];
-    reOpt.style.display = reasoningModels.indexOf(model) >= 0 ? 'block' : 'none';
+    var aigBackend = (document.getElementById('selAIGBackend') || {}).value || '';
+    var cognitionEnabled = !!(document.getElementById('cogEnabled') || {}).checked;
+    var cognitionModels = ['cogEvaModel', 'cogReviewerModel'].map(function (id) {
+      return (document.getElementById(id) || {}).value || '';
+    });
+    var cognitionUsesCloud = cognitionEnabled && cognitionModels.some(function (cognitionModel) {
+      return cognitionModel && cognitionModel !== 'lmstudio';
+    });
+    var supportsReasoning = reasoningModels.indexOf(model) >= 0 || (model === 'aig' && (aigBackend !== 'lmstudio' || cognitionUsesCloud));
+    reOpt.style.display = supportsReasoning ? 'block' : 'none';
     var reasoningSelect = document.getElementById('selReasoningEffort');
     if (reasoningSelect) {
       var savedEffort = localStorage.getItem('reasoningEffort') || 'default';
       var hasSavedEffort = Array.from(reasoningSelect.options).some(function (option) { return option.value === savedEffort; });
       if (!hasSavedEffort) savedEffort = 'default';
+      var supportsFullReasoningRange = model === 'copilot-acp' || model === 'aig';
       Array.from(reasoningSelect.options).forEach(function (option) {
-        option.disabled = model !== 'copilot-acp' && ['default', 'low', 'medium', 'high'].indexOf(option.value) < 0;
+        option.disabled = !supportsFullReasoningRange && ['default', 'low', 'medium', 'high'].indexOf(option.value) < 0;
       });
-      reasoningSelect.value = model === 'copilot-acp' || ['low', 'medium', 'high'].indexOf(savedEffort) >= 0 ? savedEffort : 'default';
+      reasoningSelect.value = supportsFullReasoningRange || ['low', 'medium', 'high'].indexOf(savedEffort) >= 0 ? savedEffort : 'default';
     }
   }
   // Show/hide temperature (hidden for reasoning models, gpt-5 family, latest, copilot-acp)
@@ -4592,6 +4602,7 @@ function cogInit() {
   if ($('cogEvaPrompt'))         $('cogEvaPrompt').value         = _cogStoredPromptOrDefault('eva');
   if ($('cogReviewerPrompt'))    $('cogReviewerPrompt').value    = _cogStoredPromptOrDefault('reviewer');
   cogUpdateBadge();
+  onModelSettingsChange();
 }
 
 function cogPersist() {
@@ -4617,6 +4628,7 @@ function cogPersist() {
   Cognition.setCfg(partial);
   cogUpdateBadge();
   cogUpdatePromptsTabUI();
+  onModelSettingsChange();
 }
 
 function cogUpdatePromptsTabUI() {

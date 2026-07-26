@@ -484,6 +484,7 @@
       messages: msgs,
       user_message: taskMessage || '',
       model: model,
+      acp_reasoning_effort: (typeof getReasoningEffortForModel === 'function' && getReasoningEffortForModel('aig') !== 'default') ? getReasoningEffortForModel('aig') : '',
       lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
       lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
       github_pat: authPat(),
