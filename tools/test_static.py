@@ -496,6 +496,15 @@ def test_sidebar_workflow_contract():
     report("workflow_audio_settings_persist", "function initAudioPreferences" in options_js and "tts_engine" in options_js and "tts_auto_speak" in options_js and "tts_voice" in options_js)
 
 
+def test_pages_comparison_contract():
+    """The Pages comparison includes the official GitHub Copilot app."""
+    with open("docs/index.html") as f:
+        docs_html = f.read()
+    report("pages_github_copilot_app_column", "GitHub Copilot app</a>" in docs_html and "https://github.com/features/ai/github-app?locale=en-US" in docs_html)
+    report("pages_github_copilot_app_capabilities", all(value in docs_html for value in ("Custom skills", "Automations", "Session history", "Multi-model + BYOK")))
+    report("pages_comparison_scrolls", ".compare-wrap {\n      border-radius: var(--radius); overflow-x: auto;" in docs_html and "min-width: 960px" in docs_html)
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  Section 7: Seed File Validation
 # ═══════════════════════════════════════════════════════════════════
@@ -702,6 +711,7 @@ def main():
         ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract]),
         ("Security Alerts", [test_security_alert_contract]),
         ("Sidebar Workflows", [test_sidebar_workflow_contract]),
+        ("Pages Comparison", [test_pages_comparison_contract]),
         ("Seed File", [test_seed_file]),
         ("Goals Static Contract", [test_goals_static_contract]),
         ("Background Static Contract", [test_background_static_contract]),

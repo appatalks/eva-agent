@@ -454,12 +454,13 @@
 
     /* ── Comparison ────────────────────────────────────────── */
     .compare-wrap {
-      border-radius: var(--radius); overflow: hidden;
+      border-radius: var(--radius); overflow-x: auto;
     }
     .compare-table {
-      width: 100%; border-collapse: collapse;
+      width: 100%; min-width: 960px; border-collapse: collapse;
       font-size: 0.84rem;
     }
+    .compare-table th a { color: inherit; }
     .compare-table th {
       text-align: left; padding: 14px 16px;
       border-bottom: 1px solid rgba(255,255,255,0.06);
@@ -783,19 +784,20 @@
             <th>Hermes Agent</th>
             <th>ChatGPT Desktop</th>
             <th>Claude Desktop</th>
+            <th><a href="https://github.com/features/ai/github-app?locale=en-US" target="_blank" rel="noopener noreferrer">GitHub Copilot app</a></th>
           </tr>
         </thead>
         <tbody>
-          <tr><td>Open source</td><td class="y">Yes (MIT)</td><td class="y">Yes (MIT)</td><td class="n">No</td><td class="n">No</td></tr>
-          <tr><td>Camera/vision</td><td class="y">Built-in</td><td class="n">No</td><td class="n">No</td><td class="n">No</td></tr>
-          <tr><td>Browser automation</td><td class="y">Built-in (DOM + vision)</td><td>Via MCP</td><td class="n">No</td><td>Via MCP</td></tr>
-          <tr><td>Desktop control</td><td class="y">Built-in + MCP</td><td>Via MCP</td><td class="n">No</td><td>Via MCP</td></tr>
-          <tr><td>Voice interface</td><td class="y">Full voice view</td><td>Transcription only</td><td class="y">Yes</td><td class="n">No</td></tr>
-          <tr><td>Self-improving skills</td><td class="y">Auto-learn</td><td class="y">Yes</td><td class="n">No</td><td class="n">No</td></tr>
-          <tr><td>Scheduled tasks</td><td class="y">Cron</td><td class="y">Cron</td><td class="n">No</td><td class="n">No</td></tr>
-          <tr><td>Persistent memory</td><td class="y">Kusto/ADX</td><td class="y">FTS5 + files</td><td>Limited</td><td>Limited</td></tr>
-          <tr><td>Multi-provider</td><td class="y">4+ providers</td><td class="y">200+ models</td><td class="n">OpenAI only</td><td class="n">Anthropic only</td></tr>
-          <tr><td>No build step</td><td class="y">Yes</td><td class="n">pip install</td><td class="n">N/A</td><td class="n">N/A</td></tr>
+          <tr><td>Open source</td><td class="y">Yes (MIT)</td><td class="y">Yes (MIT)</td><td class="n">No</td><td class="n">No</td><td class="n">No (public repo)</td></tr>
+          <tr><td>Camera/vision</td><td class="y">Built-in</td><td class="n">No</td><td class="n">No</td><td class="n">No</td><td class="n">Not documented</td></tr>
+          <tr><td>Browser automation</td><td class="y">Built-in (DOM + vision)</td><td>Via MCP</td><td class="n">No</td><td>Via MCP</td><td>Via MCP</td></tr>
+          <tr><td>Desktop control</td><td class="y">Built-in + MCP</td><td>Via MCP</td><td class="n">No</td><td>Via MCP</td><td>Via MCP</td></tr>
+          <tr><td>Voice interface</td><td class="y">Full voice view</td><td>Transcription only</td><td class="y">Yes</td><td class="n">No</td><td class="n">Not documented</td></tr>
+          <tr><td>Self-improving skills</td><td class="y">Auto-learn</td><td class="y">Yes</td><td class="n">No</td><td class="n">No</td><td>Custom skills</td></tr>
+          <tr><td>Scheduled tasks</td><td class="y">Cron</td><td class="y">Cron</td><td class="n">No</td><td class="n">No</td><td class="y">Automations</td></tr>
+          <tr><td>Persistent memory</td><td class="y">Kusto/ADX</td><td class="y">FTS5 + files</td><td>Limited</td><td>Limited</td><td>Session history</td></tr>
+          <tr><td>Multi-provider</td><td class="y">4+ providers</td><td class="y">200+ models</td><td class="n">OpenAI only</td><td class="n">Anthropic only</td><td class="y">Multi-model + BYOK</td></tr>
+          <tr><td>No build step</td><td class="y">Yes</td><td class="n">pip install</td><td class="n">N/A</td><td class="n">N/A</td><td class="n">Desktop install</td></tr>
         </tbody>
       </table>
     </div>
