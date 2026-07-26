@@ -332,6 +332,7 @@ function toggleSkillsPanel(force) {
   if (!panel) return;
   var visible = panel.getAttribute('aria-hidden') !== 'true';
   var next = (typeof force === 'boolean') ? !force : visible;
+  if (!next && typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
   if (!next && typeof closeSidePanels === 'function') closeSidePanels('skillsPanel');
   panel.setAttribute('aria-hidden', next ? 'true' : 'false');
   if (!next) loadSkills();

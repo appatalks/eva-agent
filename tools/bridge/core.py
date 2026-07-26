@@ -281,6 +281,247 @@ _ALERT_CHANNELS = _cfg.ALERT_CHANNELS
 _TELEMETRY_RING_MAX = _cfg.TELEMETRY_RING_MAX
 _BG_PROPOSAL_COLUMNS = _cfg.BG_PROPOSAL_COLUMNS
 _SUBAGENT_MAX = 4
+_SUBAGENT_ACTIVE_STATUSES = {"starting", "waiting", "running", "steering", "finalizing"}
+_AGENT_ACTIVE_STATUSES = _SUBAGENT_ACTIVE_STATUSES | {"awaiting_confirmation", "awaiting_input"}
+
+
+def _subagent_active_count(tasks=None):
+    active_tasks = tasks if tasks is not None else _st.subagent_tasks
+    return sum(
+        1 for task in active_tasks.values()
+        if task.get("status") in _SUBAGENT_ACTIVE_STATUSES
+    )
+
+
+def _reserve_subagent_task(task):
+    """Atomically reserve capacity and register a subagent task."""
+    with _st.subagent_lock:
+        if _subagent_active_count() >= _SUBAGENT_MAX:
+            return False
+        _st.subagent_tasks[task["id"]] = task
+        return True
+
+
+def _reserve_subagent_batch(tasks):
+    """Atomically reserve every task in a batch or none of them."""
+    with _st.subagent_lock:
+        if _subagent_active_count() + len(tasks) > _SUBAGENT_MAX:
+            return False
+        for task in tasks:
+            _st.subagent_tasks[task["id"]] = task
+        return True
+
+
+def _start_reserved_subagent_batch(tasks, thread_factory=threading.Thread):
+    """Start all batch workers behind a gate; roll back if any thread fails to start."""
+    start_gate = threading.Event()
+    abort_start = threading.Event()
+    threads = []
+    try:
+        for task in tasks:
+            thread = thread_factory(
+                target=_subagent_worker,
+                args=(task["id"], task["_full_prompt"], task["label"], task["model"], start_gate, abort_start),
+                name=f"subagent-{task['id']}",
+                daemon=True,
+            )
+            thread.start()
+            threads.append(thread)
+    except Exception:
+        abort_start.set()
+        start_gate.set()
+        with _st.subagent_lock:
+            for task in tasks:
+                _st.subagent_tasks.pop(task["id"], None)
+        return False
+    for task in tasks:
+        task.pop("_full_prompt", None)
+    start_gate.set()
+    return True
+
+
+def _select_subagent_overview_tasks(tasks, limit=20):
+    """Keep every active task visible, followed by the newest inactive history."""
+    all_tasks = list(tasks.values())
+    active_tasks = [
+        task for task in all_tasks
+        if task.get("status") in _SUBAGENT_ACTIVE_STATUSES
+    ]
+    inactive_tasks = [
+        task for task in all_tasks
+        if task.get("status") not in _SUBAGENT_ACTIVE_STATUSES
+    ]
+    inactive_tasks.sort(key=lambda task: str(task.get("ended_at") or task.get("started_at") or ""))
+    remaining = max(0, limit - len(active_tasks))
+    recent_inactive = inactive_tasks[-remaining:] if remaining else []
+    return len(active_tasks), active_tasks + recent_inactive
+
+
+def _select_active_history(items, active_statuses, limit):
+    """Keep active records ahead of a bounded tail of inactive history."""
+    active_items = [item for item in items if item.get("status") in active_statuses]
+    inactive_items = [item for item in items if item.get("status") not in active_statuses]
+    remaining = max(0, limit - len(active_items))
+    recent_inactive = inactive_items[-remaining:] if remaining else []
+    return active_items + recent_inactive
+
+
+def _select_agent_payload(items, limit=30):
+    """Keep every active agent, then fill the payload with recent completions."""
+    active_items = [item for item in items if item.get("status") in _AGENT_ACTIVE_STATUSES]
+    inactive_items = [item for item in items if item.get("status") not in _AGENT_ACTIVE_STATUSES]
+    active_items.sort(key=lambda item: str(item.get("started_at") or ""), reverse=True)
+    inactive_items.sort(
+        key=lambda item: str(item.get("ended_at") or item.get("started_at") or ""),
+        reverse=True,
+    )
+    remaining = max(0, limit - len(active_items))
+    return active_items + inactive_items[:remaining]
+
+
+def _dismiss_subagent_task(task_id):
+    """Remove a terminal task unless an active task still depends on it."""
+    with _st.subagent_lock:
+        task = _st.subagent_tasks.get(task_id)
+        if not task:
+            return False, "not_found"
+        if task.get("status") not in ("done", "error", "cancelled"):
+            return False, "active"
+        dependent = next(
+            (
+                other for other in _st.subagent_tasks.values()
+                if task_id in (other.get("depends_on") or [])
+                and other.get("status") in _SUBAGENT_ACTIVE_STATUSES
+            ),
+            None,
+        )
+        if dependent:
+            return False, "dependency"
+        _st.subagent_tasks.pop(task_id, None)
+        return True, ""
+
+
+def _prepare_subagent_steer(task, instruction):
+    """Mutate a task for an accepted steering request; return None at capacity."""
+    task_is_active = task.get("status") in _SUBAGENT_ACTIVE_STATUSES
+    if not task_is_active and _subagent_active_count() >= _SUBAGENT_MAX:
+        return None
+    task.setdefault("steer_queue", [])
+    task.setdefault("steer_history", []).append({
+        "instruction": instruction,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    })
+    if task_is_active:
+        task["steer_queue"].append(instruction)
+        return {"restart": False, "prompt": instruction}
+    prior_result = str(task.get("result") or "")[:3000]
+    prompt = (
+        f"Continue the existing task '{task.get('label', 'subagent task')}'.\n"
+        f"Previous result:\n{prior_result}\n\nNew direction:\n{instruction}"
+    )
+    task["status"] = "steering"
+    task["ended_at"] = None
+    task["signal_on_complete"] = False
+    task["signal_status"] = ""
+    return {"restart": True, "prompt": prompt}
+
+
+def _knowledge_graph_snapshot(rows):
+    """Project Knowledge rows into deterministic entity and fact graph records."""
+    nodes = {
+        "eva-root": {
+            "id": "eva-root",
+            "label": "Eva",
+            "type": "core",
+            "description": "Cognitive root and agent orchestrator",
+        }
+    }
+    edges = []
+    for row in rows or []:
+        source_label = str(row.get("Entity", "") or "").strip()
+        target_value = str(row.get("Value", "") or "").strip()
+        relation = str(row.get("Relation", "related_to") or "related_to").strip()
+        if not source_label or not target_value:
+            continue
+        source_lower = source_label.lower()
+        if relation.lower() in ("mentioned", "candidate_mentioned", "recurring_topic"):
+            continue
+        if source_lower != "eva" and (
+            source_lower in _cfg.ENTITY_IGNORE_WORDS or source_lower in _cfg.ENTITY_RESERVED_TERMS
+        ):
+            continue
+        target_label = target_value
+        if len(target_label) > 56:
+            target_label = target_label[:53].rstrip() + "..."
+        source_id = "eva-root" if source_lower == "eva" else "entity-" + hashlib.sha1(source_lower.encode()).hexdigest()[:12]
+        target_key = relation.lower() + "\0" + target_value.lower()
+        target_id = "fact-" + hashlib.sha1(target_key.encode()).hexdigest()[:12]
+        if source_id != "eva-root":
+            nodes[source_id] = {
+                "id": source_id,
+                "label": source_label,
+                "type": "entity",
+                "description": "Remembered entity",
+            }
+        nodes[target_id] = {
+            "id": target_id,
+            "label": target_label,
+            "full_label": target_value[:240],
+            "type": "fact",
+            "source_label": source_label,
+            "relation": relation.replace("_", " "),
+            "confidence": float(row.get("Confidence", 0.0) or 0.0),
+            "description": f"{source_label} · {relation.replace('_', ' ')}",
+        }
+        edges.append({
+            "source": source_id,
+            "target": target_id,
+            "label": relation.replace("_", " "),
+            "confidence": float(row.get("Confidence", 0.0) or 0.0),
+            "type": "memory",
+        })
+    return {"nodes": list(nodes.values()), "edges": edges}
+
+
+def _append_agent_topology(graph, tasks):
+    """Add agent nodes plus Eva orchestration and inter-agent dependency edges."""
+    task_by_id = {task.get("id"): task for task in tasks if task.get("id")}
+    graph_node_ids = {node.get("id") for node in graph.get("nodes", [])}
+    if "eva-root" not in graph_node_ids:
+        graph.setdefault("nodes", []).insert(0, {
+            "id": "eva-root", "label": "Eva", "type": "core",
+            "description": "Cognitive root and agent orchestrator",
+        })
+    for task_id, task in task_by_id.items():
+        task_node_id = "agent-" + task_id
+        graph["nodes"].append({
+            "id": task_node_id,
+            "label": task.get("label", "Agent"),
+            "type": "agent",
+            "status": task.get("status", "unknown"),
+            "model": task.get("model", "default") or "default",
+            "group_id": task.get("group_id", ""),
+            "result": str(task.get("result") or "")[:240],
+            "description": "Isolated ACP agent session",
+        })
+        graph["edges"].append({
+            "source": "eva-root",
+            "target": task_node_id,
+            "label": "orchestrates",
+            "confidence": 1.0,
+            "type": "orchestration",
+        })
+        for dependency_id in task.get("depends_on", []):
+            if dependency_id not in task_by_id:
+                continue
+            graph["edges"].append({
+                "source": "agent-" + dependency_id,
+                "target": task_node_id,
+                "label": "feeds",
+                "confidence": 1.0,
+                "type": "dependency",
+            })
+    return graph
 _TELEMETRY_ENABLED = _st.telemetry_enabled
 _BG_PROPOSALS_LATEST_QUERY = (
     "BackgroundProposals "
@@ -385,6 +626,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._cron_list()
         elif parsed_path == "/v1/subagent/status":
             self._subagent_status()
+        elif parsed_path == "/v1/agents/overview":
+            self._agents_overview()
         elif parsed_path == "/v1/telemetry":
             self._telemetry_report()
         elif parsed_path == "/v1/logs":
@@ -455,6 +698,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._skills_auto_learn()
         elif parsed_path == "/v1/subagent/spawn":
             self._subagent_spawn()
+        elif parsed_path == "/v1/subagent/spawn-batch":
+            self._subagent_spawn_batch()
+        elif parsed_path == "/v1/subagent/steer":
+            self._subagent_steer()
         elif parsed_path == "/v1/browser/run":
             self._browser_run()
         elif parsed_path == "/v1/desktop/run":
@@ -525,6 +772,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._skills_delete(urllib.parse.unquote(parsed_path.split("/v1/skills/", 1)[1]))
         elif parsed_path.startswith("/v1/cron/"):
             self._cron_delete(urllib.parse.unquote(parsed_path.split("/v1/cron/", 1)[1]))
+        elif parsed_path.startswith("/v1/subagent/"):
+            self._subagent_dismiss(urllib.parse.unquote(parsed_path.split("/v1/subagent/", 1)[1]))
         else:
             self.send_error(404, "Not Found")
 
@@ -1849,6 +2098,136 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
     # Subagent parallelism
     # ------------------------------------------------------------------
+    def _agents_overview(self):
+        """Return a normalized snapshot for the agent operations dashboard."""
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "agent overview restricted to loopback"}})
+            return
+        agents = []
+        with _st.subagent_lock:
+            subagents_active, visible_tasks = _select_subagent_overview_tasks(_st.subagent_tasks)
+            for task in visible_tasks:
+                agents.append({
+                    "id": task.get("id", ""),
+                    "kind": "subagent",
+                    "label": task.get("label", "Subagent"),
+                    "model": task.get("model", ""),
+                    "status": task.get("status", "unknown"),
+                    "detail": task.get("prompt", ""),
+                    "result": task.get("result"),
+                    "started_at": task.get("started_at"),
+                    "ended_at": task.get("ended_at"),
+                    "session_id": task.get("session_id", ""),
+                    "group_id": task.get("group_id", ""),
+                    "depends_on": task.get("depends_on", []),
+                    "signal_status": task.get("signal_status", ""),
+                })
+
+        for module, kind, label in (
+            (_BROWSER_AGENT, "browser", "Browser agent"),
+            (_DESKTOP_AGENT, "desktop", "Desktop agent"),
+        ):
+            if module is None:
+                continue
+            runs = getattr(module, "_runs", {})
+            runs_lock = getattr(module, "_runs_lock", None)
+            if runs_lock is None:
+                continue
+            with runs_lock:
+                run_ids = list(runs.keys())
+            run_snapshots = []
+            for run_id in run_ids:
+                run = module.public_status(run_id)
+                if not run:
+                    continue
+                run_snapshots.append(run)
+            visible_runs = _select_active_history(
+                run_snapshots,
+                {"starting", "running", "awaiting_confirmation", "awaiting_input"},
+                10,
+            )
+            for run in visible_runs:
+                agents.append({
+                    "id": run.get("id", ""),
+                    "kind": kind,
+                    "label": label,
+                    "status": run.get("status", "unknown"),
+                    "detail": run.get("subgoal") or run.get("goal", ""),
+                    "result": run.get("result") or run.get("error"),
+                    "started_at": run.get("started"),
+                    "ended_at": run.get("finished"),
+                    "session_id": "",
+                    "step": run.get("step", 0),
+                })
+
+        background = _background_status_dict()
+        last_activity = background.get("lastActivity") or {}
+        if last_activity:
+            agents.append({
+                "id": last_activity.get("TickId", "background-latest"),
+                "kind": "background",
+                "label": last_activity.get("JobType", "Background cognition"),
+                "status": last_activity.get("Status", "unknown"),
+                "detail": last_activity.get("Notes", ""),
+                "result": None,
+                "started_at": last_activity.get("StartedAt"),
+                "ended_at": last_activity.get("EndedAt"),
+                "session_id": "",
+            })
+
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        include_graph = (params.get("include_graph", ["1"])[0] or "1") != "0"
+        graph = None
+        if include_graph:
+            if _resolve_memory_backend() == "sqlite":
+                rows = _get_sqlite_mem().query(
+                    "SELECT Entity, Relation, Value, Confidence, Timestamp FROM Knowledge "
+                    "WHERE Confidence >= 0.6 AND Relation NOT IN ('mentioned', 'candidate_mentioned', 'recurring_topic') "
+                    "ORDER BY Timestamp DESC LIMIT 30"
+                ) or []
+            else:
+                cluster, database = _get_kusto_config()
+                rows = _kusto_query_direct(
+                    cluster, database,
+                    "Knowledge | where Confidence >= 0.6 "
+                    "and Relation !in~ ('mentioned', 'candidate_mentioned', 'recurring_topic') "
+                    "| order by Timestamp desc | take 30 "
+                    "| project Entity, Relation, Value, Confidence, Timestamp"
+                ) if cluster and database else []
+            graph = _knowledge_graph_snapshot(rows)
+            with _st.subagent_lock:
+                all_graph_tasks = dict(_st.subagent_tasks)
+                _, graph_tasks = _select_subagent_overview_tasks(all_graph_tasks, limit=30)
+                dependency_ids = {
+                    dependency_id
+                    for task in graph_tasks
+                    for dependency_id in task.get("depends_on", [])
+                }
+                visible_ids = {task.get("id") for task in graph_tasks}
+                graph_tasks.extend(
+                    all_graph_tasks[dependency_id]
+                    for dependency_id in dependency_ids
+                    if dependency_id in all_graph_tasks and dependency_id not in visible_ids
+                )
+            _append_agent_topology(graph, graph_tasks)
+
+        other_agents_active = sum(
+            1 for item in agents
+            if item.get("kind") != "subagent" and item.get("status") in _AGENT_ACTIVE_STATUSES
+        )
+        visible_agents = _select_agent_payload(agents, limit=30)
+        payload = {
+            "agents": visible_agents,
+            "active_total": subagents_active + other_agents_active,
+            "subagents_active": subagents_active,
+            "capacity": _SUBAGENT_MAX,
+            "background": background,
+            "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        if graph is not None:
+            payload["graph"] = graph
+        self._json_response(200, payload)
+
     def _subagent_spawn(self):
         """Spawn an isolated subagent that runs a prompt concurrently."""
         if not _is_loopback_bind():
@@ -1860,30 +2239,144 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         prompt = str((data or {}).get("prompt", "")).strip()
         label = str((data or {}).get("label", "subagent task")).strip()[:120]
+        model = str((data or {}).get("model", "")).strip()[:120]
+        session_id = str((data or {}).get("session_id", "")).strip()[:120]
+        group_id = str((data or {}).get("group_id", "")).strip()[:120]
+        raw_dependencies = (data or {}).get("depends_on", [])
+        depends_on = [str(value).strip()[:120] for value in raw_dependencies if str(value).strip()][:3] if isinstance(raw_dependencies, list) else []
         if not prompt:
             self._json_response(400, {"error": {"message": "prompt is required"}})
             return
-        with _st.subagent_lock:
-            running = sum(1 for t in _st.subagent_tasks.values() if t.get("status") == "running")
-            if running >= _SUBAGENT_MAX:
-                self._json_response(429, {"error": {"message": f"max {_SUBAGENT_MAX} concurrent subagents"}})
-                return
         task_id = "sub-" + uuid.uuid4().hex[:8]
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         task = {
             "id": task_id,
             "label": label,
-            "prompt": prompt[:500],
-            "status": "running",
+            "prompt": prompt[:1200],
+            "model": model,
+            "status": "waiting" if depends_on else "running",
             "result": None,
             "started_at": now_iso,
             "ended_at": None,
+            "session_id": session_id,
+            "group_id": group_id,
+            "depends_on": depends_on,
+            "signal_on_complete": False,
+            "signal_status": "",
+            "steer_queue": [],
+            "steer_history": [],
         }
-        with _st.subagent_lock:
-            _st.subagent_tasks[task_id] = task
-        thread = threading.Thread(target=_subagent_worker, args=(task_id, prompt, label), name=f"subagent-{task_id}", daemon=True)
+        if not _reserve_subagent_task(task):
+            self._json_response(429, {"error": {"message": f"max {_SUBAGENT_MAX} concurrent subagents"}})
+            return
+        thread = threading.Thread(target=_subagent_worker, args=(task_id, prompt, label, model), name=f"subagent-{task_id}", daemon=True)
         thread.start()
         self._json_response(202, {"task": {k: v for k, v in task.items() if k != "thread"}})
+
+    def _subagent_spawn_batch(self):
+        """Atomically reserve and launch one collaborative or independent batch."""
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "subagent restricted to loopback"}})
+            return
+        data, err = self._read_json_body()
+        if err:
+            self._json_response(400, {"error": {"message": err}})
+            return
+        raw_tasks = (data or {}).get("tasks", [])
+        if not isinstance(raw_tasks, list) or not 1 <= len(raw_tasks) <= _SUBAGENT_MAX:
+            self._json_response(400, {"error": {"message": f"tasks must contain 1-{_SUBAGENT_MAX} items"}})
+            return
+        collaborative = bool((data or {}).get("collaborative")) and len(raw_tasks) > 1
+        signal_on_complete = bool((data or {}).get("signal_on_complete")) and collaborative
+        if signal_on_complete and not self._require_bridge_capability():
+            return
+        session_id = str((data or {}).get("session_id", "")).strip()[:120]
+        group_id = str((data or {}).get("group_id", "")).strip()[:120] or "group-" + uuid.uuid4().hex[:10]
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        tasks = []
+        for index, raw_task in enumerate(raw_tasks):
+            raw_task = raw_task if isinstance(raw_task, dict) else {}
+            prompt = str(raw_task.get("prompt", "")).strip()
+            if not prompt:
+                self._json_response(400, {"error": {"message": f"task {index + 1} prompt is required"}})
+                return
+            tasks.append({
+                "id": "sub-" + uuid.uuid4().hex[:8],
+                "label": str(raw_task.get("label", f"Agent {index + 1}")).strip()[:120],
+                "prompt": prompt[:1200],
+                "_full_prompt": prompt,
+                "model": str(raw_task.get("model", "")).strip()[:120],
+                "status": "running",
+                "result": None,
+                "started_at": now_iso,
+                "ended_at": None,
+                "session_id": session_id,
+                "group_id": group_id,
+                "depends_on": [],
+                "signal_on_complete": False,
+                "signal_status": "",
+                "steer_queue": [],
+                "steer_history": [],
+            })
+        if collaborative:
+            synthesis = tasks[-1]
+            synthesis["depends_on"] = [task["id"] for task in tasks[:-1]]
+            synthesis["status"] = "waiting"
+            synthesis["signal_on_complete"] = signal_on_complete
+            synthesis["signal_status"] = "queued" if signal_on_complete else ""
+        if not _reserve_subagent_batch(tasks):
+            with _st.subagent_lock:
+                available = max(0, _SUBAGENT_MAX - _subagent_active_count())
+            self._json_response(429, {"error": {"message": f"batch needs {len(tasks)} slots; {available} available"}})
+            return
+        if not _start_reserved_subagent_batch(tasks):
+            self._json_response(500, {"error": {"message": "batch worker startup failed; no tasks were launched"}})
+            return
+        self._json_response(202, {
+            "tasks": [{k: v for k, v in task.items() if not k.startswith("_")} for task in tasks],
+            "group_id": group_id,
+            "collaborative": collaborative,
+            "deferred_signal": signal_on_complete,
+        })
+
+    def _subagent_steer(self):
+        """Queue a direction for a running task or resume a completed task."""
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "subagent restricted to loopback"}})
+            return
+        data, err = self._read_json_body()
+        if err:
+            self._json_response(400, {"error": {"message": err}})
+            return
+        task_id = str((data or {}).get("id", "")).strip()
+        instruction = str((data or {}).get("instruction", "")).strip()[:2000]
+        if not task_id or not instruction:
+            self._json_response(400, {"error": {"message": "id and instruction are required"}})
+            return
+
+        with _st.subagent_lock:
+            task = _st.subagent_tasks.get(task_id)
+            if not task:
+                self._json_response(404, {"error": {"message": "subagent task not found"}})
+                return
+            if task.get("status") == "finalizing":
+                self._json_response(409, {"error": {"message": "task is finalizing completion delivery"}})
+                return
+            steer = _prepare_subagent_steer(task, instruction)
+            if steer is None:
+                self._json_response(429, {"error": {"message": f"max {_SUBAGENT_MAX} concurrent subagents"}})
+                return
+            public_task = {k: v for k, v in task.items() if k != "thread"}
+
+        if steer["restart"]:
+            thread = threading.Thread(
+                target=_subagent_worker,
+                args=(task_id, steer["prompt"], task.get("label", "subagent task"), task.get("model", "")),
+                name=f"subagent-steer-{task_id}",
+                daemon=True,
+            )
+            thread.start()
+        self._json_response(202, {"task": public_task, "queued": not steer["restart"]})
 
     def _subagent_status(self):
         """Return status of all subagent tasks, or a specific one via ?id=..."""
@@ -1898,8 +2391,23 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._json_response(200, {"task": {k: v for k, v in task.items() if k != "thread"}})
             else:
                 tasks = [{k: v for k, v in t.items() if k != "thread"} for t in _st.subagent_tasks.values()]
-                running = sum(1 for t in tasks if t.get("status") == "running")
-                self._json_response(200, {"tasks": tasks[-20:], "running": running, "max": _SUBAGENT_MAX})
+                active = _subagent_active_count()
+                self._json_response(200, {"tasks": tasks[-20:], "running": active, "max": _SUBAGENT_MAX})
+
+    def _subagent_dismiss(self, task_id):
+        """Dismiss a completed/error/cancelled task from Agent Operations."""
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "subagent restricted to loopback"}})
+            return
+        dismissed, reason = _dismiss_subagent_task((task_id or "").strip())
+        if dismissed:
+            self._json_response(200, {"dismissed": task_id})
+        elif reason == "not_found":
+            self._json_response(404, {"error": {"message": "subagent task not found"}})
+        elif reason == "dependency":
+            self._json_response(409, {"error": {"message": "task is still required by an active dependent agent"}})
+        else:
+            self._json_response(409, {"error": {"message": "only completed, failed, or cancelled tasks can be dismissed"}})
 
     def _models(self):
         models = {

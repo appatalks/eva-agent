@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import importlib.util
+import threading
 
 PASS = 0
 FAIL = 0
@@ -60,6 +61,8 @@ def test_required_files():
         "core/js/external.js",
         "core/js/sessions.js",
         "core/js/voice.js",
+        "core/js/agents.js",
+        "core/js/dialogs.js",
         "tools/acp_bridge.py",
         "tools/kusto_mcp.py",
         ".gitignore",
@@ -418,7 +421,7 @@ def test_signal_and_github_mcp_contract():
     report("local_mcp_refreshes_after_auth", "Refreshed LOCAL mode" in bridge_core and "previous_manager.stop_all()" in bridge_core)
     report("github_mcp_omitted_without_pat", "unresolved_servers.append" in bridge_core and "mcp_servers.pop" in bridge_core)
     report("github_mcp_reapplies_late_pat", "_lastAutoAppliedMCPPat" in copilot_js and "_autoApplyMCPQueue" in copilot_js and options_js.count("autoApplySavedMCPConfig()") >= 2)
-    report("signal_is_only_capability_endpoint", bridge_core.count("_require_bridge_capability()") == 1)
+    report("signal_capability_endpoints_bounded", bridge_core.count("_require_bridge_capability()") == 2)
     report("bridge_capability_not_in_child_env", acp_client.count('pop("EVA_BRIDGE_TOKEN", None)') >= 2 and 'pop("EVA_BRIDGE_TOKEN", None)' in local_mcp)
     report("cors_uses_exact_loopback_host", "parsed.hostname" in bridge_core and "origin.startswith" not in bridge_core)
 
@@ -483,11 +486,17 @@ def test_sidebar_workflow_contract():
     report("workflow_signal_marker_only", "Do NOT call /v1/signal/send" in cognition_js and "Do NOT call /v1/signal/send" in bridge_core)
     report("workflow_signal_missing_marker_fails", "Eva did not provide a Signal message payload" in options_js)
     report("workflow_session_rename", "function renameSession" in sessions_js and "customTitle" in sessions_js)
+    report("workflow_session_delegated_activation", "function activateSessionListItem" in sessions_js and "data-session-id" in sessions_js and "activationBound" in sessions_js)
+    report("workflow_session_awaits_save", "return Promise.resolve(saveCurrentSession()).then(function()" in sessions_js)
+    report("workflow_session_legacy_fallback", "localStorage.getItem('session_' + id)" in sessions_js and "idbSaveSession(id, data)" in sessions_js)
+    report("workflow_session_reveals_chat", "EvaAgents.close" in sessions_js and "Session loaded." in sessions_js)
+    report("workflow_sidebar_session_provider", "function getAllSessions" in sessions_js and "updatedAt:" in sessions_js)
     report("workflow_new_session_on_launch", "idbMigrateFromLocalStorage().then(function() {\n    newSession();" in sessions_js)
     report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "newSession();\n      else" in options_js)
     report("workflow_side_panels_click_outside", "function closeSidePanels" in sessions_js and "EVA_SIDE_PANEL_IDS" in sessions_js and "document.addEventListener('click'" in sessions_js)
+    report("workflow_agent_view_navigation", "function closeAgentOperationsForNavigation" in sessions_js and "#evaAgentsBtn" in sessions_js and "#lcarsAgentsBtn" in sessions_js)
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
-    report("workflow_profile_picker", 'id="profilePanel"' in html and 'src="core/js/profiles.js"' in html and "function switchEvaProfile" in profiles_js)
+    report("workflow_profile_picker", 'id="profilePanel"' in html and re.search(r'src="core/js/profiles\.js(?:\?[^" ]+)?"', html) is not None and "function switchEvaProfile" in profiles_js)
     report("workflow_profile_awaits_session_save", "async function switchEvaProfile" in profiles_js and "await saveCurrentSession()" in profiles_js)
     report("workflow_profile_scoped_sessions", "saveCurrentSession" in profiles_js and "eva_sessions" not in profiles_js)
     report("workflow_encrypted_auth_persistence", "safeStorage.encryptString" in standalone_main and "safeStorage.decryptString" in standalone_main and "authLoad" in standalone_preload)
@@ -595,6 +604,371 @@ def test_background_static_contract():
            "background proposals read endpoint must check loopback bind" if proposals_loopback is None else "")
     report("background_activity_loopback_read", activity_loopback is not None,
            "background activity read endpoint must check loopback bind" if activity_loopback is None else "")
+
+
+def test_agent_operations_contract():
+    """Agent dashboard routes, UI entry points, and steering are wired."""
+    bridge_path = "tools/bridge/core.py"
+    worker_path = "tools/bridge/utils.py"
+    ui_path = "core/js/agents.js"
+    with open(bridge_path) as f:
+        bridge = f.read()
+    with open(worker_path) as f:
+        worker = f.read()
+    with open(ui_path) as f:
+        ui = f.read()
+    with open("core/js/cognition.js") as f:
+        cognition = f.read()
+    with open("core/js/profiles.js") as f:
+        profiles = f.read()
+    with open("core/js/sessions.js") as f:
+        sessions = f.read()
+    with open("index.html") as f:
+        html = f.read()
+
+    for endpoint in ("/v1/agents/overview", "/v1/subagent/steer"):
+        report(f"agent_operations_endpoint:{endpoint}", endpoint in bridge,
+               f"missing {endpoint}" if endpoint not in bridge else "")
+    for element_id in ("evaAgentsBtn", "agentsView", "agentsGrid", "agentGraphCanvas"):
+        report(f"agent_operations_element:{element_id}", f'id="{element_id}"' in html,
+               f"missing #{element_id}" if f'id="{element_id}"' not in html else "")
+    report("agent_operations_script", re.search(r'src="core/js/agents\.js(?:\?[^" ]+)?"', html) is not None)
+    report("agent_operations_polling", "setInterval(refresh, 2000)" in ui)
+    report("agent_operations_keyed_cards", "existing[child.dataset.agentId]" in ui and "updateAgentCard(card, agent)" in ui)
+    report("agent_operations_entry_animation_new_only", "agent-card agent-card-enter" in ui and ".agent-card.agent-card-enter" in open("core/style.css").read())
+    report("agent_operations_graph_fetch", "data.graph" in ui)
+    report("agent_operations_steer_queue", 'task.setdefault("steer_queue", [])' in worker)
+    report("agent_operations_spawn_capability", "id: 'agent.spawn_batch'" in cognition)
+    report("agent_operations_spawn_endpoint_call", "'/v1/subagent/spawn-batch'" in cognition)
+    report("agent_operations_spawn_forces_cognition", "spin\\s+up" in cognition and "kick\\s+off|start|run" in cognition and "subagents?" in cognition)
+    report("agent_operations_multi_agent_turn_intent", "multi[- ]agent(?:ic)?" in cognition and "turn|session|workflow|test|again" in cognition)
+    report("agent_operations_repeat_batch", "eva_last_agent_batch" in cognition and "_agentRepeatIntent" in cognition and "repeatIntent ? priorBatch.tasks" in cognition)
+    report("agent_operations_deterministic_fallback", "async function ensureAgentLaunch" in cognition and "_fallbackAgentTasks" in cognition)
+    report("agent_operations_nonempty_action_success", "Array.isArray(action.result.tasks) && action.result.tasks.length > 0" in cognition)
+    report("agent_operations_deferred_signal", "deferredSignal" in cognition and "!deferredSignal && canAuthorizeSignalDelivery" in open("core/js/aig.js").read())
+    report("agent_operations_collaboration_metadata", "synthesis[\"depends_on\"]" in bridge and "signal_on_complete" in cognition)
+    report("agent_operations_signal_authorized", "getBridgeCapabilityHeaders" in cognition and "signal_on_complete and not self._require_bridge_capability()" in bridge)
+    report("agent_operations_signal_fails_closed", "typeof canAuthorizeSignalDelivery === 'function'" in cognition and ": false;" in cognition)
+    report("agent_operations_scoped_action_context", "actionContext = { userMessage:" in cognition and "cap.run(spec.args || {}, actionContext)" in cognition)
+    report("agent_operations_no_shared_user_context", "_activeAgentUserMessage" not in cognition)
+    report("agent_operations_lm_context", "Cognition.executeActions(candidate, { userMessage: sQuestion })" in open("core/js/lm-studio.js").read())
+    report("agent_operations_finalizing_steer_rejected", 'task.get("status") == "finalizing"' in bridge and "task is finalizing completion delivery" in bridge)
+    report("agent_operations_dismiss_endpoint", 'parsed_path.startswith("/v1/subagent/")' in bridge and "def _subagent_dismiss" in bridge)
+    report("agent_operations_dismiss_control", "function dismissAgent" in ui and "agent-card-dismiss" in ui)
+    report("agent_operations_agent_graph", '"type": "agent"' in bridge and '"label": "feeds"' in bridge)
+    report("agent_operations_agent_nodes_prioritized", "selectGraphNodes(sourceNodes, 90)" in ui and "node.type === 'agent'" in ui)
+    report("agent_operations_eva_fixed_root", "node.id === 'eva-root'" in ui and "existing.x = 0.5" in ui)
+    report("agent_operations_rich_tooltip", "function graphTooltipText" in ui and "Orchestrates:" in ui and "Receives from:" in ui and "Confidence:" in ui)
+    report("agent_operations_live_graph_status", "agentById['agent-' + agent.id]" in ui and "node.status = liveAgent.status" in ui)
+    report("agent_operations_done_graph_state", "doneAgent" in ui and "statusLabel(node.status)" in ui)
+    report("agent_operations_model_routing", 'get("model", "")' in bridge and "selected_model = model or template.model" in worker)
+    report("agent_operations_no_native_prompt", "prompt(" not in profiles and "prompt(" not in sessions)
+    with open("tools/bridge/acp_client.py") as f:
+        acp_client = f.read()
+    report("agent_operations_acp_tool_uuid", re.search(r"^import uuid$", acp_client, re.MULTILINE) is not None)
+    with open("tools/bridge/cron.py") as f:
+        cron = f.read()
+    report("agent_operations_notification_uuid", re.search(r"^import uuid$", cron, re.MULTILINE) is not None)
+    report("agent_operations_notification_nonfatal", "Completion notification failed" in worker)
+    report("agent_operations_isolated_client", "client = ACPClient(" in worker and "client.stop()" in worker)
+    report("agent_operations_structured_result", "def _subagent_result_text" in worker and 'result.get("error")' in worker)
+    report("agent_operations_graph_throttle", "include_graph" in bridge and "graphFetchedAt" in ui)
+    report("agent_operations_style_versioned", re.search(r'href="core/style\.css\?v=[^" ]+"', html) is not None)
+
+
+def test_agent_operations_behavior():
+    """Capacity reservation and graph IDs behave correctly."""
+    spec = importlib.util.spec_from_file_location("agent_operations_core", "tools/bridge/core.py")
+    if spec is None or spec.loader is None:
+        report("agent_operations_import", False, "could not load bridge core")
+        return
+    bridge_core = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge_core)
+
+    original_tasks = bridge_core._st.subagent_tasks
+    bridge_core._st.subagent_tasks = {}
+    accepted = []
+    accepted_lock = threading.Lock()
+
+    def reserve(index):
+        ok = bridge_core._reserve_subagent_task({"id": f"capacity-{index}", "status": "running"})
+        with accepted_lock:
+            accepted.append(ok)
+
+    threads = [threading.Thread(target=reserve, args=(index,)) for index in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    report("agent_operations_atomic_capacity", sum(accepted) == bridge_core._SUBAGENT_MAX,
+           f"accepted {sum(accepted)} tasks" if sum(accepted) != bridge_core._SUBAGENT_MAX else "")
+    bridge_core._st.subagent_tasks = original_tasks
+
+    bridge_core._st.subagent_tasks = {
+        "existing-a": {"id": "existing-a", "status": "running"},
+        "existing-b": {"id": "existing-b", "status": "running"},
+    }
+    rejected_batch = [
+        {"id": "batch-a", "status": "running"},
+        {"id": "batch-b", "status": "running"},
+        {"id": "batch-c", "status": "waiting"},
+    ]
+    batch_reserved = bridge_core._reserve_subagent_batch(rejected_batch)
+    report("agent_operations_atomic_batch_rejection",
+           not batch_reserved and set(bridge_core._st.subagent_tasks) == {"existing-a", "existing-b"},
+           "over-capacity batch was partially reserved")
+    bridge_core._st.subagent_tasks = original_tasks
+
+    startup_tasks = [
+        {"id": "startup-a", "label": "A", "model": "", "status": "running", "_full_prompt": "a"},
+        {"id": "startup-b", "label": "B", "model": "", "status": "running", "_full_prompt": "b"},
+        {"id": "startup-c", "label": "C", "model": "", "status": "waiting", "_full_prompt": "c"},
+    ]
+    bridge_core._st.subagent_tasks = {task["id"]: task for task in startup_tasks}
+
+    class FailingThread:
+        starts = 0
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            FailingThread.starts += 1
+            if FailingThread.starts == 2:
+                raise RuntimeError("simulated start failure")
+
+    startup_ok = bridge_core._start_reserved_subagent_batch(startup_tasks, thread_factory=FailingThread)
+    report("agent_operations_batch_start_rollback",
+           not startup_ok and bridge_core._st.subagent_tasks == {},
+           "thread startup failure left reserved tasks behind")
+    bridge_core._st.subagent_tasks = original_tasks
+
+    shared_prefix = "A durable fact with the same display prefix that extends beyond fifty-three characters: "
+    graph = bridge_core._knowledge_graph_snapshot([
+        {"Entity": "User", "Relation": "note", "Value": shared_prefix + "alpha", "Confidence": 0.8},
+        {"Entity": "User", "Relation": "note", "Value": shared_prefix + "beta", "Confidence": 0.8},
+        {"Entity": "Eva", "Relation": "role", "Value": "AI assistant with persistent memory", "Confidence": 0.95},
+        {"Entity": "Open", "Relation": "recurring_topic", "Value": "repeated mention", "Confidence": 0.8},
+        {"Entity": "Thank", "Relation": "recurring_topic", "Value": "repeated mention", "Confidence": 0.8},
+    ])
+    target_ids = {edge["target"] for edge in graph["edges"] if edge.get("label") == "note"}
+    report("agent_operations_distinct_fact_ids", len(target_ids) == 2,
+           "long facts collapsed to one node" if len(target_ids) != 2 else "")
+    root_nodes = [node for node in graph["nodes"] if node.get("id") == "eva-root"]
+    graph_labels = {node.get("label") for node in graph["nodes"]}
+    role_facts = [node for node in graph["nodes"] if node.get("relation") == "role"]
+    report(
+        "agent_operations_eva_root_label",
+        len(root_nodes) == 1 and root_nodes[0].get("label") == "Eva" and root_nodes[0].get("type") == "core",
+        "Eva root is missing, duplicated, or unlabeled",
+    )
+    report(
+        "agent_operations_noise_filtered",
+        "Open" not in graph_labels and "Thank" not in graph_labels,
+        "low-value recurring topic leaked into topology",
+    )
+    report(
+        "agent_operations_fact_metadata",
+        bool(role_facts) and role_facts[0].get("source_label") == "Eva" and role_facts[0].get("confidence") == 0.95,
+        "fact hover metadata is incomplete",
+    )
+
+    topology_tasks = [
+        {"id": "alpha", "label": "Alpha", "status": "done", "model": "default", "group_id": "group-1", "result": "evidence"},
+        {"id": "delta", "label": "Delta", "status": "waiting", "model": "gpt-5.2", "group_id": "group-1", "depends_on": ["alpha"]},
+    ]
+    bridge_core._append_agent_topology(graph, topology_tasks)
+    topology_edges = {(edge.get("source"), edge.get("target"), edge.get("type")) for edge in graph["edges"]}
+    agent_nodes = {node.get("id"): node for node in graph["nodes"] if node.get("type") == "agent"}
+    report(
+        "agent_operations_eva_orchestration_edges",
+        ("eva-root", "agent-alpha", "orchestration") in topology_edges
+        and ("eva-root", "agent-delta", "orchestration") in topology_edges,
+        "agents are disconnected from Eva",
+    )
+    report(
+        "agent_operations_dependency_edge",
+        ("agent-alpha", "agent-delta", "dependency") in topology_edges,
+        "collaboration dependency edge is missing",
+    )
+    report(
+        "agent_operations_graph_status_metadata",
+        agent_nodes.get("agent-alpha", {}).get("status") == "done"
+        and agent_nodes.get("agent-delta", {}).get("status") == "waiting"
+        and agent_nodes.get("agent-delta", {}).get("model") == "gpt-5.2",
+        "agent state/model metadata is missing",
+    )
+
+    historical_tasks = {
+        f"done-{index}": {"id": f"done-{index}", "status": "done"}
+        for index in range(25)
+    }
+    historical_tasks["older-active"] = {"id": "older-active", "status": "steering"}
+    active_count, visible_tasks = bridge_core._select_subagent_overview_tasks(historical_tasks)
+    visible_ids = {task["id"] for task in visible_tasks}
+    report("agent_operations_full_history_metrics", active_count == 1 and "older-active" in visible_ids,
+           "older active task missing from overview metrics or display")
+    topology_history = {
+        "older-running": {"id": "older-running", "status": "running"},
+        **{
+            f"newer-done-{index}": {"id": f"newer-done-{index}", "status": "done"}
+            for index in range(30)
+        },
+    }
+    _, topology_visible = bridge_core._select_subagent_overview_tasks(topology_history, limit=30)
+    report("agent_operations_active_topology_history",
+           "older-running" in {task["id"] for task in topology_visible},
+           "older active task was omitted from topology history")
+    topology_history["older-running"].update({
+        "status": "done",
+        "ended_at": "2099-01-01T00:00:00+00:00",
+    })
+    _, completed_overview = bridge_core._select_subagent_overview_tasks(topology_history, limit=20)
+    _, completed_topology = bridge_core._select_subagent_overview_tasks(topology_history, limit=30)
+    report("agent_operations_done_transition_retained",
+           "older-running" in {task["id"] for task in completed_overview} and
+           "older-running" in {task["id"] for task in completed_topology},
+           "recently completed older task disappeared before showing done")
+    mixed_agents = [
+        {
+            "id": "transitioned", "kind": "subagent", "status": "done",
+            "started_at": "2000-01-01T00:00:00+00:00", "ended_at": "2099-01-01T00:00:00+00:00",
+        }
+    ] + [
+        {
+            "id": f"sub-history-{index}", "kind": "subagent", "status": "done",
+            "started_at": f"2026-01-{index + 1:02d}T00:00:00+00:00",
+            "ended_at": f"2026-02-{index + 1:02d}T00:00:00+00:00",
+        }
+        for index in range(19)
+    ] + [
+        {
+            "id": f"browser-history-{index}", "kind": "browser", "status": "done",
+            "started_at": f"2026-03-{index + 1:02d}T00:00:00+00:00",
+            "ended_at": f"2026-04-{index + 1:02d}T00:00:00+00:00",
+        }
+        for index in range(11)
+    ]
+    mixed_visible = bridge_core._select_agent_payload(mixed_agents, limit=30)
+    report("agent_operations_payload_retains_transition",
+           "transitioned" in {item["id"] for item in mixed_visible},
+           "final mixed-agent payload dropped recent completion transition")
+
+    agent_runs = [{"id": "older-active-run", "status": "running"}] + [
+        {"id": f"finished-run-{index}", "status": "done"}
+        for index in range(10)
+    ]
+    visible_runs = bridge_core._select_active_history(agent_runs, {"starting", "running"}, 10)
+    report("agent_operations_active_run_history",
+           "older-active-run" in {run["id"] for run in visible_runs},
+           "older active browser/desktop run was hidden by completed history")
+    boundary_runs = [
+        {"id": f"active-run-{index}", "status": "running"}
+        for index in range(10)
+    ] + [
+        {"id": f"inactive-run-{index}", "status": "done"}
+        for index in range(25)
+    ]
+    boundary_visible = bridge_core._select_active_history(boundary_runs, {"running"}, 10)
+    report("agent_operations_history_zero_boundary", len(boundary_visible) == 10,
+           f"selected {len(boundary_visible)} records at active limit")
+
+    from bridge import utils as bridge_utils
+    original_dependency_tasks = bridge_utils._st.subagent_tasks
+    bridge_utils._st.subagent_tasks = {
+        "upstream-a": {"id": "upstream-a", "label": "Alpha", "status": "done", "result": "alpha evidence"},
+        "upstream-b": {"id": "upstream-b", "label": "Beta", "status": "done", "result": "beta analysis"},
+        "synthesis": {"id": "synthesis", "status": "waiting", "depends_on": ["upstream-a", "upstream-b"]},
+    }
+    dependency_context = bridge_utils._subagent_dependency_context("synthesis", timeout=1)
+    synthesis_task = bridge_utils._st.subagent_tasks["synthesis"]
+    report("agent_operations_dependency_context",
+           "alpha evidence" in dependency_context and "beta analysis" in dependency_context,
+           "upstream outputs missing from synthesis context")
+    report("agent_operations_waiting_transition", synthesis_task["status"] == "running",
+           "synthesis task did not transition from waiting to running")
+    bridge_utils._st.subagent_tasks = original_dependency_tasks
+
+    from bridge import alerts as bridge_alerts
+    original_signal_send = bridge_alerts._signal_send
+    delivered_messages = []
+    bridge_alerts._signal_send = lambda message: delivered_messages.append(message) or True
+    signal_task = {"id": "synthesis", "signal_on_complete": True, "signal_status": "queued"}
+    signal_status = bridge_utils._deliver_subagent_completion_signal(signal_task, "line one\nline two")
+    bridge_alerts._signal_send = original_signal_send
+    report(
+        "agent_operations_completion_signal",
+        signal_status == "sent"
+        and signal_task["signal_status"] == "sent"
+        and signal_task["signal_on_complete"] is False
+        and delivered_messages == ["line one line two"],
+        "completion Signal was not delivered from finalized synthesis text",
+    )
+    replay_status = bridge_utils._deliver_subagent_completion_signal(signal_task, "replayed")
+    report(
+        "agent_operations_signal_consent_single_use",
+        replay_status == "" and delivered_messages == ["line one line two"],
+        "completion Signal authorization was replayed",
+    )
+    bridge_alerts._signal_send = lambda message: False
+    failed_signal_task = {"id": "failed-synthesis", "signal_on_complete": True, "signal_status": "queued"}
+    failed_status = bridge_utils._deliver_subagent_completion_signal(failed_signal_task, "summary")
+    empty_signal_task = {"id": "empty-synthesis", "signal_on_complete": True, "signal_status": "queued"}
+    empty_status = bridge_utils._deliver_subagent_completion_signal(empty_signal_task, "")
+    bridge_alerts._signal_send = original_signal_send
+    report(
+        "agent_operations_failed_signal_visible",
+        failed_status == "failed"
+        and empty_status == "failed"
+        and failed_signal_task["signal_status"] == "failed"
+        and empty_signal_task["signal_status"] == "failed",
+        "failed or empty completion Signal did not retain failed status",
+    )
+
+    bridge_core._st.subagent_tasks = {
+        f"active-{index}": {"id": f"active-{index}", "status": "running"}
+        for index in range(bridge_core._SUBAGENT_MAX)
+    }
+    rejected_task = {"id": "rejected", "status": "done", "steer_history": []}
+    steer_result = bridge_core._prepare_subagent_steer(rejected_task, "do not record this")
+    report("agent_operations_rejected_steer_immutable",
+           steer_result is None and rejected_task["steer_history"] == [],
+           "rejected steering request mutated task history")
+    resumable_task = {
+        "id": "resume-synthesis", "label": "Delta", "status": "done", "result": "prior",
+        "signal_on_complete": True, "signal_status": "sent", "steer_history": [], "steer_queue": [],
+    }
+    bridge_core._st.subagent_tasks = {"resume-synthesis": resumable_task}
+    resume_result = bridge_core._prepare_subagent_steer(resumable_task, "revise")
+    report("agent_operations_resume_clears_signal_consent",
+           resume_result is not None and resumable_task["signal_on_complete"] is False and resumable_task["signal_status"] == "",
+           "resumed completed synthesis retained Signal authorization")
+
+    bridge_core._st.subagent_tasks = {
+        "active": {"id": "active", "status": "running"},
+        "upstream": {"id": "upstream", "status": "done"},
+        "synthesis": {"id": "synthesis", "status": "waiting", "depends_on": ["upstream"]},
+        "finished": {"id": "finished", "status": "done"},
+    }
+    active_dismissed, active_reason = bridge_core._dismiss_subagent_task("active")
+    upstream_dismissed, upstream_reason = bridge_core._dismiss_subagent_task("upstream")
+    finished_dismissed, finished_reason = bridge_core._dismiss_subagent_task("finished")
+    report(
+        "agent_operations_active_dismiss_blocked",
+        not active_dismissed and active_reason == "active" and "active" in bridge_core._st.subagent_tasks,
+        "active task could be dismissed",
+    )
+    report(
+        "agent_operations_dependency_dismiss_blocked",
+        not upstream_dismissed and upstream_reason == "dependency" and "upstream" in bridge_core._st.subagent_tasks,
+        "active synthesis lost its upstream task",
+    )
+    report(
+        "agent_operations_terminal_dismissed",
+        finished_dismissed and finished_reason == "" and "finished" not in bridge_core._st.subagent_tasks,
+        "terminal standalone task was not dismissed",
+    )
+    bridge_core._st.subagent_tasks = original_tasks
 
 
 def test_mcp_config():
@@ -716,6 +1090,7 @@ def main():
         ("Seed File", [test_seed_file]),
         ("Goals Static Contract", [test_goals_static_contract]),
         ("Background Static Contract", [test_background_static_contract]),
+        ("Agent Operations Contract", [test_agent_operations_contract, test_agent_operations_behavior]),
         ("MCP Config", [test_mcp_config]),
         ("Behavioral Eval", [test_eval_contract]),
     ]

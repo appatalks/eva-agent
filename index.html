@@ -11,21 +11,23 @@
   <!-- Optional local config override (prevents file:// fetch issues) -->
   <script src="config.local.js"></script>
   <!-- Scripts -->
-  <script src="core/js/profiles.js"></script>
-  <script src="core/js/options.js"></script> 
+  <script src="core/js/dialogs.js?v=5.4.17"></script>
+  <script src="core/js/profiles.js?v=5.4.17"></script>
+  <script src="core/js/options.js?v=5.4.17"></script>
   <script src="core/js/external.js"></script>
   <script src="core/js/gpt-core.js"></script>
   <script src="core/js/gl-google.js"></script>
   <script src="core/js/lm-studio.js"></script>
   <script src="core/js/copilot.js"></script>
-  <script src="core/js/cognition.js"></script>
-  <script src="core/js/skills.js"></script>
+  <script src="core/js/cognition.js?v=5.4.17"></script>
+  <script src="core/js/skills.js?v=5.4.17"></script>
   <script src="core/js/browser-agent.js"></script>
   <script src="core/js/camera.js"></script>
   <script src="core/js/aig.js"></script>
   <script src="core/js/dalle3.js"></script>
   <script src="core/js/idb-store.js"></script>
-  <script src="core/js/sessions.js"></script>
+  <script src="core/js/sessions.js?v=5.4.17"></script>
+  <script src="core/js/agents.js?v=5.4.17"></script>
   <script src="core/js/voice.js"></script>
   <script src="core/js/aws-sdk-2.1304.0.min.js"></script>
   <script>
@@ -35,7 +37,7 @@
   </script>
 
   <!-- Original CSS -->
-  <link rel="stylesheet" type="text/css" href="core/style.css">
+  <link rel="stylesheet" type="text/css" href="core/style.css?v=5.4.17">
 
 </head>
 
@@ -81,6 +83,10 @@
       <button id="evaVoiceViewBtn" class="eva-nav-item eva-nav-eva" type="button" title="Eva Voice" onclick="toggleVoiceView()">
         <span class="eva-nav-icon">&#x25C9;</span> Eva
       </button>
+      <button id="evaAgentsBtn" class="eva-nav-item" type="button" title="Agent Operations" onclick="EvaAgents.toggle()">
+        <span class="eva-nav-icon">&#x25A6;</span> Agents
+        <span id="evaAgentsBadge" class="eva-agent-count" aria-label="Running agents">0</span>
+      </button>
       <button id="evaChatsBtn" class="eva-nav-item" type="button" title="Sessions" onclick="toggleSessionPanel()">
         <span class="eva-nav-icon">&#x1F4AC;</span> Sessions
       </button>
@@ -116,6 +122,7 @@
       </button>
     </div>
   </nav>
+  <button id="agentsMobileBtn" class="agents-mobile-btn" type="button" title="Agent Operations" aria-label="Open Agent Operations" onclick="EvaAgents.open()">&#x25A6;</button>
 
   <!-- LCARS Left Sidebar (shown in LCARS theme) -->
   <nav id="lcarsSidebar" aria-label="LCARS sidebar">
@@ -139,6 +146,9 @@
     <!-- Session Explorer (inside LCARS sidebar) -->
     <div class="lcars-chip sessions" id="lcarsChipSessions">
       <button id="sidebarSessionsBtn" type="button" title="Sessions">Sessions</button>
+    </div>
+    <div class="lcars-chip agents" id="lcarsChipAgents">
+      <button id="lcarsAgentsBtn" type="button" title="Agent Operations" onclick="EvaAgents.toggle()">Agents</button>
     </div>
 
     <div class="lcars-label" aria-hidden="true">Access • 49204.3</div>
@@ -272,6 +282,51 @@
   </div>
 
   <div id="idContainer">
+    <section id="agentsView" class="agents-view" aria-hidden="true" aria-label="Agent operations">
+      <header class="agents-view-header">
+        <div>
+          <div class="agents-kicker">LIVE ORCHESTRATION</div>
+          <h1>Agent Operations</h1>
+        </div>
+        <div class="agents-view-actions">
+          <span id="agentsUpdatedAt" class="agents-updated">OFFLINE</span>
+          <button id="agentsRefreshBtn" class="agents-icon-btn" type="button" title="Refresh agent status" aria-label="Refresh agent status">&#x21BB;</button>
+          <button id="agentsCloseBtn" class="agents-icon-btn" type="button" title="Return to chat" aria-label="Return to chat">&times;</button>
+        </div>
+      </header>
+      <div class="agents-metrics" aria-label="Agent activity summary">
+        <div class="agents-metric"><span>ACTIVE</span><strong id="agentsActiveCount">0</strong></div>
+        <div class="agents-metric"><span>CAPACITY</span><strong id="agentsCapacity">0 / 4</strong></div>
+        <div class="agents-metric"><span>MEMORY NODES</span><strong id="agentsNodeCount">0</strong></div>
+        <div class="agents-metric"><span>BACKGROUND</span><strong id="agentsBackgroundState">IDLE</strong></div>
+      </div>
+      <div class="agents-session-area">
+        <div id="agentsGrid" class="agents-grid" aria-live="polite"></div>
+        <aside id="agentDetail" class="agent-detail" aria-hidden="true">
+          <button id="agentDetailClose" class="agents-icon-btn agent-detail-close" type="button" aria-label="Close agent session">&times;</button>
+          <div id="agentDetailContent"></div>
+        </aside>
+      </div>
+      <section class="agent-graph" aria-label="Memory graph topology">
+        <div class="agent-graph-heading">
+          <div>
+            <span class="agents-kicker">GRAPH RETRIEVAL FIELD</span>
+            <h2>Memory Topology</h2>
+          </div>
+          <div class="agent-graph-legend" aria-label="Graph legend">
+            <span><i class="legend-entity"></i>Entity</span>
+            <span><i class="legend-fact"></i>Fact</span>
+            <span><i class="legend-agent"></i>Agent</span>
+            <span id="agentGraphEdgeCount">0 relations</span>
+          </div>
+        </div>
+        <div class="agent-graph-stage">
+          <canvas id="agentGraphCanvas" aria-label="Animated graph of Eva memory relationships"></canvas>
+          <div id="agentGraphEmpty" class="agent-graph-empty">GRAPH INDEX STANDBY</div>
+          <div id="agentGraphTooltip" class="agent-graph-tooltip" aria-hidden="true"></div>
+        </div>
+      </section>
+    </section>
     <div id="textToSynth">
       <!-- Chat Output Area -->
       <div id="txtOutput" rows="10" wrap="soft" placeholder="Output">
@@ -311,6 +366,17 @@
 
   <!-- Settings Overlay -->
   <div class="settings-overlay" id="settingsOverlay"></div>
+
+  <div id="evaTextPrompt" class="eva-text-prompt" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="evaTextPromptTitle">
+    <form id="evaTextPromptForm" class="eva-text-prompt-panel">
+      <h2 id="evaTextPromptTitle">Enter a value</h2>
+      <input id="evaTextPromptInput" type="text" maxlength="120" autocomplete="off">
+      <div class="eva-text-prompt-actions">
+        <button id="evaTextPromptCancel" type="button">Cancel</button>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+  </div>
 
   <!-- Settings Panel (tabbed) -->
   <div class="settingsMenu" id="settingsMenu">

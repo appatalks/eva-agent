@@ -66,8 +66,9 @@
       "the user asks to text them.",
       "SCHEDULED TASKS: Eva has a cron scheduler. When the user asks to schedule something recurring",
       "(daily briefings, periodic checks, reminders), acknowledge that this can be set up in Settings > Cron.",
-      "SUBAGENTS: For multi-part tasks that can run in parallel, Eva can spawn isolated subagents. Each runs",
-      "its own prompt concurrently and delivers results via notifications when done.",
+      "SUBAGENTS: For multi-part tasks that can run in parallel, use the registered agent.spawn_batch capability.",
+      "Never say agents are running unless that capability returns accepted task IDs. Each task runs concurrently",
+      "and appears in Agent Operations. Use no more than 4 concise, independent tasks.",
       "SKILLS: Eva learns from successful complex tasks. After finishing a browser or desktop task, she may",
       "auto-extract a reusable skill. Skills are stored as drafts for user review in Settings > Goals/Skills.",
       "Do NOT narrate phases. Do NOT mention the pipeline, the reviewer,",
@@ -101,11 +102,13 @@
     /\brun\s+(the\s+)?(eva|reviewer)\b/i,
     /\brun\s+(the\s+)?(cognitive\s+)?(chain|pipeline)\b/i,
     /\bengage\s+cognition\b/i,
-    /\bcognition\s*:\s*on\b/i
+    /\bcognition\s*:\s*on\b/i,
+    /\b(?:launch|spawn|spin\s+up|kick\s+off|start|run)\b[^.!?]{0,50}\b(?:agents?|subagents?)\b/i
   ];
 
   function detectTrigger(text) {
     var s = String(text || '');
+    if (_agentLaunchIntent(s) || (_agentRepeatIntent(s) && _loadLastAgentBatch())) return true;
     for (var i = 0; i < TRIGGER_PATTERNS.length; i++) {
       if (TRIGGER_PATTERNS[i].test(s)) return true;
     }
@@ -192,6 +195,77 @@
   // stub so feature work has a stable contract.
   var capabilities = [];
 
+  function _agentLaunchIntent(text) {
+    var source = String(text || '');
+    return /\b(?:launch|spawn|spin\s+up|kick\s+off|start|run)\b[^.!?]{0,60}\b(?:agents?|subagents?)\b/i.test(source) ||
+           /\b(?:try|test|retry|repeat|redo|rerun|do)\b[^.!?]{0,80}\b(?:multi[- ]agent(?:ic)?|agentic|agents?|subagents?)\b/i.test(source) ||
+           /\b(?:multi[- ]agent(?:ic)?|agentic)\b[^.!?]{0,60}\b(?:turn|session|workflow|test|again)\b/i.test(source);
+  }
+
+  function _agentRepeatIntent(text) {
+    return /\b(?:do\s+it\s+again|do\s+that\s+again|try\s+again|run\s+that\s+again|repeat(?:\s+that)?|rerun(?:\s+that)?)\b/i.test(String(text || ''));
+  }
+
+  function _loadLastAgentBatch() {
+    try {
+      var value = JSON.parse(localStorage.getItem('eva_last_agent_batch') || 'null');
+      return value && Array.isArray(value.tasks) && value.tasks.length ? value : null;
+    } catch (_) { return null; }
+  }
+
+  function _saveLastAgentBatch(tasks, collaborative) {
+    try {
+      localStorage.setItem('eva_last_agent_batch', JSON.stringify({
+        tasks: tasks.map(function(task) {
+          return { label: task.label, prompt: task.prompt, model: task.model || '' };
+        }),
+        collaborative: !!collaborative
+      }));
+    } catch (_) {}
+  }
+
+  function _agentCollaborationIntent(text) {
+    return /\b(?:work\s+together|collaborat|coordinat|relay|handoff|hand-off|relate\s+to\s+each\s+other|build\s+on)\b/i.test(String(text || ''));
+  }
+
+  function _agentSignalIntent(text) {
+    var source = String(text || '');
+    return (typeof canAuthorizeSignalDelivery === 'function')
+      ? canAuthorizeSignalDelivery(source)
+      : false;
+  }
+
+  function _requestedAgentCount(text) {
+    var match = String(text || '').match(/\b([1-4]|one|two|three|four)\s+(?:background\s+)?(?:agents?|subagents?)\b/i);
+    if (!match) return 3;
+    var words = { one: 1, two: 2, three: 3, four: 4 };
+    return Math.max(1, Math.min(4, words[match[1].toLowerCase()] || parseInt(match[1], 10) || 3));
+  }
+
+  function _fallbackAgentTasks(userMessage) {
+    var count = _requestedAgentCount(userMessage);
+    var names = ['Alpha', 'Beta', 'Gamma', 'Delta'];
+    var focuses = [
+      'Investigate the objective and return concrete evidence or observations.',
+      'Analyze risks, tradeoffs, and alternative interpretations of the objective.',
+      'Evaluate integration details and define how the result should be tested.',
+      'Synthesize the upstream findings into the requested final result.'
+    ];
+    var tasks = [];
+    for (var i = 0; i < count; i++) {
+      tasks.push({
+        label: names[i],
+        prompt: focuses[i] + '\n\nShared objective:\n' + String(userMessage || '') +
+                '\n\nDo not send messages or claim other agents completed. Return only your own findings.'
+      });
+    }
+    return tasks;
+  }
+
+  function _stripSignalMarkers(text) {
+    return String(text || '').replace(/\[\[EVA_SIGNAL\]\][\s\S]*?\[\[\/EVA_SIGNAL\]\]/g, '').trim();
+  }
+
   function registerCapability(spec) {
     if (!spec || !spec.id || typeof spec.run !== 'function') return false;
     // Replace existing with same id so reload is safe
@@ -226,8 +300,10 @@
   // forget the closing tag). The second alternation grabs to end-of-string.
   var ACTION_BLOCK_RE = /\[\[EVA_ACTION\]\]([\s\S]*?)\[\[\/EVA_ACTION\]\]|\[\[EVA_ACTION\]\]([\s\S]+)$/g;
 
-  async function executeActions(text) {
+  async function executeActions(text, options) {
     if (!text) return { content: '', actions: [] };
+    options = options || {};
+    var actionContext = { userMessage: String(options.userMessage || '') };
     var actions = [];
     var out = text;
     var match;
@@ -256,7 +332,7 @@
         continue;
       }
       try {
-        var result = await cap.run(spec.args || {});
+        var result = await cap.run(spec.args || {}, actionContext);
         actions.push({ ok: true, id: spec.id, result: result });
         var html = (result && typeof result.html === 'string') ? result.html :
                    '<div class="cog-action-ok">[action ' + spec.id + ' completed]</div>';
@@ -467,6 +543,132 @@
     }
   });
 
+  registerCapability({
+    id: 'agent.spawn_batch',
+    description: 'Actually launch 1-4 parallel background ACP agents and show them in Agent Operations. ' +
+                 'args: {tasks:[{label:string,prompt:string,model?:string}]}. Use this whenever the user asks ' +
+                 'to launch, kick off, delegate to, or watch multiple agents. A model is optional; when requested, ' +
+                 'pass a valid Copilot CLI model ID. Never claim agents started without invoking this capability.',
+    run: async function(args, context) {
+      args = args || {};
+      context = context || {};
+      var sourceRequest = String(context.userMessage || '');
+      var tasks = Array.isArray(args.tasks) ? args.tasks.slice(0, 4) : [];
+      if (!tasks.length) throw new Error('agent.spawn_batch requires at least one task');
+      var collaborative = args.collaborative === true || _agentCollaborationIntent(sourceRequest);
+      var signalOnComplete = collaborative && _agentSignalIntent(sourceRequest);
+      var groupId = 'group-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+      var sessionId = (typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '';
+      var baseUrl = bridgeUrl().replace(/\/+$/, '');
+      var preparedTasks = [];
+      for (var i = 0; i < tasks.length; i++) {
+        var task = tasks[i] || {};
+        var label = String(task.label || ('Agent ' + (i + 1))).trim().slice(0, 120);
+        var promptText = String(task.prompt || '').trim().slice(0, 8000);
+        var model = String(task.model || '').trim().slice(0, 120);
+        var isSynthesisTask = collaborative && tasks.length > 1 && i === tasks.length - 1;
+        if (isSynthesisTask && promptText.indexOf('Wait for and use every upstream agent output supplied by the runtime.') === -1) {
+          promptText += '\n\nWait for and use every upstream agent output supplied by the runtime. ' +
+                        'Produce the final synthesis in exactly 1-2 concise lines. Do not claim a Signal was sent.';
+        }
+        if (!promptText) {
+          throw new Error('task ' + (i + 1) + ' prompt is required');
+        }
+        preparedTasks.push({ label: label, prompt: promptText, model: model });
+      }
+      var response = await fetch(baseUrl + '/v1/subagent/spawn-batch', {
+        method: 'POST',
+        headers: (typeof getBridgeCapabilityHeaders === 'function')
+          ? getBridgeCapabilityHeaders()
+          : { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tasks: preparedTasks,
+          session_id: sessionId,
+          group_id: groupId,
+          collaborative: collaborative,
+          signal_on_complete: signalOnComplete
+        })
+      });
+      var payload = await response.json().catch(function() { return {}; });
+      if (!response.ok || !Array.isArray(payload.tasks) || payload.tasks.length !== preparedTasks.length) {
+        throw new Error(payload.error && payload.error.message ? payload.error.message : 'batch launch failed (HTTP ' + response.status + ')');
+      }
+      var accepted = payload.tasks;
+      _saveLastAgentBatch(preparedTasks, !!payload.collaborative);
+      if (accepted.length && typeof EvaAgents !== 'undefined') {
+        if (EvaAgents.invalidateGraph) EvaAgents.invalidateGraph();
+        if (EvaAgents.open) EvaAgents.open();
+      }
+      var escape = (typeof escapeHtml === 'function') ? escapeHtml : function(value) {
+        return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      };
+      var lines = accepted.map(function(task) {
+        return '<li><strong>' + escape(task.label) + '</strong> <code>' + escape(task.id) + '</code>' +
+               (task.model ? ' · ' + escape(task.model) : '') + '</li>';
+      });
+      var html = '<div class="cog-action-ok"><strong>Started ' + accepted.length + ' agent' +
+                 (accepted.length === 1 ? '' : 's') + '.</strong>' +
+                 (lines.length ? '<ul>' + lines.join('') + '</ul>' : '') +
+                 '</div>';
+      return {
+        html: html,
+        tasks: accepted,
+        rejected: [],
+        group_id: payload.group_id || groupId,
+        collaborative: !!payload.collaborative,
+        deferred_signal: !!payload.deferred_signal
+      };
+    }
+  });
+
+  async function ensureAgentLaunch(opts) {
+    opts = opts || {};
+    var userMessage = String(opts.userMessage || '');
+    var content = String(opts.content || '');
+    var actions = Array.isArray(opts.actions) ? opts.actions.slice() : [];
+    var priorBatch = _loadLastAgentBatch();
+    var repeatIntent = _agentRepeatIntent(userMessage) && priorBatch;
+    if (!_agentLaunchIntent(userMessage) && !repeatIntent) {
+      return { content: content, actions: actions, deferredSignal: false };
+    }
+    var successful = actions.filter(function(action) {
+      return action && action.ok && action.id === 'agent.spawn_batch' && action.result &&
+             Array.isArray(action.result.tasks) && action.result.tasks.length > 0;
+    })[0];
+    var result = successful && successful.result;
+    if (!result) {
+      var capability = capabilities.filter(function(item) { return item.id === 'agent.spawn_batch'; })[0];
+      if (!capability) throw new Error('agent.spawn_batch is unavailable');
+      try {
+        result = await capability.run({
+          tasks: repeatIntent ? priorBatch.tasks : _fallbackAgentTasks(userMessage),
+          collaborative: repeatIntent ? priorBatch.collaborative : _agentCollaborationIntent(userMessage),
+          signal_on_complete: _agentSignalIntent(userMessage)
+        }, { userMessage: userMessage });
+        actions.push({ ok: true, id: 'agent.spawn_batch', result: result, deterministic: true });
+      } catch (error) {
+        actions.push({ ok: false, id: 'agent.spawn_batch', error: 'run-failed', detail: error.message || String(error), deterministic: true });
+        return {
+          content: '<div class="cog-action-err">No agents were started: ' +
+                   String(error.message || error).replace(/</g, '&lt;') + '</div>',
+          actions: actions,
+          deferredSignal: _agentSignalIntent(userMessage)
+        };
+      }
+    }
+    var acceptedCount = (result.tasks || []).length;
+    var statusLine = result.collaborative
+      ? 'The synthesis agent is waiting for the upstream results; dependency edges are visible in Memory Topology.'
+      : 'The accepted agents are running independently.';
+    if (result.deferred_signal) statusLine += ' Signal delivery is queued until synthesis completes.';
+    return {
+      content: result.html + '<div class="cog-action-ok">' + statusLine + '</div>',
+      actions: actions,
+      deferredSignal: !!result.deferred_signal,
+      acceptedCount: acceptedCount
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Bridge call primitive
   // ---------------------------------------------------------------------------
@@ -612,7 +814,8 @@
     var _draftMs = 0, _reviewMs = 0, _reviseMs = 0;
     var capDesc = describeCapabilities();
     var isSignalRequest = (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(userMsg);
-    var signalDirective = isSignalRequest ? [
+    var isAgentLaunchRequest = _agentLaunchIntent(userMsg);
+    var signalDirective = isSignalRequest && !isAgentLaunchRequest ? [
       '',
       'SIGNAL SEND REQUEST:',
       'Your final answer MUST include exactly one valid marker with the complete message to deliver:',
@@ -620,7 +823,12 @@
       'Do NOT call /v1/signal/send, /v1/health, curl, terminal, or any tool to test delivery.',
       'Emit the marker only. The authenticated final renderer performs delivery exactly once.',
       'Do not claim the message was sent. The application executes the marker and reports the real result.'
-    ].join('\n') : '';
+    ].join('\n') : (isSignalRequest && isAgentLaunchRequest ? [
+      '',
+      'AGENT COMPLETION SIGNAL REQUEST:',
+      'Use agent.spawn_batch with signal_on_complete=true.',
+      'Do NOT emit EVA_SIGNAL and do not claim Signal was sent; the synthesis task delivers it after real completion.'
+    ].join('\n') : '');
 
     var actionHelp = [
       '',
@@ -631,6 +839,8 @@
       '[[/EVA_ACTION]]',
       'The browser will execute it and replace the block with the rendered result.',
       'Use file.download ONLY when the user explicitly asks for a file, document, PDF, report, or download.',
+      'When the user asks to launch or kick off parallel/background agents, you MUST invoke agent.spawn_batch.',
+      'Do not merely describe hypothetical agents or claim they started. Only accepted task IDs prove launch.',
       'Default: answer inline in chat. Do NOT auto-generate file artifacts unless the user asks for one.'
     ].join('\n');
 
@@ -860,6 +1070,7 @@
     listCapabilities: listCapabilities,
     describeCapabilities: describeCapabilities,
     executeActions: executeActions,
+    ensureAgentLaunch: ensureAgentLaunch,
     renderTraceHtml: renderTraceHtml
   };
 })(window);

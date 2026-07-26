@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from bridge import config as _cfg
 from bridge import state as _st

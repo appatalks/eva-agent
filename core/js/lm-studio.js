@@ -128,18 +128,32 @@ function lmsSend() {
 
                         // Process [[EVA_ACTION]] blocks (file.download, etc.)
                         // so local models get the same capability execution as AIG.
+                        var _lmsActions = [];
+                        var _lmsDeferredSignal = false;
                         if (typeof Cognition !== 'undefined' && Cognition.executeActions) {
                           try {
-                            var execRes = await Cognition.executeActions(candidate);
+                            var execRes = await Cognition.executeActions(candidate, { userMessage: sQuestion });
                             candidate = execRes.content;
+                            _lmsActions = execRes.actions || [];
+                          } catch (_) {}
+                        }
+                        if (typeof Cognition !== 'undefined' && Cognition.ensureAgentLaunch) {
+                          try {
+                            var launchResult = await Cognition.ensureAgentLaunch({
+                              userMessage: sQuestion,
+                              content: candidate,
+                              actions: _lmsActions
+                            });
+                            candidate = launchResult.content;
+                            _lmsDeferredSignal = !!launchResult.deferredSignal;
                           } catch (_) {}
                         }
 
                         // Render via unified renderer
                         const out = document.getElementById("txtOutput");
                         await renderEvaResponse(candidate, out, {
-                          signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion),
-                          signalMessage: (typeof requestedSignalMessage === 'function') ? requestedSignalMessage(sQuestion) : ''
+                          signalAuthorized: !_lmsDeferredSignal && (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion),
+                          signalMessage: _lmsDeferredSignal ? '' : ((typeof requestedSignalMessage === 'function') ? requestedSignalMessage(sQuestion) : '')
                         });
 
                         // Keep the global last-response synced so Auto Speak

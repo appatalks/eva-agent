@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from bridge import config as _cfg
 from bridge import state as _st
 

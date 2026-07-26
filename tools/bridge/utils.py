@@ -1,6 +1,7 @@
 """Bridge domain: utils."""
 
 import copy
+import datetime
 import json
 import os
 import re
@@ -36,6 +37,60 @@ def _valid_artifact_name(name):
         and not name.startswith(".")
         and not all(char == "." for char in name)
     )
+
+
+def _subagent_result_text(result):
+    """Return ACP response text or raise for a structured ACP error."""
+    if isinstance(result, dict):
+        if result.get("error"):
+            raise RuntimeError(str(result["error"]))
+        return str(result.get("text") or "")
+    return str(result or "")
+
+
+def _subagent_dependency_context(task_id, timeout=300):
+    """Wait for prerequisite tasks and return their labeled outputs."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with _st.subagent_lock:
+            task = _st.subagent_tasks.get(task_id)
+            if not task:
+                raise RuntimeError("subagent task disappeared")
+            dependency_ids = list(task.get("depends_on") or [])
+            dependencies = [_st.subagent_tasks.get(value) for value in dependency_ids]
+            if any(dependency is None for dependency in dependencies):
+                raise RuntimeError("a dependency task is unavailable")
+            failed = [dependency for dependency in dependencies if dependency.get("status") in ("error", "cancelled")]
+            if failed:
+                raise RuntimeError("dependency failed: " + ", ".join(item.get("label", item.get("id", "?")) for item in failed))
+            if all(dependency.get("status") == "done" for dependency in dependencies):
+                task["status"] = "running"
+                sections = []
+                for dependency in dependencies:
+                    sections.append(
+                        f"[{dependency.get('label', dependency.get('id', 'Agent'))}]\n"
+                        f"{str(dependency.get('result') or '')[:4000]}"
+                    )
+                return "\n\n".join(sections)
+        time.sleep(0.25)
+    raise RuntimeError("timed out waiting for dependency tasks")
+
+
+def _deliver_subagent_completion_signal(task, result_text):
+    """Deliver a requested final synthesis after task completion."""
+    if not task.get("signal_on_complete"):
+        return ""
+    task["signal_on_complete"] = False
+    try:
+        from bridge.alerts import _signal_send
+        signal_text = " ".join(str(result_text or "").split())[:1000]
+        sent = bool(signal_text) and _signal_send(signal_text)
+        status = "sent" if sent else "failed"
+    except Exception as signal_error:
+        status = "failed"
+        print(f"[Subagent] Completion Signal failed for {task.get('id', '?')}: {signal_error}")
+    task["signal_status"] = status
+    return status
 
 
 
@@ -219,28 +274,76 @@ _st.log_ring = _st.log_ring
 
 
 
-def _subagent_worker(task_id, prompt, label):
+def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_start=None):
     """Run a single subagent task in its own thread using the existing ACP pool."""
+    if start_gate is not None:
+        start_gate.wait()
+        if abort_start is not None and abort_start.is_set():
+            return
     with _st.subagent_lock:
         task = _st.subagent_tasks.get(task_id)
         if not task:
             return
     try:
-        if not _st.acp_client or not _st.acp_client.alive:
-            raise RuntimeError("ACP not available")
-        messages = [{"role": "user", "content": f"[Subagent task: {label}] {prompt}"}]
-        result = _st.acp_client.send_prompt(messages)
+        dependency_context = _subagent_dependency_context(task_id) if task.get("depends_on") else ""
+        from bridge.acp_client import ACPClient
+        with _st.acp_pool_lock:
+            template = _st.acp_client
+            if not template or not template.alive:
+                raise RuntimeError("ACP not available")
+            selected_model = model or template.model
+            client = ACPClient(
+                copilot_path=template.copilot_path,
+                cwd=template.cwd,
+                model=selected_model,
+                mcp_config=copy.deepcopy(template.mcp_config),
+                reasoning_effort=template.reasoning_effort,
+            )
+        client.start()
         with _st.subagent_lock:
-            task["status"] = "done"
-            task["result"] = str(result or "")[:4000]
-            task["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        _push_notification(f"Subagent done: {label}", str(result or "")[:300], channel="chat")
+            task["model"] = client.model or "default"
+        prompt_text = f"[Subagent task: {label}] {prompt}"
+        if dependency_context:
+            prompt_text += "\n\nUpstream agent outputs:\n" + dependency_context
+        try:
+            result_text = _subagent_result_text(client.prompt(prompt_text, timeout=180))
+            while True:
+                with _st.subagent_lock:
+                    task["result"] = result_text[:4000]
+                    steer_queue = task.setdefault("steer_queue", [])
+                    instruction = steer_queue.pop(0) if steer_queue else ""
+                    if not instruction:
+                        task["status"] = "finalizing" if task.get("signal_on_complete") else "done"
+                        if not task.get("signal_on_complete"):
+                            task["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                        break
+                    task["status"] = "steering"
+                prompt_text = (
+                    f"[Steering update for: {label}]\n"
+                    f"Work so far:\n{result_text[:3000]}\n\n"
+                    f"New direction:\n{instruction}"
+                )
+                result_text = _subagent_result_text(client.prompt(prompt_text, timeout=180))
+        finally:
+            client.stop()
+        try:
+            _push_notification(f"Subagent done: {label}", result_text[:300], channel="chat")
+        except Exception as notify_error:
+            print(f"[Subagent] Completion notification failed for {task_id}: {notify_error}")
+        if task.get("signal_on_complete"):
+            _deliver_subagent_completion_signal(task, result_text)
+            with _st.subagent_lock:
+                task["status"] = "done"
+                task["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     except Exception as e:
         with _st.subagent_lock:
             task["status"] = "error"
             task["result"] = str(e)[:500]
             task["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        _push_notification(f"Subagent failed: {label}", str(e)[:300], channel="chat")
+        try:
+            _push_notification(f"Subagent failed: {label}", str(e)[:300], channel="chat")
+        except Exception as notify_error:
+            print(f"[Subagent] Failure notification failed for {task_id}: {notify_error}")
 
 
 

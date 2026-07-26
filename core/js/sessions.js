@@ -8,6 +8,10 @@ var SESSION_ACTIVE_KEY = 'eva_active_session';
 // All provider message keys
 var SESSION_MSG_KEYS = ['messages', 'copilotMessages', 'copilotACPMessages', 'geminiMessages', 'openLLMessages', 'aigMessages'];
 
+function closeAgentOperationsForNavigation() {
+  if (typeof EvaAgents !== 'undefined' && EvaAgents.close) EvaAgents.close();
+}
+
 function _getSessionIndex() {
   try { return JSON.parse(localStorage.getItem(SESSION_INDEX_KEY)) || []; }
   catch(e) { return []; }
@@ -15,6 +19,18 @@ function _getSessionIndex() {
 
 function _saveSessionIndex(index) {
   localStorage.setItem(SESSION_INDEX_KEY, JSON.stringify(index));
+}
+
+function getAllSessions() {
+  return Promise.resolve(_getSessionIndex().map(function(entry) {
+    return {
+      id: entry.id,
+      title: entry.title || 'Untitled',
+      createdAt: entry.created || 0,
+      updatedAt: entry.updated || entry.created || 0,
+      pinned: !!entry.pinned
+    };
+  }));
 }
 
 function _activeSessionId() {
@@ -42,7 +58,7 @@ function _restoreSession(data) {
 
   // Write stored keys back
   Object.keys(data).forEach(function(key) {
-    if (key.charAt(0) === '_') return; // skip meta keys
+    if (key === 'id' || key.charAt(0) === '_') return; // skip record/meta keys
     localStorage.setItem(key, data[key]);
   });
   if (data._masterOutput) {
@@ -138,6 +154,7 @@ function saveCurrentSession() {
 
 /** Start a brand new session */
 function newSession() {
+  closeAgentOperationsForNavigation();
   // Auto-save current first
   saveCurrentSession();
 
@@ -160,16 +177,39 @@ function newSession() {
 
 /** Load a session by id */
 function loadSession(id) {
-  // Save current first
-  saveCurrentSession();
-
-  idbLoadSession(id).then(function(data) {
-    if (!data) return;
+  // Finish saving the current session before reading another record. This
+  // avoids a read/restore race when users switch sessions quickly.
+  return Promise.resolve(saveCurrentSession()).then(function() {
+    return idbLoadSession(id);
+  }).then(function(data) {
+    if (!data) {
+      var legacy = localStorage.getItem('session_' + id);
+      if (legacy) {
+        try {
+          data = JSON.parse(legacy);
+          idbSaveSession(id, data).then(function() {
+            localStorage.removeItem('session_' + id);
+          }).catch(function() {});
+        } catch (error) {
+          data = null;
+        }
+      }
+    }
+    if (!data) {
+      if (typeof setStatus === 'function') setStatus('error', 'This saved session is unavailable. Its index entry was preserved.');
+      return false;
+    }
     _restoreSession(data);
     localStorage.setItem(SESSION_ACTIVE_KEY, id);
     renderSessionList();
+    var panel = document.getElementById('sessionPanel');
+    if (panel) panel.setAttribute('aria-hidden', 'true');
+    if (typeof EvaAgents !== 'undefined' && EvaAgents.close) EvaAgents.close();
+    if (typeof setStatus === 'function') setStatus('info', 'Session loaded.');
+    return true;
   }).catch(function(e) {
     console.error('Failed to load session:', e);
+    return false;
   });
 }
 
@@ -190,11 +230,11 @@ function deleteSession(id) {
 }
 
 /** Rename a session; custom titles are preserved by later autosaves. */
-function renameSession(id) {
+async function renameSession(id) {
   var index = _getSessionIndex();
   var entry = index.filter(function(item) { return item.id === id; })[0];
   if (!entry) return;
-  var title = prompt('Session title:', entry.title || 'Untitled');
+  var title = await evaTextPrompt('Session title', entry.title || 'Untitled', { maxLength: 80 });
   if (title === null) return;
   title = title.trim().replace(/[\r\n\t]+/g, ' ').slice(0, 80);
   if (!title) return;
@@ -230,6 +270,9 @@ function renderSessionList() {
   sorted.forEach(function(entry) {
     var li = document.createElement('li');
     li.className = 'session-item' + (entry.id === activeId ? ' active' : '') + (entry.pinned ? ' pinned' : '');
+    li.dataset.sessionId = entry.id;
+    li.setAttribute('role', 'button');
+    li.tabIndex = 0;
 
     var titleSpan = document.createElement('span');
     titleSpan.className = 'session-title';
@@ -278,10 +321,17 @@ function renderSessionList() {
     li.appendChild(titleSpan);
     li.appendChild(timeSpan);
     li.appendChild(btnWrap);
-    li.onclick = function() { loadSession(entry.id); };
-
     ul.appendChild(li);
   });
+}
+
+function activateSessionListItem(event) {
+  var target = event.target;
+  if (!target || !target.closest) return;
+  if (target.closest('.session-actions button')) return;
+  var item = target.closest('.session-item[data-session-id]');
+  if (!item || !item.closest('#sessionList')) return;
+  loadSession(item.dataset.sessionId);
 }
 
 /** Toggle the session panel visibility */
@@ -291,6 +341,7 @@ function toggleSessionPanel() {
   var visible = panel.getAttribute('aria-hidden') !== 'true';
   if (visible) panel.setAttribute('aria-hidden', 'true');
   else {
+    closeAgentOperationsForNavigation();
     closeSidePanels('sessionPanel');
     panel.setAttribute('aria-hidden', 'false');
   }
@@ -323,6 +374,19 @@ function initSessions() {
   var exportBtn = document.getElementById('sessionExportBtn');
   if (exportBtn) exportBtn.addEventListener('click', function() { exportCurrentSession(); });
 
+  var sessionList = document.getElementById('sessionList');
+  if (sessionList && !sessionList.dataset.activationBound) {
+    sessionList.dataset.activationBound = 'true';
+    sessionList.addEventListener('click', activateSessionListItem);
+    sessionList.addEventListener('keydown', function(event) {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      var item = event.target && event.target.closest ? event.target.closest('.session-item[data-session-id]') : null;
+      if (!item || event.target.closest('.session-actions button')) return;
+      event.preventDefault();
+      loadSession(item.dataset.sessionId);
+    });
+  }
+
   // Assets panel close button
   var assetsClose = document.getElementById('assetsPanelClose');
   if (assetsClose) assetsClose.addEventListener('click', toggleAssetsPanel);
@@ -330,6 +394,23 @@ function initSessions() {
   // Terminal panel close button
   var termClose = document.getElementById('terminalPanelClose');
   if (termClose) termClose.addEventListener('click', toggleTerminalPanel);
+
+  // Agent Operations is a full workspace view. Any other sidebar destination
+  // must first reveal the normal workspace so its panel/view is visible.
+  var evaSidebar = document.getElementById('evaSidebar');
+  if (evaSidebar) evaSidebar.addEventListener('click', function(event) {
+    var target = event.target;
+    if (target && target.closest && !target.closest('#evaAgentsBtn')) {
+      closeAgentOperationsForNavigation();
+    }
+  });
+  var lcarsSidebar = document.getElementById('lcarsSidebar');
+  if (lcarsSidebar) lcarsSidebar.addEventListener('click', function(event) {
+    var target = event.target;
+    if (target && target.closest && !target.closest('#lcarsAgentsBtn')) {
+      closeAgentOperationsForNavigation();
+    }
+  });
 
   // Migrate localStorage sessions, preserve the previous turn, and always
   // present a fresh session when Eva launches.
@@ -439,6 +520,7 @@ function toggleAssetsPanel() {
   var visible = panel.getAttribute('aria-hidden') !== 'true';
   if (visible) panel.setAttribute('aria-hidden', 'true');
   else {
+    closeAgentOperationsForNavigation();
     closeSidePanels('assetsPanel');
     panel.setAttribute('aria-hidden', 'false');
   }
@@ -556,6 +638,7 @@ function toggleTerminalPanel() {
   var visible = panel.getAttribute('aria-hidden') !== 'true';
   if (visible) panel.setAttribute('aria-hidden', 'true');
   else {
+    closeAgentOperationsForNavigation();
     closeSidePanels('terminalPanel');
     panel.setAttribute('aria-hidden', 'false');
   }

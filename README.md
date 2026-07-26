@@ -46,6 +46,7 @@ Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).
 | **Self-improving skills** | Auto-extracts reusable skills from successful tasks, stored as drafts |
 | **Cron scheduler** | Standard cron expressions, recurring prompts, morning briefings, alerts |
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |
+| **Agent operations** | Live scorecard for subagents, browser/desktop runs, steering, and animated memory topology |
 | **Multi-provider** | OpenAI, Google Gemini, GitHub Copilot, lm-studio (local) |
 | **Reasoning controls** | Model-specific effort levels for OpenAI, GitHub Models, and Copilot CLI ACP |
 | **Doctor diagnostics** | Structured readiness probe for every subsystem with actionable fixes |

@@ -85,14 +85,25 @@ async function aigSend() {
       // Execute any [[EVA_ACTION]] blocks Eva emitted, then render.
       var actionsRun = [];
       if (Cognition.executeActions) {
-        var execRes = await Cognition.executeActions(cogContent);
+        var execRes = await Cognition.executeActions(cogContent, { userMessage: sQuestion });
         cogContent = execRes.content;
         actionsRun = execRes.actions || [];
       }
+      var deferredSignal = false;
+      if (Cognition.ensureAgentLaunch) {
+        var launchResult = await Cognition.ensureAgentLaunch({
+          userMessage: sQuestion,
+          content: cogContent,
+          actions: actionsRun
+        });
+        cogContent = launchResult.content;
+        actionsRun = launchResult.actions || actionsRun;
+        deferredSignal = !!launchResult.deferredSignal;
+      }
       cognitionFinalizing = true;
       await renderEvaResponse(cogContent, txtOutput, {
-        signalAuthorized: canAuthorizeSignalDelivery(sQuestion),
-        signalMessage: requestedSignalMessage(sQuestion)
+        signalAuthorized: !deferredSignal && canAuthorizeSignalDelivery(sQuestion),
+        signalMessage: deferredSignal ? '' : requestedSignalMessage(sQuestion)
       });
       if (Cognition.getCfg && Cognition.getCfg().showTrace && Cognition.renderTraceHtml) {
         try {

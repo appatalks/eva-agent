@@ -2537,6 +2537,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Must stopPropagation so the document click-outside handler doesn't immediately close settings
   function evaOpenSettings(e, tabName) {
     e.stopPropagation();
+    if (typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
     var overlay = document.getElementById('settingsOverlay');
     if (!settingsMenu.classList.contains('open')) {
       settingsMenu.classList.add('open');
@@ -2724,6 +2725,7 @@ function toggleVoiceView() {
 function openVoiceView() {
   var el = document.getElementById('voiceView');
   if (!el) return;
+  if (typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
   _vv.open = true;
   el.classList.add('open');
   el.setAttribute('aria-hidden', 'false');

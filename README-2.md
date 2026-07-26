@@ -441,6 +441,17 @@ Options:
 | `/v1/desktop/launch` | POST | Start autonomous desktop task |
 | `/v1/desktop/<id>/status` | GET | Run status + latest screenshot |
 
+**Agent Operations:**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/agents/overview` | GET | Loopback-only normalized agent activity, background state, and bounded memory graph snapshot |
+| `/v1/subagent/status` | GET | Raw status for all subagents or one task selected with `?id=` |
+| `/v1/subagent/spawn` | POST | Start an isolated ACP subagent; accepts `prompt`, `label`, optional `model`, and optional `session_id` |
+| `/v1/subagent/spawn-batch` | POST | Atomically reserve and start 1-4 independent or collaborative tasks |
+| `/v1/subagent/steer` | POST | Queue or resume an existing subagent with `id` and `instruction` |
+| `/v1/subagent/<id>` | DELETE | Dismiss a completed, failed, or cancelled task from Agent Operations |
+
 **Camera:**
 
 | Endpoint | Method | Purpose |
@@ -820,6 +831,178 @@ Local webcam face and motion detection.
 
 **Privacy:** Camera off by default. Only activates on explicit `POST /v1/camera/start`.
 
+### Agent Operations View
+
+The **Agents** sidebar destination replaces the chat workspace with a live
+operations scorecard. On screens narrower than 600 px, the Eva theme hides its
+sidebar and exposes the same destination through a compact grid button. The view
+is implemented by `core/js/agents.js`, with structure in `index.html` and styles
+in `core/style.css`.
+
+The client polls `GET /v1/agents/overview` every two seconds while the view is
+open and every 15 seconds while it is closed so the sidebar count remains
+current. The memory graph is included at most every 30 seconds; intervening
+requests fetch only lightweight agent/background status and retain the prior
+graph client-side. Closing the view cancels its fast polling and animation
+frame. Opening Voice View closes Agent Operations and vice versa.
+
+Cards are keyed by task ID and updated in place. Polling changes only the text,
+status classes, and controls that changed; it does not recreate the card grid or
+replay entry animation, so active sessions remain visually stable. Terminal
+subagent cards (`done`, `error`, or `cancelled`) expose a dismiss button. Active
+tasks cannot be dismissed, and a completed upstream task remains protected while
+an active synthesis still depends on it. Successful dismissal removes the card
+and forces an immediate topology refresh so its graph node disappears at the
+same time.
+
+#### Scorecard Data
+
+The bridge normalizes four activity sources into one `agents` array. The response
+uses `active_total` for all active agent kinds and `subagents_active` against the
+subagent-only `capacity` of four:
+
+| `kind` | Source | Important fields |
+|---|---|---|
+| `subagent` | `bridge.state.subagent_tasks` | label, model, prompt, result, start/end time, linked chat session |
+| `browser` | `tools/browser_agent.py` run registry | goal/subgoal, step, confirmation state, result/error |
+| `desktop` | `tools/desktop_agent.py` run registry | goal/subgoal, step, active run state, result/error |
+| `background` | latest `BackgroundActivity` state | job type, status, notes, start/end time |
+
+Each square card has a stable runtime ID and displays kind, state, elapsed time,
+objective, and step where available. Selecting an unlinked card opens its live
+session detail pane. If a subagent was spawned with a `session_id`, selecting it
+loads that saved chat through the existing IndexedDB session manager.
+
+Subagent detail includes a steering input. `POST /v1/subagent/steer` behaves as
+follows:
+
+- For a running task, the instruction is appended to `steer_queue`. The worker
+  completes its current model turn, supplies the latest output and instruction
+  to the next turn, and remains in `steering` state.
+- For a completed or failed task, the same task record is reopened. Its prior
+  result is included as context and a worker resumes under the original ID.
+- `steer_history` retains timestamped directions in bridge memory for the life
+  of the process. Subagent records are currently process-local and are not
+  restored after bridge restart.
+
+Eva launches batches through the registered Cognition capability
+`agent.spawn_batch`, which accepts one to four `{label, prompt, model}` objects.
+The browser calls `/v1/subagent/spawn-batch` once and reports only bridge-
+accepted task IDs. The bridge validates every prompt and reserves the full batch
+under one lock before starting workers. If insufficient slots are available,
+it returns `429` and creates zero tasks. Each worker creates a dedicated ACP
+client/session configured with the requested model, so same-model tasks remain
+isolated and concurrent. If no model is supplied, the bridge uses the current
+default Copilot model.
+
+Explicit requests to launch, start, spawn, run, or kick off agents activate the
+Cognition action path even if the general cognitive-layer toggle is off. Each
+accepted task creates a dedicated Copilot ACP client and session. Same-model
+tasks therefore run concurrently without sharing conversation context or the
+main Eva session. ACP responses are normalized to clean text; structured ACP
+errors produce `error` task states and can never be reported as successful
+completion. Notification delivery occurs after task state is finalized and is
+non-fatal if the notification channel is unavailable.
+
+`spin up` is also an explicit launch trigger. After normal action parsing, the
+frontend runs `Cognition.ensureAgentLaunch()`. If the model omitted the action
+block, this deterministic guard discards any unsupported success narrative and
+creates one to four real tasks through the same capability. The rendered reply
+contains only bridge-accepted task IDs.
+
+For requests containing collaboration language such as `work together`,
+`relay`, or `handoff`, the last task becomes a synthesis agent. It is created
+immediately in `waiting` state with `depends_on` references to the upstream
+tasks. Once all prerequisites are `done`, the bridge injects their labeled
+outputs into the synthesis prompt and transitions it to `running`. The topology
+adds blue `agent` nodes and `feeds` edges for these dependencies.
+
+When a collaborative request also asks for Signal delivery, only the synthesis
+task receives `signal_on_complete`. The renderer suppresses its normal immediate
+Signal fallback, and the bridge sends the finalized 1-2 line synthesis after
+upstream work and synthesis complete. The task remains `finalizing` while
+`signal-cli` runs, then changes to `done`; its card and detail pane show
+`SIGNAL SENT` or `SIGNAL FAILED`. This option requires the existing Standalone
+bridge capability token; browser-only callers cannot schedule Signal delivery.
+Consent is derived only from the captured real user turn through
+`canAuthorizeSignalDelivery()`; model-provided arguments cannot grant it, and
+negated requests such as "do not notify me" never schedule delivery.
+
+Profile creation and session renaming use the in-app `evaTextPrompt()` dialog in
+`core/js/dialogs.js`. Native `window.prompt()` is not used because Electron does
+not support it. Changed runtime scripts and styles carry version query strings
+in `index.html` to prevent Chromium from executing cached pre-upgrade assets.
+
+The dashboard reports the subagent concurrency capacity (`4`) separately from
+browser, desktop, and background activity. Browser and desktop cards are
+monitoring surfaces; their existing confirmation and cancellation APIs remain
+the control path for sensitive actions.
+
+#### Memory Topology
+
+The bottom pane visualizes a live, bounded projection of Eva's existing
+`Knowledge` table plus the current agent registry. The bridge selects the 30
+newest rows with confidence at least `0.6`, excluding `mentioned`,
+`candidate_mentioned`, and `recurring_topic`. Ignore/reserved-word entities are
+also omitted so extraction artifacts such as command words do not become
+topology labels. It emits:
+
+```json
+{
+  "graph": {
+    "nodes": [
+      {"id": "eva-root", "label": "Eva", "type": "core"},
+      {"id": "fact-...", "label": "AI assistant with persistent memory", "type": "fact"},
+      {"id": "agent-sub-...", "label": "Alpha", "type": "agent", "status": "done"}
+    ],
+    "edges": [
+      {"source": "eva-root", "target": "fact-...", "label": "role", "type": "memory"},
+      {"source": "eva-root", "target": "agent-sub-...", "label": "orchestrates", "type": "orchestration"}
+    ]
+  }
+}
+```
+
+`eva-root` is fixed at the canvas center and rendered as a gold double-ring with
+the permanent label `EVA CORE`. Every agent has a blue `orchestrates` edge from
+Eva. Collaborative prerequisites have violet `feeds` edges into the synthesis
+agent. Running/waiting agents are blue squares; completed agents become teal
+checked circles, and their graph status is merged from the two-second status
+poll even when the memory graph remains cached.
+
+Hover text explains the node instead of returning only its label: Eva lists the
+agents she orchestrates; agents show status, model, result preview, upstream and
+downstream relationships; facts show entity, relation, full value preview, and
+confidence. IDs for memory nodes are deterministic SHA-1-derived identifiers
+over normalized labels and do not expose database row IDs.
+
+The browser retains force-layout positions across polls, applies attraction and
+repulsion, clamps nodes using pixel-safe label margins, flips right-edge labels
+to the left, and supports hover and drag. Agent and core nodes are prioritized
+inside the 90-node client cap, so memory volume cannot push active sessions off
+the canvas. Rendering runs only while the view is visible. Canvas resolution
+follows device pixel ratio up to 2x.
+
+This is intentionally a **lightweight GraphRAG complement**, not Microsoft
+GraphRAG indexing. Eva already stores entity-relation-value facts, confidence,
+source, timestamps, and decay. The topology exposes those relationships without
+changing recall behavior. It does not yet perform entity alias resolution,
+entity-to-entity edge extraction, multi-hop graph ranking, Leiden community
+detection, community summaries, or global/DRIFT search.
+
+The incremental path to fuller graph retrieval is:
+
+1. Add canonical node and typed-edge records with source evidence and aliases.
+2. Resolve entities during reflection while retaining `Knowledge` as the
+   compatibility read model.
+3. Add bounded one- and two-hop retrieval for relational questions.
+4. Generate community summaries in background cognition jobs.
+5. Evaluate graph retrieval against lexical/embedding recall before changing
+   prompt injection.
+
+Keeping this projection read-only means the dashboard can ship independently of
+that indexing work and cannot corrupt existing memory.
+
 ## Skills System
 
 Skills are reusable instruction sets that Eva matches to user requests via
@@ -1095,8 +1278,18 @@ refusal, recall, routing, capability, injection_resistance. Mock mode reads
 - **Storage:** IndexedDB (`eva_sessions_db`) with `sessions` + `blobs` object stores
 - **Auto-save** after every response, auto-restore on page load
 - **Session index** in localStorage (lightweight), full snapshots in IndexedDB
-- **Migration** from localStorage on first load
+- **Migration** from localStorage on first load, plus per-session fallback when a
+  legacy `session_<id>` snapshot remains after migration
 - **Persistent storage** via `navigator.storage.persist()`
+- **Transactional switching:** the current session save finishes before the
+  target IndexedDB record is read; successful loads restore chat/model state,
+  close Session Explorer, and exit Agent Operations
+- **Row activation:** delegated mouse and Enter/Space activation works from the
+  title, timestamp, or empty row space; rename/pin/delete buttons remain isolated
+- **Sidebar coordination:** selecting any non-Agents sidebar destination closes
+  the full Agent Operations workspace first, so Sessions, Prompts, Models,
+  Skills, Assets, Terminal, Profile, Voice, Settings, and New Chat are always
+  immediately visible
 
 ## LCARS Theme
 

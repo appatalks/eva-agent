@@ -87,8 +87,8 @@ async function switchEvaProfile(profileId) {
   location.reload();
 }
 
-function addEvaProfile() {
-  var name = prompt('Profile name:');
+async function addEvaProfile() {
+  var name = await evaTextPrompt('Profile name', '', { maxLength: 40, placeholder: 'Name' });
   if (!name) return;
   name = name.trim().slice(0, 40);
   if (!name) return;
@@ -161,6 +161,7 @@ function toggleProfilePanel(force) {
   if (!panel) return;
   var visible = panel.getAttribute('aria-hidden') !== 'true';
   var shouldOpen = typeof force === 'boolean' ? force : !visible;
+  if (shouldOpen && typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
   if (shouldOpen && typeof closeSidePanels === 'function') closeSidePanels('profilePanel');
   panel.setAttribute('aria-hidden', shouldOpen ? 'false' : 'true');
   if (shouldOpen) renderEvaProfiles();
