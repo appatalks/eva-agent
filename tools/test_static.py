@@ -443,6 +443,8 @@ def test_security_alert_contract():
         web_search = f.read()
     with open(".github/workflows/pa11y_accessibility_testing.yml") as f:
         accessibility_workflow = f.read()
+    with open("standalone/package.json") as f:
+        standalone_package = f.read()
 
     report("security_mcp_fixed_launch_specs", "def normalize_mcp_config" in local_mcp and "_mcp_launch_spec(name)" in local_mcp and "normalize_mcp_config(requested_mcp_servers)" in bridge_core)
     report("security_mcp_env_allowlist", "_MCP_ENV_KEYS" in local_mcp and "LD_PRELOAD" not in local_mcp)
@@ -453,6 +455,7 @@ def test_security_alert_contract():
     report("security_asset_download_blob_url", "URL.createObjectURL" in sessions_js and "/^[A-Za-z0-9._-]{1,128}$/" in sessions_js)
     report("security_search_exact_hostname", "result_host.endswith(\".google.com\")" in web_search)
     report("security_workflow_read_only", "permissions:\n  contents: read" in accessibility_workflow)
+    report("security_web_search_mcp_bundled", '"tools/web_search_mcp.py"' in standalone_package)
 
 
 # ═══════════════════════════════════════════════════════════════════
