@@ -502,7 +502,7 @@ def test_pages_comparison_contract():
         docs_html = f.read()
     report("pages_github_copilot_app_column", "GitHub Copilot app</a>" in docs_html and "https://github.com/features/ai/github-app?locale=en-US" in docs_html)
     report("pages_github_copilot_app_capabilities", all(value in docs_html for value in ("Custom skills", "Automations", "Session history", "Multi-model + BYOK")))
-    report("pages_eva_differentiators", all(value in docs_html for value in ("LM Studio + direct MCP", "Local SQLite or ADX", "Separate sessions + settings", "Signal delivery", "Imported voice profiles", "Subsystem doctor", "Configurable Eva + Reviewer")))
+    report("pages_eva_differentiators", all(value in docs_html for value in ("LM Studio + direct MCP", "Local SQLite or Kusto/ADX", "Local SQLite or ADX", "Separate sessions + settings", "Signal delivery", "Imported voice profiles", "Subsystem doctor", "Configurable Eva + Reviewer")))
     report("pages_comparison_scrolls", ".compare-wrap {\n      border-radius: var(--radius); overflow-x: auto;" in docs_html and "min-width: 960px" in docs_html)
 
 
