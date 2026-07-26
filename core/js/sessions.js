@@ -425,6 +425,7 @@ function loadAssetsList() {
       return;
     }
     data.files.forEach(function(f) {
+      if (!f || !/^[A-Za-z0-9._-]{1,128}$/.test(f.name || '')) return;
       var li = document.createElement('li');
       li.className = 'session-item asset-item';
 
@@ -454,14 +455,22 @@ function loadAssetsList() {
       dlBtn.className = 'session-pin';
       dlBtn.textContent = '\u2913';
       dlBtn.title = 'Download';
-      dlBtn.onclick = function(e) {
+      dlBtn.onclick = async function(e) {
         e.stopPropagation();
-        var a = document.createElement('a');
-        a.href = base + '/v1/files/' + encodeURIComponent(f.name);
-        a.download = f.name;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        try {
+          var response = await fetch(base + '/v1/files/' + encodeURIComponent(f.name));
+          if (!response.ok) throw new Error('Download failed');
+          var objectUrl = URL.createObjectURL(await response.blob());
+          var a = document.createElement('a');
+          a.href = objectUrl;
+          a.download = f.name;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(objectUrl);
+        } catch (error) {
+          if (typeof setStatus === 'function') setStatus('error', error.message || 'Asset download failed');
+        }
       };
 
       btnWrap.appendChild(openBtn);

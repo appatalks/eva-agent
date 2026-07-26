@@ -450,6 +450,7 @@ def test_security_alert_contract():
     report("security_linear_marker_parser", "def _strip_marker_blocks" in bridge_core and "[\\s\\S]*?" not in bridge_core)
     report("security_artifact_dirfd_write", "dir_fd=directory_fd" in bridge_core and "def _existing_artifact_path" in bridge_core)
     report("security_dom_error_text_only", "errorItem.textContent" in sessions_js)
+    report("security_asset_download_blob_url", "URL.createObjectURL" in sessions_js and "/^[A-Za-z0-9._-]{1,128}$/" in sessions_js)
     report("security_search_exact_hostname", "result_host.endswith(\".google.com\")" in web_search)
     report("security_workflow_read_only", "permissions:\n  contents: read" in accessibility_workflow)
 
