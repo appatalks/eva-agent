@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hmac
+import importlib.util
 import json
 import os
 from http import HTTPStatus
@@ -15,7 +17,9 @@ from typing import Any
 
 
 MAX_INPUT_CHARS = 12_000
-DEFAULT_REFERENCE_AUDIO = Path(__file__).resolve().parent.parent / "core" / "audio" / "eva-voice.wav"
+MAX_AUDIO_BYTES = 16 * 1024 * 1024
+MAX_TRANSCRIPTION_SECONDS = 120
+ALLOWED_AUDIO_TYPES = {"audio/webm", "video/webm", "audio/ogg", "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp4"}
 
 
 class LocalVoicesService:
@@ -29,7 +33,7 @@ class LocalVoicesService:
 
     def reference_audio(self) -> Path:
         configured = os.getenv("LOCAL_VOICES_REFERENCE", "").strip()
-        return Path(configured).expanduser() if configured else DEFAULT_REFERENCE_AUDIO
+        return Path(configured).expanduser() if configured else Path()
 
     def engine_class(self) -> Any | None:
         if self._engine_class is not None or self._load_error is not None:
@@ -50,7 +54,7 @@ class LocalVoicesService:
             "engine_loaded": self._engine is not None,
             "backend_available": backend is not None,
             "backend_error": self._load_error,
-            "reference_source": "environment" if os.getenv("LOCAL_VOICES_REFERENCE", "").strip() else "bundled",
+            "reference_source": "environment" if os.getenv("LOCAL_VOICES_REFERENCE", "").strip() else "none",
             "reference_readable": reference.is_file(),
             "load_error": self._load_error,
         }
@@ -91,16 +95,90 @@ class LocalVoicesService:
                 output_path.unlink(missing_ok=True)
 
 
+class LocalTranscriptionService:
+    """Lazily retain a local Faster Whisper model with Silero VAD filtering."""
+
+    def __init__(self) -> None:
+        self._model: Any | None = None
+        self._load_error: str | None = None
+        self._lock = Lock()
+
+    def _settings(self) -> tuple[str, str, str]:
+        model = os.getenv("LOCAL_STT_MODEL", "small.en").strip() or "small.en"
+        device = os.getenv("LOCAL_STT_DEVICE", "cpu").strip() or "cpu"
+        compute_type = os.getenv("LOCAL_STT_COMPUTE_TYPE", "int8").strip() or "int8"
+        return model, device, compute_type
+
+    def model(self) -> Any | None:
+        if self._model is not None or self._load_error is not None:
+            return self._model
+        try:
+            from faster_whisper import WhisperModel
+
+            model, device, compute_type = self._settings()
+            self._model = WhisperModel(model, device=device, compute_type=compute_type)
+        except Exception as error:
+            self._load_error = str(error)
+        return self._model
+
+    def health(self) -> dict[str, object]:
+        model, device, compute_type = self._settings()
+        available = importlib.util.find_spec("faster_whisper") is not None
+        if not available and self._load_error is None:
+            self._load_error = "Local transcription backend is unavailable in this Python environment."
+        return {
+            "available": available,
+            "loaded": self._model is not None,
+            "model": model,
+            "device": device,
+            "compute_type": compute_type,
+            "error": self._load_error,
+            "vad": "silero",
+        }
+
+    def transcribe(self, audio: bytes, suffix: str) -> str:
+        if not audio:
+            raise ValueError("audio input must not be empty")
+        if len(audio) > MAX_AUDIO_BYTES:
+            raise ValueError("audio input exceeds the maximum size")
+
+        with self._lock:
+            model = self.model()
+            if model is None:
+                raise RuntimeError(self._load_error or "Local transcription backend is unavailable")
+            with NamedTemporaryFile(suffix=suffix, delete=False) as source:
+                source.write(audio)
+                source_path = Path(source.name)
+            try:
+                segments, info = model.transcribe(
+                    str(source_path),
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 500},
+                    condition_on_previous_text=False,
+                )
+                if getattr(info, "duration", 0) > MAX_TRANSCRIPTION_SECONDS:
+                    raise ValueError("audio input exceeds the maximum duration")
+                return " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
+            finally:
+                source_path.unlink(missing_ok=True)
+
+
 class LocalVoicesRequestHandler(BaseHTTPRequestHandler):
     service: LocalVoicesService
+    transcriber: LocalTranscriptionService
+    auth_token: str
+
+    def _authorized(self) -> bool:
+        if not self.auth_token:
+            return True
+        provided = self.headers.get("Authorization", "")
+        return hmac.compare_digest(provided, "Bearer " + self.auth_token)
 
     def _write_headers(self, status: HTTPStatus, content_type: str, content_length: int = 0) -> None:
         self.send_response(status)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(content_length))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
     def _write_json(self, status: HTTPStatus, data: dict[str, object]) -> None:
@@ -109,18 +187,37 @@ class LocalVoicesRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_OPTIONS(self) -> None:  # noqa: N802
-        self._write_headers(HTTPStatus.NO_CONTENT, "text/plain")
+        self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_GET(self) -> None:  # noqa: N802
+        if not self._authorized():
+            self._write_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return
         if self.path.rstrip("/") != "/health":
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
-        self._write_json(HTTPStatus.OK, self.service.health())
+        tts = self.service.health()
+        stt = self.transcriber.health()
+        self._write_json(HTTPStatus.OK, {
+            **tts,
+            "tts": tts,
+            "stt": stt,
+            "version": 2,
+        })
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path.rstrip("/") != "/v1/speech":
-            self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        if not self._authorized():
+            self._write_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return
+        path = self.path.rstrip("/")
+        if path == "/v1/speech":
+            self._synthesize()
+        elif path == "/v1/audio/transcriptions":
+            self._transcribe()
+        else:
+            self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+    def _synthesize(self) -> None:
         try:
             content_length = int(self.headers.get("Content-Length", "0"))
             if content_length <= 0 or content_length > MAX_INPUT_CHARS + 512:
@@ -142,13 +239,54 @@ class LocalVoicesRequestHandler(BaseHTTPRequestHandler):
         self._write_headers(HTTPStatus.OK, "audio/wav", len(audio))
         self.wfile.write(audio)
 
+    def _transcribe(self) -> None:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            if content_length <= 0 or content_length > MAX_AUDIO_BYTES:
+                raise ValueError("audio request body has an invalid size")
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if content_type not in ALLOWED_AUDIO_TYPES:
+                raise ValueError("unsupported audio content type")
+            suffix = {
+                "audio/webm": ".webm",
+                "video/webm": ".webm",
+                "audio/ogg": ".ogg",
+                "audio/wav": ".wav",
+                "audio/x-wav": ".wav",
+                "audio/mpeg": ".mp3",
+                "audio/mp4": ".m4a",
+            }[content_type]
+            text = self.transcriber.transcribe(self.rfile.read(content_length), suffix)
+        except ValueError as error:
+            self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+        except RuntimeError as error:
+            self._write_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(error)})
+            return
+        except Exception:
+            self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "audio transcription failed"})
+            return
+        self._write_json(HTTPStatus.OK, {"text": text})
+
     def log_message(self, format: str, *args: object) -> None:
         return
 
 
-def create_server(host: str, port: int, service: LocalVoicesService | None = None) -> ThreadingHTTPServer:
+def create_server(
+    host: str,
+    port: int,
+    service: LocalVoicesService | None = None,
+    transcriber: LocalTranscriptionService | None = None,
+    auth_token: str = "",
+) -> ThreadingHTTPServer:
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError("Local speech bridge must bind to a loopback address")
+    if not auth_token:
+        raise ValueError("Local speech bridge requires an authentication token")
     handler = type("ConfiguredLocalVoicesRequestHandler", (LocalVoicesRequestHandler,), {})
     handler.service = service or LocalVoicesService()
+    handler.transcriber = transcriber or LocalTranscriptionService()
+    handler.auth_token = auth_token
     return ThreadingHTTPServer((host, port), handler)
 
 
@@ -157,11 +295,12 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="Loopback address to bind (default: 127.0.0.1).")
     parser.add_argument("--port", type=int, default=8090, help="Loopback port to bind (default: 8090).")
     parser.add_argument("--reference", type=Path, help="Reference WAV file for this bridge process.")
+    parser.add_argument("--token", default=os.getenv("EVA_LOCAL_SPEECH_TOKEN", ""), help="Per-process bearer token supplied by Eva Standalone.")
     args = parser.parse_args()
     if args.reference:
         os.environ["LOCAL_VOICES_REFERENCE"] = str(args.reference.expanduser())
-    server = create_server(args.host, args.port)
-    print(f"Eva Local Voices bridge listening on http://{args.host}:{args.port}")
+    server = create_server(args.host, args.port, auth_token=args.token)
+    print(f"Eva Local Voices bridge listening on http://127.0.0.1:{server.server_port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -115,10 +115,13 @@
     return false;
   }
 
-  // Returns { active: bool, reason: 'toggle' | 'phrase' | null }
+  // Returns { active: bool, reason: 'adaptive' | 'phrase' | null }. The
+  // primary AIG model handles ordinary conversation directly; this layer is
+  // reserved for work where an independent, high-tier review adds value.
   function shouldRun(userMessage) {
-    if (isEnabled()) return { active: true, reason: 'toggle' };
     if (detectTrigger(userMessage)) return { active: true, reason: 'phrase' };
+    var adaptiveReason = adaptiveReviewReason(userMessage);
+    if (isEnabled() && adaptiveReason) return { active: true, reason: 'adaptive:' + adaptiveReason };
     return { active: false, reason: null };
   }
 
@@ -142,9 +145,9 @@
     var def = getDefaultModel();
     return {
       enabled: ls('cogEnabled', '1') === '1',
-      evaModel:      ls('cogEvaModel', '')      || def,
-      reviewerModel: ls('cogReviewerModel', '') || def,
-      maxCycles: Math.max(0, parseInt(ls('cogMaxCycles', '1'), 10) || 0),
+      evaModel:      def,
+      reviewerModel: ls('cogReviewerModel', '') || 'gpt-5.6-terra',
+      maxCycles: 1,
       evaPrompt:      ls('cogEvaPrompt', '')      || DEFAULT_PROMPTS.eva,
       reviewerPrompt: ls('cogReviewerPrompt', '') || DEFAULT_PROMPTS.reviewer,
       showTrace: ls('cogShowTrace', '0') === '1'
@@ -203,7 +206,9 @@
   }
 
   function _agentRepeatIntent(text) {
-    return /\b(?:do\s+it\s+again|do\s+that\s+again|try\s+again|run\s+that\s+again|repeat(?:\s+that)?|rerun(?:\s+that)?)\b/i.test(String(text || ''));
+    var source = String(text || '');
+    return /\b(?:repeat|rerun|run|start|try|do)\b[^.!?]{0,60}\b(?:agents?|subagents?|batch|agent\s+(?:batch|run|workflow))\b/i.test(source) ||
+           /\b(?:repeat|rerun|run)\s+(?:the\s+)?(?:last|previous|those)\s+(?:agents?|subagents?|agent\s+(?:batch|run|workflow)|batch)\b/i.test(source);
   }
 
   function _loadLastAgentBatch() {
@@ -796,6 +801,14 @@
     return '';
   }
 
+  function adaptiveReviewReason(userMsg) {
+    var userText = String(userMsg || '');
+    if (FACTUAL_TOPICS.test(userText) || RETRIEVAL_INTENT.test(userText)) return 'factual';
+    if (/\b(?:send|signal|schedule|browser|desktop|open|create|download|generate|look|camera|purchase|delete|transfer)\b/i.test(userText)) return 'action';
+    if (/\b(?:analyze|compare|evaluate|review|audit|plan|strategy|architecture|security|legal|medical|financial)\b/i.test(userText)) return 'complex';
+    return '';
+  }
+
   // ---------------------------------------------------------------------------
   // Pipeline: eva -> (reviewer -> eva)*
   // ---------------------------------------------------------------------------
@@ -815,6 +828,7 @@
     var capDesc = describeCapabilities();
     var isSignalRequest = (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(userMsg);
     var isAgentLaunchRequest = _agentLaunchIntent(userMsg);
+    var requestedReviewReason = String(opts.reviewReason || '');
     var signalDirective = isSignalRequest && !isAgentLaunchRequest ? [
       '',
       'SIGNAL SEND REQUEST:',
@@ -895,7 +909,9 @@
     // high-fabrication-risk and irreversible categories.)
     var floorReason = reviewFloorReason(userMsg, current);
     var reviewReason;
-    if (floorReason) {
+    if (requestedReviewReason === 'phrase' || requestedReviewReason.indexOf('adaptive:') === 0) {
+      reviewReason = requestedReviewReason;
+    } else if (floorReason) {
       reviewReason = 'floor:' + floorReason;
     } else if (sentinel.want === true) {
       reviewReason = 'eva-opt-in';

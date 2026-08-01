@@ -17,6 +17,9 @@ async function aigSend() {
     txtMsg.focus();
     return;
   }
+  var signalContext = (typeof captureSignalDeliveryContext === 'function')
+    ? captureSignalDeliveryContext(sQuestion)
+    : null;
 
   // Display user message
   var safeUser = escapeHtml(sQuestion).replace(/\n/g, '<br>');
@@ -79,7 +82,8 @@ async function aigSend() {
         userMessage: sQuestion,
         messages: existingMessages,
         forceEnable: cogDecision.reason === 'phrase',
-        forcedReason: cogDecision.reason
+        forcedReason: cogDecision.reason,
+        reviewReason: cogDecision.reason
       });
       var cogContent = (cogResult && cogResult.content) ? cogResult.content : '';
       // Execute any [[EVA_ACTION]] blocks Eva emitted, then render.
@@ -102,8 +106,10 @@ async function aigSend() {
       }
       cognitionFinalizing = true;
       await renderEvaResponse(cogContent, txtOutput, {
-        signalAuthorized: !deferredSignal && canAuthorizeSignalDelivery(sQuestion),
-        signalMessage: deferredSignal ? '' : requestedSignalMessage(sQuestion)
+        signalAuthorized: !deferredSignal && !!(signalContext && signalContext.authorized),
+        signalMessage: deferredSignal ? '' : (signalContext ? signalContext.message : ''),
+        signalRequest: sQuestion,
+        signalContext: signalContext
       });
       if (Cognition.getCfg && Cognition.getCfg().showTrace && Cognition.renderTraceHtml) {
         try {
@@ -155,17 +161,16 @@ async function aigSend() {
       // fall through to single-shot path
     }
   } else {
-    // Single-shot path: tell Eva the truth about her own cognitive layer so
-    // she does not hallucinate a fake pipeline run when asked about it.
+    // Single-shot path: tell Eva that adaptive review was not selected for
+    // this turn, so she neither invents a pipeline nor claims it is disabled.
     var cogState = (typeof Cognition !== 'undefined' && Cognition.getCfg)
                      ? Cognition.getCfg() : null;
     var cogNote = [
       '[Cognition Layer Runtime State - AUTHORITATIVE]',
-      'The cognitive layer (eva / reviewer) is currently DISABLED for this turn.',
-      'It is controlled by the user via Settings > Models > "Enable Cognitive Layer",',
-      'or by an explicit phrase trigger such as "trigger the chain" or "use cognition".',
-      'You are NOT running inside that layer right now. You are the single-shot AIG responder.',
-      'If asked whether the layer ran, answer truthfully: it did not.',
+      'Adaptive review did NOT run for this turn; the selected AIG backend is responding directly.',
+      'Adaptive review is controlled by Settings > Models > "Adaptive Review" and activates for',
+      'consequential work or an explicit phrase trigger such as "trigger the chain" or "use cognition".',
+      'If asked whether review ran, answer truthfully: it did not run for this turn.',
       'Never narrate a fake pipeline (no PHASE 1 / PHASE 2 / PHASE 3 headers, no fabricated reviewer feedback).',
       'The .github/agents/*.agent.md files describe VS Code Copilot review agents and are NOT your runtime tools.',
       'If the user wants the layer, tell them to enable the toggle or use a trigger phrase.'
@@ -182,15 +187,9 @@ async function aigSend() {
   try {
     var url = bridgeUrl.replace(/\/+$/, '') + '/v1/aig/chat';
 
-    // Prefer cognition evaModel when cognition is configured,
-    // otherwise fall back to the AIG backend selector dropdown.
+    // The selected AIG backend is Eva's primary model. Adaptive review uses a
+    // separate reviewer model and must never override this direct responder.
     var aigModel = (document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna';
-    if (typeof Cognition !== 'undefined' && Cognition.getCfg) {
-      var cogModelCfg = Cognition.getCfg();
-      if (cogModelCfg.enabled && cogModelCfg.evaModel) {
-        aigModel = cogModelCfg.evaModel;
-      }
-    }
     var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel('aig') : 'default';
 
     var resp = await fetch(url, {
@@ -223,8 +222,10 @@ async function aigSend() {
 
     // Render response
     await renderEvaResponse(content, txtOutput, {
-      signalAuthorized: canAuthorizeSignalDelivery(sQuestion),
-      signalMessage: requestedSignalMessage(sQuestion)
+      signalAuthorized: !!(signalContext && signalContext.authorized),
+      signalMessage: signalContext ? signalContext.message : '',
+      signalRequest: sQuestion,
+      signalContext: signalContext
     });
 
     if (content) {

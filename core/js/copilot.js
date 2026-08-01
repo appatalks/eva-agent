@@ -103,6 +103,9 @@ async function copilotSend() {
     txtMsg.focus();
     return;
   }
+  var signalContext = (typeof captureSignalDeliveryContext === 'function')
+    ? captureSignalDeliveryContext(sQuestion)
+    : null;
 
   var selModel = document.getElementById('selModel');
   var mode = getCopilotMode(selModel.value);
@@ -160,15 +163,15 @@ async function copilotSend() {
 
   // Route to the appropriate backend
   if (mode === 'acp') {
-    await _copilotSendACP(existingMessages, sQuestion, txtOutput, storageKey);
+    await _copilotSendACP(existingMessages, sQuestion, txtOutput, storageKey, signalContext);
   } else {
-    await _copilotSendModelsAPI(existingMessages, selModel.value, sQuestion, txtOutput, storageKey);
+    await _copilotSendModelsAPI(existingMessages, selModel.value, sQuestion, txtOutput, storageKey, signalContext);
   }
 }
 
 // --- GitHub Models API mode ---
 
-async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, storageKey) {
+async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, storageKey, signalContext) {
   var githubToken = getAuthKey('GITHUB_PAT');
   var model = modelValue.replace(/^copilot-/, '');
 
@@ -270,7 +273,7 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
     }
 
     var data = await resp.json();
-    _copilotRenderResponse(data, txtOutput, model, question);
+    _copilotRenderResponse(data, txtOutput, model, question, signalContext);
 
   } catch (err) {
     _copilotHandleFetchError(err, txtOutput);
@@ -279,7 +282,7 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
 
 // --- ACP Bridge mode ---
 
-async function _copilotSendACP(messages, question, txtOutput, storageKey) {
+async function _copilotSendACP(messages, question, txtOutput, storageKey, signalContext) {
   // Auto-detect bridge URL (tries configured, same-host, localhost)
   var bridgeUrl = await detectACPBridge();
 
@@ -309,7 +312,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey) {
     }
 
     var data = await resp.json();
-    _copilotRenderResponse(data, txtOutput, modelLabel, question);
+    _copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext);
 
   } catch (err) {
     var errorMessage = err.message || String(err);
@@ -322,13 +325,15 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey) {
 
 // --- Shared response rendering ---
 
-async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage) {
+async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, signalContext) {
   var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
 
   // Use unified renderer
   await renderEvaResponse(content, txtOutput, {
-    signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(userMessage),
-    signalMessage: (typeof requestedSignalMessage === 'function') ? requestedSignalMessage(userMessage) : ''
+    signalAuthorized: !!(signalContext && signalContext.authorized),
+    signalMessage: signalContext ? signalContext.message : '',
+    signalRequest: userMessage,
+    signalContext: signalContext
   });
 
   if (content) {

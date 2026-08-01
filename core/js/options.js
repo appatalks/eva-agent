@@ -136,8 +136,10 @@ function saveAuthKeys() {
     localStorage.removeItem('aig_lmstudio_model');
   }
   var localVoicesProfileEl = document.getElementById('localVoicesProfile');
-  if (localVoicesProfileEl) {
-    localStorage.setItem('local_voices_profile', localVoicesProfileEl.value || 'eva');
+  if (localVoicesProfileEl && localVoicesProfileEl.value) {
+    localStorage.setItem('local_voices_profile', localVoicesProfileEl.value);
+  } else if (localVoicesProfileEl) {
+    localStorage.setItem('local_voices_profile', 'bundled:eva-english');
   }
   // Save Signal sender/recipient to localStorage and push to bridge
   var sigSender = document.getElementById('authSignalSender');
@@ -250,12 +252,8 @@ function getLmStudioModel() {
   return v || 'granite-3.1-8b-instruct';
 }
 
-function getLocalVoicesBridgeUrl() {
-  return 'http://localhost:8090';
-}
-
 function getLocalVoicesProfile() {
-  return (localStorage.getItem('local_voices_profile') || 'eva').trim() || 'eva';
+  return (localStorage.getItem('local_voices_profile') || 'bundled:eva-english').trim();
 }
 
 function getSafeBridgeBaseUrl() {
@@ -281,23 +279,82 @@ function getBridgeCapabilityHeaders() {
 
 function isAffirmativeSignalSendRequest(text) {
   var value = String(text || '').toLowerCase();
-  if (/\b(?:do not|don't|dont|never|cancel|stop)\b[^.!?]{0,80}\b(?:send|text|message|signal|notify)\b/.test(value)) return false;
-  return /\b(?:send|text|message|notify)\b[^.!?]{0,60}\b(?:me|my|signal|phone|number|recipient)\b/.test(value) ||
-    /\bsignal\s+me\b/.test(value) ||
-    /\bsignal\b[^.!?]{0,40}\b(?:send|text|message|notify)\b/.test(value);
+  // Quoted text may describe a request without making one. Keep the original
+  // input for payload extraction, but never authorize delivery from a quote.
+  var comparable = value.replace(/"[^"]*"|“[^”]*”/g, ' ');
+  if (!/\bsignal\b/.test(comparable)) return false;
+  var clauses = comparable.split(/(?:[.;]|\bthen\b|\band\b)/);
+  var authorized = false;
+  for (var clauseIndex = 0; clauseIndex < clauses.length; clauseIndex++) {
+    var rawClause = clauses[clauseIndex];
+    var clause = rawClause.trim();
+    if (!clause) continue;
+    var address = '(?:(?:hey\\s+)?eva[,.]?\\s*)?';
+    var revocation = /(?:^|,|\bbut\b)\s*(?:actually\s+|please\s+)?(?:don't|dont|don’t|i\s+(?:don't|dont|don’t)\s+want\s+you\s+to|never mind|cancel(?:\s+(?:that|this|the)?\s*(?:request|message|signal)?)?|(?:do not|don't|dont|don’t)\s+(?:send|text|message|notify|signal)|stop\s+(?:that|this|the)?\s*(?:send|message|signal))/;
+    if (/^signal\s+me\s+(?:is|was|means)\b/.test(clause)) continue;
+    var requestPrefix = '(?:(?:please\\s+)?(?:can you|could you|would you|will you)\\s+(?:please\\s+)?|please\\s+|i want you to\\s+|i need you to\\s+)?';
+    var command = '(?:send|text|message|notify|ping)';
+    var prefix = '^\\s*' + address + requestPrefix;
+    var commandMatches = new RegExp(prefix + 'signal\\s+me\\b').test(clause) ||
+      new RegExp(prefix + 'use\\s+signal\\s+(?:to\\s+)?(?:send|text|message|notify|ping|say|tell)\\b').test(clause) ||
+      new RegExp(prefix + command + '\\b[\\s\\S]{0,100}\\b(?:on|via|through|with)\\s+signal\\b').test(clause) ||
+      new RegExp(prefix + command + '\\s+(?:me\\s+)?(?:a\\s+)?signal\\b').test(clause);
+    if ((authorized || commandMatches) && revocation.test(clause)) return false;
+    if (commandMatches) authorized = true;
+  }
+  return authorized;
+}
+
+var _lastDeliveredSignal = null;
+var _signalDeliveryGeneration = 0;
+
+function clearLastDeliveredSignal() {
+  _lastDeliveredSignal = null;
+  _signalDeliveryGeneration += 1;
+}
+
+function isSignalRepeatRequest(text) {
+  var value = String(text || '').toLowerCase().trim();
+  if (!_lastDeliveredSignal || Date.now() - _lastDeliveredSignal.sentAt > 5 * 60 * 1000) return false;
+  return /^(?:please\s+)?(?:do\s+(?:it|that)\s+again|send\s+(?:it|that)\s+again|repeat\s+(?:it|that)|do\s+the\s+same)\s*[.!?]?$/i.test(value);
 }
 
 function canAuthorizeSignalDelivery(text) {
-  return isAffirmativeSignalSendRequest(text) && !!(window.evaStandalone && window.evaStandalone.bridgeToken);
+  return (isAffirmativeSignalSendRequest(text) || isSignalRepeatRequest(text)) &&
+    !!(window.evaStandalone && window.evaStandalone.bridgeToken);
+}
+
+function captureSignalDeliveryContext(text) {
+  var request = String(text || '');
+  var repeat = isSignalRepeatRequest(request);
+  var repeatSignal = repeat && _lastDeliveredSignal ? {
+    message: _lastDeliveredSignal.message,
+    request: _lastDeliveredSignal.request
+  } : null;
+  return {
+    authorized: canAuthorizeSignalDelivery(request),
+    message: repeatSignal ? repeatSignal.message : requestedSignalMessage(request),
+    request: request,
+    repeat: !!repeatSignal,
+    repeatSignal: repeatSignal,
+    generation: _signalDeliveryGeneration
+  };
+}
+
+function isSignalDeliveryContextValid(context) {
+  return !!context && context.generation === _signalDeliveryGeneration;
 }
 
 function requestedSignalMessage(text) {
   var value = String(text || '').trim();
+  if (isSignalRepeatRequest(value)) {
+    return _lastDeliveredSignal.message || '';
+  }
   if (!isAffirmativeSignalSendRequest(value)) return '';
   var quoted = value.match(/["“]([^"”]{1,4000})["”]/) || value.match(/'([^']{1,4000})'/);
   var message = quoted ? quoted[1].trim() : '';
   if (!message) {
-    var explicit = value.match(/\b(?:saying|that says|message\s*:|text\s*:)\s*(.{1,4000})$/i);
+    var explicit = value.match(/\b(?:say|saying|that says|message\s*:|text\s*:)\s*(.{1,4000})$/i);
     if (explicit) message = explicit[1].trim();
   }
   var wantsTimestamp = /\b(?:date\s+)?timestamp\b|\bdate\s+and\s+time\b/i.test(value);
@@ -330,10 +387,12 @@ async function refreshLocalVoicesProfiles() {
       select.appendChild(option);
     });
     var found = Array.from(select.options).some(function(option) { return option.value === selected; });
-    select.value = found ? selected : 'eva';
+    var defaultProfile = 'bundled:eva-english';
+    var defaultFound = Array.from(select.options).some(function(option) { return option.value === defaultProfile; });
+    select.value = found ? selected : (defaultFound ? defaultProfile : '');
     localStorage.setItem('local_voices_profile', select.value);
   } catch (error) {
-    select.value = 'eva';
+    select.value = 'bundled:eva-english';
     setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Voice profiles unavailable.', true);
   }
 }
@@ -345,7 +404,7 @@ async function importLocalVoicesProfile() {
   try {
     var result = await window.evaStandalone.localVoicesImport();
     if (!result || result.canceled) return;
-    localStorage.setItem('local_voices_profile', result.selected || 'eva');
+    localStorage.setItem('local_voices_profile', result.selected || 'bundled:eva-english');
     await refreshLocalVoicesProfiles();
     await syncLocalVoicesEngine(true);
   } catch (error) {
@@ -365,7 +424,7 @@ function setLocalVoicesBridgeStatus(text, isError) {
 async function refreshLocalVoicesBridgeControl() {
   if (!window.evaStandalone || !window.evaStandalone.isStandalone) return null;
   try {
-    _localVoicesBridgeState = await window.evaStandalone.localVoicesStatus(getLocalVoicesBridgeUrl());
+    _localVoicesBridgeState = await window.evaStandalone.localVoicesStatus();
     if (_localVoicesBridgeState.running) {
       setLocalVoicesBridgeStatus(_localVoicesBridgeState.managed ? 'Running locally.' : 'Running outside Eva.', false);
     } else {
@@ -382,32 +441,20 @@ async function refreshLocalVoicesBridgeControl() {
 async function syncLocalVoicesEngine(restartForProfile) {
   var engine = document.getElementById('selEngine');
   if (!window.evaStandalone || !window.evaStandalone.isStandalone || !engine) return;
-  var baseUrl = getLocalVoicesBridgeUrl();
   var state = await refreshLocalVoicesBridgeControl();
 
   if (engine.value !== 'local-voices') {
-    try {
-      if (state && state.running && state.managed) {
-        setLocalVoicesBridgeStatus('Stopping Local Voices...', false);
-        await window.evaStandalone.localVoicesStop(baseUrl);
-      }
-      setLocalVoicesBridgeStatus('', false);
-    } catch (error) {
-      setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Local Voices could not stop.', true);
-    }
+    // Voice View may still be using this shared service for local STT. Keep it
+    // alive; Electron stops the managed process when Eva exits.
+    setLocalVoicesBridgeStatus('', false);
     return;
   }
 
   try {
-    if (restartForProfile && state && state.running && state.managed) {
-      setLocalVoicesBridgeStatus('Switching voice model...', false);
-      await window.evaStandalone.localVoicesStop(baseUrl);
-      state = null;
-    }
-    if (!state || !state.running) {
-      setLocalVoicesBridgeStatus('Starting Local Voices...', false);
-      await window.evaStandalone.localVoicesStart(baseUrl, '', getLocalVoicesProfile());
-    }
+    setLocalVoicesBridgeStatus(state && state.running ? 'Updating voice model...' : 'Starting Local Voices...', false);
+    // Electron owns profile-aware reuse/restart so settings refreshes do not
+    // churn a matching model and STT-only service leases remain intact.
+    await window.evaStandalone.localVoicesStart('', getLocalVoicesProfile());
     await refreshLocalVoicesBridgeControl();
   } catch (error) {
     setLocalVoicesBridgeStatus(error && error.message ? error.message : 'Local Voices could not start.', true);
@@ -2699,6 +2746,8 @@ var _vv = {
   dataArray: null,
   phase: 'idle', // idle | listening | awake | thinking | speaking | error
   recognition: null,
+  whisperProvider: '',
+  listenGeneration: 0,
   awakeTimer: null,
   convoMode: true,        // stay in an active conversation after the wake word
   convoTimeoutMs: 30000,  // quiet period before dropping back to standby
@@ -3576,7 +3625,7 @@ function _vvToggleListening() {
 
 function _vvStartListening() {
   if (window.evaStandalone && window.evaStandalone.isStandalone) {
-    _vvStartWhisperListening();
+    _vvStartWhisperListening('local');
     return;
   }
 
@@ -3679,6 +3728,7 @@ function _vvStartListening() {
 }
 
 function _vvStopListening() {
+  _vv.listenGeneration += 1;
   if (_vv.awakeTimer) { clearTimeout(_vv.awakeTimer); _vv.awakeTimer = null; }
   if (_vv.silenceTimer) { clearTimeout(_vv.silenceTimer); _vv.silenceTimer = null; }
   if (_vv.recordingCap) { clearTimeout(_vv.recordingCap); _vv.recordingCap = null; }
@@ -3692,9 +3742,13 @@ function _vvStopListening() {
   }
   if (_vv.mediaRecorder) {
     try { _vv.mediaRecorder.stop(); } catch(e) {}
-    _vv.mediaRecorder = null;
+  }
+  if (_vv._capture) {
+    if (_vv._capture.silenceTimer) clearTimeout(_vv._capture.silenceTimer);
+    if (_vv._capture.recordingCap) clearTimeout(_vv._capture.recordingCap);
   }
   _vv.whisperMode = false;
+  _vv.whisperProvider = '';
   _vv._whisperInflight = false;
   _vv.audioChunks = [];
   _vv.speechDetected = false;
@@ -3705,15 +3759,40 @@ function _vvStopListening() {
 
 // --- Whisper fallback ---
 
-function _vvStartWhisperListening() {
+function _vvStartWhisperListening(provider) {
   if (typeof stopVoiceListener === 'function') stopVoiceListener();
 
+  _vv.whisperProvider = provider || 'openai';
+  _vv.listenGeneration += 1;
+  var generation = _vv.listenGeneration;
   _vv.whisperMode = true;
   _vv._whisperInflight = false;
   _vvSetStatus('listening');
-  _vvStartMicAnalyser().then(function() {
-    if (_vv.open && _vv.whisperMode) _vvWhisperRecord();
-  });
+
+  function beginRecording() {
+    if (generation !== _vv.listenGeneration || !_vv.open || !_vv.whisperMode) return;
+    _vvStartMicAnalyser().then(function() {
+      if (generation !== _vv.listenGeneration || !_vv.open || !_vv.whisperMode) {
+        _vvStopMicAnalyser();
+        return;
+      }
+      _vvWhisperRecord();
+    });
+  }
+
+  if (_vv.whisperProvider === 'local') {
+    if (!window.evaStandalone || typeof window.evaStandalone.localVoicesStart !== 'function') {
+      _vvSetStatus('error');
+      return;
+    }
+    window.evaStandalone.localVoicesStart('', '').then(beginRecording).catch(function(error) {
+      if (generation !== _vv.listenGeneration || !_vv.open || !_vv.whisperMode) return;
+      console.warn('[VoiceView] Local transcription unavailable:', error && error.message ? error.message : error);
+      _vvSetStatus('error');
+    });
+  } else {
+    beginRecording();
+  }
 
   // Whisper recording loop watchdog: if the loop has stalled (no active
   // recorder and no API call in flight) while we should be listening, restart.
@@ -3726,7 +3805,7 @@ function _vvStartWhisperListening() {
     if (_vv.phase === 'thinking') return;
     var recActive = _vv.mediaRecorder && _vv.mediaRecorder.state === 'recording';
     if (!recActive && !_vv._whisperInflight) {
-      console.warn('[VoiceView] Whisper watchdog: recording loop stalled, restarting');
+      console.warn('[VoiceView] transcription recording loop stalled, restarting');
       _vvWhisperRecord();
     }
   }, 10000);
@@ -3735,50 +3814,82 @@ function _vvStartWhisperListening() {
 function _vvWhisperRecord() {
   if (!_vv.open || !_vv.whisperMode || !_vv.micStream) return;
   if (_vv.phase === 'thinking') return;
+  // A recorder remains owned until its onstop callback has drained its final
+  // chunks. MediaRecorder changes to inactive before that callback, so checking
+  // state alone would allow a second capture to overwrite the first one.
+  if (_vv._capture) return;
 
   var mimeType = 'audio/webm';
   if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported) {
     if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) mimeType = 'audio/webm;codecs=opus';
   }
 
+  var capture = {
+    generation: _vv.listenGeneration,
+    chunks: [],
+    speechDetected: false,
+    silenceTimer: null,
+    recordingCap: null,
+    recorder: null
+  };
+
   try {
-    _vv.mediaRecorder = new MediaRecorder(_vv.micStream, { mimeType: mimeType });
+    capture.recorder = new MediaRecorder(_vv.micStream, { mimeType: mimeType });
   } catch(e) {
     _vvSetStatus('error');
     return;
   }
 
-  _vv.audioChunks = [];
+  _vv._capture = capture;
+  _vv.mediaRecorder = capture.recorder;
+  _vv.audioChunks = capture.chunks;
   _vv.speechDetected = false;
 
-  _vv.mediaRecorder.ondataavailable = function(e) {
-    if (e.data && e.data.size > 0) _vv.audioChunks.push(e.data);
+  capture.recorder.ondataavailable = function(e) {
+    if (e.data && e.data.size > 0) capture.chunks.push(e.data);
   };
 
-  _vv.mediaRecorder.onstop = function() {
-    if (_vv.recordingCap) { clearTimeout(_vv.recordingCap); _vv.recordingCap = null; }
-    if (!_vv.speechDetected || !_vv.audioChunks.length || !_vv.whisperMode) {
+  capture.recorder.onstop = function() {
+    if (capture.recordingCap) clearTimeout(capture.recordingCap);
+    if (capture.silenceTimer) clearTimeout(capture.silenceTimer);
+    var ownsCapture = _vv._capture === capture;
+    if (ownsCapture) {
+      _vv._capture = null;
+      _vv.mediaRecorder = null;
+      _vv.recordingCap = null;
+      _vv.silenceTimer = null;
+    }
+    if (capture.generation !== _vv.listenGeneration || !_vv.open || !_vv.whisperMode) {
+      // A fast stop/start leaves the old recorder pending onstop. Release it
+      // first, then immediately arm the newer listening generation.
+      if (ownsCapture && _vv.open && _vv.whisperMode && _vv.phase !== 'thinking') {
+        setTimeout(function() { _vvWhisperRecord(); }, 0);
+      }
+      return;
+    }
+    if (!capture.speechDetected || !capture.chunks.length) {
       if (_vv.open && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 200);
       return;
     }
-    var blob = new Blob(_vv.audioChunks, { type: mimeType });
-    _vv.audioChunks = [];
+    var blob = new Blob(capture.chunks, { type: mimeType });
+    capture.chunks = [];
     _vvWhisperTranscribe(blob);
   };
 
-  _vv.mediaRecorder.start(250);
+  capture.recorder.start(250);
 
-  _vv.recordingCap = setTimeout(function() {
-    _vv.recordingCap = null;
-    if (_vv.mediaRecorder && _vv.mediaRecorder.state === 'recording') {
-      try { _vv.mediaRecorder.stop(); } catch(e) {}
+  capture.recordingCap = setTimeout(function() {
+    capture.recordingCap = null;
+    if (capture.recorder.state === 'recording') {
+      try { capture.recorder.stop(); } catch(e) {}
     }
   }, 30000);
+  _vv.recordingCap = capture.recordingCap;
 
-  _vvWhisperMonitor();
+  _vvWhisperMonitor(capture);
 }
 
-function _vvWhisperMonitor() {
+function _vvWhisperMonitor(capture) {
   if (!_vv.open || !_vv.whisperMode || !_vv.analyser || !_vv.dataArray) return;
 
   var threshold = 25;
@@ -3788,11 +3899,11 @@ function _vvWhisperMonitor() {
   // throttle the energy monitor to 0 fps when the window is unfocused.
   if (_vv._energyMonitor) clearInterval(_vv._energyMonitor);
   _vv._energyMonitor = setInterval(function() {
-    if (!_vv.open || !_vv.whisperMode || !_vv.analyser || !_vv.dataArray) {
+    if (!_vv.open || !_vv.whisperMode || _vv._capture !== capture || !_vv.analyser || !_vv.dataArray) {
       clearInterval(_vv._energyMonitor); _vv._energyMonitor = null; return;
     }
     if (_vv.phase === 'thinking') return;
-    if (!_vv.mediaRecorder || _vv.mediaRecorder.state !== 'recording') return;
+    if (capture.recorder.state !== 'recording') return;
 
     _vv.analyser.getByteFrequencyData(_vv.dataArray);
     var sum = 0;
@@ -3800,49 +3911,57 @@ function _vvWhisperMonitor() {
     var avg = sum / _vv.dataArray.length;
 
     if (avg > threshold) {
+      capture.speechDetected = true;
       _vv.speechDetected = true;
-      if (_vv.silenceTimer) { clearTimeout(_vv.silenceTimer); _vv.silenceTimer = null; }
-    } else if (_vv.speechDetected && !_vv.silenceTimer) {
-      _vv.silenceTimer = setTimeout(function() {
-        _vv.silenceTimer = null;
-        if (_vv.mediaRecorder && _vv.mediaRecorder.state === 'recording') {
-          try { _vv.mediaRecorder.stop(); } catch(e) {}
+      if (capture.silenceTimer) { clearTimeout(capture.silenceTimer); capture.silenceTimer = null; }
+    } else if (capture.speechDetected && !capture.silenceTimer) {
+      capture.silenceTimer = setTimeout(function() {
+        capture.silenceTimer = null;
+        if (capture.recorder.state === 'recording') {
+          try { capture.recorder.stop(); } catch(e) {}
         }
       }, silenceDelay);
+      _vv.silenceTimer = capture.silenceTimer;
     }
   }, 100);
 }
 
 function _vvWhisperTranscribe(blob) {
-  var apiKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : null;
-  if (!apiKey) {
-    _vvSetStatus('error');
-    return;
+  var generation = _vv.listenGeneration;
+  var phaseAtStart = _vv.phase;
+  _vv._whisperInflight = true;
+  var request;
+  if (_vv.whisperProvider === 'local') {
+    request = blob.arrayBuffer().then(function(audio) {
+      return window.evaStandalone.localSpeechTranscribe(audio, blob.type || 'audio/webm;codecs=opus');
+    });
+  } else {
+    var apiKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : null;
+    if (!apiKey) {
+      _vv._whisperInflight = false;
+      _vvSetStatus('error');
+      return;
+    }
+    var formData = new FormData();
+    formData.append('file', blob, 'audio.webm');
+    formData.append('model', 'whisper-1');
+    formData.append('language', 'en');
+    var controller = new AbortController();
+    var fetchTimeout = setTimeout(function() { controller.abort(); }, 20000);
+    request = fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + apiKey },
+      body: formData,
+      signal: controller.signal
+    }).then(function(res) {
+      if (!res.ok) throw new Error('Whisper API returned ' + res.status);
+      return res.json();
+    }).finally(function() { clearTimeout(fetchTimeout); });
   }
 
-  _vv._whisperInflight = true;
-
-  var formData = new FormData();
-  formData.append('file', blob, 'audio.webm');
-  formData.append('model', 'whisper-1');
-  formData.append('language', 'en');
-
-  // Abort controller with 20s timeout so a hanging network call does not
-  // permanently kill the recording loop.
-  var controller = new AbortController();
-  var fetchTimeout = setTimeout(function() { controller.abort(); }, 20000);
-
-  fetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + apiKey },
-    body: formData,
-    signal: controller.signal
-  }).then(function(res) {
-    if (!res.ok) throw new Error('Whisper API returned ' + res.status);
-    return res.json();
-  }).then(function(data) {
+  request.then(function(data) {
+    if (generation !== _vv.listenGeneration || !_vv.whisperMode) return;
     _vv._whisperInflight = false;
-    clearTimeout(fetchTimeout);
     if (data.text && data.text.trim()) {
       _vvHandleTranscript(data.text.trim());
     }
@@ -3850,9 +3969,30 @@ function _vvWhisperTranscribe(blob) {
       _vvWhisperRecord();
     }
   }).catch(function(err) {
+    if (generation !== _vv.listenGeneration || !_vv.whisperMode) return;
     _vv._whisperInflight = false;
-    clearTimeout(fetchTimeout);
-    console.warn('[VoiceView] Whisper transcription error:', err.message);
+    var message = err && err.message ? err.message : String(err);
+    // A rejected or empty recording is normal during interruption and should
+    // return Eva to capture immediately instead of stranding the conversation.
+    if (/HTTP 400/.test(message)) {
+      // Do not steal the state from an active response: a failed background
+      // capture while Eva is speaking/thinking must not silence or bypass it.
+      if (_vv.phase === 'speaking') {
+        if (_vv.open && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 200);
+        return;
+      }
+      if (_vv.phase === 'thinking') return;
+      if (_vv.phase === 'awake') {
+        _vvEnterAwake(_vv.convoMode ? _vv.convoTimeoutMs : 10000);
+      } else if (phaseAtStart === 'awake' && _vv.convoMode) {
+        _vvEnterAwake(_vv.convoTimeoutMs);
+      } else {
+        _vvSetStatus('listening');
+      }
+      if (_vv.open && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 200);
+      return;
+    }
+    console.warn('[VoiceView] transcription error:', message);
     if (_vv.open && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 1000);
   });
 }
@@ -3931,7 +4071,7 @@ function _vvAfterTurn() {
 // voices; cancel() stops the browser SpeechSynthesis engine.
 function _vvStopTTS() {
   // Cancel any in-flight chunked playback so queued sentences do not resume.
-  if (typeof _ttsChunk !== 'undefined') { _ttsChunk.cancelled = true; _ttsChunk.active = false; }
+  if (typeof _ttsChunk !== 'undefined') { _ttsChunk.runId += 1; _ttsChunk.cancelled = true; _ttsChunk.active = false; }
   var audio = document.getElementById('audioPlayback');
   if (audio) {
     try { audio.pause(); } catch (e) {}
@@ -3973,14 +4113,33 @@ function _vvAfterBarge() {
   if (_vv.whisperMode) _vvWhisperRecord();
 }
 
-// Raw microphone energy is intentionally not enough to interrupt Eva. Voice
-// recognition or Whisper must transcribe the wake name before playback stops.
+// Local STT keeps an active recorder while Eva speaks. With echo cancellation
+// enabled, sustained microphone energy is a practical low-latency barge signal:
+// stop playback now, then let the same recording finish and transcribe the
+// user's redirect after silence. Browser recognition retains wake-word-only
+// interruption because it does not expose a reliable local VAD result.
 function _vvStartBargeMonitor() {
   _vvStopBargeMonitor();
+  if (_vv.whisperProvider !== 'local' || !_vv.analyser || !_vv.dataArray) return;
+  _vv._bargeEnergyFrames = 0;
+  _vv._bargeMonitor = setInterval(function() {
+    if (_vv.phase !== 'speaking' || !_vv.analyser || !_vv.dataArray) {
+      _vvStopBargeMonitor();
+      return;
+    }
+    _vv.analyser.getByteFrequencyData(_vv.dataArray);
+    var total = 0;
+    for (var index = 0; index < _vv.dataArray.length; index++) total += _vv.dataArray[index];
+    var average = total / _vv.dataArray.length;
+    _vv._bargeEnergyFrames = average > 25 ? _vv._bargeEnergyFrames + 1 : 0;
+    if (_vv._bargeEnergyFrames >= 4) _vvBargeIn();
+  }, 100);
 }
 
 function _vvStopBargeMonitor() {
   if (_vv.bargeRAF) { cancelAnimationFrame(_vv.bargeRAF); _vv.bargeRAF = null; }
+  if (_vv._bargeMonitor) { clearInterval(_vv._bargeMonitor); _vv._bargeMonitor = null; }
+  _vv._bargeEnergyFrames = 0;
 }
 
 function _vvWakeWordIndex(transcript) {
@@ -4007,7 +4166,7 @@ function _vvHandleTranscript(transcript) {
   // an immediate redirect.
   if (_vv.phase === 'speaking') {
     if (!transcript || transcript.trim().length <= 1) return;
-    if (_vvWakeWordIndex(transcript) < 0) return;
+    if (_vv.whisperProvider !== 'local' && _vvWakeWordIndex(transcript) < 0) return;
     _vvBargeIn();
   }
 
@@ -4654,7 +4813,6 @@ function _cogPopulateModelSelect(targetId) {
 }
 
 var COG_PROMPT_FIELDS = {
-  eva: { id: 'cogEvaPrompt', key: 'cogEvaPrompt', cfgKey: 'evaPrompt' },
   reviewer: { id: 'cogReviewerPrompt', key: 'cogReviewerPrompt', cfgKey: 'reviewerPrompt' }
 };
 
@@ -4676,16 +4834,11 @@ function _cogStoredPromptOrDefault(role) {
 
 function cogInit() {
   if (typeof Cognition === 'undefined') return;
-  ['cogEvaModel', 'cogReviewerModel']
-    .forEach(_cogPopulateModelSelect);
+  _cogPopulateModelSelect('cogReviewerModel');
   var cfg = Cognition.getCfg();
   var $ = function (id) { return document.getElementById(id); };
   if ($('cogEnabled'))           $('cogEnabled').checked          = !!cfg.enabled;
-  if ($('cogShowTrace'))         $('cogShowTrace').checked        = !!cfg.showTrace;
-  if ($('cogEvaModel'))          $('cogEvaModel').value           = cfg.evaModel;
   if ($('cogReviewerModel'))     $('cogReviewerModel').value      = cfg.reviewerModel;
-  if ($('cogMaxCycles'))         $('cogMaxCycles').value          = String(cfg.maxCycles);
-  if ($('cogEvaPrompt'))         $('cogEvaPrompt').value         = _cogStoredPromptOrDefault('eva');
   if ($('cogReviewerPrompt'))    $('cogReviewerPrompt').value    = _cogStoredPromptOrDefault('reviewer');
   cogUpdateBadge();
   onModelSettingsChange();
@@ -4696,10 +4849,8 @@ function cogPersist() {
   var $ = function (id) { return document.getElementById(id); };
   var partial = {
     enabled:           $('cogEnabled')          ? $('cogEnabled').checked        : false,
-    showTrace:         $('cogShowTrace')        ? $('cogShowTrace').checked      : false,
-    evaModel:          $('cogEvaModel')         ? $('cogEvaModel').value         : '',
     reviewerModel:     $('cogReviewerModel')    ? $('cogReviewerModel').value    : '',
-    maxCycles:         $('cogMaxCycles')        ? $('cogMaxCycles').value        : '1'
+    maxCycles:         '1'
   };
   Object.keys(COG_PROMPT_FIELDS).forEach(function (role) {
     var field = COG_PROMPT_FIELDS[role];
@@ -4740,7 +4891,7 @@ function cogUpdateBadge() {
   var on = false;
   try { on = (typeof Cognition !== 'undefined' && Cognition.isEnabled && Cognition.isEnabled()); } catch (_) {}
   badge.setAttribute('data-active', on ? 'true' : 'false');
-  badge.textContent = on ? 'Cognition: on' : 'Cognition: off';
+  badge.textContent = on ? 'Review: adaptive' : 'Review: off';
 }
 
 function _cogApplyDefaultPrompt(role) {
@@ -5399,7 +5550,7 @@ function sanitizeForSpeech(input) {
 // synthesized, so spoken replies begin far sooner than waiting for the whole
 // audio blob. The voice view consults `_ttsChunk.active` to know when the
 // entire reply (not just the first chunk) has finished.
-var _ttsChunk = { active: false, cancelled: false, _audio: null, _onEnded: null };
+var _ttsChunk = { active: false, cancelled: false, runId: 0, _audio: null, _onEnded: null };
 
 // Split text into ordered chunks for incremental synthesis. The first sentence
 // is its own chunk for the fastest possible start; the rest are packed up to a
@@ -5441,7 +5592,9 @@ function _ttsSpeakOpenAIChunked(text, key, voice) {
   var urls = new Array(chunks.length);     // object URLs once synthesized
   var fetches = new Array(chunks.length);  // in-flight synthesis promises
   var idx = 0;
+  var runId = _ttsChunk.runId + 1;
 
+  _ttsChunk.runId = runId;
   _ttsChunk.cancelled = false;
   _ttsChunk.active = true;
   _ttsChunk._audio = audio;
@@ -5457,11 +5610,19 @@ function _ttsSpeakOpenAIChunked(text, key, voice) {
     }).then(function (resp) {
       if (!resp.ok) return resp.text().then(function (t) { throw new Error('OpenAI TTS ' + resp.status + ': ' + t.slice(0, 200)); });
       return resp.blob();
-    }).then(function (blob) { urls[i] = URL.createObjectURL(blob); return urls[i]; });
+    }).then(function (blob) {
+      if (runId !== _ttsChunk.runId) return '';
+      urls[i] = URL.createObjectURL(blob);
+      return urls[i];
+    });
     return fetches[i];
   }
 
   function finish() {
+    if (runId !== _ttsChunk.runId) {
+      for (var staleIndex = 0; staleIndex < urls.length; staleIndex++) { if (urls[staleIndex]) { try { URL.revokeObjectURL(urls[staleIndex]); } catch (_) {} } }
+      return;
+    }
     if (!_ttsChunk.active) return;
     _ttsChunk.active = false;
     try { audio.removeEventListener('ended', onEnded); } catch (_) {}
@@ -5470,17 +5631,17 @@ function _ttsSpeakOpenAIChunked(text, key, voice) {
   }
 
   function onEnded() {
-    if (_ttsChunk.cancelled) { finish(); return; }
+    if (runId !== _ttsChunk.runId || _ttsChunk.cancelled) { finish(); return; }
     if (idx + 1 < chunks.length) playFrom(idx + 1);
     else finish();
   }
 
   function playFrom(i) {
-    if (_ttsChunk.cancelled) { finish(); return; }
+    if (runId !== _ttsChunk.runId || _ttsChunk.cancelled) { finish(); return; }
     if (i >= chunks.length) { finish(); return; }
     idx = i;
     synth(i).then(function () {
-      if (_ttsChunk.cancelled) { finish(); return; }
+      if (runId !== _ttsChunk.runId || _ttsChunk.cancelled) { finish(); return; }
       synth(i + 1); // prefetch the next chunk while this one plays
       if (src) {
         src.src = urls[i];
@@ -5503,6 +5664,86 @@ function _ttsSpeakOpenAIChunked(text, key, voice) {
   _ttsChunk._onEnded = onEnded;
   audio.addEventListener('ended', onEnded);
   synth(0); synth(1);
+  playFrom(0);
+}
+
+function _ttsSpeakLocalChunked(text) {
+  if (!window.evaStandalone || typeof window.evaStandalone.localSpeechSynthesize !== 'function') {
+    throw new Error('Local Voices requires Eva Standalone.');
+  }
+  var audio = document.getElementById('audioPlayback');
+  var source = document.getElementById('audioSource');
+  var chunks = _ttsSplitChunks(text);
+  if (!audio || !chunks.length) return;
+
+  if (_ttsChunk._onEnded && _ttsChunk._audio) {
+    try { _ttsChunk._audio.removeEventListener('ended', _ttsChunk._onEnded); } catch (_) {}
+  }
+
+  var urls = new Array(chunks.length);
+  var requests = new Array(chunks.length);
+  var index = 0;
+  var runId = _ttsChunk.runId + 1;
+  _ttsChunk.runId = runId;
+  _ttsChunk.cancelled = false;
+  _ttsChunk.active = true;
+  _ttsChunk._audio = audio;
+
+  function synth(chunkIndex) {
+    if (chunkIndex < 0 || chunkIndex >= chunks.length) return Promise.resolve();
+    if (urls[chunkIndex]) return Promise.resolve(urls[chunkIndex]);
+    if (requests[chunkIndex]) return requests[chunkIndex];
+    requests[chunkIndex] = window.evaStandalone.localSpeechSynthesize(chunks[chunkIndex]).then(function(bytes) {
+      if (runId !== _ttsChunk.runId || _ttsChunk.cancelled) return '';
+      var blob = new Blob([bytes], { type: 'audio/wav' });
+      urls[chunkIndex] = URL.createObjectURL(blob);
+      return urls[chunkIndex];
+    });
+    return requests[chunkIndex];
+  }
+
+  function finish() {
+    if (runId !== _ttsChunk.runId) {
+      urls.forEach(function(url) { if (url) { try { URL.revokeObjectURL(url); } catch (_) {} } });
+      return;
+    }
+    if (!_ttsChunk.active) return;
+    _ttsChunk.active = false;
+    try { audio.removeEventListener('ended', onEnded); } catch (_) {}
+    _ttsChunk._onEnded = null;
+    urls.forEach(function(url) { if (url) { try { URL.revokeObjectURL(url); } catch (_) {} } });
+  }
+
+  function onEnded() {
+    if (runId !== _ttsChunk.runId || _ttsChunk.cancelled) { finish(); return; }
+    if (index + 1 < chunks.length) playFrom(index + 1);
+    else finish();
+  }
+
+  function playFrom(chunkIndex) {
+    if (runId !== _ttsChunk.runId || _ttsChunk.cancelled || chunkIndex >= chunks.length) { finish(); return; }
+    index = chunkIndex;
+    synth(chunkIndex).then(function(url) {
+      if (runId !== _ttsChunk.runId || _ttsChunk.cancelled || !url) { finish(); return; }
+      synth(chunkIndex + 1);
+      if (source) {
+        source.src = url;
+        source.type = 'audio/wav';
+      }
+      audio.load();
+      audio.setAttribute('autoplay', 'true');
+      audio.play().catch(function() {});
+    }).catch(function(error) {
+      if (runId !== _ttsChunk.runId || _ttsChunk.cancelled) { finish(); return; }
+      console.warn('Local Voices chunk error:', error && error.message ? error.message : error);
+      if (index + 1 < chunks.length) playFrom(index + 1); else finish();
+    });
+  }
+
+  _ttsChunk._onEnded = onEnded;
+  audio.addEventListener('ended', onEnded);
+  synth(0);
+  synth(1);
   playFrom(0);
 }
 
@@ -5617,33 +5858,13 @@ function speakText() {
 
 
     if (speechParams.Engine === "local-voices") {
-      var bridgeUrl = (typeof getLocalVoicesBridgeUrl === 'function') ? getLocalVoicesBridgeUrl() : 'http://localhost:8090';
-      fetch(bridgeUrl + '/v1/speech', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: speechParams.Text })
-      }).then(function(response) {
-        if (response.ok) return response.blob();
-        return response.text().then(function(text) {
-          throw new Error(text || ('Local Voices bridge returned HTTP ' + response.status));
-        });
-      }).then(function(blob) {
-        var audio = document.getElementById('audioPlayback');
-        var source = document.getElementById('audioSource');
-        if (!audio || !source) return;
-        if (typeof _ttsChunk !== 'undefined') _ttsChunk.cancelled = true;
-        var objectUrl = URL.createObjectURL(blob);
-        source.src = objectUrl;
-        source.type = 'audio/wav';
-        audio.load();
-        audio.addEventListener('ended', function() { URL.revokeObjectURL(objectUrl); }, { once: true });
-        audio.setAttribute('autoplay', 'true');
-        audio.play().catch(function() {});
-      }).catch(function(error) {
+      try {
+        _ttsSpeakLocalChunked(speechParams.Text);
+      } catch (error) {
         var message = 'Local Voices unavailable: ' + (error && error.message ? error.message : error);
         if (typeof setStatus === 'function') setStatus('error', message);
         else console.warn(message);
-      });
+      }
       return;
     }
 
@@ -5929,8 +6150,13 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   var signalSendResult = null;
   var signalMessage = '';
   var usedSignalFallback = false;
+  var signalContext = renderOptions.signalContext || null;
+  var forceSignalRepeat = !!(signalContext && signalContext.repeat);
+  var repeatedSignal = forceSignalRepeat ? signalContext.repeatSignal : null;
+  var signalContextValid = !signalContext || isSignalDeliveryContextValid(signalContext);
   var _sigRe = /\[\[EVA_SIGNAL\]\]\s*([\s\S]*?)\s*\[\[\/EVA_SIGNAL\]\]/g;
   text = text.replace(_sigRe, function(full, json) {
+    if (forceSignalRepeat) return '';
     if (!signalMessage) {
       try {
         var signalData = JSON.parse(json);
@@ -5939,12 +6165,12 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     }
     return '';
   });
-  if (!signalMessage && renderOptions.signalAuthorized === true && renderOptions.signalMessage) {
+  if (!signalMessage && signalContextValid && renderOptions.signalAuthorized === true && renderOptions.signalMessage) {
     signalMessage = String(renderOptions.signalMessage).trim().slice(0, 4000);
     usedSignalFallback = !!signalMessage;
     if (usedSignalFallback) text = '';
   }
-  if (signalMessage && renderOptions.signalAuthorized === true) {
+  if (signalMessage && signalContextValid && renderOptions.signalAuthorized === true) {
     try {
       var signalResponse = await fetch(getSafeBridgeBaseUrl() + '/v1/signal/send', {
         method: 'POST',
@@ -5953,9 +6179,22 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
       });
       var signalData = await signalResponse.json().catch(function() { return {}; });
       signalSendResult = { ok: signalResponse.ok, message: signalData && signalData.error ? signalData.error.message : '' };
+      if (signalSendResult.ok) {
+        var sourceRequest = String(renderOptions.signalRequest || '');
+        var originalRequest = repeatedSignal
+          ? repeatedSignal.request
+          : sourceRequest;
+        _lastDeliveredSignal = {
+          message: signalMessage,
+          request: originalRequest,
+          sentAt: Date.now()
+        };
+      }
     } catch (signalError) {
       signalSendResult = { ok: false, message: signalError && signalError.message ? signalError.message : 'bridge unavailable' };
     }
+  } else if (signalContext && !signalContextValid && (signalMessage || /\[\[EVA_SIGNAL\]\]/.test(content))) {
+    signalSendResult = { ok: false, message: 'Signal repeat expired after the conversation changed' };
   } else if (/\[\[EVA_SIGNAL\]\]/.test(content)) {
     signalSendResult = {
       ok: false,
@@ -6429,6 +6668,7 @@ document.querySelector("#txtMsg").addEventListener("keydown", function(event) {
 
 // Clear Messages for Clear Memory Button
 function clearMessages() {
+  if (typeof clearLastDeliveredSignal === 'function') clearLastDeliveredSignal();
     // Preserve auth keys, settings, and session data across clear
     var keysToKeep = [];
     for (var i = 0; i < localStorage.length; i++) {

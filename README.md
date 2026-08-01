@@ -51,7 +51,7 @@ Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).
 | **Reasoning controls** | Model-specific effort levels for OpenAI, GitHub Models, and Copilot CLI ACP |
 | **Doctor diagnostics** | Structured readiness probe for every subsystem with actionable fixes |
 | **MCP ecosystem** | Azure, GitHub, Kusto, computer-use-linux desktop control |
-| **Cognitive layer** | Eva + Reviewer dual-agent pipeline with configurable models |
+| **Adaptive review** | Fast direct Eva responses with GPT-5.6 Terra review for consequential turns |
 | **Dual data mode** | Cloud (Copilot CLI + MCP) or Local (LM Studio + direct MCP, fully offline) |
 
 ## Get started
@@ -64,13 +64,13 @@ For Signal notifications, install [signal-cli](https://github.com/AsamK/signal-c
 
 ### Local Voices
 
-Eva's **Local Voices** TTS engine uses the bundled [`core/audio/eva-voice.wav`](core/audio/eva-voice.wav) recording by default. In Eva Standalone, select **Local Voices** and choose a **Voice model**. Eva starts its managed local bridge automatically, then stops that bridge when you select another TTS engine.
+Eva's **Local Voices** engine defaults to **Eva English**. Eva Korean and AppaTalks English are also bundled profile choices. In Eva Standalone, use **Add voice** to import an authorized uncompressed PCM WAV recording between 5 and 10 seconds; imported profiles remain available beside the bundled choices.
 
 ```bash
-~/.local/share/eva/local-voices/.venv/bin/python tools/local_voices_bridge.py
+./install.sh --voice-deps
 ```
 
-Use **Add voice** to import an authorized uncompressed PCM WAV recording between 5 and 10 seconds long; imported profiles remain available in the Voice model selector. The bridge listens only on localhost by default, loads the model once, and returns generated WAV data directly to Eva. Advanced users can set `LOCAL_VOICES_REFERENCE`, `LOCAL_VOICES_DEVICE`, `LOCAL_VOICES_EXAGGERATION`, and `LOCAL_VOICES_CFG_WEIGHT` when starting the bridge manually.
+This creates a separate Python 3.11 environment at `~/.local/share/eva/local-voices/.venv` using Chatterbox TTS, Eva's maintained `tools/voice_clone_module` adapter, and Faster Whisper with Silero VAD. The first local TTS or STT use downloads the selected model; later cached use is local. Chatterbox and Perth remain external dependencies: Chatterbox is MIT-licensed, and Perth is pinned to its source commit by the installer. Eva intentionally uses six newer tested dependency versions than Chatterbox 0.1.7 declares; the installer verifies that no other dependency conflict is present. The standalone app creates a token-protected loopback speech service automatically and does not upload microphone audio to a cloud transcription service.
 
 Import skills from text, URLs, GitHub repos, or files in Settings. Eva normalizes them into her format, stores in ADX, and applies matching skills automatically.
 

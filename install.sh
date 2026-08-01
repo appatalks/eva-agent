@@ -10,6 +10,7 @@
 #    ./install.sh --yes           Install everything missing without prompting
 #    ./install.sh --check         Report only; install nothing (doctor mode)
 #    ./install.sh --no-skill-deps Skip the optional skill toolchains (PDF/OCR)
+#    ./install.sh --voice-deps    Install optional local Chatterbox TTS and Faster Whisper STT
 #    ./install.sh --build         Rebuild the standalone AppImage at the end
 #    ./install.sh --no-update     Do not git-pull / self-update before running
 #    ./install.sh --help          Show this help
@@ -41,6 +42,7 @@ CHECK_ONLY=0
 DO_UPDATE=1
 DO_BUILD=0
 WANT_SKILL_DEPS=1
+WANT_VOICE_DEPS=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -50,6 +52,8 @@ for arg in "$@"; do
     --build)         DO_BUILD=1 ;;
     --skill-deps)    WANT_SKILL_DEPS=1 ;;
     --no-skill-deps) WANT_SKILL_DEPS=0 ;;
+    --voice-deps)    WANT_VOICE_DEPS=1 ;;
+    --no-voice-deps) WANT_VOICE_DEPS=0 ;;
     --help|-h)
       sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
@@ -131,6 +135,39 @@ detect_platform() {
 # pip install command (user scope so the bare-python3 bridge can import them).
 pip_install_cmd() {  # echoes a command that installs the given pip package(s)
   printf '%s -m pip install --user %s' "$PYTHON" "$*"
+}
+
+local_speech_overrides_are_expected() {
+  local conflicts="$1"
+  local expected=$'The package `chatterbox-tts` requires `torch==2.6.0 ; python_full_version < \'3.14\'`, but `2.10.0` is installed\nThe package `chatterbox-tts` requires `torchaudio==2.6.0 ; python_full_version < \'3.14\'`, but `2.10.0` is installed\nThe package `chatterbox-tts` requires `transformers==5.2.0`, but `5.5.0` is installed\nThe package `chatterbox-tts` requires `diffusers==0.29.0`, but `0.38.0` is installed\nThe package `chatterbox-tts` requires `safetensors==0.5.3`, but `0.8.0` is installed\nThe package `chatterbox-tts` requires `gradio==6.8.0`, but `6.16.0` is installed'
+  [[ "$conflicts" == "$expected" ]]
+}
+
+install_local_speech() {
+  local uv_bin voice_home voice_python voice_package check_output conflict_count
+  uv_bin="$(command -v uv || printf '%s' "$HOME/.local/bin/uv")"
+  voice_home="$HOME/.local/share/eva/local-voices"
+  voice_python="$voice_home/.venv/bin/python"
+  voice_package="$SCRIPT_DIR/tools/voice_clone_module"
+  [ -x "$uv_bin" ] || { err "uv is required for Local Voices"; return 1; }
+  [ -f "$voice_package/pyproject.toml" ] || { err "Eva's vendored voice adapter is missing"; return 1; }
+  "$uv_bin" venv --allow-existing --python 3.11 "$voice_home/.venv" &&
+    "$uv_bin" pip install --python "$voice_python" torch==2.10.0 torchaudio==2.10.0 faster-whisper==1.2.1 soundfile==0.14.0 librosa==0.11.0 transformers==5.5.0 accelerate==1.14.0 bitsandbytes==0.49.2 numpy==1.26.4 s3tokenizer==0.3.0 diffusers==0.38.0 resemble-perth@git+https://github.com/resemble-ai/Perth.git@ce86c49d029f42272c1902eccb675556b9ed2330 conformer==0.3.2 safetensors==0.8.0 spacy-pkuseg==1.0.1 pykakasi==2.3.0 pyloudnorm==0.2.0 omegaconf==2.3.1 gradio==6.16.0 &&
+    "$uv_bin" pip install --python "$voice_python" --no-deps chatterbox-tts==0.1.7 &&
+    "$uv_bin" pip install --python "$voice_python" --no-deps --reinstall "$voice_package" || return 1
+
+  if check_output="$("$uv_bin" pip check --python "$voice_python" 2>&1)"; then
+    printf '%s\n' "$check_output"
+    return 0
+  fi
+  printf '%s\n' "$check_output"
+  conflict_count="$(printf '%s\n' "$check_output" | sed -n '/^The package /p')"
+  if local_speech_overrides_are_expected "$conflict_count"; then
+    warn "Accepted six tested Chatterbox metadata overrides; all other dependencies are consistent."
+    return 0
+  fi
+  err "Unexpected Local Voices dependency conflicts were found."
+  return 1
 }
 
 # Resolve a per-manager system package name. Empty field => not available there.
@@ -263,6 +300,22 @@ register_dependencies() {
     ok "OpenCV (cv2) present"; PRESENT_COUNT=$((PRESENT_COUNT+1))
   else
     queue "opencv-python (camera presence)" "$(pip_install_cmd opencv-python)"
+  fi
+
+  if [ "$WANT_VOICE_DEPS" = "1" ]; then
+    hr; info "Local speech (optional Chatterbox + Faster Whisper)"; hr
+    local voice_python="${HOME}/.local/share/eva/local-voices/.venv/bin/python"
+    if [ -x "$voice_python" ] && "$voice_python" -c "import faster_whisper; from importlib.metadata import version; assert version('eva-voice-clone-module') == '0.1.0'" >/dev/null 2>&1; then
+      ok "Local Voices and local transcription (managed environment present)"; PRESENT_COUNT=$((PRESENT_COUNT+1))
+    elif have_cmd uv; then
+      ok "uv (managed local speech environment)"; PRESENT_COUNT=$((PRESENT_COUNT+1))
+      queue "Local Voices and local transcription" "install_local_speech"
+    else
+      queue "uv (managed local speech environment)" "curl -LsSf https://astral.sh/uv/install.sh | sh"
+      queue "Local Voices and local transcription" "install_local_speech"
+    fi
+  else
+    info "Skipping optional local speech dependencies (--voice-deps enables them)"
   fi
 
   if [ "$WANT_SKILL_DEPS" = "1" ]; then
@@ -439,4 +492,6 @@ main() {
   printf '\n'
 }
 
-main "$@"
+if [[ "${EVA_INSTALLER_LIBRARY:-0}" != "1" ]]; then
+  main "$@"
+fi

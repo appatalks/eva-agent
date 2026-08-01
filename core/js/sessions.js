@@ -155,6 +155,7 @@ function saveCurrentSession() {
 /** Start a brand new session */
 function newSession() {
   closeAgentOperationsForNavigation();
+  if (typeof clearLastDeliveredSignal === 'function') clearLastDeliveredSignal();
   // Auto-save current first
   saveCurrentSession();
 
@@ -200,6 +201,7 @@ function loadSession(id) {
       return false;
     }
     _restoreSession(data);
+    if (typeof clearLastDeliveredSignal === 'function') clearLastDeliveredSignal();
     localStorage.setItem(SESSION_ACTIVE_KEY, id);
     renderSessionList();
     var panel = document.getElementById('sessionPanel');

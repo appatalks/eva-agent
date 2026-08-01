@@ -53,6 +53,9 @@ function geminiSend() {
         txtMsg.focus();
         return;
     }
+    const signalContext = (typeof captureSignalDeliveryContext === 'function')
+        ? captureSignalDeliveryContext(sQuestion)
+        : null;
 
     getGoogleGlKey().then(GOOGLE_GL_KEY => {
         document.getElementById("txtMsg").innerHTML = "";
@@ -99,8 +102,10 @@ function geminiSend() {
                         let mainResponse = nonThoughts.map(part => part.text).join("\n").trim();
                         const out = document.getElementById("txtOutput");
                         await renderEvaResponse(mainResponse, out, {
-                            signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion),
-                            signalMessage: (typeof requestedSignalMessage === 'function') ? requestedSignalMessage(sQuestion) : ''
+                            signalAuthorized: !!(signalContext && signalContext.authorized),
+                            signalMessage: signalContext ? signalContext.message : '',
+                            signalRequest: sQuestion,
+                            signalContext: signalContext
                         });
                     })();
 

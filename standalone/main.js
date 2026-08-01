@@ -12,6 +12,9 @@ let readyBridgeProcess = null;
 let bridgeStopTimer = null;
 let bridgeStoppingProcess = null;
 let localVoicesProcess = null;
+let localSpeechBaseUrl = '';
+let localSpeechToken = '';
+let localSpeechProfileId = '';
 let bridgeCapabilityToken = '';
 let shuttingDown = false;
 let stoppingBridge = false;
@@ -132,11 +135,35 @@ function getLocalVoicesDirectory() {
   return path.join(process.env.HOME || '', '.local', 'share', 'eva', 'local-voices', 'voices');
 }
 
+const DEFAULT_LOCAL_VOICE_PROFILE = 'bundled:eva-english';
+const BUNDLED_LOCAL_VOICE_PROFILES = [
+  { id: 'bundled:eva-english', label: 'Eva English', file: 'eva_voice_profile-english.wav' },
+  { id: 'bundled:eva-korean', label: 'Eva Korean', file: 'eva_voice_profile-korean.wav' },
+  { id: 'bundled:appatalks-english', label: 'AppaTalks English', file: 'appatalks_voice_profile-english.wav' }
+];
+
+function resolveBundledLocalVoiceReference(voiceId) {
+  const profile = BUNDLED_LOCAL_VOICE_PROFILES.find(function(item) { return item.id === voiceId; });
+  if (!profile) return null;
+  const directory = path.join(getAppRoot(), 'core', 'audio');
+  const reference = path.join(directory, profile.file);
+  const stat = fs.lstatSync(reference);
+  if (!stat.isFile() || stat.isSymbolicLink() || fs.realpathSync(reference) !== reference) {
+    throw new Error('The selected bundled Local Voices profile is unavailable.');
+  }
+  return reference;
+}
+
 function getLocalVoiceProfiles() {
-  const profiles = [{ id: 'eva', label: 'Eva (bundled)', bundled: true }];
+  const profiles = BUNDLED_LOCAL_VOICE_PROFILES.filter(function(profile) {
+    try { return !!resolveBundledLocalVoiceReference(profile.id); } catch (_) { return false; }
+  }).map(function(profile) {
+    return { id: profile.id, label: profile.label, bundled: true };
+  });
   const directory = getLocalVoicesDirectory();
   try {
-    fs.mkdirSync(directory, { recursive: true });
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
     fs.readdirSync(directory).filter(function(name) {
       return name.toLowerCase().endsWith('.wav');
     }).sort().forEach(function(name) {
@@ -187,7 +214,8 @@ async function importLocalVoiceProfile() {
   if (duration > 10.01) throw new Error('Voice samples must be 10 seconds or shorter.');
   if (duration < 5) throw new Error('Voice samples must be at least 5 seconds long.');
   const directory = getLocalVoicesDirectory();
-  fs.mkdirSync(directory, { recursive: true });
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.chmodSync(directory, 0o700);
   const base = path.basename(source, path.extname(source)).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'voice';
   let name = base + '.wav';
   let index = 2;
@@ -195,17 +223,24 @@ async function importLocalVoiceProfile() {
     name = base + '-' + index + '.wav';
     index += 1;
   }
-  fs.copyFileSync(source, path.join(directory, name));
+  const destination = path.join(directory, name);
+  fs.copyFileSync(source, destination);
+  fs.chmodSync(destination, 0o600);
   return { canceled: false, selected: 'custom:' + name, profiles: getLocalVoiceProfiles() };
 }
 
 function resolveLocalVoiceReference(voiceId) {
-  if (!voiceId || voiceId === 'eva') return path.join(getAppRoot(), 'core', 'audio', 'eva-voice.wav');
+  const bundledReference = resolveBundledLocalVoiceReference(voiceId);
+  if (bundledReference) return bundledReference;
   if (!voiceId.startsWith('custom:')) throw new Error('Unknown Local Voices profile.');
   const name = voiceId.slice('custom:'.length);
   if (path.basename(name) !== name || !name.toLowerCase().endsWith('.wav')) throw new Error('Invalid Local Voices profile.');
-  const reference = path.join(getLocalVoicesDirectory(), name);
-  if (!fs.existsSync(reference)) throw new Error('The selected Local Voices profile is unavailable.');
+  const directory = fs.realpathSync(getLocalVoicesDirectory());
+  const reference = path.join(directory, name);
+  const stat = fs.lstatSync(reference);
+  if (!stat.isFile() || stat.isSymbolicLink() || fs.realpathSync(reference) !== reference) {
+    throw new Error('The selected Local Voices profile is unavailable.');
+  }
   return reference;
 }
 
@@ -458,47 +493,50 @@ function isChildRunning(child) {
   return !!child && child.exitCode === null && child.signalCode === null;
 }
 
-function parseLocalVoicesUrl(baseUrl) {
-  const parsed = new URL(String(baseUrl || ''));
-  const hostname = parsed.hostname.toLowerCase();
-  if (parsed.protocol !== 'http:' || (hostname !== 'localhost' && hostname !== '127.0.0.1')) {
-    throw new Error('Local Voices can only run on an http://localhost URL.');
-  }
-  const port = Number(parsed.port);
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
-    throw new Error('Local Voices needs a localhost port from 1024 to 65535.');
-  }
-  return { baseUrl: parsed.origin, port: port };
-}
-
-function requestLocalVoicesHealth(baseUrl) {
+function requestLocalSpeech(pathname, method, body, contentType, timeoutMs) {
+  if (!localSpeechBaseUrl || !localSpeechToken) return Promise.reject(new Error('Local speech service is not running.'));
+  const requestBody = body == null ? null : (Buffer.isBuffer(body) || typeof body === 'string' ? body : Buffer.from(body));
   return new Promise(function(resolve, reject) {
-    const req = http.get(baseUrl.replace(/\/+$/, '') + '/health', function(res) {
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', function(chunk) { body += chunk; });
+    const request = http.request(localSpeechBaseUrl + pathname, {
+      method: method,
+      headers: {
+        'Authorization': 'Bearer ' + localSpeechToken,
+        'Content-Type': contentType || 'application/json',
+        'Content-Length': requestBody ? Buffer.byteLength(requestBody) : 0
+      },
+      timeout: timeoutMs || 180000
+    }, function(res) {
+      const chunks = [];
+      res.on('data', function(chunk) { chunks.push(chunk); });
       res.on('end', function() {
-        if (res.statusCode !== 200) {
-          reject(new Error('Local Voices health returned HTTP ' + res.statusCode));
-          return;
+        const response = Buffer.concat(chunks);
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          let detail = '';
+          try { detail = JSON.parse(response.toString('utf8')).error || ''; } catch (_) {}
+          reject(new Error('Local speech service returned HTTP ' + res.statusCode + (detail ? ': ' + detail : ''))); return;
         }
         try {
-          const data = JSON.parse(body);
-          if (data.ok === true && data.backend_available === true) resolve(data);
-          else reject(new Error(data.backend_error || 'Local Voices backend is unavailable.'));
+          if ((res.headers['content-type'] || '').toLowerCase().startsWith('audio/')) resolve(response);
+          else resolve(JSON.parse(response.toString('utf8')));
         } catch (err) {
           reject(err);
         }
       });
     });
-    req.setTimeout(2000, function() {
-      req.destroy(new Error('Local Voices health timed out.'));
+    request.setTimeout(timeoutMs || 180000, function() {
+      request.destroy(new Error('Local speech request timed out.'));
     });
-    req.on('error', reject);
+    request.on('error', reject);
+    if (requestBody) request.write(requestBody);
+    request.end();
   });
 }
 
-function waitForLocalVoices(baseUrl, child, timeoutMs) {
+function requestLocalVoicesHealth() {
+  return requestLocalSpeech('/health', 'GET', null, 'application/json', 2000);
+}
+
+function waitForLocalVoices(child, timeoutMs) {
   const startedAt = Date.now();
   return new Promise(function(resolve, reject) {
     function poll() {
@@ -506,7 +544,7 @@ function waitForLocalVoices(baseUrl, child, timeoutMs) {
         reject(new Error('Local Voices stopped before it was ready (' + formatExitDetails(child.exitCode, child.signalCode) + ').'));
         return;
       }
-      requestLocalVoicesHealth(baseUrl).then(resolve).catch(function(err) {
+      requestLocalVoicesHealth().then(resolve).catch(function(err) {
         if (Date.now() - startedAt >= timeoutMs) {
           reject(new Error('Timed out waiting for Local Voices: ' + err.message));
           return;
@@ -518,63 +556,92 @@ function waitForLocalVoices(baseUrl, child, timeoutMs) {
   });
 }
 
-async function getLocalVoicesStatus(baseUrl) {
-  const target = parseLocalVoicesUrl(baseUrl);
+async function getLocalVoicesStatus() {
   try {
-    const health = await requestLocalVoicesHealth(target.baseUrl);
+    const health = await requestLocalVoicesHealth();
     return { running: true, managed: isChildRunning(localVoicesProcess), health: health };
   } catch (_) {
     return { running: false, managed: isChildRunning(localVoicesProcess), health: null };
   }
 }
 
-async function startLocalVoices(baseUrl, pythonPath, voiceId) {
-  const target = parseLocalVoicesUrl(baseUrl);
-  const status = await getLocalVoicesStatus(target.baseUrl);
-  if (status.running) return status;
+async function startLocalVoices(pythonPath, voiceId) {
+  const status = await getLocalVoicesStatus();
+  const requestedProfile = String(voiceId || '');
+  // STT-only callers do not impose a TTS profile. Preserve an active imported
+  // profile so opening Voice View cannot unload Local Voices mid-conversation.
+  if (status.running && (!requestedProfile || localSpeechProfileId === requestedProfile)) return status;
+  if (status.running) await stopLocalVoices();
   if (isChildRunning(localVoicesProcess)) {
-    throw new Error('Local Voices is already starting on another localhost port.');
+    throw new Error('Local speech service is already starting.');
   }
 
   const appRoot = getAppRoot();
   const bridgePath = path.join(appRoot, 'tools', 'local_voices_bridge.py');
   const managedPython = path.join(process.env.HOME || '', '.local', 'share', 'eva', 'local-voices', '.venv', 'bin', 'python');
   const pythonCmd = String(pythonPath || process.env.LOCAL_VOICES_PYTHON || process.env.EVA_PYTHON || (fs.existsSync(managedPython) ? managedPython : 'python3')).trim() || 'python3';
-  const reference = resolveLocalVoiceReference(voiceId);
-  const child = spawn(pythonCmd, [bridgePath, '--host', '127.0.0.1', '--port', String(target.port), '--reference', reference], {
+  localSpeechBaseUrl = '';
+  localSpeechToken = crypto.randomBytes(32).toString('hex');
+  const args = [bridgePath, '--host', '127.0.0.1', '--port', '0'];
+  if (voiceId) args.push('--reference', resolveLocalVoiceReference(voiceId));
+  const child = spawn(pythonCmd, args, {
     cwd: appRoot,
-    env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1' }),
+    env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1', EVA_LOCAL_SPEECH_TOKEN: localSpeechToken }),
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe']
   });
   localVoicesProcess = child;
+  localSpeechProfileId = requestedProfile;
+  let addressReady;
+  const addressPromise = new Promise(function(resolve, reject) { addressReady = { resolve: resolve, reject: reject }; });
 
   child.stdout.on('data', function(chunk) {
-    process.stdout.write('[eva-local-voices] ' + chunk.toString());
+    const text = chunk.toString();
+    process.stdout.write('[eva-local-voices] ' + text);
+    const match = text.match(/listening on (http:\/\/127\.0\.0\.1:\d+)/);
+    if (match) {
+      localSpeechBaseUrl = match[1];
+      addressReady.resolve(localSpeechBaseUrl);
+    }
   });
   child.stderr.on('data', function(chunk) {
     process.stderr.write('[eva-local-voices] ' + chunk.toString());
   });
   child.on('exit', function() {
-    if (localVoicesProcess === child) localVoicesProcess = null;
+    if (localVoicesProcess === child) {
+      localVoicesProcess = null;
+      localSpeechBaseUrl = '';
+      localSpeechToken = '';
+      localSpeechProfileId = '';
+    }
+    addressReady.reject(new Error('Local speech service stopped before publishing its address.'));
   });
 
   try {
-    const health = await waitForLocalVoices(target.baseUrl, child, LOCAL_VOICES_READY_TIMEOUT_MS);
+    await Promise.race([
+      addressPromise,
+      new Promise(function(_resolve, reject) { setTimeout(function() { reject(new Error('Timed out waiting for Local Voices to bind.')); }, LOCAL_VOICES_READY_TIMEOUT_MS); })
+    ]);
+    const health = await waitForLocalVoices(child, LOCAL_VOICES_READY_TIMEOUT_MS);
     return { running: true, managed: true, health: health };
   } catch (err) {
     groupSignal(child, 'SIGTERM');
+    localSpeechBaseUrl = '';
+    localSpeechToken = '';
+    localSpeechProfileId = '';
     throw err;
   }
 }
 
-async function stopLocalVoices(baseUrl) {
-  parseLocalVoicesUrl(baseUrl);
+async function stopLocalVoices() {
   const child = localVoicesProcess;
   if (!isChildRunning(child)) return { running: false, managed: false, health: null };
   groupSignal(child, 'SIGTERM');
   await waitForBridgeExit(child, 3000);
   if (isChildRunning(child)) groupSignal(child, 'SIGKILL');
+  localSpeechBaseUrl = '';
+  localSpeechToken = '';
+  localSpeechProfileId = '';
   return { running: false, managed: false, health: null };
 }
 
@@ -582,20 +649,38 @@ function stopManagedLocalVoices() {
   if (isChildRunning(localVoicesProcess)) groupSignal(localVoicesProcess, 'SIGTERM');
 }
 
-ipcMain.handle('local-voices-status', function(_event, baseUrl) {
-  return getLocalVoicesStatus(baseUrl);
+ipcMain.handle('local-voices-status', function(event) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  return getLocalVoicesStatus();
 });
-ipcMain.handle('local-voices-start', function(_event, baseUrl, pythonPath, voiceId) {
-  return startLocalVoices(baseUrl, pythonPath, voiceId);
+ipcMain.handle('local-voices-start', function(event, pythonPath, voiceId) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  return startLocalVoices(pythonPath, voiceId);
 });
-ipcMain.handle('local-voices-stop', function(_event, baseUrl) {
-  return stopLocalVoices(baseUrl);
+ipcMain.handle('local-voices-stop', function(event) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  return stopLocalVoices();
 });
-ipcMain.handle('local-voices-list', function() {
+ipcMain.handle('local-voices-list', function(event) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
   return getLocalVoiceProfiles();
 });
-ipcMain.handle('local-voices-import', function() {
+ipcMain.handle('local-voices-import', function(event) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
   return importLocalVoiceProfile();
+});
+ipcMain.handle('local-speech-synthesize', async function(event, text) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  const value = String(text || '');
+  if (!value.trim() || value.length > 12000) throw new Error('Invalid speech input.');
+  const audio = await requestLocalSpeech('/v1/speech', 'POST', JSON.stringify({ input: value }), 'application/json');
+  return new Uint8Array(audio);
+});
+ipcMain.handle('local-speech-transcribe', async function(event, audio, contentType) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  const bytes = Buffer.from(audio || []);
+  if (!bytes.length || bytes.length > 16 * 1024 * 1024) throw new Error('Invalid audio input.');
+  return requestLocalSpeech('/v1/audio/transcriptions', 'POST', bytes, String(contentType || ''));
 });
 ipcMain.handle('auth-load', function(event) {
   return isTrustedEvaRenderer(event) ? loadEncryptedAuth() : {};

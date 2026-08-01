@@ -8,11 +8,14 @@ Usage:
 """
 
 import json
+import http.client
+import ast
 import os
 import re
 import sys
 import importlib.util
 import threading
+import subprocess
 
 PASS = 0
 FAIL = 0
@@ -136,7 +139,7 @@ def test_no_hardcoded_keys():
 
 def test_python_syntax():
     """All Python files compile without errors."""
-    for py in ["tools/acp_bridge.py", "tools/kusto_mcp.py", "tools/test_eva.py", "tools/eval/run.py"]:
+    for py in ["tools/acp_bridge.py", "tools/kusto_mcp.py", "tools/local_voices_bridge.py", "tools/voice_clone_module/src/voice_clone_module/service.py", "tools/test_eva.py", "tools/eval/run.py"]:
         if not os.path.isfile(py):
             report(f"python_syntax:{py}", None, "file missing")
             continue
@@ -172,6 +175,154 @@ def test_artifact_filename_validation():
     for name, expected in cases:
         label = name if name else "empty"
         report(f"artifact_name:{label}", acp_bridge._valid_artifact_name(name) is expected)
+
+
+def test_local_speech_contract():
+    """Local speech remains token-protected, bounded, and free of bundled voices."""
+    with open("tools/local_voices_bridge.py") as f:
+        bridge = f.read()
+    with open("standalone/main.js") as f:
+        standalone = f.read()
+    with open("core/js/options.js") as f:
+        options = f.read()
+    with open("install.sh") as f:
+        installer = f.read()
+    with open("standalone/package.json") as f:
+        standalone_package = json.load(f)
+    bundled_profiles = {
+        "core/audio/eva_voice_profile-english.wav",
+        "core/audio/eva_voice_profile-korean.wav",
+        "core/audio/appatalks_voice_profile-english.wav",
+    }
+    report("local_speech_removed_legacy_voice", not os.path.exists("core/audio/eva-voice.wav"))
+    report("local_speech_bundled_profiles", all(os.path.isfile(path) for path in bundled_profiles))
+    report("local_speech_loopback_only", 'Local speech bridge must bind to a loopback address' in bridge)
+    report("local_speech_token_auth", 'hmac.compare_digest' in bridge and "--token" in bridge)
+    report("local_speech_no_wildcard_cors", 'Access-Control-Allow-Origin' not in bridge)
+    report("local_speech_local_stt", 'faster_whisper' in bridge and 'vad_filter=True' in bridge)
+    report("local_speech_electron_webm", '"video/webm"' in bridge)
+    report("local_speech_electron_proxy", 'local-speech-transcribe' in standalone and 'localSpeechTranscribe' in options)
+    report("local_speech_response_aware_proxy", "res.headers['content-type']" in standalone)
+    report("local_speech_proxy_error_detail", "JSON.parse(response.toString('utf8')).error" in standalone and "Buffer.from(body)" in standalone)
+    report("local_speech_stt_preserves_tts_profile", "!requestedProfile || localSpeechProfileId === requestedProfile" in standalone)
+    report("local_speech_profile_reuse", "Electron owns profile-aware reuse/restart" in options)
+    report("local_speech_default_eva_english", "bundled:eva-english" in standalone and "bundled:eva-english" in options)
+    report("local_speech_no_removed_profile_fallback", "localVoicesProfileEl.value || 'eva'" not in options and "localStorage.setItem('local_voices_profile', 'bundled:eva-english')" in options)
+    report("local_speech_no_renderer_url", "fetch(bridgeUrl + '/v1/speech'" not in options)
+    report("local_speech_incremental_tts", 'function _ttsSpeakLocalChunked' in options and 'synth(chunkIndex + 1)' in options)
+    report("local_speech_recorder_exclusive", "if (_vv._capture) return;" in options and "_vv._capture === capture" in options)
+    report("local_speech_capture_generation", "capture.generation !== _vv.listenGeneration" in options and "capture.chunks" in options)
+    report("local_speech_recorder_finalizes_before_rearm", "var ownsCapture = _vv._capture === capture;" in options and "if (ownsCapture && _vv.open && _vv.whisperMode" in options)
+    report("local_speech_400_recovers", "if (/HTTP 400/.test(message))" in options and "if (_vv.phase === 'speaking')" in options and "if (_vv.phase === 'awake')" in options and "_vvEnterAwake(_vv.convoMode ? _vv.convoTimeoutMs : 10000)" in options)
+    report("local_speech_energy_barge", "_vv.whisperProvider !== 'local'" in options and "_vv._bargeEnergyFrames >= 4" in options)
+    report("local_speech_installer", '--voice-deps' in installer and 'install_local_speech' in installer)
+    report("local_speech_installer_uses_adapter", 'voice_package="$SCRIPT_DIR/tools/voice_clone_module"' in installer and '--reinstall "$voice_package"' in installer)
+    report("local_speech_installer_migrates_legacy", "version('eva-voice-clone-module') == '0.1.0'" in installer)
+    report("local_speech_installer_checks_overrides", 'pip check --python "$voice_python"' in installer and 'local_speech_overrides_are_expected' in installer)
+    report("local_speech_vendored_adapter", os.path.isfile("tools/voice_clone_module/pyproject.toml") and os.path.isfile("tools/voice_clone_module/src/voice_clone_module/service.py"))
+    adapter_files = []
+    for root, directories, files in os.walk("tools/voice_clone_module"):
+        directories[:] = [directory for directory in directories if directory != "__pycache__"]
+        for name in files:
+            adapter_files.append(os.path.relpath(os.path.join(root, name), "tools/voice_clone_module"))
+    allowed_adapter_files = {
+        "pyproject.toml",
+        "src/voice_clone_module/__init__.py",
+        "src/voice_clone_module/service.py",
+    }
+    report("local_speech_adapter_source_allowlist", set(adapter_files) == allowed_adapter_files)
+    resource_filters = standalone_package["build"]["extraResources"][0]["filter"]
+    report("local_speech_adapter_packaged", "tools/voice_clone_module/**" in resource_filters)
+    report("local_speech_adapter_package_hygiene", "!tools/voice_clone_module/build/**" in resource_filters and "!tools/voice_clone_module/**/*.egg-info/**" in resource_filters and "!tools/voice_clone_module/**/__pycache__/**" in resource_filters and "!tools/voice_clone_module/**/*.pyc" in resource_filters and "!core/audio/**" in resource_filters)
+    report("local_speech_bundled_profiles_packaged", bundled_profiles.issubset(set(resource_filters)))
+    report("local_speech_no_private_clone", "EVA_VOICE_CLONE_SOURCE" not in installer and "appatalks/voice_clone_module" not in installer)
+
+    expected = "\n".join([
+        "The package `chatterbox-tts` requires `torch==2.6.0 ; python_full_version < '3.14'`, but `2.10.0` is installed",
+        "The package `chatterbox-tts` requires `torchaudio==2.6.0 ; python_full_version < '3.14'`, but `2.10.0` is installed",
+        "The package `chatterbox-tts` requires `transformers==5.2.0`, but `5.5.0` is installed",
+        "The package `chatterbox-tts` requires `diffusers==0.29.0`, but `0.38.0` is installed",
+        "The package `chatterbox-tts` requires `safetensors==0.5.3`, but `0.8.0` is installed",
+        "The package `chatterbox-tts` requires `gradio==6.8.0`, but `6.16.0` is installed",
+    ])
+    shell = "source ./install.sh; local_speech_overrides_are_expected \"$VOICE_TEST_CONFLICTS\""
+    accepted = subprocess.run(["bash", "-c", shell], env={**os.environ, "EVA_INSTALLER_LIBRARY": "1", "VOICE_TEST_CONFLICTS": expected}).returncode == 0
+    rejected = subprocess.run(["bash", "-c", shell], env={**os.environ, "EVA_INSTALLER_LIBRARY": "1", "VOICE_TEST_CONFLICTS": expected + "\nThe package `unexpected-package` requires `x`, but `y` is installed"}).returncode != 0
+    report("local_speech_override_allowlist_accepts_exact", accepted)
+    report("local_speech_override_allowlist_rejects_extra", rejected)
+
+
+def test_local_speech_http_contract():
+    """The local speech bridge enforces its token without loading real models."""
+    spec = importlib.util.spec_from_file_location("local_speech_bridge", "tools/local_voices_bridge.py")
+    if spec is None or spec.loader is None:
+        report("local_speech_http_import", False, "could not load local speech bridge")
+        return
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    try:
+        module.create_server("127.0.0.1", 0)
+    except ValueError:
+        report("local_speech_http_requires_token", True)
+    else:
+        report("local_speech_http_requires_token", False)
+
+    class FakeTts:
+        def health(self):
+            return {"ok": True, "backend_available": True}
+
+        def synthesize(self, text):
+            return b"RIFFfake-wav"
+
+    class FakeStt:
+        def health(self):
+            return {"available": True, "loaded": False, "vad": "silero"}
+
+        def transcribe(self, audio, suffix):
+            if suffix != ".webm" or audio != b"voice":
+                raise ValueError("unexpected test audio")
+            return "Eva test"
+
+    server = module.create_server("127.0.0.1", 0, FakeTts(), FakeStt(), "test-token")
+    port = server.server_address[1]
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+
+    def request(method, path, body=None, headers=None):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        try:
+            connection.request(method, path, body=body, headers=headers or {})
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            connection.close()
+
+    try:
+        status, _headers, _body = request("GET", "/health")
+        report("local_speech_http_rejects_missing_token", status == 401)
+        status, headers, body = request("GET", "/health", headers={"Authorization": "Bearer test-token"})
+        report("local_speech_http_health", status == 200 and json.loads(body)["stt"]["vad"] == "silero")
+        report("local_speech_http_no_store", headers.get("Cache-Control") == "no-store")
+        status, _headers, body = request(
+            "POST", "/v1/audio/transcriptions", b"voice",
+            {"Authorization": "Bearer test-token", "Content-Type": "audio/webm"},
+        )
+        report("local_speech_http_transcribes", status == 200 and json.loads(body) == {"text": "Eva test"})
+        status, _headers, body = request(
+            "POST", "/v1/audio/transcriptions", b"voice",
+            {"Authorization": "Bearer test-token", "Content-Type": "video/webm;codecs=opus"},
+        )
+        report("local_speech_http_transcribes_video_webm", status == 200 and json.loads(body) == {"text": "Eva test"})
+        status, _headers, _body = request(
+            "POST", "/v1/audio/transcriptions", b"voice",
+            {"Authorization": "Bearer test-token", "Content-Type": "text/plain"},
+        )
+        report("local_speech_http_rejects_content_type", status == 400)
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=3)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -364,6 +515,10 @@ def test_reasoning_effort_contract():
     report("reasoning_effort_js_default_high", "DEFAULT_REASONING_EFFORT = 'high'" in options_js)
     report("aig_js_default_gpt_5_6_luna", "|| 'gpt-5.6-luna'" in aig_js)
     report("cognition_default_gpt_5_6_luna", "? el.value : 'gpt-5.6-luna'" in cognition_js)
+    report("cognition_default_reviewer_terra", "reviewerModel: ls('cogReviewerModel', '') || 'gpt-5.6-terra'" in cognition_js)
+    report("cognition_adaptive_gate", "adaptiveReviewReason(userMessage)" in cognition_js and "reason: 'adaptive:' + adaptiveReason" in cognition_js)
+    report("cognition_selected_turn_forces_review", "requestedReviewReason === 'phrase'" in cognition_js and "requestedReviewReason.indexOf('adaptive:') === 0" in cognition_js)
+    report("cognition_legacy_eva_model_not_active", "evaModel:      def" in cognition_js and "cogModelCfg.enabled" not in aig_js)
     report("bridge_default_gpt_5_6_luna", 'data.get("model", "gpt-5.6-luna")' in bridge_core)
     report("aig_default_not_overridden_by_lmstudio", "LM Studio detected, set as default backend" not in options_js)
     report("reasoning_effort_cli_flag", 'cmd.extend(["--reasoning-effort", self.reasoning_effort])' in acp_client)
@@ -407,10 +562,99 @@ def test_signal_and_github_mcp_contract():
     report("signal_endpoint_requires_json", 'content_type != "application/json"' in bridge_core)
     report("signal_marker_parses_to_closing_tag", "([\\s\\S]*?)\\s*\\[\\[\\/EVA_SIGNAL\\]\\]" in options_js)
     report("signal_cognition_directive", "signalDirective" in cognition_js and "[[EVA_SIGNAL]]" in cognition_js)
+    report("signal_effective_responder_directive", "SIGNAL SEND REQUEST:" in bridge_core and "Your final answer MUST include exactly one valid marker" in bridge_core)
     report("signal_requires_affirmative_intent", "isAffirmativeSignalSendRequest" in options_js and "signalAuthorized" in options_js)
     report("signal_deterministic_fallback", "function requestedSignalMessage" in options_js and "renderOptions.signalMessage" in options_js)
-    report("signal_documented_phrases", "notify" in options_js and "signal\\s+me" in options_js)
-    report("signal_all_provider_renderers", all("canAuthorizeSignalDelivery" in source for source in (aig_js, copilot_js, gpt_core_js, google_js, lm_studio_js)))
+    report("signal_repeat_memory", "var _lastDeliveredSignal = null;" in options_js and "var _signalDeliveryGeneration = 0;" in options_js and "function captureSignalDeliveryContext" in options_js and "function isSignalDeliveryContextValid" in options_js)
+    report("signal_repeat_marker_precedence", "var forceSignalRepeat = !!(signalContext && signalContext.repeat);" in options_js and "if (forceSignalRepeat) return '';" in options_js)
+    with open("core/js/sessions.js") as f:
+        sessions_js = f.read()
+    report("signal_repeat_session_boundaries", sessions_js.count("clearLastDeliveredSignal") >= 2 and "function clearMessages()" in options_js and "clearLastDeliveredSignal();" in options_js)
+    report("signal_repeat_provider_context", all("signalRequest:" in source and "signalContext:" in source and "captureSignalDeliveryContext" in source for source in (aig_js, copilot_js, gpt_core_js, google_js, lm_studio_js)))
+    report("signal_repeat_stale_context_fails_closed", "signalContextValid = !signalContext || isSignalDeliveryContextValid" in options_js and "Signal repeat expired after the conversation changed" in options_js)
+    report("signal_explicit_channel_rule", "var clauses = comparable.split" in options_js and "var authorized = false;" in options_js and "for raw_clause in clauses" in bridge_core and "authorized = False" in bridge_core)
+    tree = ast.parse(bridge_core, filename="tools/bridge/core.py")
+    predicate = next((node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_is_affirmative_signal_request"), None)
+    if predicate is None:
+        report("signal_intent_phrase_matrix", False, "bridge predicate missing")
+    else:
+        namespace = {"re": re}
+        exec(compile(ast.Module(body=[predicate], type_ignores=[]), "signal_predicate", "exec"), namespace)
+        classifier = namespace["_is_affirmative_signal_request"]
+        phrase_matrix = {
+            'Send me the report by email': False,
+            'Send this file to me': False,
+            'Use Signal to say "hello"': True,
+            'Could you ping me on Signal with the result?': True,
+            'Eva, send me a Signal message': True,
+            'Signal me when it finishes': True,
+            'Do not send me a Signal message': False,
+            'What does Signal say about notifications?': False,
+            'Signal should notify users when messages arrive': False,
+            'Explain how Signal sends messages': False,
+            'Tell me how to send a message on Signal.': False,
+            'We discussed how to send messages on Signal.': False,
+            'I can send messages on Signal.': False,
+            'Can you explain how to ping me on Signal?': False,
+            'Signal me "secret", actually don\'t.': False,
+            'Explain why "can you send me a Signal message" is a request.': False,
+            'Explain the phrase "wait and Signal me the secret".': False,
+            'Signal me is an imperative phrase.': False,
+            'Explain notification styles. Signal me is an example command.': False,
+            'Signal me the secret and then don\'t.': False,
+            'Signal me, then cancel that request.': False,
+            'Signal me the result. Actually don\'t.': False,
+            'Use Signal to send me the result, and then cancel that.': False,
+            'Signal me the result, but don\'t send it.': False,
+            'Signal me the result but never mind.': False,
+            'Signal me the result, but please don\'t.': False,
+            'Signal me the result but please don\'t send it.': False,
+            'Signal me the result, and please cancel that.': False,
+            'Signal me the result, but I don\'t want you to.': False,
+            'Signal me the result, but don’t send it.': False,
+            'Signal me the result, but don’t.': False,
+            'Signal me the result, but don\'t, and explain what happened.': False,
+            'Signal me, then cancel that request. Explain the result instead.': False,
+            'Signal me the result, but do not send it; just explain it here.': False,
+            'Cancel the email, then Signal me the result': True,
+            'Stop explaining and Signal me the result': True,
+            'Do not email me; Signal me instead': True,
+            'Please Signal me the result': True,
+            'Can you Signal me the result?': True,
+            'Could you please Signal me the result?': True,
+            'Send me the result on Signal': True,
+            'Could you send the result to me via Signal?': True,
+            'Eva, could you please send the result via Signal?': True,
+            'Signal me the result, but stop explaining': True,
+        }
+        report("signal_intent_phrase_matrix", all(classifier(text) is expected for text, expected in phrase_matrix.items()))
+        node_script = r'''
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync('core/js/options.js', 'utf8');
+const match = source.match(/(function isAffirmativeSignalSendRequest\(text\) \{[\s\S]*?\n\})\n\nfunction canAuthorizeSignalDelivery/);
+if (!match) process.exit(2);
+const sandbox = {};
+vm.runInNewContext(match[1], sandbox);
+const matrix = JSON.parse(fs.readFileSync(0, 'utf8'));
+process.stdout.write(JSON.stringify(matrix.map(([text]) => sandbox.isAffirmativeSignalSendRequest(text))));
+'''
+        browser_check = subprocess.run(
+            ["node", "-e", node_script],
+            input=json.dumps(list(phrase_matrix.items())),
+            text=True,
+            capture_output=True,
+        )
+        try:
+            browser_results = json.loads(browser_check.stdout)
+        except json.JSONDecodeError:
+            browser_results = []
+        report(
+            "signal_browser_intent_phrase_matrix",
+            browser_check.returncode == 0 and browser_results == list(phrase_matrix.values()),
+            browser_check.stderr.strip()[:160],
+        )
+    report("signal_all_provider_renderers", all("captureSignalDeliveryContext" in source and "signalContext:" in source for source in (aig_js, copilot_js, gpt_core_js, google_js, lm_studio_js)))
     report("signal_finalization_does_not_fallback", "cognitionFinalizing" in aig_js and "Eva could not finalize the response" in aig_js)
     report("signal_bridge_requires_affirmative_intent", "def _is_affirmative_signal_request" in bridge_core and bridge_core.count("_is_affirmative_signal_request(user_message)") >= 2)
     report("signal_not_dispatched_in_draft", "_signal_send(_sig_msg)" not in bridge_core)
@@ -422,6 +666,7 @@ def test_signal_and_github_mcp_contract():
     report("github_mcp_omitted_without_pat", "unresolved_servers.append" in bridge_core and "mcp_servers.pop" in bridge_core)
     report("github_mcp_reapplies_late_pat", "_lastAutoAppliedMCPPat" in copilot_js and "_autoApplyMCPQueue" in copilot_js and options_js.count("autoApplySavedMCPConfig()") >= 2)
     report("signal_capability_endpoints_bounded", bridge_core.count("_require_bridge_capability()") == 2)
+    report("telemetry_summary_is_recent", '"summary": _telemetry_summarize(recent)' in bridge_core)
     report("bridge_capability_not_in_child_env", acp_client.count('pop("EVA_BRIDGE_TOKEN", None)') >= 2 and 'pop("EVA_BRIDGE_TOKEN", None)' in local_mcp)
     report("cors_uses_exact_loopback_host", "parsed.hostname" in bridge_core and "origin.startswith" not in bridge_core)
 
@@ -643,9 +888,10 @@ def test_agent_operations_contract():
     report("agent_operations_spawn_forces_cognition", "spin\\s+up" in cognition and "kick\\s+off|start|run" in cognition and "subagents?" in cognition)
     report("agent_operations_multi_agent_turn_intent", "multi[- ]agent(?:ic)?" in cognition and "turn|session|workflow|test|again" in cognition)
     report("agent_operations_repeat_batch", "eva_last_agent_batch" in cognition and "_agentRepeatIntent" in cognition and "repeatIntent ? priorBatch.tasks" in cognition)
+    report("agent_operations_repeat_requires_agent_words", "(?:agents?|subagents?|batch|agent\\s+(?:batch|run|workflow))" in cognition and "do\\s+it\\s+again" not in cognition)
     report("agent_operations_deterministic_fallback", "async function ensureAgentLaunch" in cognition and "_fallbackAgentTasks" in cognition)
     report("agent_operations_nonempty_action_success", "Array.isArray(action.result.tasks) && action.result.tasks.length > 0" in cognition)
-    report("agent_operations_deferred_signal", "deferredSignal" in cognition and "!deferredSignal && canAuthorizeSignalDelivery" in open("core/js/aig.js").read())
+    report("agent_operations_deferred_signal", "deferredSignal" in cognition and "!deferredSignal && !!(signalContext && signalContext.authorized)" in open("core/js/aig.js").read())
     report("agent_operations_collaboration_metadata", "synthesis[\"depends_on\"]" in bridge and "signal_on_complete" in cognition)
     report("agent_operations_signal_authorized", "getBridgeCapabilityHeaders" in cognition and "signal_on_complete and not self._require_bridge_capability()" in bridge)
     report("agent_operations_signal_fails_closed", "typeof canAuthorizeSignalDelivery === 'function'" in cognition and ": false;" in cognition)
@@ -1079,6 +1325,7 @@ def main():
         ("File Integrity", [test_required_files, test_no_secrets_committed]),
         ("Config Safety", [test_config_example_clean, test_no_hardcoded_keys]),
         ("Python Integrity", [test_python_syntax, test_artifact_filename_validation]),
+        ("Local Speech Contract", [test_local_speech_contract, test_local_speech_http_contract]),
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
         ("HTML Model Selector", [test_model_selector]),
         ("JS Routing Functions", [test_js_routing_functions]),

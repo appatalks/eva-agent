@@ -56,13 +56,38 @@ ACP_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "m
 
 def _is_affirmative_signal_request(text):
     value = str(text or "").lower()
-    if re.search(r"\b(?:do not|don't|dont|never|cancel|stop)\b[^.!?]{0,80}\b(?:send|text|message|signal|notify)\b", value):
+    comparable = re.sub(r'"[^"]*"|“[^”]*”', " ", value)
+    if not re.search(r"\bsignal\b", comparable):
         return False
-    return bool(
-        re.search(r"\b(?:send|text|message|notify)\b[^.!?]{0,60}\b(?:me|my|signal|phone|number|recipient)\b", value)
-        or re.search(r"\bsignal\s+me\b", value)
-        or re.search(r"\bsignal\b[^.!?]{0,40}\b(?:send|text|message|notify)\b", value)
-    )
+    clauses = re.split(r"(?:[.;]|\bthen\b|\band\b)", comparable)
+    authorized = False
+    for raw_clause in clauses:
+        clause = raw_clause.strip()
+        if not clause:
+            continue
+        address = r"(?:(?:hey\s+)?eva[,.]?\s*)?"
+        revocation = re.compile(
+            r"(?:^|,|\bbut\b)\s*(?:actually\s+|please\s+)?"
+            r"(?:don't|dont|don’t|i\s+(?:don't|dont|don’t)\s+want\s+you\s+to|never mind|cancel(?:\s+(?:that|this|the)?\s*(?:request|message|signal)?)?|"
+            r"(?:do not|don't|dont|don’t)\s+(?:send|text|message|notify|signal)|"
+            r"stop\s+(?:that|this|the)?\s*(?:send|message|signal))"
+        )
+        if re.search(r"^signal\s+me\s+(?:is|was|means)\b", clause):
+            continue
+        request_prefix = r"(?:(?:please\s+)?(?:can you|could you|would you|will you)\s+(?:please\s+)?|please\s+|i want you to\s+|i need you to\s+)?"
+        command = r"(?:send|text|message|notify|ping)"
+        prefix = r"^\s*" + address + request_prefix
+        command_matches = bool(
+            re.search(prefix + r"signal\s+me\b", clause)
+            or re.search(prefix + r"use\s+signal\s+(?:to\s+)?(?:send|text|message|notify|ping|say|tell)\b", clause)
+            or re.search(prefix + command + r"\b[\s\S]{0,100}\b(?:on|via|through|with)\s+signal\b", clause)
+            or re.search(prefix + command + r"\s+(?:me\s+)?(?:a\s+)?signal\b", clause)
+        )
+        if (authorized or command_matches) and revocation.search(clause):
+            return False
+        if command_matches:
+            authorized = True
+    return authorized
 
 
 def _strip_marker_blocks(text, marker):
@@ -2449,7 +2474,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "enabled": _TELEMETRY_ENABLED,
             "count": len(recent),
             "total_in_memory": len(_st.telemetry_ring),
-            "summary": _telemetry_summarize(events),
+            "summary": _telemetry_summarize(recent),
             "events": recent,
         })
 

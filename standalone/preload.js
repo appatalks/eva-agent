@@ -18,9 +18,11 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   minimize: function() { ipcRenderer.send('win-minimize'); },
   maximize: function() { ipcRenderer.send('win-maximize'); },
   close: function() { ipcRenderer.send('win-close'); },
-  localVoicesStatus: function(baseUrl) { return ipcRenderer.invoke('local-voices-status', baseUrl); },
-  localVoicesStart: function(baseUrl, pythonPath, voiceId) { return ipcRenderer.invoke('local-voices-start', baseUrl, pythonPath, voiceId); },
-  localVoicesStop: function(baseUrl) { return ipcRenderer.invoke('local-voices-stop', baseUrl); },
+  localVoicesStatus: function() { return ipcRenderer.invoke('local-voices-status'); },
+  localVoicesStart: function(pythonPath, voiceId) { return ipcRenderer.invoke('local-voices-start', pythonPath, voiceId); },
+  localVoicesStop: function() { return ipcRenderer.invoke('local-voices-stop'); },
   localVoicesList: function() { return ipcRenderer.invoke('local-voices-list'); },
-  localVoicesImport: function() { return ipcRenderer.invoke('local-voices-import'); }
+  localVoicesImport: function() { return ipcRenderer.invoke('local-voices-import'); },
+  localSpeechSynthesize: function(text) { return ipcRenderer.invoke('local-speech-synthesize', text); },
+  localSpeechTranscribe: function(audio, contentType) { return ipcRenderer.invoke('local-speech-transcribe', audio, contentType); }
 }));

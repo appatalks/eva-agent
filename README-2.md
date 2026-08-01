@@ -38,7 +38,7 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 - Cron scheduler for recurring tasks (briefings, checks, reminders)
 - Alert system (SEC filings, weather, space weather, keyword watch) with Signal delivery
 - Mode persistence across restarts (bridge-side mode.txt, frontend localStorage)
-- TTS: OpenAI (default), browser, Local Voices, and Amazon Polly (standard/neural/generative)
+- TTS: OpenAI (default), browser, user-authorized Local Voices, and Amazon Polly (standard/neural/generative)
 - LCARS and Eva themes (7 Eva variants)
 - Standalone Electron AppImage with bundled bridge
 - Full behavioral eval harness with mock and live modes
@@ -234,7 +234,8 @@ tools/
   browser_agent.py         Autonomous web browsing (Playwright + CDP)
   desktop_agent.py         Autonomous desktop control (pyautogui + vision)
   camera_sense.py          Webcam presence detection (OpenCV face + motion)
-  local_voices_bridge.py   Local Voices engine bridge (bundled default recording)
+  local_voices_bridge.py   Token-protected local Chatterbox TTS + Faster Whisper STT bridge
+  voice_clone_module/      Eva-maintained Chatterbox adapter; no reference audio
   eva_seed.kql             Sanitized database seed (public-safe)
   acp_bridge.service       Systemd unit file
   acp_setup.sh             One-command installer
@@ -269,6 +270,7 @@ standalone/
 | pyautogui | Desktop agent | `pip install pyautogui` |
 | opencv-python | Camera presence | `pip install opencv-python` |
 | signal-cli | Signal messaging | Native binary from [GitHub releases](https://github.com/AsamK/signal-cli/releases), or `install.sh` auto-installs |
+| Local speech runtime (optional) | Chatterbox TTS + Faster Whisper STT | `./install.sh --voice-deps` |
 
 ### API Keys
 | Key | Used by | Get it from |
@@ -732,29 +734,35 @@ server-side and adds persistent intelligence (memory injection, emotion tracking
 post-response reflection). The **browser cognitive layer** runs in the page and
 adds an optional multi-agent draft/review loop.
 
-### Browser Cognitive Layer (`core/js/cognition.js`)
+### Adaptive Review (`core/js/cognition.js`)
 
-Opt-in via Settings > Models > **Enable Cognitive Layer**. When active, every Eva
-(AIG) turn is routed through two role-specific agents:
+Settings > Models > **Adaptive Review** keeps routine conversation on Eva's
+selected AIG backend. It invokes an independent reviewer only for action/tool
+turns, current-data or factual work, complex decisions, or an explicit cognition
+request. The default reviewer is GPT-5.6 Terra; one review/revise pass is used.
 
 ```
 User turn
-  -> Eva (plans, drafts answer, may emit action blocks)
-     -> Reviewer (verdict: APPROVE | REQUEST_CHANGES)
-        -> Eva (revises against feedback) ... up to cogMaxCycles
+  -> Eva selected AIG backend (fast direct path for routine chat)
+  -> adaptive gate for consequential turns
+    -> independent reviewer (VERDICT: APPROVE | REQUEST_CHANGES)
+      -> Eva revises against material feedback
   -> executeActions(): runs any [[EVA_ACTION]] blocks
   -> renderEvaResponse(): renders the final approved draft
 ```
 
-Each agent calls `/v1/aig/chat` independently with its own model and editable
-system prompt, so users can mix providers (Claude for planning, GPT for drafting,
-a smaller model for review).
+The selected AIG backend remains responsible for planning and final responses.
+ACP owns MCP-backed retrieval and ACP tool calls; browser capabilities and
+renderer-dispatched actions follow their local routes. The reviewer is
+deliberately tool-free. This prevents a model label from becoming a cosmetic
+tool router: routing follows available capabilities and the request type, while
+review adds independent scrutiny when the risk warrants it.
 
 **Activation:**
 
 | Trigger | Behavior |
 |---|---|
-| Settings toggle on | Layer runs for every AIG turn |
+| Adaptive Review on | Reviews consequential turns; routine chat stays direct |
 | Phrase in user message | Force-enabled for that single turn |
 | Neither | Single-shot AIG path; system note prevents fabricated phase narration |
 
@@ -763,11 +771,11 @@ Trigger phrases: `trigger the chain`, `use cognition`, `use the cognitive layer`
 
 **Configuration (localStorage):**
 - `cogEnabled`: "0" or "1"
-- `cogEvaModel`: model name for draft agent
-- `cogReviewerModel`: model name for review agent
-- `cogMaxCycles`: review iterations (0-3, default 1)
-- `cogEvaPrompt` / `cogReviewerPrompt`: editable system prompts
-- `cogShowTrace`: show draft/review trace in output
+- `cogReviewerModel`: model name for the independent reviewer (default `gpt-5.6-terra`)
+- `cogReviewerPrompt`: optional reviewer prompt override
+
+Legacy `cogEvaModel`, `cogMaxCycles`, and trace values remain readable for
+existing profiles but are no longer exposed in Settings.
 
 ### Capability Registry
 
@@ -1182,7 +1190,7 @@ Eight tabs in a modal overlay:
 | Tab | Contents |
 |---|---|
 | **General** | Theme, TTS engine/voice, auto-speak, camera presence, vision provider, data retrieval mode (cloud/local) with status |
-| **Models** | Model selector (grouped by provider), temperature, max tokens, reasoning effort, AIG backend selector, ACP model selector, cognitive layer controls (toggle, per-agent model selectors, max cycles, editable prompts, debug trace) |
+| **Models** | Model selector (grouped by provider), temperature, max tokens, reasoning effort, AIG backend selector, ACP model selector, adaptive review toggle and reviewer model |
 | **Auth** | API key inputs with show/hide toggles, ACP bridge URL, Signal sender/recipient numbers. Standalone encrypts provider keys with Electron safeStorage so they survive AppImage rebuilds. |
 | **Prompts** | Personality presets (Default/Concise/Advanced/Terminal/Custom), editable system prompt textarea |
 | **Goals** | Goals list with create/edit/delete |

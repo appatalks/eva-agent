@@ -55,4 +55,4 @@ not.
 - The renderer receives the bridge URL through `window.evaStandalone.acpBaseUrl`.
 - Standalone exposes Eva (AIG) only. All routing, cognition, AIG backend selection, and Settings sub-controls remain available.
 - The Kusto database field is intentionally blank on first run. Configure it in Settings > MCP.
-- TTS engines: standalone defaults to OpenAI TTS when an OpenAI API key is set in Settings > Auth, otherwise falls back to browser SpeechSynthesis. Polly engines (Standard, Neural, Generative) require AWS credentials and are not configured through the standalone Auth tab. Bark is hidden in standalone mode.
+- TTS engines: standalone defaults to OpenAI TTS when an OpenAI API key is set in Settings > Auth, otherwise falls back to browser SpeechSynthesis. Optional Local Voices uses an authorized imported PCM WAV profile plus `./install.sh --voice-deps`; its token-protected loopback service also provides local Faster Whisper transcription with Silero VAD for Voice View. Polly engines (Standard, Neural, Generative) require AWS credentials and are not configured through the standalone Auth tab.

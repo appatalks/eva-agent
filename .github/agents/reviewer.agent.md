@@ -1,7 +1,7 @@
 ---
 description: "Comprehensive reviewer for Eva AI Assistant. Use when reviewing Eva's work, approving changes, designing tests, running checks, or rubber-ducking implementation plans."
 tools: [read, search, execute, web, agent, todo]
-model: "GPT-5.6 Sol (copilot)"
+model: "GPT-5.6 Terra (copilot)"
 modelInstructions: high
 agents: [eva]
 user-invocable: true

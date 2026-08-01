@@ -47,6 +47,9 @@ function lmsSend() {
         txtMsg.focus();
         return;
     }
+    const signalContext = (typeof captureSignalDeliveryContext === 'function')
+      ? captureSignalDeliveryContext(sQuestion)
+      : null;
 
     // --- Cognition: Fetch memory context + live data from bridge ---
     var _bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
@@ -152,8 +155,10 @@ function lmsSend() {
                         // Render via unified renderer
                         const out = document.getElementById("txtOutput");
                         await renderEvaResponse(candidate, out, {
-                          signalAuthorized: !_lmsDeferredSignal && (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion),
-                          signalMessage: _lmsDeferredSignal ? '' : ((typeof requestedSignalMessage === 'function') ? requestedSignalMessage(sQuestion) : '')
+                          signalAuthorized: !_lmsDeferredSignal && !!(signalContext && signalContext.authorized),
+                          signalMessage: _lmsDeferredSignal ? '' : (signalContext ? signalContext.message : ''),
+                          signalRequest: sQuestion,
+                          signalContext: signalContext
                         });
 
                         // Keep the global last-response synced so Auto Speak

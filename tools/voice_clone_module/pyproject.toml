@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eva-voice-clone-module"
+version = "0.1.0"
+description = "Reusable Chatterbox voice cloning for Eva Local Voices"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]

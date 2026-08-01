@@ -14,6 +14,9 @@ async function trboSend() {
     txtMsg.focus();
     return;
   }
+  var signalContext = (typeof captureSignalDeliveryContext === 'function')
+    ? captureSignalDeliveryContext(sQuestion)
+    : null;
 
   var oHttp = new XMLHttpRequest();
   oHttp.open("POST", "https://api.openai.com/v1/chat/completions");
@@ -96,8 +99,10 @@ async function trboSend() {
             var s = oJson.choices[0].message;
 	    // Empty Response Handling / Render via unified renderer
 	    await renderEvaResponse(s.content, txtOutput, {
-              signalAuthorized: (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(sQuestion),
-              signalMessage: (typeof requestedSignalMessage === 'function') ? requestedSignalMessage(sQuestion) : ''
+              signalAuthorized: !!(signalContext && signalContext.authorized),
+              signalMessage: signalContext ? signalContext.message : '',
+              signalRequest: sQuestion,
+              signalContext: signalContext
             });
        	
             // Send to Local Storage - possibly way to intigrate into memory

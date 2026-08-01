@@ -437,10 +437,10 @@
 
         <label for="localVoicesProfile">Voice model:</label>
         <select id="localVoicesProfile">
-          <option value="eva">Eva (bundled)</option>
+          <option value="bundled:eva-english">Eva English</option>
         </select>
         <div class="auth-note" style="margin:4px 0 0;font-size:11px;opacity:0.75">
-          Choose a bundled voice or add a 5-10 second PCM WAV reference recording.
+          Eva English is the default. Choose another bundled profile or add an authorized 5-10 second PCM WAV recording.
         </div>
         <div class="background-actions" id="localVoicesProfileControls" style="margin:6px 0 2px">
           <button type="button" class="auth-toggle" id="localVoicesImportButton">Add voice</button>
@@ -624,35 +624,21 @@
             </select>
           </div>
 
-          <!-- Cognitive Layer (Eva / Reviewer) -->
+          <!-- Adaptive review -->
           <div class="model-opt cog-section">
             <label class="cog-toggle-row">
               <input type="checkbox" id="cogEnabled" onchange="cogPersist()">
-              <span><strong>Enable Cognitive Layer</strong> &mdash; route Eva (AIG) through internal eva / reviewer agents.</span>
+              <span><strong>Adaptive Review</strong> &mdash; use an independent reviewer for consequential turns.</span>
             </label>
-            <p class="cog-help">When on, every Eva (AIG) turn is drafted by Eva, then critiqued by a reviewer (bounded loop). The user only sees the final approved draft. Each agent uses its own model.</p>
+            <p class="cog-help">Routine chat stays fast on Eva's selected backend. Eva invokes review for actions, current-data and factual work, complex decisions, or an explicit request for cognition.</p>
 
             <div class="cog-grid">
               <div>
-                <label for="cogEvaModel">Eva model:</label>
-                <select id="cogEvaModel" onchange="cogPersist()"></select>
-              </div>
-              <div>
-                <label for="cogReviewerModel">Reviewer model:</label>
+                <label for="cogReviewerModel">Review model:</label>
                 <select id="cogReviewerModel" onchange="cogPersist()"></select>
               </div>
-              <div>
-                <label for="cogMaxCycles">Max review cycles:</label>
-                <input type="number" id="cogMaxCycles" min="0" max="3" step="1" value="1" onchange="cogPersist()">
-              </div>
             </div>
-
-            <label class="cog-toggle-row">
-              <input type="checkbox" id="cogShowTrace" onchange="cogPersist()">
-              <span>Show pipeline trace below each response (debug)</span>
-            </label>
-
-            <p class="prompt-hint" style="margin-top:10px;font-size:11px">Edit Eva and Reviewer system prompts in the <strong>Prompts</strong> tab.</p>
+            <p class="prompt-hint" style="margin-top:10px;font-size:11px">Eva uses the selected AIG backend. Edit the review prompt in the <strong>Prompts</strong> tab when needed.</p>
           </div>
         </div>
       </div>
@@ -724,7 +710,7 @@
         <!-- Cognitive Layer Status Indicator -->
         <div id="cogStatusIndicator" class="cog-status-indicator" style="display:none">
           <span class="cog-status-icon">✓</span>
-          <span class="cog-status-text"><strong>Cognitive Layer Enabled</strong> &mdash; Eva and Reviewer agents are active.</span>
+          <span class="cog-status-text"><strong>Adaptive Review Enabled</strong> &mdash; Eva uses the reviewer when the turn warrants it.</span>
         </div>
 
         <label for="selPers">Personality Preset:</label>
@@ -743,20 +729,11 @@
         <!-- Cognitive Layer Agent Prompts -->
         <div id="cogPromptsSection" class="cog-prompts-section" style="display:none">
           <hr style="border:none;border-top:1px solid rgba(255,255,255,.12);margin:20px 0 16px">
-          <h3 style="margin:0 0 12px;font-size:14px;font-weight:600">Cognitive Layer Agent Prompts</h3>
-          <p class="prompt-hint" style="margin-top:0;margin-bottom:12px">Configure system prompts for Eva and Reviewer agents when Cognitive Layer is enabled.</p>
-          
+          <h3 style="margin:0 0 12px;font-size:14px;font-weight:600">Adaptive Review Prompt</h3>
+          <p class="prompt-hint" style="margin-top:0;margin-bottom:12px">Configure the independent reviewer used for consequential turns.</p>
           <div class="cog-prompt-row">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:3px">
-              <label for="cogEvaPrompt" style="margin:0">Eva Agent Prompt:</label>
-              <button type="button" class="auth-toggle" style="padding:3px 8px;font-size:11px" onclick="cogResetPrompt('eva')" aria-label="Reset Eva prompt to default">Reset</button>
-            </div>
-            <textarea id="cogEvaPrompt" rows="5" onchange="cogPersist()" placeholder="(default Eva prompt)"></textarea>
-          </div>
-          
-          <div class="cog-prompt-row">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:3px">
-              <label for="cogReviewerPrompt" style="margin:0">Reviewer Agent Prompt:</label>
+              <label for="cogReviewerPrompt" style="margin:0">Review Prompt:</label>
               <button type="button" class="auth-toggle" style="padding:3px 8px;font-size:11px" onclick="cogResetPrompt('reviewer')" aria-label="Reset reviewer prompt to default">Reset</button>
             </div>
             <textarea id="cogReviewerPrompt" rows="5" onchange="cogPersist()" placeholder="(default reviewer prompt)"></textarea>

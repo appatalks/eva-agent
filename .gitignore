@@ -14,7 +14,17 @@ audio/
 *.wav
 *.mp3
 !core/audio/
-!core/audio/eva-voice.wav
+!core/audio/eva_voice_profile-english.wav
+!core/audio/eva_voice_profile-korean.wav
+!core/audio/appatalks_voice_profile-english.wav
+*.safetensors
+*.pth
+*.pt
+.venv/
+models/
+build/
+dist/
+*.egg-info/
 
 # OS files
 .DS_Store
