@@ -204,9 +204,15 @@ def test_local_speech_contract():
     report("local_speech_electron_proxy", 'local-speech-transcribe' in standalone and 'localSpeechTranscribe' in options)
     report("local_speech_response_aware_proxy", "res.headers['content-type']" in standalone)
     report("local_speech_proxy_error_detail", "JSON.parse(response.toString('utf8')).error" in standalone and "Buffer.from(body)" in standalone)
-    report("local_speech_stt_preserves_tts_profile", "!requestedProfile || localSpeechProfileId === requestedProfile" in standalone)
-    report("local_speech_profile_reuse", "Electron owns profile-aware reuse/restart" in options)
+    report("local_speech_per_request_profile", "resolveLocalVoiceForSynthesis" in standalone and "reference: profile.reference" in standalone)
+    report("local_speech_profile_reuse", "Keeping one" in standalone and "English and Korean alternate" in standalone)
     report("local_speech_default_eva_english", "bundled:eva-english" in standalone and "bundled:eva-english" in options)
+    report("local_speech_multilingual_profiles", "language: 'en'" in standalone and "language: 'ko'" in standalone)
+    report("local_speech_language_ui", 'id="localVoicesLanguage"' in open("index.html").read() and "local_voices_language" in options)
+    report("local_speech_mixed_language_chunks", "function _ttsLocalLanguageSpans" in options and "function _ttsSplitLocalChunks" in options and "language: chunk.language" in options)
+    report("local_speech_playback_settings_snapshot", "var languageMode = getLocalVoicesLanguage();" in options and "var profileId = getLocalVoicesProfile();" in options and "languageMode: languageMode" in options and "profileId: profileId" in options)
+    report("local_speech_explicit_custom_profile", "profile.language === null" in standalone and "!automatic && profile" in standalone)
+    report("local_speech_stt_language_header", "X-Eva-Speech-Language" in standalone and "normalize_speech_language" in bridge)
     report("local_speech_no_removed_profile_fallback", "localVoicesProfileEl.value || 'eva'" not in options and "localStorage.setItem('local_voices_profile', 'bundled:eva-english')" in options)
     report("local_speech_no_renderer_url", "fetch(bridgeUrl + '/v1/speech'" not in options)
     report("local_speech_incremental_tts", 'function _ttsSpeakLocalChunked' in options and 'synth(chunkIndex + 1)' in options)
@@ -216,7 +222,9 @@ def test_local_speech_contract():
     report("local_speech_400_recovers", "if (/HTTP 400/.test(message))" in options and "if (_vv.phase === 'speaking')" in options and "if (_vv.phase === 'awake')" in options and "_vvEnterAwake(_vv.convoMode ? _vv.convoTimeoutMs : 10000)" in options)
     report("local_speech_energy_barge", "_vv.whisperProvider !== 'local'" in options and "_vv._bargeEnergyFrames >= 4" in options)
     report("local_speech_installer", '--voice-deps' in installer and 'install_local_speech' in installer)
+    report("local_speech_installer_refreshes_existing_runtime", 'queue "Refresh Local Voices and local transcription" "install_local_speech"' in installer)
     report("local_speech_installer_uses_adapter", 'voice_package="$SCRIPT_DIR/tools/voice_clone_module"' in installer and '--reinstall "$voice_package"' in installer)
+    report("local_speech_installer_pins_multilingual_v3", "chatterbox.git@5de7a54aa4e5e2baadb0182dde554908b48b85c2" in installer)
     report("local_speech_installer_migrates_legacy", "version('eva-voice-clone-module') == '0.1.0'" in installer)
     report("local_speech_installer_checks_overrides", 'pip check --python "$voice_python"' in installer and 'local_speech_overrides_are_expected' in installer)
     report("local_speech_vendored_adapter", os.path.isfile("tools/voice_clone_module/pyproject.toml") and os.path.isfile("tools/voice_clone_module/src/voice_clone_module/service.py"))
@@ -269,20 +277,23 @@ def test_local_speech_http_contract():
         report("local_speech_http_requires_token", False)
 
     class FakeTts:
-        def health(self):
-            return {"ok": True, "backend_available": True}
+        calls = []
 
-        def synthesize(self, text):
+        def health(self):
+            return {"ok": True, "backend_available": True, "supported_languages": ["en", "ko"]}
+
+        def synthesize(self, text, language="auto", reference_audio=""):
+            self.calls.append((text, language, reference_audio))
             return b"RIFFfake-wav"
 
     class FakeStt:
         def health(self):
             return {"available": True, "loaded": False, "vad": "silero"}
 
-        def transcribe(self, audio, suffix):
+        def transcribe(self, audio, suffix, language="auto"):
             if suffix != ".webm" or audio != b"voice":
                 raise ValueError("unexpected test audio")
-            return "Eva test"
+            return {"text": "Eva test", "language": "ko" if language == "ko" else "en"}
 
     server = module.create_server("127.0.0.1", 0, FakeTts(), FakeStt(), "test-token")
     port = server.server_address[1]
@@ -302,18 +313,29 @@ def test_local_speech_http_contract():
         status, _headers, _body = request("GET", "/health")
         report("local_speech_http_rejects_missing_token", status == 401)
         status, headers, body = request("GET", "/health", headers={"Authorization": "Bearer test-token"})
-        report("local_speech_http_health", status == 200 and json.loads(body)["stt"]["vad"] == "silero")
+        health = json.loads(body)
+        report("local_speech_http_health", status == 200 and health["stt"]["vad"] == "silero" and health["tts"]["supported_languages"] == ["en", "ko"])
         report("local_speech_http_no_store", headers.get("Cache-Control") == "no-store")
+        status, headers, body = request(
+            "POST", "/v1/speech", json.dumps({"input": "안녕하세요", "language": "ko", "reference": "/tmp/eva-korean.wav"}),
+            {"Authorization": "Bearer test-token", "Content-Type": "application/json"},
+        )
+        report("local_speech_http_synthesis_language", status == 200 and headers.get("Content-Type") == "audio/wav" and FakeTts.calls == [("안녕하세요", "ko", "/tmp/eva-korean.wav")])
+        status, _headers, _body = request(
+            "POST", "/v1/speech", json.dumps({"input": "hello", "language": "ja"}),
+            {"Authorization": "Bearer test-token", "Content-Type": "application/json"},
+        )
+        report("local_speech_http_rejects_unsupported_tts_language", status == 400)
         status, _headers, body = request(
             "POST", "/v1/audio/transcriptions", b"voice",
-            {"Authorization": "Bearer test-token", "Content-Type": "audio/webm"},
+            {"Authorization": "Bearer test-token", "Content-Type": "audio/webm", "X-Eva-Speech-Language": "ko"},
         )
-        report("local_speech_http_transcribes", status == 200 and json.loads(body) == {"text": "Eva test"})
+        report("local_speech_http_transcribes", status == 200 and json.loads(body) == {"text": "Eva test", "language": "ko"})
         status, _headers, body = request(
             "POST", "/v1/audio/transcriptions", b"voice",
             {"Authorization": "Bearer test-token", "Content-Type": "video/webm;codecs=opus"},
         )
-        report("local_speech_http_transcribes_video_webm", status == 200 and json.loads(body) == {"text": "Eva test"})
+        report("local_speech_http_transcribes_video_webm", status == 200 and json.loads(body) == {"text": "Eva test", "language": "en"})
         status, _headers, _body = request(
             "POST", "/v1/audio/transcriptions", b"voice",
             {"Authorization": "Bearer test-token", "Content-Type": "text/plain"},
@@ -822,7 +844,7 @@ def test_pages_comparison_contract():
         docs_html = f.read()
     report("pages_github_copilot_app_column", "GitHub Copilot app</a>" in docs_html and "https://github.com/features/ai/github-app?locale=en-US" in docs_html)
     report("pages_github_copilot_app_capabilities", all(value in docs_html for value in ("Custom skills", "Automations", "Session history", "Multi-model + BYOK")))
-    report("pages_eva_differentiators", all(value in docs_html for value in ("LM Studio + direct MCP", "Local SQLite or Kusto/ADX", "Local SQLite or ADX", "Separate sessions + settings", "Signal delivery", "Imported voice profiles", "PDF/MD/CSV/JSON/TXT + Assets", "Subsystem doctor", "Configurable Eva + Reviewer")))
+    report("pages_eva_differentiators", all(value in docs_html for value in ("LM Studio + direct MCP", "Local SQLite or Kusto/ADX", "Local SQLite or ADX", "Separate sessions + settings", "Signal delivery", "Automatic English/Korean + imported profiles", "PDF/MD/CSV/JSON/TXT + Assets", "Subsystem doctor", "Configurable Eva + Reviewer")))
     report("pages_comparison_scrolls", ".compare-wrap {\n      border-radius: var(--radius); overflow-x: auto;" in docs_html and "min-width: 960px" in docs_html)
 
 

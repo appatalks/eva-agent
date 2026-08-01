@@ -137,9 +137,9 @@ function getLocalVoicesDirectory() {
 
 const DEFAULT_LOCAL_VOICE_PROFILE = 'bundled:eva-english';
 const BUNDLED_LOCAL_VOICE_PROFILES = [
-  { id: 'bundled:eva-english', label: 'Eva English', file: 'eva_voice_profile-english.wav' },
-  { id: 'bundled:eva-korean', label: 'Eva Korean', file: 'eva_voice_profile-korean.wav' },
-  { id: 'bundled:appatalks-english', label: 'AppaTalks English', file: 'appatalks_voice_profile-english.wav' }
+  { id: 'bundled:eva-english', label: 'Eva English', language: 'en', file: 'eva_voice_profile-english.wav' },
+  { id: 'bundled:eva-korean', label: 'Eva Korean', language: 'ko', file: 'eva_voice_profile-korean.wav' },
+  { id: 'bundled:appatalks-english', label: 'AppaTalks English', language: 'en', file: 'appatalks_voice_profile-english.wav' }
 ];
 
 function resolveBundledLocalVoiceReference(voiceId) {
@@ -158,7 +158,7 @@ function getLocalVoiceProfiles() {
   const profiles = BUNDLED_LOCAL_VOICE_PROFILES.filter(function(profile) {
     try { return !!resolveBundledLocalVoiceReference(profile.id); } catch (_) { return false; }
   }).map(function(profile) {
-    return { id: profile.id, label: profile.label, bundled: true };
+    return { id: profile.id, label: profile.label, language: profile.language, bundled: true };
   });
   const directory = getLocalVoicesDirectory();
   try {
@@ -170,6 +170,7 @@ function getLocalVoiceProfiles() {
       profiles.push({
         id: 'custom:' + name,
         label: path.basename(name, path.extname(name)),
+        language: null,
         bundled: false
       });
     });
@@ -242,6 +243,40 @@ function resolveLocalVoiceReference(voiceId) {
     throw new Error('The selected Local Voices profile is unavailable.');
   }
   return reference;
+}
+
+function normalizeLocalSpeechLanguage(value, allowAuto) {
+  const language = String(value || 'auto').trim().toLowerCase();
+  if (allowAuto && language === 'auto') return language;
+  if (language !== 'en' && language !== 'ko') {
+    throw new Error('Unsupported local speech language. Choose Automatic, English, or Korean.');
+  }
+  return language;
+}
+
+function detectLocalSpeechLanguage(text) {
+  const value = String(text || '');
+  const korean = (value.match(/[\uac00-\ud7a3]/g) || []).length;
+  const latin = (value.match(/[A-Za-z]/g) || []).length;
+  return korean > latin ? 'ko' : 'en';
+}
+
+function resolveLocalVoiceForSynthesis(voiceId, language, automatic) {
+  const selected = getLocalVoiceProfiles().find(function(profile) { return profile.id === voiceId; });
+  let profile = selected;
+  if (!profile || profile.language !== language) {
+    // Imported recordings are intentionally unclassified. An explicit language
+    // selection is the user's declaration that this reference is compatible.
+    if (!automatic && profile && profile.language === null) {
+      return { reference: resolveLocalVoiceReference(profile.id), language: language, profileId: profile.id };
+    }
+    if (!automatic) {
+      throw new Error('The selected voice profile does not match the requested speech language. Choose a matching profile or Automatic.');
+    }
+    profile = BUNDLED_LOCAL_VOICE_PROFILES.find(function(item) { return item.language === language; });
+  }
+  if (!profile) throw new Error('No local voice profile is available for the requested speech language.');
+  return { reference: resolveLocalVoiceReference(profile.id), language: profile.language, profileId: profile.id };
 }
 
 function getFreeLocalPort() {
@@ -493,17 +528,17 @@ function isChildRunning(child) {
   return !!child && child.exitCode === null && child.signalCode === null;
 }
 
-function requestLocalSpeech(pathname, method, body, contentType, timeoutMs) {
+function requestLocalSpeech(pathname, method, body, contentType, timeoutMs, extraHeaders) {
   if (!localSpeechBaseUrl || !localSpeechToken) return Promise.reject(new Error('Local speech service is not running.'));
   const requestBody = body == null ? null : (Buffer.isBuffer(body) || typeof body === 'string' ? body : Buffer.from(body));
   return new Promise(function(resolve, reject) {
     const request = http.request(localSpeechBaseUrl + pathname, {
       method: method,
-      headers: {
+      headers: Object.assign({
         'Authorization': 'Bearer ' + localSpeechToken,
         'Content-Type': contentType || 'application/json',
         'Content-Length': requestBody ? Buffer.byteLength(requestBody) : 0
-      },
+      }, extraHeaders || {}),
       timeout: timeoutMs || 180000
     }, function(res) {
       const chunks = [];
@@ -567,11 +602,9 @@ async function getLocalVoicesStatus() {
 
 async function startLocalVoices(pythonPath, voiceId) {
   const status = await getLocalVoicesStatus();
-  const requestedProfile = String(voiceId || '');
-  // STT-only callers do not impose a TTS profile. Preserve an active imported
-  // profile so opening Voice View cannot unload Local Voices mid-conversation.
-  if (status.running && (!requestedProfile || localSpeechProfileId === requestedProfile)) return status;
-  if (status.running) await stopLocalVoices();
+  // Profiles are resolved for each authenticated synthesis request. Keeping one
+  // bridge process alive lets English and Korean alternate without losing STT.
+  if (status.running) return status;
   if (isChildRunning(localVoicesProcess)) {
     throw new Error('Local speech service is already starting.');
   }
@@ -583,7 +616,6 @@ async function startLocalVoices(pythonPath, voiceId) {
   localSpeechBaseUrl = '';
   localSpeechToken = crypto.randomBytes(32).toString('hex');
   const args = [bridgePath, '--host', '127.0.0.1', '--port', '0'];
-  if (voiceId) args.push('--reference', resolveLocalVoiceReference(voiceId));
   const child = spawn(pythonCmd, args, {
     cwd: appRoot,
     env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1', EVA_LOCAL_SPEECH_TOKEN: localSpeechToken }),
@@ -591,7 +623,7 @@ async function startLocalVoices(pythonPath, voiceId) {
     stdio: ['ignore', 'pipe', 'pipe']
   });
   localVoicesProcess = child;
-  localSpeechProfileId = requestedProfile;
+  localSpeechProfileId = '';
   let addressReady;
   const addressPromise = new Promise(function(resolve, reject) { addressReady = { resolve: resolve, reject: reject }; });
 
@@ -669,18 +701,34 @@ ipcMain.handle('local-voices-import', function(event) {
   if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
   return importLocalVoiceProfile();
 });
-ipcMain.handle('local-speech-synthesize', async function(event, text) {
+ipcMain.handle('local-speech-synthesize', async function(event, request) {
   if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
-  const value = String(text || '');
+  const payload = typeof request === 'string' ? { input: request } : (request || {});
+  const value = String(payload.input || '');
   if (!value.trim() || value.length > 12000) throw new Error('Invalid speech input.');
-  const audio = await requestLocalSpeech('/v1/speech', 'POST', JSON.stringify({ input: value }), 'application/json');
+  const requestedLanguage = normalizeLocalSpeechLanguage(payload.language, true);
+  const language = requestedLanguage === 'auto' ? detectLocalSpeechLanguage(value) : requestedLanguage;
+  const languageMode = normalizeLocalSpeechLanguage(payload.languageMode, true);
+  const profile = resolveLocalVoiceForSynthesis(
+    String(payload.profileId || DEFAULT_LOCAL_VOICE_PROFILE),
+    language,
+    languageMode === 'auto'
+  );
+  const audio = await requestLocalSpeech('/v1/speech', 'POST', JSON.stringify({
+    input: value,
+    language: language,
+    reference: profile.reference
+  }), 'application/json');
   return new Uint8Array(audio);
 });
-ipcMain.handle('local-speech-transcribe', async function(event, audio, contentType) {
+ipcMain.handle('local-speech-transcribe', async function(event, audio, contentType, language) {
   if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
   const bytes = Buffer.from(audio || []);
   if (!bytes.length || bytes.length > 16 * 1024 * 1024) throw new Error('Invalid audio input.');
-  return requestLocalSpeech('/v1/audio/transcriptions', 'POST', bytes, String(contentType || ''));
+  const requestedLanguage = normalizeLocalSpeechLanguage(language, true);
+  return requestLocalSpeech('/v1/audio/transcriptions', 'POST', bytes, String(contentType || ''), 180000, {
+    'X-Eva-Speech-Language': requestedLanguage
+  });
 });
 ipcMain.handle('auth-load', function(event) {
   return isTrustedEvaRenderer(event) ? loadEncryptedAuth() : {};

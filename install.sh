@@ -153,7 +153,7 @@ install_local_speech() {
   [ -f "$voice_package/pyproject.toml" ] || { err "Eva's vendored voice adapter is missing"; return 1; }
   "$uv_bin" venv --allow-existing --python 3.11 "$voice_home/.venv" &&
     "$uv_bin" pip install --python "$voice_python" torch==2.10.0 torchaudio==2.10.0 faster-whisper==1.2.1 soundfile==0.14.0 librosa==0.11.0 transformers==5.5.0 accelerate==1.14.0 bitsandbytes==0.49.2 numpy==1.26.4 s3tokenizer==0.3.0 diffusers==0.38.0 resemble-perth@git+https://github.com/resemble-ai/Perth.git@ce86c49d029f42272c1902eccb675556b9ed2330 conformer==0.3.2 safetensors==0.8.0 spacy-pkuseg==1.0.1 pykakasi==2.3.0 pyloudnorm==0.2.0 omegaconf==2.3.1 gradio==6.16.0 &&
-    "$uv_bin" pip install --python "$voice_python" --no-deps chatterbox-tts==0.1.7 &&
+    "$uv_bin" pip install --python "$voice_python" --no-deps --reinstall "chatterbox-tts @ git+https://github.com/resemble-ai/chatterbox.git@5de7a54aa4e5e2baadb0182dde554908b48b85c2" &&
     "$uv_bin" pip install --python "$voice_python" --no-deps --reinstall "$voice_package" || return 1
 
   if check_output="$("$uv_bin" pip check --python "$voice_python" 2>&1)"; then
@@ -307,6 +307,7 @@ register_dependencies() {
     local voice_python="${HOME}/.local/share/eva/local-voices/.venv/bin/python"
     if [ -x "$voice_python" ] && "$voice_python" -c "import faster_whisper; from importlib.metadata import version; assert version('eva-voice-clone-module') == '0.1.0'" >/dev/null 2>&1; then
       ok "Local Voices and local transcription (managed environment present)"; PRESENT_COUNT=$((PRESENT_COUNT+1))
+      queue "Refresh Local Voices and local transcription" "install_local_speech"
     elif have_cmd uv; then
       ok "uv (managed local speech environment)"; PRESENT_COUNT=$((PRESENT_COUNT+1))
       queue "Local Voices and local transcription" "install_local_speech"

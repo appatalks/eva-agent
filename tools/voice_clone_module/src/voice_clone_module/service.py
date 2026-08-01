@@ -8,6 +8,25 @@ import torch
 
 
 MAX_SYNTHESIS_CHARS = 600
+SUPPORTED_LANGUAGES = {"en", "ko"}
+
+
+def detect_language(text: str) -> str:
+    """Choose Korean when Hangul is the dominant letter script; otherwise English."""
+    value = str(text or "")
+    korean = sum("\uac00" <= character <= "\ud7a3" for character in value)
+    latin = sum(character.isascii() and character.isalpha() for character in value)
+    return "ko" if korean > latin else "en"
+
+
+def resolve_language(language: str | None, text: str) -> str:
+    """Validate a requested language or resolve Eva's deterministic auto mode."""
+    value = str(language or "auto").strip().lower()
+    if value == "auto":
+        return detect_language(text)
+    if value not in SUPPORTED_LANGUAGES:
+        raise ValueError("unsupported language; supported values are auto, en, and ko")
+    return value
 
 
 def split_synthesis_text(text: str, max_chars: int = MAX_SYNTHESIS_CHARS) -> list[str]:
@@ -100,8 +119,9 @@ class VoiceCloner:
         self.device = choose_device(device)
         self.exaggeration = exaggeration
         self.cfg_weight = cfg_weight
-        self._model = model
-        self._prepared_reference: Path | None = None
+        self._english_model = model
+        self._multilingual_model: Any | None = None
+        self._prepared_references: dict[str, tuple[Path, float]] = {}
 
     @classmethod
     def from_environment(cls) -> "VoiceCloner":
@@ -115,18 +135,39 @@ class VoiceCloner:
 
     @property
     def model(self) -> Any:
-        """Load and cache Chatterbox on first use."""
-        if self._model is None:
+        """Load and cache the existing English Chatterbox model."""
+        if self._english_model is None:
             from chatterbox.tts import ChatterboxTTS
 
-            self._model = ChatterboxTTS.from_pretrained(device=self.device)
-        return self._model
+            self._english_model = ChatterboxTTS.from_pretrained(device=self.device)
+        return self._english_model
 
-    def _prepare_reference(self, reference: Path) -> None:
-        if self._prepared_reference == reference:
+    @property
+    def loaded_languages(self) -> list[str]:
+        languages = []
+        if self._english_model is not None:
+            languages.append("en")
+        if self._multilingual_model is not None:
+            languages.append("ko")
+        return languages
+
+    def _model_for(self, language: str) -> Any:
+        if language == "en":
+            return self.model
+        if self._multilingual_model is None:
+            from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+            self._multilingual_model = ChatterboxMultilingualTTS.from_pretrained(
+                device=self.device,
+                t3_model=os.getenv("VOICE_CLONE_MULTILINGUAL_MODEL", "v3"),
+            )
+        return self._multilingual_model
+
+    def _prepare_reference(self, reference: Path, language: str, model: Any, exaggeration: float) -> None:
+        if self._prepared_references.get(language) == (reference, exaggeration):
             return
-        self.model.prepare_conditionals(str(reference), exaggeration=self.exaggeration)
-        self._prepared_reference = reference
+        model.prepare_conditionals(str(reference), exaggeration=exaggeration)
+        self._prepared_references[language] = (reference, exaggeration)
 
     def synthesize(
         self,
@@ -135,6 +176,7 @@ class VoiceCloner:
         reference_audio: str | Path | None = None,
         exaggeration: float | None = None,
         cfg_weight: float | None = None,
+        language: str | None = "auto",
     ) -> torch.Tensor:
         """Generate a watermarked waveform using the configured authorized voice."""
         if not text.strip():
@@ -146,20 +188,30 @@ class VoiceCloner:
         if not reference.is_file():
             raise FileNotFoundError(f"reference audio does not exist: {reference}")
 
+        resolved_language = resolve_language(language, text)
         exaggeration_value = self.exaggeration if exaggeration is None else exaggeration
         cfg_weight_value = self.cfg_weight if cfg_weight is None else cfg_weight
-        if exaggeration_value != self.exaggeration:
-            self._prepared_reference = None
-            self.exaggeration = exaggeration_value
-        self._prepare_reference(reference)
-        waveforms = [
-            self.model.generate(
-                chunk,
-                exaggeration=exaggeration_value,
-                cfg_weight=cfg_weight_value,
-            )
-            for chunk in split_synthesis_text(text)
-        ]
+        model = self._model_for(resolved_language)
+        self._prepare_reference(reference, resolved_language, model, exaggeration_value)
+        if resolved_language == "en":
+            waveforms = [
+                model.generate(
+                    chunk,
+                    exaggeration=exaggeration_value,
+                    cfg_weight=cfg_weight_value,
+                )
+                for chunk in split_synthesis_text(text)
+            ]
+        else:
+            waveforms = [
+                model.generate(
+                    chunk,
+                    language_id=resolved_language,
+                    exaggeration=exaggeration_value,
+                    cfg_weight=cfg_weight_value,
+                )
+                for chunk in split_synthesis_text(text)
+            ]
         return torch.cat(waveforms, dim=-1)
 
     def save(
@@ -170,6 +222,7 @@ class VoiceCloner:
         reference_audio: str | Path | None = None,
         exaggeration: float | None = None,
         cfg_weight: float | None = None,
+        language: str | None = "auto",
     ) -> Path:
         """Synthesize speech and save it as a WAV file."""
         import soundfile
@@ -181,10 +234,11 @@ class VoiceCloner:
             reference_audio=reference_audio,
             exaggeration=exaggeration,
             cfg_weight=cfg_weight,
+            language=language,
         )
         soundfile.write(
             str(output),
             waveform.detach().cpu().squeeze().numpy(),
-            self.model.sr,
+            self._model_for(resolve_language(language, text)).sr,
         )
         return output

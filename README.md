@@ -64,13 +64,13 @@ For Signal notifications, install [signal-cli](https://github.com/AsamK/signal-c
 
 ### Local Voices
 
-Eva's **Local Voices** engine defaults to **Eva English**. Eva Korean and AppaTalks English are also bundled profile choices. In Eva Standalone, use **Add voice** to import an authorized uncompressed PCM WAV recording between 5 and 10 seconds; imported profiles remain available beside the bundled choices.
+Eva's **Local Voices** engine defaults to **Eva English** and supports **Automatic**, English, and Korean speech. Automatic uses deterministic Hangul detection, preserves mixed English/Korean playback order, and selects Eva's bundled Korean profile for Korean spans while keeping English as the default profile. Eva Korean and AppaTalks English are also available as explicit profile choices. Imported recordings are intentionally unclassified, so Automatic uses a bundled language-matched profile rather than guessing an imported recording's language.
 
 ```bash
 ./install.sh --voice-deps
 ```
 
-This creates a separate Python 3.11 environment at `~/.local/share/eva/local-voices/.venv` using Chatterbox TTS, Eva's maintained `tools/voice_clone_module` adapter, and Faster Whisper with Silero VAD. The first local TTS or STT use downloads the selected model; later cached use is local. Chatterbox and Perth remain external dependencies: Chatterbox is MIT-licensed, and Perth is pinned to its source commit by the installer. Eva intentionally uses six newer tested dependency versions than Chatterbox 0.1.7 declares; the installer verifies that no other dependency conflict is present. The standalone app creates a token-protected loopback speech service automatically and does not upload microphone audio to a cloud transcription service.
+This creates a separate Python 3.11 environment at `~/.local/share/eva/local-voices/.venv` using Chatterbox English plus Multilingual V3, Eva's maintained `tools/voice_clone_module` adapter, and Faster Whisper with Silero VAD. Korean and Automatic local transcription use a multilingual Whisper model; the first use downloads its selected model and Chatterbox Multilingual V3 (about 3.2 GB), while later cached use remains local. Chatterbox and Perth remain external dependencies: Chatterbox is MIT-licensed, and Perth is pinned to its source commit by the installer. Eva intentionally uses six newer tested dependency versions than Chatterbox 0.1.7 declares; the installer verifies that no other dependency conflict is present. The standalone app creates a token-protected loopback speech service automatically and does not upload microphone audio to a cloud transcription service.
 
 Import skills from text, URLs, GitHub repos, or files in Settings. Eva normalizes them into her format, stores in ADX, and applies matching skills automatically.
 

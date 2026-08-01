@@ -439,8 +439,14 @@
         <select id="localVoicesProfile">
           <option value="bundled:eva-english">Eva English</option>
         </select>
+        <label for="localVoicesLanguage">Local speech language:</label>
+        <select id="localVoicesLanguage">
+          <option value="auto">Automatic</option>
+          <option value="en">English</option>
+          <option value="ko">Korean</option>
+        </select>
         <div class="auth-note" style="margin:4px 0 0;font-size:11px;opacity:0.75">
-          Eva English is the default. Choose another bundled profile or add an authorized 5-10 second PCM WAV recording.
+          Automatic switches between the bundled English and Korean Eva profiles. Imported recordings are unclassified until language metadata is supported.
         </div>
         <div class="background-actions" id="localVoicesProfileControls" style="margin:6px 0 2px">
           <button type="button" class="auth-toggle" id="localVoicesImportButton">Add voice</button>

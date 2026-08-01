@@ -20,6 +20,16 @@ MAX_INPUT_CHARS = 12_000
 MAX_AUDIO_BYTES = 16 * 1024 * 1024
 MAX_TRANSCRIPTION_SECONDS = 120
 ALLOWED_AUDIO_TYPES = {"audio/webm", "video/webm", "audio/ogg", "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp4"}
+SUPPORTED_SPEECH_LANGUAGES = {"en", "ko"}
+
+
+def normalize_speech_language(value: object, *, allow_auto: bool = True) -> str:
+    language = str(value or "auto").strip().lower()
+    if allow_auto and language == "auto":
+        return language
+    if language not in SUPPORTED_SPEECH_LANGUAGES:
+        raise ValueError("unsupported language; supported values are auto, en, and ko")
+    return language
 
 
 class LocalVoicesService:
@@ -54,18 +64,22 @@ class LocalVoicesService:
             "engine_loaded": self._engine is not None,
             "backend_available": backend is not None,
             "backend_error": self._load_error,
+            "supported_languages": sorted(SUPPORTED_SPEECH_LANGUAGES),
+            "language_detection": "hangul-script",
+            "loaded_models": self._engine.loaded_languages if self._engine is not None else [],
             "reference_source": "environment" if os.getenv("LOCAL_VOICES_REFERENCE", "").strip() else "none",
             "reference_readable": reference.is_file(),
             "load_error": self._load_error,
         }
 
-    def synthesize(self, text: str) -> bytes:
+    def synthesize(self, text: str, language: str = "auto", reference_audio: str = "") -> bytes:
         if not text.strip():
             raise ValueError("input must not be empty")
         if len(text) > MAX_INPUT_CHARS:
             raise ValueError(f"input must be {MAX_INPUT_CHARS} characters or fewer")
 
-        reference = self.reference_audio()
+        language = normalize_speech_language(language)
+        reference = Path(reference_audio).expanduser() if reference_audio else self.reference_audio()
         if not reference.is_file():
             raise RuntimeError("the configured local voice reference is unavailable")
 
@@ -76,7 +90,6 @@ class LocalVoicesService:
                     raise RuntimeError(self._load_error or "Local Voices backend is unavailable")
                 try:
                     self._engine = engine_class(
-                        reference_audio=reference,
                         device=os.getenv("LOCAL_VOICES_DEVICE", "auto"),
                         exaggeration=float(os.getenv("LOCAL_VOICES_EXAGGERATION", "0.5")),
                         cfg_weight=float(os.getenv("LOCAL_VOICES_CFG_WEIGHT", "0.5")),
@@ -89,7 +102,7 @@ class LocalVoicesService:
             with NamedTemporaryFile(suffix=".wav", delete=False) as output:
                 output_path = Path(output.name)
             try:
-                self._engine.save(text, output_path)
+                self._engine.save(text, output_path, reference_audio=reference, language=language)
                 return output_path.read_bytes()
             finally:
                 output_path.unlink(missing_ok=True)
@@ -99,53 +112,59 @@ class LocalTranscriptionService:
     """Lazily retain a local Faster Whisper model with Silero VAD filtering."""
 
     def __init__(self) -> None:
-        self._model: Any | None = None
-        self._load_error: str | None = None
+        self._models: dict[str, Any] = {}
+        self._load_errors: dict[str, str] = {}
         self._lock = Lock()
 
-    def _settings(self) -> tuple[str, str, str]:
-        model = os.getenv("LOCAL_STT_MODEL", "small.en").strip() or "small.en"
+    def _settings(self, language: str) -> tuple[str, str, str]:
+        model_name = "LOCAL_STT_MODEL" if language == "en" else "LOCAL_STT_MULTILINGUAL_MODEL"
+        default_model = "small.en" if language == "en" else "small"
+        model = os.getenv(model_name, default_model).strip() or default_model
         device = os.getenv("LOCAL_STT_DEVICE", "cpu").strip() or "cpu"
         compute_type = os.getenv("LOCAL_STT_COMPUTE_TYPE", "int8").strip() or "int8"
         return model, device, compute_type
 
-    def model(self) -> Any | None:
-        if self._model is not None or self._load_error is not None:
-            return self._model
+    def model(self, language: str) -> Any | None:
+        model_name, device, compute_type = self._settings(language)
+        if model_name in self._models or model_name in self._load_errors:
+            return self._models.get(model_name)
         try:
             from faster_whisper import WhisperModel
 
-            model, device, compute_type = self._settings()
-            self._model = WhisperModel(model, device=device, compute_type=compute_type)
+            self._models[model_name] = WhisperModel(model_name, device=device, compute_type=compute_type)
         except Exception as error:
-            self._load_error = str(error)
-        return self._model
+            self._load_errors[model_name] = str(error)
+        return self._models.get(model_name)
 
     def health(self) -> dict[str, object]:
-        model, device, compute_type = self._settings()
+        english_model, device, compute_type = self._settings("en")
+        multilingual_model, _, _ = self._settings("ko")
         available = importlib.util.find_spec("faster_whisper") is not None
-        if not available and self._load_error is None:
-            self._load_error = "Local transcription backend is unavailable in this Python environment."
         return {
             "available": available,
-            "loaded": self._model is not None,
-            "model": model,
+            "loaded": bool(self._models),
+            "loaded_models": sorted(self._models),
+            "english_model": english_model,
+            "multilingual_model": multilingual_model,
             "device": device,
             "compute_type": compute_type,
-            "error": self._load_error,
+            "errors": self._load_errors,
             "vad": "silero",
         }
 
-    def transcribe(self, audio: bytes, suffix: str) -> str:
+    def transcribe(self, audio: bytes, suffix: str, language: str = "auto") -> dict[str, str]:
         if not audio:
             raise ValueError("audio input must not be empty")
         if len(audio) > MAX_AUDIO_BYTES:
             raise ValueError("audio input exceeds the maximum size")
+        language = normalize_speech_language(language)
+        model_language = "en" if language == "en" else "ko"
 
         with self._lock:
-            model = self.model()
+            model = self.model(model_language)
             if model is None:
-                raise RuntimeError(self._load_error or "Local transcription backend is unavailable")
+                model_name, _, _ = self._settings(model_language)
+                raise RuntimeError(self._load_errors.get(model_name, "Local transcription backend is unavailable"))
             with NamedTemporaryFile(suffix=suffix, delete=False) as source:
                 source.write(audio)
                 source_path = Path(source.name)
@@ -155,10 +174,14 @@ class LocalTranscriptionService:
                     vad_filter=True,
                     vad_parameters={"min_silence_duration_ms": 500},
                     condition_on_previous_text=False,
+                    language=None if language == "auto" else language,
                 )
                 if getattr(info, "duration", 0) > MAX_TRANSCRIPTION_SECONDS:
                     raise ValueError("audio input exceeds the maximum duration")
-                return " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
+                return {
+                    "text": " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip(),
+                    "language": str(getattr(info, "language", language) or language),
+                }
             finally:
                 source_path.unlink(missing_ok=True)
 
@@ -225,7 +248,11 @@ class LocalVoicesRequestHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(content_length))
             if not isinstance(payload, dict) or not isinstance(payload.get("input"), str):
                 raise ValueError("request body must contain a string input")
-            audio = self.service.synthesize(payload["input"])
+            language = normalize_speech_language(payload.get("language", "auto"))
+            reference = payload.get("reference", "")
+            if not isinstance(reference, str) or len(reference) > 4096:
+                raise ValueError("request reference is invalid")
+            audio = self.service.synthesize(payload["input"], language=language, reference_audio=reference)
         except ValueError as error:
             self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
@@ -256,7 +283,8 @@ class LocalVoicesRequestHandler(BaseHTTPRequestHandler):
                 "audio/mpeg": ".mp3",
                 "audio/mp4": ".m4a",
             }[content_type]
-            text = self.transcriber.transcribe(self.rfile.read(content_length), suffix)
+            language = normalize_speech_language(self.headers.get("X-Eva-Speech-Language", "auto"))
+            transcript = self.transcriber.transcribe(self.rfile.read(content_length), suffix, language=language)
         except ValueError as error:
             self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
@@ -266,7 +294,7 @@ class LocalVoicesRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "audio transcription failed"})
             return
-        self._write_json(HTTPStatus.OK, {"text": text})
+        self._write_json(HTTPStatus.OK, transcript)
 
     def log_message(self, format: str, *args: object) -> None:
         return

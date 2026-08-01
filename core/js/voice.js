@@ -20,7 +20,10 @@ function startVoiceListener() {
   }
 
   _voiceRecognition = new SpeechRec();
-  _voiceRecognition.lang = 'en-US';
+  var voiceLanguage = typeof getLocalVoicesLanguage === 'function' ? getLocalVoicesLanguage() : 'auto';
+  // Browser SpeechRecognition has no portable automatic language mode. Local
+  // Whisper handles automatic detection; browser recognition defaults to English.
+  _voiceRecognition.lang = voiceLanguage === 'ko' ? 'ko-KR' : 'en-US';
   _voiceRecognition.continuous = true;
   _voiceRecognition.interimResults = false;
 

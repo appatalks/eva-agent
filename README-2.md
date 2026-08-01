@@ -270,7 +270,7 @@ standalone/
 | pyautogui | Desktop agent | `pip install pyautogui` |
 | opencv-python | Camera presence | `pip install opencv-python` |
 | signal-cli | Signal messaging | Native binary from [GitHub releases](https://github.com/AsamK/signal-cli/releases), or `install.sh` auto-installs |
-| Local speech runtime (optional) | Chatterbox TTS + Faster Whisper STT | `./install.sh --voice-deps` |
+| Local speech runtime (optional) | Chatterbox English + Multilingual V3 TTS, Faster Whisper STT | `./install.sh --voice-deps` |
 
 ### API Keys
 | Key | Used by | Get it from |

@@ -141,6 +141,12 @@ function saveAuthKeys() {
   } else if (localVoicesProfileEl) {
     localStorage.setItem('local_voices_profile', 'bundled:eva-english');
   }
+  var localVoicesLanguageEl = document.getElementById('localVoicesLanguage');
+  if (localVoicesLanguageEl && localVoicesLanguageEl.value) {
+    localStorage.setItem('local_voices_language', localVoicesLanguageEl.value);
+  } else if (localVoicesLanguageEl) {
+    localStorage.setItem('local_voices_language', 'auto');
+  }
   // Save Signal sender/recipient to localStorage and push to bridge
   var sigSender = document.getElementById('authSignalSender');
   var sigRecip = document.getElementById('authSignalRecipient');
@@ -254,6 +260,11 @@ function getLmStudioModel() {
 
 function getLocalVoicesProfile() {
   return (localStorage.getItem('local_voices_profile') || 'bundled:eva-english').trim();
+}
+
+function getLocalVoicesLanguage() {
+  var language = (localStorage.getItem('local_voices_language') || 'auto').trim().toLowerCase();
+  return language === 'en' || language === 'ko' ? language : 'auto';
 }
 
 function getSafeBridgeBaseUrl() {
@@ -370,8 +381,10 @@ var _localVoicesBridgeState = null;
 
 async function refreshLocalVoicesProfiles() {
   var select = document.getElementById('localVoicesProfile');
+  var languageSelect = document.getElementById('localVoicesLanguage');
   var controls = document.getElementById('localVoicesProfileControls');
   if (!select) return;
+  if (languageSelect) languageSelect.value = getLocalVoicesLanguage();
   if (!window.evaStandalone || !window.evaStandalone.isStandalone) {
     if (controls) controls.style.display = 'none';
     return;
@@ -2666,7 +2679,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  ['aigLmStudioBaseUrl', 'aigLmStudioModel', 'localVoicesProfile', 'authSignalSender', 'authSignalRecipient'].forEach(function(id) {
+  ['aigLmStudioBaseUrl', 'aigLmStudioModel', 'localVoicesProfile', 'localVoicesLanguage', 'authSignalSender', 'authSignalRecipient'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el) {
       el.addEventListener('change', saveAuthKeys);
@@ -3934,7 +3947,7 @@ function _vvWhisperTranscribe(blob) {
   var request;
   if (_vv.whisperProvider === 'local') {
     request = blob.arrayBuffer().then(function(audio) {
-      return window.evaStandalone.localSpeechTranscribe(audio, blob.type || 'audio/webm;codecs=opus');
+      return window.evaStandalone.localSpeechTranscribe(audio, blob.type || 'audio/webm;codecs=opus', getLocalVoicesLanguage());
     });
   } else {
     var apiKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : null;
@@ -3946,7 +3959,8 @@ function _vvWhisperTranscribe(blob) {
     var formData = new FormData();
     formData.append('file', blob, 'audio.webm');
     formData.append('model', 'whisper-1');
-    formData.append('language', 'en');
+    var whisperLanguage = getLocalVoicesLanguage();
+    if (whisperLanguage !== 'auto') formData.append('language', whisperLanguage);
     var controller = new AbortController();
     var fetchTimeout = setTimeout(function() { controller.abort(); }, 20000);
     request = fetch('https://api.openai.com/v1/audio/transcriptions', {
@@ -5575,6 +5589,40 @@ function _ttsSplitChunks(text) {
   return chunks;
 }
 
+function _ttsLocalLanguageSpans(text, languageMode) {
+  var clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return [];
+  if (languageMode !== 'auto') return [{ text: clean, language: languageMode }];
+  var hangul = (clean.match(/[\uac00-\ud7a3]/g) || []).length;
+  var latin = (clean.match(/[A-Za-z]/g) || []).length;
+  var currentLanguage = hangul > latin ? 'ko' : 'en';
+  var current = '';
+  var spans = [];
+  for (var index = 0; index < clean.length; index++) {
+    var character = clean.charAt(index);
+    var nextLanguage = /[\uac00-\ud7a3]/.test(character) ? 'ko' : (/[A-Za-z]/.test(character) ? 'en' : currentLanguage);
+    if (nextLanguage !== currentLanguage && current.trim()) {
+      spans.push({ text: current, language: currentLanguage });
+      current = '';
+    }
+    currentLanguage = nextLanguage;
+    current += character;
+  }
+  if (current.trim()) spans.push({ text: current, language: currentLanguage });
+  return spans;
+}
+
+function _ttsSplitLocalChunks(text, languageMode) {
+  languageMode = languageMode || getLocalVoicesLanguage();
+  var chunks = [];
+  _ttsLocalLanguageSpans(text, languageMode).forEach(function(span) {
+    _ttsSplitChunks(span.text).forEach(function(chunk) {
+      chunks.push({ text: chunk, language: span.language });
+    });
+  });
+  return chunks;
+}
+
 // Speak `text` via OpenAI TTS one sentence chunk at a time. Chunk N+1 is
 // synthesized while chunk N is still playing, so audio starts after the first
 // sentence rather than after the whole reply has been synthesized.
@@ -5674,7 +5722,9 @@ function _ttsSpeakLocalChunked(text) {
   }
   var audio = document.getElementById('audioPlayback');
   var source = document.getElementById('audioSource');
-  var chunks = _ttsSplitChunks(text);
+  var languageMode = getLocalVoicesLanguage();
+  var profileId = getLocalVoicesProfile();
+  var chunks = _ttsSplitLocalChunks(text, languageMode);
   if (!audio || !chunks.length) return;
 
   if (_ttsChunk._onEnded && _ttsChunk._audio) {
@@ -5694,7 +5744,13 @@ function _ttsSpeakLocalChunked(text) {
     if (chunkIndex < 0 || chunkIndex >= chunks.length) return Promise.resolve();
     if (urls[chunkIndex]) return Promise.resolve(urls[chunkIndex]);
     if (requests[chunkIndex]) return requests[chunkIndex];
-    requests[chunkIndex] = window.evaStandalone.localSpeechSynthesize(chunks[chunkIndex]).then(function(bytes) {
+    var chunk = chunks[chunkIndex];
+    requests[chunkIndex] = window.evaStandalone.localSpeechSynthesize({
+      input: chunk.text,
+      language: chunk.language,
+      languageMode: languageMode,
+      profileId: profileId
+    }).then(function(bytes) {
       if (runId !== _ttsChunk.runId || _ttsChunk.cancelled) return '';
       var blob = new Blob([bytes], { type: 'audio/wav' });
       urls[chunkIndex] = URL.createObjectURL(blob);

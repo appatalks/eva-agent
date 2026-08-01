@@ -23,6 +23,6 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   localVoicesStop: function() { return ipcRenderer.invoke('local-voices-stop'); },
   localVoicesList: function() { return ipcRenderer.invoke('local-voices-list'); },
   localVoicesImport: function() { return ipcRenderer.invoke('local-voices-import'); },
-  localSpeechSynthesize: function(text) { return ipcRenderer.invoke('local-speech-synthesize', text); },
-  localSpeechTranscribe: function(audio, contentType) { return ipcRenderer.invoke('local-speech-transcribe', audio, contentType); }
+  localSpeechSynthesize: function(request) { return ipcRenderer.invoke('local-speech-synthesize', request); },
+  localSpeechTranscribe: function(audio, contentType, language) { return ipcRenderer.invoke('local-speech-transcribe', audio, contentType, language); }
 }));
