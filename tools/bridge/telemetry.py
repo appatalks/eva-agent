@@ -189,6 +189,11 @@ def _telemetry_summarize(events):
     pool = {"hit": 0, "warm": 0, "evict": 0, "miss": 0}
     prompt_ms = []
     turn_ms = []
+    memory_ms = []
+    preflight_ms = []
+    responder_ms = []
+    preflight_attempted = 0
+    preflight_succeeded = 0
     for ev in events:
         name = ev.get("event", "?")
         counts[name] = counts.get(name, 0) + 1
@@ -200,6 +205,16 @@ def _telemetry_summarize(events):
             prompt_ms.append(ev["ms"])
         elif name == "aig_turn" and isinstance(ev.get("total_ms"), (int, float)):
             turn_ms.append(ev["total_ms"])
+            if isinstance(ev.get("memory_ms"), (int, float)):
+                memory_ms.append(ev["memory_ms"])
+            if ev.get("preflight_attempted") is True:
+                preflight_attempted += 1
+            if ev.get("preflight_succeeded") is True:
+                preflight_succeeded += 1
+            if ev.get("preflight_attempted") is True and isinstance(ev.get("preflight_ms"), (int, float)):
+                preflight_ms.append(ev["preflight_ms"])
+            if isinstance(ev.get("responder_ms"), (int, float)):
+                responder_ms.append(ev["responder_ms"])
     pool_selects = pool["hit"] + pool["warm"]
     summary = {
         "event_counts": counts,
@@ -220,6 +235,16 @@ def _telemetry_summarize(events):
 
     summary["acp_prompt_ms"] = _stats(prompt_ms)
     summary["aig_turn_ms"] = _stats(turn_ms)
+    summary["aig_memory_ms"] = _stats(memory_ms)
+    summary["aig_preflight_ms"] = _stats(preflight_ms)
+    summary["aig_responder_ms"] = _stats(responder_ms)
+    summary["aig_preflight"] = {
+        "turns": len(turn_ms),
+        "attempted": preflight_attempted,
+        "succeeded": preflight_succeeded,
+        "attempt_rate": round(preflight_attempted / len(turn_ms), 3) if turn_ms else None,
+        "success_rate": round(preflight_succeeded / preflight_attempted, 3) if preflight_attempted else None,
+    }
     return summary
 
 

@@ -371,7 +371,8 @@ def _classify_request_type(msg_lower):
        re.search(r'\blatest\b.*\b(update|report|story|stories|happening|developments?)\b', m):
         return "news-search"
 
-    if re.search(r'\b(kql|kusto|run a query|execute a query|table schema|sample rows|show me data)\b', m):
+    if re.search(r'\b(kql|run a query|execute a query|table schema|sample rows|show me data)\b', m) or \
+       (re.search(r'\bkusto\b', m) and re.search(r'\b(?:query|table|rows?|data|schema|count|filter|summarize)\b', m)):
         return "kusto-query"
     if re.search(r'\b(count|summarize|filter by|group by|\bjoin\b|distinct|top \d|take \d)\b', m):
         return "kusto-operator"
@@ -380,6 +381,44 @@ def _classify_request_type(msg_lower):
         return "web-search"
 
     return "general"
+
+
+def _needs_acp_preflight(msg_lower, request_type):
+    """Return true only when ACP pre-retrieval is needed before responding.
+
+    Routine chat should reach the selected responder in one model pass. This
+    gate reserves the ACP preflight for classified live-data work, explicit MCP
+    operations, and artifact requests that need bridge/tool support.
+    """
+    message = msg_lower or ""
+    if request_type in {
+        "news-search", "weather-search", "financial-data",
+        "web-search", "kusto-query", "kusto-operator"
+    }:
+        return True
+
+    explanatory_question = bool(re.match(
+        r"\s*(?:what|how|why|explain|describe|tell\s+me\s+about)\b", message
+    ))
+    operation = r"(?:search|find|list|check|review|open|create|update|close|comment|manage|run|trigger|configure|connect|deploy|query|enable|disable|start|stop|merge|delete|push|scale|restart|apply|get|describe)"
+    github_operation = bool(re.search(rf"\bgithub\b[^.!?]{{0,100}}\b{operation}\b|\b{operation}\b[^.!?]{{0,100}}\bgithub\b", message))
+    platform_operation = bool(
+        re.search(r"\b(?:azure|mcp|kubernetes|kubectl|kusto)\b", message) and
+        re.search(rf"\b{operation}\b", message)
+    )
+    artifact_request = bool(re.search(
+        r"\b(?:create|generate|make|export|download)\b[^.!?]{0,100}"
+        r"\b(?:pdf|csv|json|markdown|md|txt|file|report|document|spreadsheet|invoice)\b|"
+        r"\bwrite\s+(?:a\s+|an\s+|the\s+|this\s+)?"
+        r"(?:pdf|csv|json|markdown|md|txt|file|report|document|spreadsheet|invoice)\b|"
+        r"\bsave\s+(?:this|that|it)\s+as\s+(?:a\s+|an\s+)?"
+        r"(?:pdf|csv|json|markdown|md|txt|file|report|spreadsheet)\b|"
+        r"\bsave\s+(?:this\s+|that\s+|the\s+)?(?:report|invoice|document|file|spreadsheet)\b|"
+        r"\bwrite\b[^.!?]{0,100}\b(?:to|as)\s+(?:a\s+|an\s+|the\s+)?"
+        r"(?:pdf|csv|json|markdown|md|txt|file|report|document|spreadsheet|invoice)\b",
+        message,
+    ))
+    return artifact_request or (not explanatory_question and (github_operation or platform_operation))
 _MEMORY_TABLES = _cfg.MEMORY_TABLES
 
 # Injected into tool-active ACP prompts so Eva persists durable facts herself.

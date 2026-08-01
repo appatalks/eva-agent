@@ -289,6 +289,7 @@ function isAffirmativeSignalSendRequest(text) {
     var rawClause = clauses[clauseIndex];
     var clause = rawClause.trim();
     if (!clause) continue;
+    clause = clause.replace(/^(?:now|then|and|but|okay|ok|sure|great|very good)\s*,?\s*/i, '');
     var address = '(?:(?:hey\\s+)?eva[,.]?\\s*)?';
     var revocation = /(?:^|,|\bbut\b)\s*(?:actually\s+|please\s+)?(?:don't|dont|don’t|i\s+(?:don't|dont|don’t)\s+want\s+you\s+to|never mind|cancel(?:\s+(?:that|this|the)?\s*(?:request|message|signal)?)?|(?:do not|don't|dont|don’t)\s+(?:send|text|message|notify|signal)|stop\s+(?:that|this|the)?\s*(?:send|message|signal))/;
     if (/^signal\s+me\s+(?:is|was|means)\b/.test(clause)) continue;

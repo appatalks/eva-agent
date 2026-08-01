@@ -588,6 +588,8 @@ def test_signal_and_github_mcp_contract():
             'Could you ping me on Signal with the result?': True,
             'Eva, send me a Signal message': True,
             'Signal me when it finishes': True,
+            'Very good. Now, can you send me a Signal text message with today\'s timestamp?': True,
+            'But send me a Signal message with the result.': True,
             'Do not send me a Signal message': False,
             'What does Signal say about notifications?': False,
             'Signal should notify users when messages arrive': False,
@@ -667,8 +669,72 @@ process.stdout.write(JSON.stringify(matrix.map(([text]) => sandbox.isAffirmative
     report("github_mcp_reapplies_late_pat", "_lastAutoAppliedMCPPat" in copilot_js and "_autoApplyMCPQueue" in copilot_js and options_js.count("autoApplySavedMCPConfig()") >= 2)
     report("signal_capability_endpoints_bounded", bridge_core.count("_require_bridge_capability()") == 2)
     report("telemetry_summary_is_recent", '"summary": _telemetry_summarize(recent)' in bridge_core)
+    with open("tools/bridge/telemetry.py") as f:
+        telemetry_py = f.read()
+    report("telemetry_aig_stage_budget", all(field in telemetry_py for field in ("aig_memory_ms", "aig_preflight_ms", "aig_responder_ms", "aig_preflight", "attempt_rate")))
+    report("aig_general_bypasses_preflight", '_acp_route = "direct/general"' in bridge_core and "_needs_acp_preflight(msg_lower, _request_type)" in bridge_core and "def _needs_acp_preflight" in bridge_utils)
+    report("aig_preflight_attempt_telemetry", "preflight_attempted=_preflight_attempted" in bridge_core and "preflight_succeeded=_preflight_succeeded" in bridge_core)
+    report("aig_lmstudio_latency_telemetry", bridge_core.count('"aig_turn"') >= 2 and 'model_used = "aig:lmstudio:" + lms_model' in bridge_core)
+    preflight_intent_cases = {
+        "chat advice": False,
+        "search GitHub for a function": True,
+        "use the GitHub connector to list my repositories": True,
+        "open GitHub and check notifications": True,
+        "review pull requests in GitHub": True,
+        "download the invoice": True,
+        "save this as a CSV": True,
+        "write a PDF report": True,
+        "generate a spreadsheet": True,
+        "Create a document with the project notes": True,
+        "Write a document describing the deployment": True,
+        "Export the document": True,
+        "Save the report": True,
+        "Save this report to a file": True,
+        "Write the output to a CSV file": True,
+        "merge the GitHub pull request": True,
+        "delete the GitHub issue": True,
+        "scale the Kubernetes deployment": True,
+        "restart the Azure web app": True,
+        "apply this Kubernetes manifest": True,
+        "kubectl get pods": True,
+        "What is Azure?": False,
+        "Explain Kubernetes pods to me": False,
+        "What does MCP stand for?": False,
+        "How does GitHub Actions work?": False,
+        "Explain GitHub merge conflicts": False,
+        "How does GitHub delete a branch work?": False,
+        "Explain Azure scale sets": False,
+        "What does MCP describe mean?": False,
+        "What does kubectl get do?": False,
+        "This PDF report is useful; write a summary in chat": False,
+        "What is Kusto?": False,
+        "Run a Kusto query": True,
+    }
+    try:
+        from bridge.utils import _classify_request_type, _needs_acp_preflight
+        report("aig_capability_preflight_matrix", all(_needs_acp_preflight(text.lower(), _classify_request_type(text.lower())) is expected for text, expected in preflight_intent_cases.items()))
+    except Exception as error:
+        report("aig_capability_preflight_matrix", False, str(error))
     report("bridge_capability_not_in_child_env", acp_client.count('pop("EVA_BRIDGE_TOKEN", None)') >= 2 and 'pop("EVA_BRIDGE_TOKEN", None)' in local_mcp)
     report("cors_uses_exact_loopback_host", "parsed.hostname" in bridge_core and "origin.startswith" not in bridge_core)
+
+
+def test_latency_telemetry_contract():
+    """AIG latency telemetry distinguishes direct turns from ACP preflights."""
+    try:
+        from bridge.telemetry import _telemetry_summarize
+        summary = _telemetry_summarize([
+            {"event": "aig_turn", "total_ms": 1000, "memory_ms": 25, "preflight_ms": 0,
+             "responder_ms": 975, "preflight_attempted": False, "preflight_succeeded": False},
+            {"event": "aig_turn", "total_ms": 3000, "memory_ms": 50, "preflight_ms": 1200,
+             "responder_ms": 1750, "preflight_attempted": True, "preflight_succeeded": True},
+        ])
+        preflight = summary.get("aig_preflight") or {}
+        report("latency_telemetry_attempt_rate", preflight.get("turns") == 2 and preflight.get("attempted") == 1 and preflight.get("succeeded") == 1 and preflight.get("attempt_rate") == 0.5 and preflight.get("success_rate") == 1.0)
+        report("latency_telemetry_preflight_stats", (summary.get("aig_preflight_ms") or {}).get("n") == 1 and (summary.get("aig_preflight_ms") or {}).get("p50") == 1200)
+    except Exception as error:
+        report("latency_telemetry_attempt_rate", False, str(error))
+        report("latency_telemetry_preflight_stats", False, str(error))
 
 
 def test_security_alert_contract():
@@ -1330,7 +1396,7 @@ def main():
         ("HTML Model Selector", [test_model_selector]),
         ("JS Routing Functions", [test_js_routing_functions]),
         ("Reasoning Effort", [test_reasoning_effort_contract]),
-        ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract]),
+        ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract]),
         ("Security Alerts", [test_security_alert_contract]),
         ("Sidebar Workflows", [test_sidebar_workflow_contract]),
         ("Pages Comparison", [test_pages_comparison_contract]),

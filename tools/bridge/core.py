@@ -65,6 +65,7 @@ def _is_affirmative_signal_request(text):
         clause = raw_clause.strip()
         if not clause:
             continue
+        clause = re.sub(r"^(?:now|then|and|but|okay|ok|sure|great|very good)\s*,?\s*", "", clause)
         address = r"(?:(?:hey\s+)?eva[,.]?\s*)?"
         revocation = re.compile(
             r"(?:^|,|\bbut\b)\s*(?:actually\s+|please\s+)?"
@@ -285,6 +286,7 @@ from bridge.utils import (  # noqa: F401
     _save_client_prefs,
     _subagent_worker,
     _classify_request_type,
+    _needs_acp_preflight,
     _MEMORY_CAPTURE_DIRECTIVE,
 )
 
@@ -2735,7 +2737,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         print(f"[AIG] Processing: {user_message[:80]}...")
 
-        # Step 1: Build memory context + proactive data retrieval
+        # Step 1: Build memory context. Timings stay privacy-safe: no prompt or
+        # response content is emitted into telemetry.
+        _memory_t0 = time.perf_counter()
         # Skip for internal calls (cognition sub-calls already have context)
         if internal:
             # Cognition draft/revise stages opt in to recall via recall_query so
@@ -2753,6 +2757,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             memory_context = _build_memory_context(user_message) if _st.cognition_enabled else ""
             if memory_context:
                 print(f"[AIG] Injected {len(memory_context)} chars of memory context")
+        _memory_ms = round((time.perf_counter() - _memory_t0) * 1000.0, 1)
 
         # Step 2: ACP-first routing — ACP is the default path (it has MCP tools).
         # Skip ACP data retrieval for internal calls (cognition sub-calls)
@@ -2791,7 +2796,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Classify the request type for logging and prompt tuning
         _request_type = _classify_request_type(msg_lower)
 
-        needs_acp_tools = not skip_acp
+        # ACP pre-retrieval is useful only when the classifier identified a
+        # live-data/query request. Running an agentic ACP pass for every
+        # ordinary question serializes two model turns before Eva can answer.
+        # General chat, advice, writing, and browser/renderer action markers
+        # go directly to the selected responder; their local capability routes
+        # remain available in the final response.
+        needs_acp_tools = not skip_acp and _needs_acp_preflight(msg_lower, _request_type)
+        if not skip_acp and not needs_acp_tools:
+            skip_acp = True
+            _acp_route = "direct/general"
         if skip_acp:
             print(f"[AIG] Skipping ACP ({_acp_route})")
         else:
@@ -2813,7 +2827,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         acp_data = ""
         acp_model_used = ""
+        _preflight_ms = 0.0
+        _preflight_attempted = bool(needs_acp_tools)
+        _preflight_succeeded = False
         if needs_acp_tools:
+            _preflight_t0 = time.perf_counter()
             print(f"[AIG] Step 2: Using ACP ({_request_type})...")
             # Ensure ACP is alive before attempting tool calls.
             # The CLI may have died between requests (idle timeout, crash).
@@ -2864,6 +2882,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 acp_data = acp_result["text"]
                 acp_model_used = _st.acp_client.model or "copilot-acp"
                 print(f"[AIG] ACP returned {len(acp_data)} chars of data")
+            _preflight_succeeded = bool(acp_result and not acp_result.get("error"))
+        if _preflight_attempted:
+            _preflight_ms = round((time.perf_counter() - _preflight_t0) * 1000.0, 1)
 
         # Step 3: Build the final prompt for Eva's persona model (PAT)
         eva_system = (
@@ -2934,6 +2955,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "Answer directly from [Data Retrieved].\n"
             )
 
+        _responder_t0 = time.perf_counter()
         if model_for_response == "lmstudio":
             lms_base = (data.get("lmstudio_base_url") or "").strip()
             lms_model = (data.get("lmstudio_model") or "").strip()
@@ -3054,9 +3076,28 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             }
             self._json_response(200, response)
+            _telemetry_emit(
+                "aig_turn",
+                model=model_for_response,
+                model_used=model_used,
+                route=_acp_route,
+                request_type=_request_type,
+                internal=internal,
+                no_tools=no_tools,
+                used_acp_tools=bool(needs_acp_tools),
+                acp_data_chars=len(acp_data or ""),
+                memory_ms=_memory_ms,
+                preflight_ms=_preflight_ms,
+                responder_ms=round((time.perf_counter() - _responder_t0) * 1000.0, 1),
+                preflight_attempted=_preflight_attempted,
+                preflight_succeeded=_preflight_succeeded,
+                response_chars=len(response_text or ""),
+                total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
+            )
             return
 
-        # Step 4: Pick the best PAT model for response generation
+        # Step 4: Pick the best responder. This timing separates the final
+        # model pass from memory and optional ACP pre-retrieval.
         # Priority: request body PAT > env var > Copilot CLI OAuth token > ACP fallback
         github_pat = data.get("github_pat", "") or os.environ.get("GITHUB_PAT", "")
 
@@ -3302,6 +3343,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             no_tools=no_tools,
             used_acp_tools=bool(needs_acp_tools),
             acp_data_chars=len(acp_data or ""),
+            memory_ms=_memory_ms,
+            preflight_ms=_preflight_ms,
+            responder_ms=round((time.perf_counter() - _responder_t0) * 1000.0, 1),
+            preflight_attempted=_preflight_attempted,
+            preflight_succeeded=_preflight_succeeded,
             response_chars=len(response_text or ""),
             total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
         )
