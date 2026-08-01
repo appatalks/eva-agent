@@ -247,6 +247,8 @@ def test_local_speech_contract():
     report("local_speech_adapter_package_hygiene", "!tools/voice_clone_module/build/**" in resource_filters and "!tools/voice_clone_module/**/*.egg-info/**" in resource_filters and "!tools/voice_clone_module/**/__pycache__/**" in resource_filters and "!tools/voice_clone_module/**/*.pyc" in resource_filters and "!core/audio/**" in resource_filters)
     report("local_speech_bundled_profiles_packaged", bundled_profiles.issubset(set(resource_filters)))
     report("local_speech_no_private_clone", "EVA_VOICE_CLONE_SOURCE" not in installer and "appatalks/voice_clone_module" not in installer)
+    report("local_speech_hides_known_diffusers_warning", "LoRACompatibleLinear" in open("tools/voice_clone_module/src/voice_clone_module/service.py").read())
+    report("standalone_single_instance_lock", "app.requestSingleInstanceLock()" in standalone and "app.on('second-instance'" in standalone and "mainWindow.focus()" in standalone)
 
     expected = "\n".join([
         "The package `chatterbox-tts` requires `torch==2.6.0 ; python_full_version < '3.14'`, but `2.10.0` is installed",

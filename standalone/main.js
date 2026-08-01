@@ -18,6 +18,7 @@ let localSpeechProfileId = '';
 let bridgeCapabilityToken = '';
 let shuttingDown = false;
 let stoppingBridge = false;
+let mainWindow = null;
 
 const BRIDGE_READY_TIMEOUT_MS = 60000;
 const LOCAL_VOICES_READY_TIMEOUT_MS = 10000;
@@ -759,7 +760,7 @@ function createWindow(acpBaseUrl) {
     return false;
   });
 
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1280,
     height: 900,
     show: false,
@@ -792,6 +793,7 @@ function createWindow(acpBaseUrl) {
     mainWindow.show();
   });
   mainWindow.on('closed', function() {
+    mainWindow = null;
     stopBridge();
   });
 
@@ -844,18 +846,31 @@ async function boot() {
   }
 }
 
-app.whenReady().then(function() {
-  boot().catch(function(err) {
-    stopBridge();
-    dialog.showErrorBox(getStartupErrorTitle(err), getStartupErrorMessage(err));
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', function() {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+
+  app.whenReady().then(function() {
+    boot().catch(function(err) {
+      stopBridge();
+      dialog.showErrorBox(getStartupErrorTitle(err), getStartupErrorMessage(err));
+      app.quit();
+    });
+  });
+
+  app.on('before-quit', stopBridge);
+  app.on('window-all-closed', function() {
     app.quit();
   });
-});
-
-app.on('before-quit', stopBridge);
-app.on('window-all-closed', function() {
-  app.quit();
-});
+}
 
 process.on('SIGINT', function() {
   stopBridge();

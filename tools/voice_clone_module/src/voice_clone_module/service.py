@@ -3,8 +3,19 @@ import os
 from pathlib import Path
 import re
 from typing import Any
+import warnings
 
 import torch
+
+
+# Diffusers emits this upstream migration notice while Chatterbox loads. It is
+# not actionable for Eva and does not affect generated audio.
+warnings.filterwarnings(
+    "ignore",
+    message=r"`LoRACompatibleLinear` is deprecated.*",
+    category=FutureWarning,
+    module=r"diffusers\.models\.lora",
+)
 
 
 MAX_SYNTHESIS_CHARS = 600
