@@ -230,7 +230,10 @@ def test_local_speech_contract():
     report("local_speech_vendored_adapter", os.path.isfile("tools/voice_clone_module/pyproject.toml") and os.path.isfile("tools/voice_clone_module/src/voice_clone_module/service.py"))
     adapter_files = []
     for root, directories, files in os.walk("tools/voice_clone_module"):
-        directories[:] = [directory for directory in directories if directory != "__pycache__"]
+        directories[:] = [
+            directory for directory in directories
+            if directory != "__pycache__" and directory != "build" and not directory.endswith(".egg-info")
+        ]
         for name in files:
             adapter_files.append(os.path.relpath(os.path.join(root, name), "tools/voice_clone_module"))
     allowed_adapter_files = {
