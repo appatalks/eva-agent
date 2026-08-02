@@ -43,6 +43,7 @@ Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).
 | **Signal messaging** | Send-only text notifications via signal-cli, keyword-triggered or on-demand |
 | **Persistent memory** | Kusto/ADX or local SQLite: conversations, emotion tracking, semantic recall |
 | **User profiles** | Switch local profiles with separate sessions, prompts, model choices, and UI preferences |
+| **Settings workspace** | Full-view grouped navigation for models, accounts, goals, background jobs, schedules, tools, memory, and learning controls |
 | **Self-improving skills** | Auto-extracts reusable skills from successful tasks, stored as drafts |
 | **Cron scheduler** | Standard cron expressions, recurring prompts, morning briefings, alerts |
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |

@@ -2513,6 +2513,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const lcarsChipTop = document.getElementById('lcarsChipTop');
   const monitorTabs = document.getElementById('lcarsMonitorTabs');
   const monitorPanels = document.getElementById('lcarsMonitorPanels');
+  var settingsReturnFocus = null;
 
   initAudioPreferences();
   applyStandaloneSurface();
@@ -2619,14 +2620,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function toggleSettings(event) {
     event.stopPropagation();
-    var overlay = document.getElementById('settingsOverlay');
     var isOpen = settingsMenu.classList.contains('open');
     if (isOpen) {
-      settingsMenu.classList.remove('open');
-      if (overlay) overlay.classList.remove('open');
+      setSettingsOpen(false);
     } else {
-      settingsMenu.classList.add('open');
-      if (overlay) overlay.classList.add('open');
+      setSettingsOpen(true, event.currentTarget);
       populateAuthFields();
       refreshLocalVoicesProfiles();
       syncLocalVoicesEngine(false);
@@ -2650,9 +2648,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Close the menu when clicking outside
   document.addEventListener('click', (event) => {
     if (!settingsMenu.contains(event.target) && event.target !== settingsButton) {
-      settingsMenu.classList.remove('open');
-      var overlay = document.getElementById('settingsOverlay');
-      if (overlay) overlay.classList.remove('open');
+      setSettingsOpen(false);
     }
   });
 
@@ -2736,23 +2732,87 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Eva sidebar nav buttons — open settings with correct tab
   // Must stopPropagation so the document click-outside handler doesn't immediately close settings
+  var settingsMetadata = {
+    general: ['Essentials', 'General', "Choose Eva's appearance, voice, data mode and memory location."],
+    models: ['Essentials', 'Models', 'Select the response model, reasoning level and adaptive review behavior.'],
+    prompts: ['Essentials', 'Personality', "Shape Eva's personality and the independent review prompt."],
+    goals: ['Operations', 'Goals', 'Create and maintain the persistent intentions Eva carries across sessions.'],
+    background: ['Operations', 'Background jobs', 'Manage maintenance cycles, proactive alerts, notification limits and recent activity.'],
+    cron: ['Operations', 'Schedules', 'Create recurring tasks that Eva runs through the background service.'],
+    auth: ['Connections', 'Accounts', 'Manage local provider credentials and Signal notification endpoints.'],
+    mcp: ['Connections', 'Tools & memory', 'Configure persistent storage, MCP servers and generated artifacts.'],
+    learning: ['Privacy', 'Learning', 'Control what bounded feedback metadata Eva may retain and for how long.']
+  };
+
+  function setSettingsOpen(open, trigger) {
+    var overlay = document.getElementById('settingsOverlay');
+    var wasOpen = settingsMenu.classList.contains('open');
+    if (open && !wasOpen) {
+      settingsReturnFocus = trigger || document.activeElement;
+    }
+    settingsMenu.classList.toggle('open', open);
+    settingsMenu.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (overlay) overlay.classList.toggle('open', open);
+    document.body.classList.toggle('settings-open', open);
+    if (open && !wasOpen) {
+      requestAnimationFrame(function() {
+        var activeTab = settingsMenu.querySelector('.settings-tab.active');
+        if (activeTab) activeTab.focus();
+      });
+    } else if (!open && wasOpen) {
+      var focusTarget = settingsReturnFocus;
+      if (!focusTarget || focusTarget.getClientRects().length === 0 || typeof focusTarget.focus !== 'function') {
+        focusTarget = document.getElementById('evaInputSettings');
+      }
+      if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
+      settingsReturnFocus = null;
+    }
+  }
+
+  function activateSettingsTab(target) {
+    var settingsTabs = document.querySelectorAll('.settings-tab');
+    var settingsPanels = document.querySelectorAll('.settings-panel');
+    var activeTab = null;
+    settingsTabs.forEach(function(tab) {
+      var active = tab.getAttribute('data-stab') === target;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', active ? 'true' : 'false');
+      tab.setAttribute('tabindex', active ? '0' : '-1');
+      if (active) activeTab = tab;
+    });
+    settingsPanels.forEach(function(panel) {
+      var active = panel.getAttribute('data-stab') === target;
+      panel.classList.toggle('active', active);
+      panel.hidden = !active;
+      panel.setAttribute('aria-hidden', active ? 'false' : 'true');
+    });
+    var metadata = settingsMetadata[target] || settingsMetadata.general;
+    var eyebrow = document.getElementById('settingsPageEyebrow');
+    var title = document.getElementById('settingsPageTitle');
+    var description = document.getElementById('settingsPageDescription');
+    if (eyebrow) eyebrow.textContent = metadata[0];
+    if (title) title.textContent = metadata[1];
+    if (description) description.textContent = metadata[2];
+    var body = document.querySelector('.settings-body');
+    if (body) body.scrollTop = 0;
+    if (target === 'goals' && typeof loadGoals === 'function') loadGoals(false);
+    if (target === 'background' && typeof loadBackgroundData === 'function') loadBackgroundData(false);
+    return activeTab;
+  }
+
   function evaOpenSettings(e, tabName) {
     e.stopPropagation();
     if (typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
-    var overlay = document.getElementById('settingsOverlay');
     if (!settingsMenu.classList.contains('open')) {
-      settingsMenu.classList.add('open');
-      if (overlay) overlay.classList.add('open');
+      setSettingsOpen(true, e.currentTarget);
       populateAuthFields();
       refreshLocalVoicesProfiles();
       syncLocalVoicesEngine(false);
       if (typeof loadBackgroundData === 'function') loadBackgroundData(true);
     }
     if (tabName) {
-      setTimeout(function() {
-        var tab = document.querySelector('[data-stab=' + tabName + ']');
-        if (tab) tab.click();
-      }, 50);
+      var requestedTab = activateSettingsTab(tabName);
+      if (requestedTab) requestedTab.focus();
     }
   }
   var evaPromptsBtn = document.getElementById('evaPromptsBtn');
@@ -2784,18 +2844,41 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Settings panel tab switching
   var settingsTabs = document.querySelectorAll('.settings-tab');
-  var settingsPanels = document.querySelectorAll('.settings-panel');
   settingsTabs.forEach(function(tab) {
+    var target = tab.getAttribute('data-stab');
+    var panel = document.querySelector('.settings-panel[data-stab="' + target + '"]');
+    tab.id = 'settings-tab-' + target;
+    tab.setAttribute('aria-controls', 'settings-panel-' + target);
+    if (panel) {
+      panel.id = 'settings-panel-' + target;
+      panel.setAttribute('role', 'tabpanel');
+      panel.setAttribute('aria-labelledby', tab.id);
+      panel.hidden = !panel.classList.contains('active');
+      panel.setAttribute('aria-hidden', panel.classList.contains('active') ? 'false' : 'true');
+    }
     tab.addEventListener('click', function() {
-      var target = tab.getAttribute('data-stab');
-      settingsTabs.forEach(function(t) {
-        t.classList.toggle('active', t === tab);
-      });
-      settingsPanels.forEach(function(p) {
-        p.classList.toggle('active', p.getAttribute('data-stab') === target);
-      });
-      if (target === 'goals' && typeof loadGoals === 'function') loadGoals(false);
-      if (target === 'background' && typeof loadBackgroundData === 'function') loadBackgroundData(false);
+      activateSettingsTab(tab.getAttribute('data-stab'));
+    });
+    tab.addEventListener('keydown', function(e) {
+      var tabs = Array.from(settingsTabs);
+      var index = tabs.indexOf(tab);
+      var nextIndex = null;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
+      if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') nextIndex = (index - 1 + tabs.length) % tabs.length;
+      if (e.key === 'Home') nextIndex = 0;
+      if (e.key === 'End') nextIndex = tabs.length - 1;
+      if (nextIndex !== null) {
+        e.preventDefault();
+        activateSettingsTab(tabs[nextIndex].getAttribute('data-stab'));
+        tabs[nextIndex].focus();
+      }
+    });
+  });
+
+  document.querySelectorAll('[data-settings-anchor]').forEach(function(button) {
+    button.addEventListener('click', function() {
+      var section = document.getElementById(button.getAttribute('data-settings-anchor'));
+      if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   });
 
@@ -2804,9 +2887,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (settingsCloseBtn) {
     settingsCloseBtn.addEventListener('click', function(e) {
       e.stopPropagation();
-      settingsMenu.classList.remove('open');
-      var overlay = document.getElementById('settingsOverlay');
-      if (overlay) overlay.classList.remove('open');
+      setSettingsOpen(false);
     });
   }
 
@@ -2814,10 +2895,34 @@ document.addEventListener('DOMContentLoaded', () => {
   var settingsOverlayEl = document.getElementById('settingsOverlay');
   if (settingsOverlayEl) {
     settingsOverlayEl.addEventListener('click', function() {
-      settingsMenu.classList.remove('open');
-      settingsOverlayEl.classList.remove('open');
+      setSettingsOpen(false);
     });
   }
+
+  document.addEventListener('keydown', function(e) {
+    if (!settingsMenu.classList.contains('open')) return;
+    if (e.key === 'Escape') {
+      setSettingsOpen(false);
+      return;
+    }
+    if (e.key === 'Tab') {
+      var focusable = Array.from(settingsMenu.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+      )).filter(function(element) {
+        return element.getClientRects().length > 0 && element.getAttribute('aria-hidden') !== 'true';
+      });
+      if (!focusable.length) return;
+      var first = focusable[0];
+      var last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  });
 
   ['aigLmStudioBaseUrl', 'aigLmStudioModel', 'localVoicesProfile', 'localVoicesLanguage', 'authSignalSender', 'authSignalRecipient'].forEach(function(id) {
     var el = document.getElementById(id);

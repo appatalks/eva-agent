@@ -584,36 +584,53 @@ body.theme-eva #idText.status-error::before { background: var(--eva-danger); }
 /* ── Settings Panel ─────────────────────────────────────────── */
 body.theme-eva .settings-overlay { background: rgba(0,0,0,0.6); backdrop-filter: blur(6px); }
 body.theme-eva #settingsMenu {
-  background: var(--eva-surface);
+  background: var(--eva-chat-bg);
   color: var(--eva-text);
-  border: 1px solid rgba(139,92,246,0.2);
-  border-radius: var(--eva-radius);
-  box-shadow: 0 12px 48px rgba(0,0,0,0.5), 0 0 80px var(--eva-purple-glow);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
-body.theme-eva .settings-header { border-color: var(--eva-border); }
+body.theme-eva .settings-header,
+body.theme-eva .settings-page-header { border-color: var(--eva-border); background: var(--eva-surface); }
 body.theme-eva .settings-header h3 { color: var(--eva-text); font-family: var(--eva-font); }
-body.theme-eva .settings-close { color: var(--eva-text-muted); }
+body.theme-eva .settings-kicker,
+body.theme-eva .settings-page-eyebrow { color: var(--eva-purple-light); }
+body.theme-eva .settings-page-header h2 { color: var(--eva-text); font-family: var(--eva-font); }
+body.theme-eva .settings-page-header p { color: var(--eva-text-muted); }
+body.theme-eva .settings-close { color: var(--eva-text-muted); background: var(--eva-chat-bg); border-color: var(--eva-border); }
 body.theme-eva .settings-close:hover { color: #fff; background: rgba(255,255,255,0.06); border-radius: 8px; }
 
 body.theme-eva .settings-tabs {
-  border-color: var(--eva-border);
   background: var(--eva-sidebar);
-  padding: 4px 14px;
-  gap: 2px;
+  border-color: var(--eva-border);
 }
+body.theme-eva .settings-nav-intro { border-color: var(--eva-border); }
+body.theme-eva .settings-nav-intro strong { color: var(--eva-text); }
+body.theme-eva .settings-nav-intro span,
+body.theme-eva .settings-nav-label { color: var(--eva-text-dim); }
 body.theme-eva .settings-tab {
   color: var(--eva-text-muted);
   background: transparent;
-  border-radius: 8px 8px 0 0;
-  border-bottom: 2px solid transparent;
+  border-radius: 6px;
   font: 500 13px var(--eva-font);
 }
 body.theme-eva .settings-tab:hover { color: var(--eva-text); background: rgba(255,255,255,0.04); }
 body.theme-eva .settings-tab.active {
   color: #fff;
-  background: var(--eva-surface);
-  border-bottom-color: var(--eva-purple);
+  background: rgba(139,92,246,.12);
+  border-color: rgba(139,92,246,.28);
 }
+body.theme-eva .settings-tab.active::before { background: var(--eva-purple-light); }
+body.theme-eva .settings-tab small { color: var(--eva-text-dim); }
+body.theme-eva .settings-body,
+body.theme-eva .settings-section-nav { background: var(--eva-chat-bg); }
+body.theme-eva .settings-section-nav,
+body.theme-eva .settings-content-section + .settings-content-section { border-color: var(--eva-border); }
+body.theme-eva .settings-section-nav button { background: var(--eva-surface); color: var(--eva-text-muted); border-color: var(--eva-border); }
+body.theme-eva .settings-section-nav button:hover { color: var(--eva-text); border-color: var(--eva-purple); }
+body.theme-eva .settings-section-heading span { color: var(--eva-purple-light); }
+body.theme-eva .settings-section-heading h3 { color: var(--eva-text); font-family: var(--eva-font); }
+body.theme-eva .settings-section-heading p { color: var(--eva-text-muted); }
 
 body.theme-eva .settings-panel label { color: var(--eva-text-muted); font: 500 13px var(--eva-font); }
 body.theme-eva .settings-panel select,

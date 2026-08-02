@@ -382,24 +382,50 @@
     </form>
   </div>
 
-  <!-- Settings Panel (tabbed) -->
-  <div class="settingsMenu" id="settingsMenu">
+  <!-- Settings Workspace -->
+  <div class="settingsMenu" id="settingsMenu" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="settingsTitle">
     <div class="settings-header">
-      <h3>Settings</h3>
+      <div class="settings-brand">
+        <span class="settings-kicker">Eva workspace</span>
+        <h3 id="settingsTitle">Settings</h3>
+      </div>
       <button class="settings-close" id="settingsClose" type="button" aria-label="Close settings">&times;</button>
     </div>
-    <div class="settings-tabs" role="tablist">
-      <button class="settings-tab active" data-stab="general" role="tab">General</button>
-      <button class="settings-tab" data-stab="models" role="tab">Models</button>
-      <button class="settings-tab" data-stab="auth" role="tab">Auth</button>
-      <button class="settings-tab" data-stab="prompts" role="tab">Prompts</button>
-      <button class="settings-tab" data-stab="goals" role="tab">Goals</button>
-      <button class="settings-tab" data-stab="background" role="tab">Background</button>
-      <button class="settings-tab" data-stab="cron" role="tab">Cron</button>
-      <button class="settings-tab" data-stab="mcp" role="tab">MCP</button>
-      <button class="settings-tab" data-stab="learning" role="tab">Learning</button>
-    </div>
-    <div class="settings-body">
+    <div class="settings-workspace">
+      <nav class="settings-tabs" role="tablist" aria-label="Settings sections">
+        <div class="settings-nav-intro">
+          <strong>Configuration</strong>
+          <span>Manage Eva without leaving your current conversation.</span>
+        </div>
+        <div class="settings-nav-group" aria-label="Essentials">
+          <span class="settings-nav-label">Essentials</span>
+          <button class="settings-tab active" data-stab="general" role="tab" aria-selected="true"><strong>General</strong><small>Theme, voice and data</small></button>
+          <button class="settings-tab" data-stab="models" role="tab" aria-selected="false"><strong>Models</strong><small>Providers and reasoning</small></button>
+          <button class="settings-tab" data-stab="prompts" role="tab" aria-selected="false"><strong>Personality</strong><small>Behavior and review prompt</small></button>
+        </div>
+        <div class="settings-nav-group" aria-label="Operations">
+          <span class="settings-nav-label">Operations</span>
+          <button class="settings-tab" data-stab="goals" role="tab" aria-selected="false"><strong>Goals</strong><small>Persistent intentions</small></button>
+          <button class="settings-tab" data-stab="background" role="tab" aria-selected="false"><strong>Background jobs</strong><small>Runtime, alerts and activity</small></button>
+          <button class="settings-tab" data-stab="cron" role="tab" aria-selected="false"><strong>Schedules</strong><small>Recurring tasks</small></button>
+        </div>
+        <div class="settings-nav-group" aria-label="Connections">
+          <span class="settings-nav-label">Connections</span>
+          <button class="settings-tab" data-stab="auth" role="tab" aria-selected="false"><strong>Accounts</strong><small>Keys and notifications</small></button>
+          <button class="settings-tab" data-stab="mcp" role="tab" aria-selected="false"><strong>Tools &amp; memory</strong><small>MCP servers and storage</small></button>
+        </div>
+        <div class="settings-nav-group" aria-label="Privacy">
+          <span class="settings-nav-label">Privacy</span>
+          <button class="settings-tab" data-stab="learning" role="tab" aria-selected="false"><strong>Learning</strong><small>Consent and retention</small></button>
+        </div>
+      </nav>
+      <main class="settings-main">
+        <header class="settings-page-header">
+          <span class="settings-page-eyebrow" id="settingsPageEyebrow">Essentials</span>
+          <h2 id="settingsPageTitle">General</h2>
+          <p id="settingsPageDescription">Choose Eva's appearance, voice, data mode and memory location.</p>
+        </header>
+        <div class="settings-body">
 
       <!-- General Tab -->
       <div class="settings-panel active" data-stab="general">
@@ -811,9 +837,21 @@
 
       <!-- Background Tab -->
       <div class="settings-panel" data-stab="background">
-        <div id="backgroundStatus" class="mcp-status" aria-live="polite"></div>
+        <nav class="settings-section-nav" aria-label="Background job sections">
+          <button type="button" data-settings-anchor="backgroundRuntime">Runtime</button>
+          <button type="button" data-settings-anchor="backgroundAlerts">Alerts</button>
+          <button type="button" data-settings-anchor="backgroundLimits">Limits</button>
+          <button type="button" data-settings-anchor="backgroundRecent">Activity</button>
+        </nav>
 
-        <div class="mcp-preset background-controls">
+        <section class="settings-content-section" id="backgroundRuntime">
+          <div class="settings-section-heading">
+            <div><span>Runtime</span><h3>Background loop</h3></div>
+            <p>Choose which maintenance and research jobs Eva runs between conversations.</p>
+          </div>
+          <div id="backgroundStatus" class="mcp-status" aria-live="polite"></div>
+
+          <div class="mcp-preset background-controls">
           <label class="background-toggle-row">
             <input type="checkbox" id="backgroundEnabled">
             <strong>Enable background loop</strong>
@@ -842,11 +880,15 @@
             <button type="button" class="auth-toggle" id="backgroundRunNowButton">Run once</button>
             <button type="button" class="auth-toggle" id="backgroundRefreshButton">Refresh</button>
           </div>
-        </div>
+          </div>
+        </section>
 
-        <h4 class="settings-subhead">My alerts</h4>
-        <p class="auth-note">Tell Eva what to watch. She checks active alerts each background cycle and speaks up in chat (and aloud) when something new turns up.</p>
-        <div class="mcp-preset background-controls">
+        <section class="settings-content-section" id="backgroundAlerts">
+          <div class="settings-section-heading">
+            <div><span>Monitoring</span><h3>My alerts</h3></div>
+            <p>Tell Eva what to watch. Active alerts are checked during each background cycle.</p>
+          </div>
+          <div class="mcp-preset background-controls">
           <div class="auth-field">
             <label for="alertType">Type</label>
             <select id="alertType">
@@ -883,11 +925,16 @@
             <button type="button" class="auth-save" id="alertSaveButton">Add alert</button>
             <button type="button" class="auth-toggle" id="alertClearButton">Clear form</button>
           </div>
-        </div>
-        <div id="alertsList" class="background-list"></div>
+          </div>
+          <div id="alertsList" class="background-list"></div>
+        </section>
 
-        <h4 class="settings-subhead">Notification limits</h4>
-        <div class="mcp-preset background-controls">
+        <section class="settings-content-section" id="backgroundLimits">
+          <div class="settings-section-heading">
+            <div><span>Delivery</span><h3>Notification limits</h3></div>
+            <p>Set quiet hours and rate limits for proactive notifications.</p>
+          </div>
+          <div class="mcp-preset background-controls">
           <div class="auth-field">
             <label for="alertQuietStart">Quiet hours start (0-23, -1 off)</label>
             <input type="number" id="alertQuietStart" min="-1" max="23" step="1" value="-1">
@@ -903,10 +950,16 @@
           <div class="background-actions">
             <button type="button" class="auth-save" id="alertSettingsSaveButton">Save limits</button>
           </div>
-        </div>
+          </div>
+        </section>
 
-        <h4 class="settings-subhead">Recent activity</h4>
-        <div id="backgroundActivity" class="background-list"></div>
+        <section class="settings-content-section" id="backgroundRecent">
+          <div class="settings-section-heading">
+            <div><span>History</span><h3>Recent activity</h3></div>
+            <p>Review the latest background runs and outcomes.</p>
+          </div>
+          <div id="backgroundActivity" class="background-list"></div>
+        </section>
       </div>
 
       <!-- Cron Tab -->
@@ -1031,6 +1084,8 @@
         </div>
       </div>
 
+        </div>
+      </main>
     </div>
   </div>
 
