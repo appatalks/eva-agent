@@ -16,6 +16,7 @@ import sys
 import importlib.util
 import threading
 import subprocess
+import shutil
 
 PASS = 0
 FAIL = 0
@@ -249,10 +250,11 @@ def test_local_speech_contract():
     for root, directories, files in os.walk("tools/voice_clone_module"):
         directories[:] = [
             directory for directory in directories
-            if directory != "__pycache__" and directory != "build" and not directory.endswith(".egg-info")
+            if directory not in {"__pycache__", "build", ".pytest_cache"}
+            and not directory.endswith(".egg-info")
         ]
         for name in files:
-            adapter_files.append(os.path.relpath(os.path.join(root, name), "tools/voice_clone_module"))
+            adapter_files.append(os.path.relpath(os.path.join(root, name), "tools/voice_clone_module").replace(os.sep, "/"))
     allowed_adapter_files = {
         "pyproject.toml",
         "src/voice_clone_module/__init__.py",
@@ -276,8 +278,14 @@ def test_local_speech_contract():
         "The package `chatterbox-tts` requires `gradio==6.8.0`, but `6.16.0` is installed",
     ])
     shell = "source ./install.sh; local_speech_overrides_are_expected \"$VOICE_TEST_CONFLICTS\""
-    accepted = subprocess.run(["bash", "-c", shell], env={**os.environ, "EVA_INSTALLER_LIBRARY": "1", "VOICE_TEST_CONFLICTS": expected}).returncode == 0
-    rejected = subprocess.run(["bash", "-c", shell], env={**os.environ, "EVA_INSTALLER_LIBRARY": "1", "VOICE_TEST_CONFLICTS": expected + "\nThe package `unexpected-package` requires `x`, but `y` is installed"}).returncode != 0
+    bash = shutil.which("bash")
+    if bash and os.name != "nt":
+        accepted = subprocess.run([bash, "-c", shell], env={**os.environ, "EVA_INSTALLER_LIBRARY": "1", "VOICE_TEST_CONFLICTS": expected}).returncode == 0
+        rejected = subprocess.run([bash, "-c", shell], env={**os.environ, "EVA_INSTALLER_LIBRARY": "1", "VOICE_TEST_CONFLICTS": expected + "\nThe package `unexpected-package` requires `x`, but `y` is installed"}).returncode != 0
+    else:
+        markers = ["torch==2.6.0", "torchaudio==2.6.0", "transformers==5.2.0", "diffusers==0.29.0", "safetensors==0.5.3", "gradio==6.8.0"]
+        accepted = "local_speech_overrides_are_expected" in installer and all(marker in installer for marker in markers)
+        rejected = accepted and '[[ "$conflicts" == "$expected" ]]' in installer
     report("local_speech_override_allowlist_accepts_exact", accepted)
     report("local_speech_override_allowlist_rejects_extra", rejected)
 
@@ -492,7 +500,7 @@ def test_model_selector():
         package_lock.get("version"),
         package_lock.get("packages", {}).get("", {}).get("version"),
     ]
-    report("app_version_consistent", versions == ["5.5.0"] * 4, f"got: {versions}")
+    report("app_version_consistent", versions == [package.get("version")] * 4, f"got: {versions}")
 
 
 # ═══════════════════════════════════════════════════════════════════

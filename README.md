@@ -27,10 +27,27 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh            # install dependencies
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.5.0.AppImage'
+./dist/'Eva Standalone-5.5.2.AppImage'
 ```
 
 Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).
+
+### Windows (experimental)
+
+The standalone launcher can be packaged as a Windows x64 installer from a
+Windows checkout:
+
+```powershell
+cd standalone
+npm install
+npm run dist:win
+```
+
+The installer is written to `standalone/dist/`. It provisions Python 3.12,
+Node.js 24+, and a private GitHub Copilot CLI runtime through Windows Package
+Manager, then opens a terminal for the account owner to complete the
+interactive GitHub sign-in. Linux-specific desktop automation and camera discovery are not yet
+supported on Windows.
 
 ## Features
 

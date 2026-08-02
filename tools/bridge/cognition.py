@@ -122,7 +122,8 @@ def _knowledge_scope_clause(max_entities=200):
         norm = (entity or "").strip()
         if not norm:
             continue
-        safe_entities.append(f"'{norm.replace("'", "''")}'")
+        escaped_entity = norm.replace("'", "''")
+        safe_entities.append(f"'{escaped_entity}'")
 
     if not safe_entities:
         return ""

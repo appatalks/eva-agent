@@ -51,6 +51,7 @@ token_cache.*
 node_modules/
 standalone/node_modules/
 standalone/dist/
+standalone/dist-*/
 standalone/out/
 *.AppImage
 

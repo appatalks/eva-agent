@@ -25,6 +25,18 @@ _ACP_TOOL_PROFILES = _cfg.ACP_TOOL_PROFILES
 _SECRET_MARKERS = ("TOKEN", "KEY", "SECRET", "PAT", "PASSWORD", "CREDENTIAL")
 
 
+def _hidden_subprocess_options():
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+        "startupinfo": startupinfo,
+    }
+
+
 def _normalize_tool_profile(profile, has_config=False):
     value = str(profile or ("broad" if has_config else "none")).strip().lower()
     return value if value in _ACP_TOOL_PROFILES else "broad"
@@ -125,7 +137,8 @@ class ACPClient:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,
-                env=process_env
+                env=process_env,
+                **_hidden_subprocess_options(),
             )
         except FileNotFoundError:
             raise RuntimeError(
@@ -545,7 +558,8 @@ class ACPClient:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 cwd=cwd,
-                env=env
+                env=env,
+                **_hidden_subprocess_options(),
             )
             self.terminals[terminal_id] = {"process": proc, "output": ""}
 

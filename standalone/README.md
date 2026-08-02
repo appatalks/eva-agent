@@ -1,6 +1,6 @@
 # Eva Standalone
 
-This directory contains the Electron scaffold for the Linux AppImage build. The Electron files stay under `standalone/`; electron-builder copies the parent web UI and bridge into `resources/app` with `extraResources`. In development, `main.js` loads the parent repo directly.
+This directory contains the Electron scaffold for the standalone builds. The Electron files stay under `standalone/`; electron-builder copies the parent web UI and bridge into `resources/app` with `extraResources`. In development, `main.js` loads the parent repo directly.
 
 ## Prerequisites
 
@@ -30,18 +30,39 @@ Output lands in `standalone/dist/`, named like `Eva Standalone-<version>.AppImag
 The AppImage build is configured in `package.json`; `package-lock.json` is
 tracked, while generated `dist/` output is ignored.
 
+## Build Windows Installer (Experimental)
+
+The installer provisions Python 3.12, Node.js 24+, and a private GitHub
+Copilot CLI runtime through Windows Package Manager. It opens a terminal for
+the account owner to complete the interactive GitHub sign-in; this cannot be
+automated or bundled. Build the installer with:
+
+```powershell
+cd standalone
+npm install
+npm run dist:win
+```
+
+The NSIS installer is written to `standalone/dist/` as
+`Eva Standalone Setup <version>.exe`. The launcher starts the bundled bridge
+with `py -3.12` and stores bridge data plus its private Copilot CLI runtime
+under the Windows application-data folder.
+
+Windows packaging is an initial compatibility path. Linux-specific desktop
+automation and camera discovery remain unsupported on Windows.
+
 ## Launch The AppImage
 
 ```sh
 cd standalone/dist
-chmod +x "Eva Standalone-5.5.0.AppImage"
-"./Eva Standalone-5.5.0.AppImage"
+chmod +x "Eva Standalone-5.5.2.AppImage"
+"./Eva Standalone-5.5.2.AppImage"
 ```
 
 If the host is missing FUSE (common on minimal containers and some distros), launch with extraction instead:
 
 ```sh
-"./Eva Standalone-5.5.0.AppImage" --appimage-extract-and-run
+"./Eva Standalone-5.5.2.AppImage" --appimage-extract-and-run
 ```
 
 The AppImage is self-contained: it spawns the bundled ACP bridge on a random
