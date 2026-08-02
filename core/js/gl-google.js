@@ -56,6 +56,10 @@ function geminiSend() {
     const signalContext = (typeof captureSignalDeliveryContext === 'function')
         ? captureSignalDeliveryContext(sQuestion)
         : null;
+    const geminiPromptBudget = EvaPromptBudget.compactGeminiContents(
+        geminiMessages.concat([{ role: "user", parts: [{ text: sQuestion }] }]),
+        { budget: 10000, recentTurns: 6, pinnedIndexes: [0] }
+    );
 
     getGoogleGlKey().then(GOOGLE_GL_KEY => {
         document.getElementById("txtMsg").innerHTML = "";
@@ -67,10 +71,8 @@ function geminiSend() {
     	   method: "POST",
     	   headers: { "Content-Type": "application/json" },
     	   body: JSON.stringify({
-               contents: geminiMessages.concat([
-            	   { role: "user", parts: [{ text: sQuestion }] }
-        	]),
-        	systemInstruction: geminiMessages[0], // Assuming the first message is the system instruction
+               contents: geminiPromptBudget.messages,
+            systemInstruction: geminiPromptBudget.messages[0],
         	generationConfig: {
             	    temperature: 0.7, 
             	    // maxOutputTokens: 1024, 

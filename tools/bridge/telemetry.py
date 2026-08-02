@@ -192,6 +192,13 @@ def _telemetry_summarize(events):
     memory_ms = []
     preflight_ms = []
     responder_ms = []
+    stream_ttft_ms = []
+    stream_completion_ms = []
+    stream_total_ms = []
+    pool_profiles = {}
+    cache_kinds = {}
+    context_used = []
+    context_percent = []
     preflight_attempted = 0
     preflight_succeeded = 0
     for ev in events:
@@ -201,6 +208,19 @@ def _telemetry_summarize(events):
             r = ev.get("result")
             if r in pool:
                 pool[r] += 1
+            profile = ev.get("tool_profile")
+            if isinstance(profile, str) and profile:
+                pool_profiles[profile] = pool_profiles.get(profile, 0) + 1
+        elif name == "kusto_metadata_cache":
+            kind = ev.get("kind")
+            if isinstance(kind, str) and kind:
+                bucket = cache_kinds.setdefault(kind, {"hit": 0, "miss": 0})
+                bucket["hit" if ev.get("hit") is True else "miss"] += 1
+        elif name == "acp_usage":
+            if isinstance(ev.get("used"), (int, float)):
+                context_used.append(ev["used"])
+            if isinstance(ev.get("percent"), (int, float)):
+                context_percent.append(ev["percent"])
         elif name == "acp_prompt" and isinstance(ev.get("ms"), (int, float)):
             prompt_ms.append(ev["ms"])
         elif name == "aig_turn" and isinstance(ev.get("total_ms"), (int, float)):
@@ -215,10 +235,19 @@ def _telemetry_summarize(events):
                 preflight_ms.append(ev["preflight_ms"])
             if isinstance(ev.get("responder_ms"), (int, float)):
                 responder_ms.append(ev["responder_ms"])
+        elif name == "stream_turn":
+            if isinstance(ev.get("ttft_ms"), (int, float)):
+                stream_ttft_ms.append(ev["ttft_ms"])
+            if isinstance(ev.get("completion_ms"), (int, float)):
+                stream_completion_ms.append(ev["completion_ms"])
+            if isinstance(ev.get("total_ms"), (int, float)):
+                stream_total_ms.append(ev["total_ms"])
     pool_selects = pool["hit"] + pool["warm"]
     summary = {
         "event_counts": counts,
         "pool": dict(pool, hit_rate=(round(pool["hit"] / pool_selects, 3) if pool_selects else None)),
+        "pool_profiles": pool_profiles,
+        "kusto_metadata_cache": cache_kinds,
     }
 
     def _stats(vals):
@@ -238,6 +267,11 @@ def _telemetry_summarize(events):
     summary["aig_memory_ms"] = _stats(memory_ms)
     summary["aig_preflight_ms"] = _stats(preflight_ms)
     summary["aig_responder_ms"] = _stats(responder_ms)
+    summary["stream_ttft_ms"] = _stats(stream_ttft_ms)
+    summary["stream_completion_ms"] = _stats(stream_completion_ms)
+    summary["stream_total_ms"] = _stats(stream_total_ms)
+    summary["acp_context_used_tokens"] = _stats(context_used)
+    summary["acp_context_percent"] = _stats(context_percent)
     summary["aig_preflight"] = {
         "turns": len(turn_ms),
         "attempted": preflight_attempted,

@@ -33,7 +33,7 @@ def to_utc_iso(value):
 
 
 # ── Filesystem paths ────────────────────────────────────────────────
-EVA_CONFIG_DIR = os.path.expanduser("~/.config/eva-standalone")
+EVA_CONFIG_DIR = os.path.expanduser(os.environ.get("EVA_CONFIG_DIR", "~/.config/eva-standalone"))
 ARTIFACTS_DIR = os.path.join(EVA_CONFIG_DIR, "artifacts")
 KUSTO_CLUSTER_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "kusto_cluster.txt")
 MCP_CONFIG_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "mcp_config.json")
@@ -50,9 +50,16 @@ HTTP_CONTENT_TYPE_RE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+
 
 # ── ACP pool ────────────────────────────────────────────────────────
 ACP_POOL_MAX = 4
+ACP_SESSION_MAX = 8
+ACP_SESSION_MAX_PROMPTS = 20
+ACP_SESSION_IDLE_SECONDS = 1800
+ACP_TOOL_PROFILES = {"none", "web", "github", "kusto", "broad"}
 
 # ── Cognition tuning ───────────────────────────────────────────────
 CANDIDATE_HISTORY_TTL_SECONDS = 60
+KUSTO_METADATA_TTL_SECONDS = 60
+KUSTO_EMOTION_TTL_SECONDS = 5
+KUSTO_SCHEMA_TTL_SECONDS = 300
 CONVO_CONTENT_CAP = 8000
 EMBEDDING_MODEL = "text-embedding-3-small"
 SEMANTIC_MIN_SCORE = 0.30

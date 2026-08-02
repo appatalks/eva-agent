@@ -42,8 +42,13 @@ function startVoiceListener() {
   };
 
   _voiceRecognition.onerror = function(event) {
-    // 'no-speech' and 'aborted' are normal when listening continuously
-    if (event.error === 'no-speech' || event.error === 'aborted') return;
+    // 'aborted' is normal when listening continuously; retain no-speech as a diagnostic.
+    if (event.error === 'aborted') return;
+    if (event.error === 'no-speech') {
+      if (typeof EvaLearning !== 'undefined' && EvaLearning) EvaLearning.recordVoiceDiagnostic({ type: 'error', reason: 'no-speech' });
+      return;
+    }
+    if (typeof EvaLearning !== 'undefined' && EvaLearning) EvaLearning.recordVoiceDiagnostic({ type: event.error === 'not-allowed' ? 'denied' : 'error', reason: event.error });
     console.warn('[Voice] Error:', event.error);
     if (event.error === 'not-allowed') {
       _setMicStatus('denied');

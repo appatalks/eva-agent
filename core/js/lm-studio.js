@@ -47,6 +47,8 @@ function lmsSend() {
         txtMsg.focus();
         return;
     }
+    const sessionId = (typeof ensureActiveSessionId === 'function')
+      ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
     const signalContext = (typeof captureSignalDeliveryContext === 'function')
       ? captureSignalDeliveryContext(sQuestion)
       : null;
@@ -63,13 +65,17 @@ function lmsSend() {
         .then(function(d) { return (d.context && d.cognition_enabled) ? d.context : ''; })
         .catch(function() { return ''; });
     } catch (e) {}
-    try {
-      _lmsDataPromise = fetch(_bUrl + '/v1/data/retrieve?message=' + encodeURIComponent(sQuestion), {
-        signal: AbortSignal.timeout(95000)
-      }).then(function(r) { return r.ok ? r.json() : { data: '' }; })
-        .then(function(d) { return (d && d.retrieved) ? d.data : ''; })
-        .catch(function() { return ''; });
-    } catch (e) {}
+    var _lmsNeedsRetrieval = typeof EvaRequestRouting !== 'undefined' &&
+      EvaRequestRouting.needsDataRetrieval(sQuestion);
+    if (_lmsNeedsRetrieval) {
+      try {
+        _lmsDataPromise = fetch(_bUrl + '/v1/data/retrieve?message=' + encodeURIComponent(sQuestion) + '&session_id=' + encodeURIComponent(sessionId), {
+          signal: AbortSignal.timeout(95000)
+        }).then(function(r) { return r.ok ? r.json() : { data: '' }; })
+          .then(function(d) { return (d && d.retrieved) ? String(d.data || '').slice(0, 8000) : ''; })
+          .catch(function() { return ''; });
+      } catch (e) {}
+    }
 
     Promise.all([_lmsMemoryPromise, _lmsDataPromise]).then(function(results) {
       var _memCtx = results[0];
@@ -88,6 +94,9 @@ function lmsSend() {
       if (_extraCtx && _lmsRequestMsgs.length > 0 && _lmsRequestMsgs[0].role === 'system') {
         _lmsRequestMsgs[0] = { role: 'system', content: _extraCtx + _lmsRequestMsgs[0].content };
       }
+      var _lmsPromptBudget = EvaPromptBudget.compactMessages(_lmsRequestMsgs.concat([
+        { role: "user", content: sQuestion }
+      ]), { budget: 10000, recentTurns: 6 });
 
                 // Document the user's message (match chat-bubble UI and sanitize)
                 document.getElementById("txtMsg").innerHTML = "";
@@ -117,9 +126,7 @@ function lmsSend() {
         body: JSON.stringify({
             model: _lmsModel,
 
-            messages: _lmsRequestMsgs.concat([
-                { role: "user", content: sQuestion }
-            ]),
+            messages: _lmsPromptBudget.messages,
             temperature: 0.7, // Adjust as needed
         }),
     };
@@ -189,7 +196,9 @@ function lmsSend() {
                             body: JSON.stringify({
                               user_message: sQuestion.substring(0, 500),
                               assistant_message: candidate.substring(0, 500),
-                              model: 'lm-studio'
+                              model: 'lm-studio',
+                              session_id: (typeof ensureActiveSessionId === 'function')
+                                ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')
                             }),
                             signal: AbortSignal.timeout(5000)
                           }).catch(function() {});

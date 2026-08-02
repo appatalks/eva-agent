@@ -55,6 +55,9 @@ def test_required_files():
         "config.local.example.js",
         "core/style.css",
         "core/js/options.js",
+        "core/js/learning.js",
+        "core/js/prompt-budget.js",
+        "core/js/request-routing.js",
         "core/js/gpt-core.js",
         "core/js/gl-google.js",
         "core/js/lm-studio.js",
@@ -68,6 +71,16 @@ def test_required_files():
         "core/js/dialogs.js",
         "tools/acp_bridge.py",
         "tools/kusto_mcp.py",
+        "tools/test_prompt_budget.js",
+        "tools/test_request_routing.js",
+        "tools/test_fast_route.py",
+        "tools/test_tool_profiles.py",
+        "tools/test_kusto_cache.py",
+        "tools/test_latency.py",
+        "tools/test_latency_fake_server.py",
+        "tools/test_streaming.py",
+        "tools/test_learning.py",
+        "tools/test_learning.js",
         ".gitignore",
     ]
     for f in required:
@@ -221,6 +234,10 @@ def test_local_speech_contract():
     report("local_speech_recorder_finalizes_before_rearm", "var ownsCapture = _vv._capture === capture;" in options and "if (ownsCapture && _vv.open && _vv.whisperMode" in options)
     report("local_speech_400_recovers", "if (/HTTP 400/.test(message))" in options and "if (_vv.phase === 'speaking')" in options and "if (_vv.phase === 'awake')" in options and "_vvEnterAwake(_vv.convoMode ? _vv.convoTimeoutMs : 10000)" in options)
     report("local_speech_energy_barge", "_vv.whisperProvider !== 'local'" in options and "_vv._bargeEnergyFrames >= 4" in options)
+    report("local_speech_voice_threshold", "var threshold = 12;" in options)
+    report("local_speech_auto_defaults_english", 'model_language = "ko" if language == "ko" else "en"' in bridge)
+    report("local_speech_wake_alias", "function _vvWakeWordMatch" in options and "(eva|ava)" in options)
+    report("local_speech_direct_dispatch", "if (_vv.whisperProvider === 'local')" in options and "_vvHandleTranscript(data.text.trim())" in options and "_vvQueueTranscript(data.text.trim(), _vv.whisperProvider)" in options)
     report("local_speech_installer", '--voice-deps' in installer and 'install_local_speech' in installer)
     report("local_speech_installer_refreshes_existing_runtime", 'queue "Refresh Local Voices and local transcription" "install_local_speech"' in installer)
     report("local_speech_installer_uses_adapter", 'voice_package="$SCRIPT_DIR/tools/voice_clone_module"' in installer and '--reinstall "$voice_package"' in installer)
@@ -507,6 +524,27 @@ def test_js_routing_functions():
                f"not found in {expected_file}" if not found else "")
 
 
+def test_learning_static_contract():
+    """Structured learning remains bounded, consent-gated, and non-content-bearing."""
+    with open("tools/bridge/learning.py") as f:
+        backend = f.read()
+    with open("tools/bridge/core.py") as f:
+        bridge = f.read()
+    with open("core/js/learning.js") as f:
+        browser = f.read()
+    with open("core/js/options.js") as f:
+        options = f.read()
+    with open("index.html") as f:
+        html = f.read()
+    report("learning_signal_sources", all(value in backend for value in ("explicit-user", "action-result", "voice-inferred")))
+    report("learning_consent_categories", all(value in backend for value in ("explicit_feedback", "action_outcomes", "voice_diagnostics")))
+    report("learning_sensitive_fields_blocked", all(value in backend for value in ("transcript", "audio", "authorization", "password")))
+    report("learning_bridge_routes", all(value in bridge for value in ("/v1/learning/signals", "/v1/learning/consent", "_require_bridge_capability")))
+    report("learning_feedback_renderer_hook", "EvaLearning.attachFeedback" in options and "renderEvaResponse" in options)
+    report("learning_voice_no_transcript", "transcript" not in browser.split("function minimizeVoiceEvent", 1)[1].split("function recordVoiceDiagnostic", 1)[0])
+    report("learning_settings_controls", all(value in html for value in ("learning_explicit_feedback", "learning_action_outcomes", "learning_voice_diagnostics", "learningDelete")))
+
+
 def test_reasoning_effort_contract():
     """Reasoning levels flow from settings through ACP to the Copilot CLI."""
     with open("index.html") as f:
@@ -694,11 +732,12 @@ process.stdout.write(JSON.stringify(matrix.map(([text]) => sandbox.isAffirmative
     report("local_mcp_refreshes_after_auth", "Refreshed LOCAL mode" in bridge_core and "previous_manager.stop_all()" in bridge_core)
     report("github_mcp_omitted_without_pat", "unresolved_servers.append" in bridge_core and "mcp_servers.pop" in bridge_core)
     report("github_mcp_reapplies_late_pat", "_lastAutoAppliedMCPPat" in copilot_js and "_autoApplyMCPQueue" in copilot_js and options_js.count("autoApplySavedMCPConfig()") >= 2)
-    report("signal_capability_endpoints_bounded", bridge_core.count("_require_bridge_capability()") == 2)
+    report("signal_capability_endpoints_bounded", bridge_core.count("_require_bridge_capability()") >= 2)
     report("telemetry_summary_is_recent", '"summary": _telemetry_summarize(recent)' in bridge_core)
     with open("tools/bridge/telemetry.py") as f:
         telemetry_py = f.read()
     report("telemetry_aig_stage_budget", all(field in telemetry_py for field in ("aig_memory_ms", "aig_preflight_ms", "aig_responder_ms", "aig_preflight", "attempt_rate")))
+    report("telemetry_profile_cache_aggregation", all(field in telemetry_py for field in ("pool_profiles", "kusto_metadata_cache", "cache_kinds")))
     report("aig_general_bypasses_preflight", '_acp_route = "direct/general"' in bridge_core and "_needs_acp_preflight(msg_lower, _request_type)" in bridge_core and "def _needs_acp_preflight" in bridge_utils)
     report("aig_preflight_attempt_telemetry", "preflight_attempted=_preflight_attempted" in bridge_core and "preflight_succeeded=_preflight_succeeded" in bridge_core)
     report("aig_lmstudio_latency_telemetry", bridge_core.count('"aig_turn"') >= 2 and 'model_used = "aig:lmstudio:" + lms_model' in bridge_core)
@@ -759,9 +798,101 @@ def test_latency_telemetry_contract():
         preflight = summary.get("aig_preflight") or {}
         report("latency_telemetry_attempt_rate", preflight.get("turns") == 2 and preflight.get("attempted") == 1 and preflight.get("succeeded") == 1 and preflight.get("attempt_rate") == 0.5 and preflight.get("success_rate") == 1.0)
         report("latency_telemetry_preflight_stats", (summary.get("aig_preflight_ms") or {}).get("n") == 1 and (summary.get("aig_preflight_ms") or {}).get("p50") == 1200)
+        profile_cache_summary = _telemetry_summarize([
+            {"event": "acp_pool", "result": "hit", "tool_profile": "web"},
+            {"event": "kusto_metadata_cache", "kind": "profile", "hit": False},
+            {"event": "kusto_metadata_cache", "kind": "profile", "hit": True},
+        ])
+        report("latency_telemetry_profile_summary", profile_cache_summary.get("pool_profiles") == {"web": 1})
+        report("latency_telemetry_cache_summary", profile_cache_summary.get("kusto_metadata_cache", {}).get("profile") == {"hit": 1, "miss": 1})
     except Exception as error:
         report("latency_telemetry_attempt_rate", False, str(error))
         report("latency_telemetry_preflight_stats", False, str(error))
+
+
+def test_issue_130_latency_contract():
+    """Latency routing, profile isolation, and Kusto cache contracts stay wired."""
+    with open("index.html") as f:
+        html = f.read()
+    with open("core/js/request-routing.js") as f:
+        routing = f.read()
+    with open("core/js/lm-studio.js") as f:
+        lm_studio = f.read()
+    with open("tools/bridge/acp_client.py") as f:
+        acp_client = f.read()
+    with open("tools/bridge/kusto.py") as f:
+        kusto = f.read()
+    with open("tools/bridge/cognition.py") as f:
+        cognition = f.read()
+    with open("tools/test_latency.py") as f:
+        latency = f.read()
+    report("request_routing_script_loaded", "core/js/request-routing.js" in html and "classifyRequestType" in routing)
+    report("lmstudio_retrieval_is_gated", "needsDataRetrieval" in lm_studio and "/v1/data/retrieve" in lm_studio)
+    report("acp_profile_key_isolated", all(value in acp_client for value in ("tool_profile", "config_fingerprint", "_acp_model_key")))
+    report("acp_fingerprint_secret_safe", "_SECRET_MARKERS" in acp_client and '"<secret>"' in acp_client)
+    report("acp_profile_pool_telemetry", all(value in acp_client for value in ("tool_profile=", "server_count=", "pool_hit=")))
+    report("kusto_metadata_cache_contract", all(value in kusto for value in ("_kusto_metadata_cached", "_invalidate_kusto_metadata_cache", "KUSTO_SCHEMA_TTL_SECONDS")))
+    report("cognition_stable_metadata_cache", all(value in cognition for value in ("_cached_metadata_rows", '"profile"', '"goals"', '"skills"', '"emotion"')))
+    report("latency_probe_production_flags", all(value in latency for value in ("production", "session_id", "latency_stage", "latency_warm", "ttft_ms")))
+    report("latency_probe_conditional_revision", "if review[\"verdict\"] == \"REQUEST_CHANGES\":" in latency)
+    report("latency_probe_json_thresholds", all(value in latency for value in ("--json", "--threshold-ttft", "--threshold-total")))
+
+
+def test_streaming_contract():
+    """Streaming stays NDJSON, marker-safe, and privacy-safe across layers."""
+    with open("tools/bridge/acp_client.py") as f:
+        acp_client = f.read()
+    with open("tools/bridge/core.py") as f:
+        bridge_core = f.read()
+    with open("tools/bridge/telemetry.py") as f:
+        telemetry = f.read()
+    with open("core/js/options.js") as f:
+        options = f.read()
+    with open("core/js/aig.js") as f:
+        aig = f.read()
+    with open("core/js/copilot.js") as f:
+        copilot = f.read()
+
+    report("stream_acp_prompt_callback", "on_chunk=None" in acp_client and "_active_prompts" in acp_client and "session_id" in acp_client)
+    report("stream_ndjson_contract", all(value in bridge_core for value in ("application/x-ndjson", "_stream_chunk", '"type": "done"', "wfile.flush")))
+    report("stream_disconnect_guard", "ConnectionResetError" in bridge_core and "disconnected" in bridge_core)
+    report("stream_browser_parser", all(value in options for value in ("readEvaStreamingResponse", "TextDecoder", "getReader", "event.type === 'done'")))
+    report("stream_marker_safe_provisional", "text.textContent = provisional.value" in options and "renderEvaResponse" not in options[options.index("function createEvaStreamingBubble"):options.index("// Global Variables")])
+    report("stream_browser_routes", "stream: true" in aig and "stream: true" in copilot and "removeEvaStreamingBubble(provisional)" in aig and "removeEvaStreamingBubble(provisional)" in copilot)
+    report("stream_ttft_summary", all(value in telemetry for value in ("stream_ttft_ms", "stream_completion_ms", "stream_total_ms", "ttft_ms")))
+
+
+def test_prompt_budget_contract():
+    """Prompt views are bounded without truncating persistent histories."""
+    with open("index.html") as f:
+        html = f.read()
+    with open("core/js/prompt-budget.js") as f:
+        budget_js = f.read()
+    provider_sources = []
+    for path in ("core/js/gpt-core.js", "core/js/copilot.js", "core/js/gl-google.js",
+                 "core/js/lm-studio.js", "core/js/aig.js", "core/js/cognition.js"):
+        with open(path) as f:
+            provider_sources.append(f.read())
+    with open("tools/bridge/core.py") as f:
+        bridge_core = f.read()
+    with open("tools/bridge/utils.py") as f:
+        bridge_utils = f.read()
+
+    script_index = html.find('src="core/js/prompt-budget.js')
+    provider_index = html.find('src="core/js/gpt-core.js')
+    report("prompt_budget_loaded_before_providers", script_index >= 0 and provider_index > script_index)
+    report("prompt_budget_exports_compactor", all(value in budget_js for value in (
+        "compactMessages", "compactGeminiContents", "estimateTokens", "telemetry", "droppedMessages",
+        "[Conversation Summary]", "PINNED_ROLES",
+    )))
+    report("prompt_budget_all_provider_routes", all("EvaPromptBudget.compact" in source for source in provider_sources))
+    report("prompt_budget_aig_metadata", "prompt_budget: EvaPromptBudget.telemetry(aigPromptBudget)" in provider_sources[4] and "prompt_budget: EvaPromptBudget.telemetry(promptBudget)" in provider_sources[5])
+    report("prompt_budget_fast_route_classifier", "def _classify_fast_route" in bridge_utils and "_fast_route = _classify_fast_route" in bridge_core)
+    report("prompt_budget_skips_memory_and_preflight", "Fast route: skipping memory assembly" in bridge_core and 'fast/" + _fast_route' in bridge_core)
+    report("prompt_budget_telemetry_fields", all(value in bridge_core for value in (
+        "def _prompt_budget_fields", "fast_route=_fast_route", "escalation=_escalation",
+        "**_prompt_fields",
+    )))
 
 
 def test_security_alert_contract():
@@ -1422,8 +1553,9 @@ def main():
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
         ("HTML Model Selector", [test_model_selector]),
         ("JS Routing Functions", [test_js_routing_functions]),
+        ("Learning Contract", [test_learning_static_contract]),
         ("Reasoning Effort", [test_reasoning_effort_contract]),
-        ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract]),
+        ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract, test_issue_130_latency_contract, test_prompt_budget_contract, test_streaming_contract]),
         ("Security Alerts", [test_security_alert_contract]),
         ("Sidebar Workflows", [test_sidebar_workflow_contract]),
         ("Pages Comparison", [test_pages_comparison_contract]),

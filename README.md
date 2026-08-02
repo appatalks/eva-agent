@@ -48,7 +48,10 @@ Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |
 | **Agent operations** | Live scorecard for subagents, browser/desktop runs, steering, and animated memory topology |
 | **Multi-provider** | OpenAI, Google Gemini, GitHub Copilot, lm-studio (local) |
+| **Prompt budgets** | Bounded provider payloads with pinned instructions, recent turns, rolling summaries, and privacy-safe estimates |
 | **Reasoning controls** | Model-specific effort levels for OpenAI, GitHub Models, and Copilot CLI ACP |
+| **Streaming responses** | AIG and direct Copilot ACP show safe incremental text with TTFT telemetry; final actions run once |
+| **Structured learning controls** | Explicit response feedback, routine action outcomes, and optional voice diagnostics use consent-gated, expiring metadata only; prompts, transcripts, audio, credentials, and private content are excluded |
 | **Doctor diagnostics** | Structured readiness probe for every subsystem with actionable fixes |
 | **MCP ecosystem** | Azure, GitHub, Kusto, computer-use-linux desktop control |
 | **Adaptive review** | Fast direct Eva responses with GPT-5.6 Terra review for consequential turns |
@@ -61,6 +64,10 @@ Select **Eva (AIG)** in the model dropdown for the full experience.
 For persistent memory, point Settings > MCP at an Azure Data Explorer cluster, or use the default local SQLite backend (zero setup). For semantic recall, add an OpenAI key in Settings > Auth (falls back to keyword matching without one).
 
 For Signal notifications, install [signal-cli](https://github.com/AsamK/signal-cli) and link it to your Signal account (`signal-cli link -n "Eva"`). Enter sender and recipient numbers in Settings > Auth.
+
+### Learning and consent
+
+Settings > Learning controls local feedback, routine outcomes, voice diagnostics, and optional standing consent for routine read/search tools. Records are bounded, expire according to the configured retention period, and can be revoked or deleted from the same panel. Feedback may add a short preference observation to reflection; inferred outcomes never overwrite explicit memory. Consequential or irreversible ACP actions require a fresh in-chat Allow once decision.
 
 ### Local Voices
 

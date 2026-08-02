@@ -123,7 +123,9 @@ async function trboSend() {
                 body: JSON.stringify({
                   user_message: sQuestion.substring(0, 500),
                   assistant_message: s.content.substring(0, 500),
-                  model: sModel
+                  model: sModel,
+                  session_id: (typeof ensureActiveSessionId === 'function')
+                    ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')
                 }),
                 signal: AbortSignal.timeout(5000)
               }).catch(function() {});
@@ -248,6 +250,11 @@ async function trboSend() {
           kMessages = kMessages.filter(msg => msg.role === 'user' || msg.role === 'assistant');
           dTemperature = 1;
         }
+        var _gptPromptBudget = EvaPromptBudget.compactMessages(kMessages, {
+          budget: 12000,
+          recentTurns: 6
+        });
+        kMessages = _gptPromptBudget.messages;
   // Potential gpt-5 guidance (adjust if OpenAI docs require different roles)
   // Keep roles for now; gpt-5 uses default temperature only; do not override.
 	

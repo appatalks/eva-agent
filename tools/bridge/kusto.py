@@ -1,6 +1,7 @@
 """Bridge domain: kusto."""
 
 import json
+import hashlib
 import os
 import re
 import sys
@@ -9,6 +10,48 @@ import time
 import urllib.parse
 from bridge import config as _cfg
 from bridge import state as _st
+from bridge.telemetry import _telemetry_emit
+
+_KUSTO_METADATA_TTL_SECONDS = _cfg.KUSTO_METADATA_TTL_SECONDS
+_KUSTO_EMOTION_TTL_SECONDS = _cfg.KUSTO_EMOTION_TTL_SECONDS
+_KUSTO_SCHEMA_TTL_SECONDS = _cfg.KUSTO_SCHEMA_TTL_SECONDS
+
+
+def _kusto_metadata_cache_key(cluster_url, database, kind, query):
+    query_hash = hashlib.sha256(str(query or "").encode("utf-8")).hexdigest()[:16]
+    return (str(cluster_url or ""), str(database or ""), str(kind or ""), query_hash)
+
+
+def _kusto_metadata_cached(cluster_url, database, kind, query, loader, ttl=None):
+    """Cache stable metadata without retaining query text in telemetry."""
+    key = _kusto_metadata_cache_key(cluster_url, database, kind, query)
+    now = time.monotonic()
+    with _st.kusto_metadata_cache_lock:
+        entry = _st.kusto_metadata_cache.get(key)
+        if entry and entry[0] > now:
+            _telemetry_emit("kusto_metadata_cache", kind=kind, hit=True,
+                            ms=0.0)
+            return entry[1]
+    started = time.perf_counter()
+    value = loader()
+    expires = now + (float(ttl if ttl is not None else _KUSTO_METADATA_TTL_SECONDS))
+    with _st.kusto_metadata_cache_lock:
+        _st.kusto_metadata_cache[key] = (expires, value)
+    _telemetry_emit("kusto_metadata_cache", kind=kind, hit=False,
+                    ms=round((time.perf_counter() - started) * 1000.0, 1))
+    return value
+
+
+def _invalidate_kusto_metadata_cache(include_schema=False):
+    with _st.kusto_metadata_cache_lock:
+        if include_schema:
+            _st.kusto_metadata_cache.clear()
+        else:
+            for key in list(_st.kusto_metadata_cache):
+                if key[2] != "schema":
+                    del _st.kusto_metadata_cache[key]
+    if include_schema:
+        _st.kusto_table_columns_cache.clear()
 
 
 def _refresh_kusto_token():
@@ -20,7 +63,7 @@ def _refresh_kusto_token():
         prior = _st.kusto_token_cache
         token = _st.kusto_credential.get_token("https://kusto.kusto.windows.net/.default")
         _st.kusto_token_cache = token.token
-        _st.kusto_table_columns_cache = {}
+        _invalidate_kusto_metadata_cache(include_schema=True)
         refresh_state = "updated" if token.token != prior else "unchanged"
         print(f"[Bridge] Kusto token refreshed ({refresh_state}, length: {len(token.token)})")
         return True
@@ -363,37 +406,22 @@ def _get_table_columns(cluster_url, database, table):
     """Return known table columns from Kusto schema, cached per cluster/db/table.
     Returns list of column names, or None if the table does not exist.
     Negative results (table not found) are cached to avoid repeated queries."""
-    key = (cluster_url, database, table)
-    cached = _st.kusto_table_columns_cache.get(key)
-    if cached is not None:
-        # Empty list means table confirmed non-existent
-        return cached if cached else None
+    query = f".show table {table} cslschema"
 
-    schema_rows = _kusto_query_direct(
-        cluster_url,
-        database,
-        f".show table {table} cslschema",
-        is_mgmt=True,
-    )
-    if not schema_rows:
-        # Cache negative result so we don't re-query on every call
-        _st.kusto_table_columns_cache[key] = []
-        return None
+    def load_schema():
+        schema_rows = _kusto_query_direct(cluster_url, database, query, is_mgmt=True)
+        if not schema_rows:
+            return []
+        schema_str = schema_rows[0].get("Schema", "") if schema_rows else ""
+        if not schema_str:
+            return [str(r.get("ColumnName", "")).strip() for r in schema_rows if r.get("ColumnName")]
+        return [pair.split(":")[0].strip() for pair in schema_str.split(",") if ":" in pair]
 
-    # .show table X cslschema returns a single row with a Schema column containing
-    # comma-separated "name:type" pairs. Parse the column names from it.
-    schema_str = schema_rows[0].get("Schema", "") if schema_rows else ""
-    if not schema_str:
-        # Fallback: try extracting ColumnName from each row (older Kusto versions)
-        cols = [str(r.get("ColumnName", "")).strip() for r in schema_rows if r.get("ColumnName")]
-    else:
-        cols = [pair.split(":")[0].strip() for pair in schema_str.split(",") if ":" in pair]
-    if not cols:
-        _st.kusto_table_columns_cache[key] = []
-        return None
-
-    _st.kusto_table_columns_cache[key] = cols
-    return cols
+    cols = _kusto_metadata_cached(
+        cluster_url, database, "schema", query, load_schema, _KUSTO_SCHEMA_TTL_SECONDS
+    ) or []
+    _st.kusto_table_columns_cache[(cluster_url, database, table)] = cols
+    return cols or None
 
 
 def _kusto_ingest_direct(cluster_url, database, table, columns, rows_data):
@@ -466,6 +494,7 @@ def _kusto_ingest_direct(cluster_url, database, table, columns, rows_data):
                         return False
                 except Exception:
                     pass
+                _invalidate_kusto_metadata_cache(include_schema=False)
                 return True
             elif resp.status_code == 401 and attempt == 0 and _refresh_kusto_token():
                 print("[Cognition] Kusto ingest got 401, retrying with refreshed token")
@@ -494,9 +523,9 @@ def _kusto_ingest_direct(cluster_url, database, table, columns, rows_data):
 
 def _get_kusto_config():
     """Get Kusto cluster URL and database from the running MCP config."""
-    if not _st.acp_client or not _st.acp_client.mcp_config:
+    if not _st.configured_mcp_config:
         return None, None
-    kusto_cfg = _st.acp_client.mcp_config.get("kusto-mcp-server", {})
+    kusto_cfg = _st.configured_mcp_config.get("kusto-mcp-server", {})
     env = kusto_cfg.get("env", {})
     cluster = env.get("KUSTO_CLUSTER_URL", "") or _st.active_kusto_cluster
     if _kusto_database_locked:
@@ -519,6 +548,8 @@ def _get_locked_kusto_database():
 def _capture_active_kusto_env(mcp_config):
     """Track the Kusto config currently posted to the bridge."""
     # global statement removed — writes go to _st.*
+    prior_cluster = _st.active_kusto_cluster
+    prior_db = _st.active_kusto_db
     kusto_cfg = (mcp_config or {}).get("kusto-mcp-server", {})
     env = kusto_cfg.get("env", {}) if isinstance(kusto_cfg, dict) else {}
     _st.active_kusto_db = str(env.get("KUSTO_DATABASE", "") or os.environ.get("KUSTO_DATABASE", "")).strip()
@@ -531,6 +562,8 @@ def _capture_active_kusto_env(mcp_config):
         if cached:
             _st.active_kusto_cluster = cached
             print(f"[Bridge] Kusto cluster restored from cache: {cached}")
+    if prior_cluster != _st.active_kusto_cluster or prior_db != _st.active_kusto_db:
+        _invalidate_kusto_metadata_cache(include_schema=True)
 
 
 

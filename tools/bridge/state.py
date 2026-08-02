@@ -13,6 +13,7 @@ import threading
 
 from bridge.config import (
     DEFAULT_ALERT_SETTINGS,
+    MODE_PREF_PATH,
     env_truthy,
 )
 
@@ -21,11 +22,14 @@ acp_client = None           # Global ACP client instance (most-recently-used)
 acp_pool = {}               # model_key -> ACPClient
 acp_pool_order = []         # model_key list, LRU first
 acp_pool_lock = threading.RLock()
+configured_mcp_config = {}  # full sanitized runtime selection; clients receive profiles
 
 # ── Kusto auth ──────────────────────────────────────────────────────
 kusto_token_cache = None    # Cached Kusto access token
 kusto_credential = None     # Cached credential object for token refresh
 kusto_table_columns_cache = {}  # (cluster, db, table) -> [columns]
+kusto_metadata_cache = {}        # (cluster, db, kind, query) -> (expires, value)
+kusto_metadata_cache_lock = threading.RLock()
 kusto_database_locked = env_truthy("KUSTO_DATABASE_LOCKED") or env_truthy("EVA_KUSTO_LOCKED")
 active_kusto_db = os.environ.get("KUSTO_DATABASE", "").strip()
 active_kusto_cluster = os.environ.get("KUSTO_CLUSTER_URL", "").strip()
@@ -88,8 +92,7 @@ notify_ring = []
 # ── Local MCP (no-cloud mode) ──────────────────────────────────────
 local_mcp_manager = None    # LocalMCPManager instance (lazy)
 # Restore persisted mode preference (local vs cloud).
-_mode_pref_path = os.path.join(
-    os.path.expanduser("~/.config/eva-standalone"), "mode.txt")
+_mode_pref_path = MODE_PREF_PATH
 try:
     _saved_mode = open(_mode_pref_path).read().strip().lower() if os.path.isfile(_mode_pref_path) else ""
 except OSError:

@@ -1,0 +1,364 @@
+"""Deterministic tests for ACP and HTTP streaming contracts."""
+
+import io
+import json
+import os
+import subprocess
+import sys
+import unittest
+from unittest.mock import patch
+
+
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(TOOLS_DIR)
+if TOOLS_DIR not in sys.path:
+    sys.path.insert(0, TOOLS_DIR)
+
+from bridge.acp_client import ACPClient
+from bridge.core import BridgeHandler
+from bridge.telemetry import _telemetry_summarize
+
+
+class CallbackACPClient(ACPClient):
+    def __init__(self):
+        super().__init__(model="test-model")
+        self.alive = True
+        self.process = object()
+        self.session_id = "startup-session"
+        self._remember_conversation_session("__default__", self.session_id)
+        self.created_sessions = []
+
+    def _send_request(self, method, params, timeout=120):
+        if method == "session/new":
+            session_id = "session-" + str(len(self.created_sessions) + 1)
+            self.created_sessions.append(session_id)
+            return {"sessionId": session_id}
+        if method == "session/prompt":
+            for text in ("alpha ", "beta [[EVA_SIGNAL]]", "[[/EVA_SIGNAL]]"):
+                self._handle_session_update({
+                    "sessionId": params["sessionId"],
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": text},
+                    },
+                })
+            return {"stopReason": "end_turn"}
+        raise AssertionError("unexpected ACP method: " + method)
+
+
+class _HandlerWFile(io.BytesIO):
+    pass
+
+
+class _DisconnectingWFile:
+    def flush(self):
+        return None
+
+    def write(self, value):
+        raise BrokenPipeError("client closed")
+
+
+def make_handler(wfile):
+    handler = BridgeHandler.__new__(BridgeHandler)
+    handler.wfile = wfile
+    handler.send_response = lambda status: None
+    handler.send_header = lambda name, value: None
+    handler.end_headers = lambda: None
+    handler._cors_headers = lambda: None
+    return handler
+
+
+class StreamingContractTests(unittest.TestCase):
+    def test_permission_request_waits_for_explicit_user_decision(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": False}), \
+                patch("bridge.acp_client._telemetry_emit") as emit, \
+                patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "jsonrpc": "2.0",
+                "id": 55,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-1", "title": "Delete file", "kind": "delete"},
+                    "options": [{"optionId": "yes", "name": "Allow", "kind": "allow_once"}],
+                },
+            })
+        pending = client.list_pending_permissions()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(responses, [])
+        self.assertTrue(client.resolve_permission(pending[0]["id"], "yes"))
+        self.assertEqual(responses, [(55, {"outcome": {"outcome": "selected", "optionId": "yes"}})])
+        self.assertEqual(emit.call_args.args[0], "acp_permission")
+
+    def test_routine_read_can_use_revocable_standing_consent(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": True}), \
+                patch("bridge.acp_client._telemetry_emit"):
+            client._handle_message({
+                "id": 56,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-2", "title": "Read issue", "kind": "read"},
+                    "options": [{"optionId": "read-once", "name": "Allow", "kind": "allow_once"}],
+                },
+            })
+        self.assertEqual(responses, [(56, {"outcome": {"outcome": "selected", "optionId": "read-once"}})])
+        self.assertEqual(client.list_pending_permissions(), [])
+
+    def test_passive_recall_rejects_tool_immediately(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        client._begin_prompt(200, "session-1", None, "passive_recall")
+        with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": True}), \
+                patch("bridge.acp_client._telemetry_emit") as emit:
+            client._handle_message({
+                "id": 60,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-5", "kind": "execute"},
+                    "options": [
+                        {"optionId": "allow", "kind": "allow_once"},
+                        {"optionId": "reject", "kind": "reject_once"},
+                    ],
+                },
+            })
+        client._finish_prompt(200)
+        self.assertEqual(responses, [(60, {
+            "outcome": {"outcome": "selected", "optionId": "reject"}
+        })])
+        self.assertEqual(client.list_pending_permissions(), [])
+        self.assertEqual(emit.call_args.kwargs["decision"], "policy-reject")
+
+    def test_passive_recall_without_reject_option_never_cancels_session(self):
+        client = CallbackACPClient()
+        wire = []
+        client._send_response = lambda request_id, result: wire.append(("response", request_id, result))
+        client._send_notification = lambda method, params: wire.append(("notification", method, params))
+        client._send_rpc_error = lambda request_id, code, message: wire.append(("error", request_id, code, message))
+        client._begin_prompt(201, "session-2", None, "passive_recall")
+        with patch("bridge.acp_client._telemetry_emit") as emit:
+            client._handle_message({
+                "id": 61,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-2",
+                    "toolCall": {"toolCallId": "call-6", "kind": "execute"},
+                    "options": [{"optionId": "allow", "kind": "allow_once"}],
+                },
+            })
+        client._finish_prompt(201)
+        self.assertEqual(wire[0][0], "error")
+        self.assertFalse(any(item[0] == "notification" for item in wire))
+        self.assertEqual(emit.call_args.kwargs["decision"], "policy-deny")
+
+    def test_permission_timeout_cancels_session_before_response(self):
+        client = CallbackACPClient()
+        wire = []
+        client._send_notification = lambda method, params: wire.append(("notification", method, params))
+        client._send_response = lambda request_id, result: wire.append(("response", request_id, result))
+        with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": False}), \
+                patch("bridge.acp_client._telemetry_emit"), \
+                patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 57,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-3", "title": "Execute command", "kind": "execute"},
+                    "options": [{"optionId": "reject", "name": "Reject", "kind": "reject_once"}],
+                },
+            })
+        permission_id = client.list_pending_permissions()[0]["id"]
+        client._expire_permission(permission_id)
+        self.assertEqual(wire[0], ("notification", "session/cancel", {"sessionId": "session-1"}))
+        self.assertEqual(wire[1], ("response", 57, {"outcome": {"outcome": "cancelled"}}))
+
+    def test_persistent_permission_option_and_sensitive_title_fail_closed(self):
+        client = CallbackACPClient()
+        wire = []
+        client._send_notification = lambda method, params: wire.append(("notification", method, params))
+        client._send_response = lambda request_id, result: wire.append(("response", request_id, result))
+        sensitive_title = "delete /private/customer-secret.txt?token=SECRET"
+        with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": False}), \
+                patch("bridge.acp_client._telemetry_emit") as emit, \
+                patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 58,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-4", "title": sensitive_title, "kind": "delete"},
+                    "options": [{"optionId": "forever", "name": sensitive_title, "kind": "allow_always"}],
+                },
+            })
+        pending = client.list_pending_permissions()
+        self.assertNotIn(sensitive_title, json.dumps(pending))
+        self.assertNotIn(sensitive_title, str(emit.call_args_list))
+        self.assertTrue(client.resolve_permission(pending[0]["id"], "forever"))
+        self.assertEqual(wire[0], ("notification", "session/cancel", {"sessionId": "session-1"}))
+        self.assertEqual(wire[1], ("response", 58, {"outcome": {"outcome": "cancelled"}}))
+
+    def test_direct_terminal_request_is_rejected_without_execution(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        with patch("bridge.acp_client.subprocess.Popen") as popen:
+            client._handle_message({
+                "id": 59,
+                "method": "terminal/create",
+                "params": {"sessionId": "session-1", "command": "echo", "args": ["SECRET"]},
+            })
+        popen.assert_not_called()
+        self.assertEqual(responses[0][0], 59)
+        self.assertEqual(responses[0][1]["error"]["code"], -32601)
+
+    def test_usage_updates_record_context_without_content(self):
+        client = CallbackACPClient()
+        events = []
+        with patch("bridge.acp_client._telemetry_emit", side_effect=lambda event, **fields: events.append((event, fields))):
+            client._handle_session_update({
+                "sessionId": "session-1",
+                "update": {
+                    "sessionUpdate": "usage_update",
+                    "used": 114000,
+                    "size": 200000,
+                    "cost": {"amount": 0.045, "currency": "USD"},
+                },
+            })
+        self.assertEqual(client.session_usage["session-1"]["used"], 114000)
+        self.assertEqual(client.session_usage["session-1"]["percent"], 57.0)
+        self.assertEqual(events[0][0], "acp_usage")
+        self.assertNotIn("content", events[0][1])
+
+    def test_callback_receives_chunks_and_prompt_keeps_accumulation(self):
+        client = CallbackACPClient()
+        chunks = []
+        result = client.prompt("hello", conversation_id="conversation-a", on_chunk=chunks.append)
+        self.assertEqual(chunks, ["alpha ", "beta [[EVA_SIGNAL]]", "[[/EVA_SIGNAL]]"])
+        self.assertEqual(result["text"], "alpha beta [[EVA_SIGNAL]][[/EVA_SIGNAL]]")
+        self.assertEqual(result["stop_reason"], "end_turn")
+        self.assertEqual(client.created_sessions, ["session-1"])
+
+    def test_session_mismatch_cannot_deliver_to_prompt_callback(self):
+        client = CallbackACPClient()
+        chunks = []
+        client._begin_prompt(101, "session-a", chunks.append)
+        client._handle_session_update({
+            "sessionId": "session-b",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "wrong"},
+            },
+        })
+        self.assertEqual(chunks, [])
+        self.assertEqual(client._finish_prompt(101)[0], "")
+
+    def test_ndjson_wire_format_flushes_chunk_before_done(self):
+        handler = make_handler(_HandlerWFile())
+        state = handler._new_stream_state("copilot-acp", "copilot-acp")
+        response = {
+            "choices": [{"message": {"role": "assistant", "content": "alpha beta"}}]
+        }
+        telemetry_events = []
+        with patch("bridge.core._telemetry_emit", side_effect=lambda event, **fields: telemetry_events.append((event, fields))):
+            handler._stream_chunk(state, "alpha ")
+            handler._stream_chunk(state, "beta")
+            handler._stream_finish(state, response)
+        events = [json.loads(line) for line in handler.wfile.getvalue().decode().splitlines()]
+        self.assertEqual([event["type"] for event in events], ["chunk", "chunk", "done"])
+        self.assertEqual(events[0]["text"] + events[1]["text"], "alpha beta")
+        self.assertEqual(events[-1]["response"], response)
+        self.assertEqual(telemetry_events[0][0], "stream_turn")
+        self.assertEqual(telemetry_events[0][1]["chunk_count"], 2)
+        self.assertNotIn("alpha beta", json.dumps(telemetry_events[0][1]))
+
+    def test_disconnect_is_recorded_without_breaking_upstream_completion(self):
+        handler = make_handler(_DisconnectingWFile())
+        state = handler._new_stream_state("aig", "aig:test")
+        with patch("bridge.core._telemetry_emit"):
+            handler._stream_chunk(state, "partial")
+            handler._stream_finish(state, {"choices": [{"message": {"content": "final"}}]})
+        self.assertTrue(state["disconnected"])
+        self.assertTrue(state["finished"])
+
+    def test_stream_error_is_terminal_ndjson_not_a_second_http_response(self):
+        handler = make_handler(_HandlerWFile())
+        state = handler._new_stream_state("aig", "aig:test")
+        handler._stream_chunk(state, "partial")
+        handler._stream_error(state, "upstream failed", 500)
+        events = [json.loads(line) for line in handler.wfile.getvalue().decode().splitlines()]
+        self.assertEqual([event["type"] for event in events], ["chunk", "error"])
+        self.assertEqual(events[-1]["status"], 500)
+        self.assertTrue(state["finished"])
+
+    def test_ttft_is_aggregated_without_content_fields(self):
+        summary = _telemetry_summarize([
+            {"event": "stream_turn", "ttft_ms": 120, "completion_ms": 900,
+             "total_ms": 905, "chunk_count": 3, "route": "aig", "model": "test"},
+            {"event": "stream_turn", "ttft_ms": 180, "completion_ms": 1100,
+             "total_ms": 1110, "chunk_count": 4, "route": "copilot-acp", "model": "test"},
+              {"event": "acp_usage", "used": 114000, "size": 200000, "percent": 57.0},
+        ])
+        self.assertEqual(summary["stream_ttft_ms"]["p50"], 150)
+        self.assertEqual(summary["stream_ttft_ms"]["n"], 2)
+        self.assertEqual(summary["stream_completion_ms"]["max"], 1100)
+        self.assertEqual(summary["acp_context_used_tokens"]["max"], 114000)
+        self.assertEqual(summary["acp_context_percent"]["p50"], 57.0)
+
+    def test_browser_parser_handles_split_utf8_ndjson_chunks(self):
+        source_path = os.path.join(REPO_DIR, "core/js/options.js")
+        with open(source_path, encoding="utf-8") as source_file:
+            source = source_file.read()
+        start = source.index("async function readEvaStreamingResponse")
+        end = source.index("\n\n// Global Variables", start)
+        parser = source[start:end]
+        script = parser + r'''
+const encoder = new TextEncoder();
+const wire = JSON.stringify({type: "chunk", text: "hello "}) + "\n" +
+  JSON.stringify({type: "chunk", text: "[[EVA_LOOK]]"}) + "\n" +
+  JSON.stringify({type: "done", response: {choices: [{message: {content: "hello [[EVA_LOOK]]"}}]}}) + "\n";
+const bytes = encoder.encode(wire);
+let offset = 0;
+const response = {
+  headers: {get: () => "application/x-ndjson; charset=utf-8"},
+  body: {getReader: () => ({read: async () => {
+    if (offset >= bytes.length) return {done: true};
+    const next = Math.min(bytes.length, offset + 3);
+    const value = bytes.slice(offset, next);
+    offset = next;
+    return {done: false, value};
+  }})}
+};
+const chunks = [];
+readEvaStreamingResponse(response, text => chunks.push(text)).then(data => {
+  if (chunks.join("") !== "hello [[EVA_LOOK]]") process.exit(1);
+  if (data.choices[0].message.content !== "hello [[EVA_LOOK]]") process.exit(2);
+}).catch(() => process.exit(3));
+'''
+        completed = subprocess.run(["node", "-"], input=script, text=True, capture_output=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_provisional_renderer_is_text_only_and_final_routes_render_once(self):
+        with open(os.path.join(REPO_DIR, "core/js/options.js"), encoding="utf-8") as source_file:
+            source = source_file.read()
+        provisional = source[source.index("function createEvaStreamingBubble"):source.index("// Global Variables")]
+        self.assertIn("text.textContent", provisional)
+        self.assertNotIn("renderEvaResponse", provisional)
+        with open(os.path.join(REPO_DIR, "core/js/aig.js"), encoding="utf-8") as aig_file:
+            aig = aig_file.read()
+        with open(os.path.join(REPO_DIR, "core/js/copilot.js"), encoding="utf-8") as copilot_file:
+            copilot = copilot_file.read()
+        self.assertIn("removeEvaStreamingBubble(provisional);\n    var content", aig)
+        self.assertIn("removeEvaStreamingBubble(provisional);\n    await _copilotRenderResponse", copilot)
+
+
+if __name__ == "__main__":
+    unittest.main()

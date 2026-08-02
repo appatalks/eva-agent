@@ -20,6 +20,8 @@ async function aigSend() {
   var signalContext = (typeof captureSignalDeliveryContext === 'function')
     ? captureSignalDeliveryContext(sQuestion)
     : null;
+  var sessionId = (typeof ensureActiveSessionId === 'function')
+    ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
 
   // Display user message
   var safeUser = escapeHtml(sQuestion).replace(/\n/g, '<br>');
@@ -81,6 +83,7 @@ async function aigSend() {
       var cogResult = await Cognition.run({
         userMessage: sQuestion,
         messages: existingMessages,
+        sessionId: sessionId,
         forceEnable: cogDecision.reason === 'phrase',
         forcedReason: cogDecision.reason,
         reviewReason: cogDecision.reason
@@ -135,7 +138,8 @@ async function aigSend() {
             body: JSON.stringify({
               user_message: sQuestion,
               assistant_message: cogContent,
-              model: cogTag
+              model: cogTag,
+              session_id: sessionId
             }),
             signal: AbortSignal.timeout(5000)
           }).catch(function () {});
@@ -186,24 +190,32 @@ async function aigSend() {
 
   try {
     var url = bridgeUrl.replace(/\/+$/, '') + '/v1/aig/chat';
+    var aigPromptBudget = EvaPromptBudget.compactMessages(existingMessages, {
+      budget: 12000,
+      recentTurns: 6
+    });
 
     // The selected AIG backend is Eva's primary model. Adaptive review uses a
     // separate reviewer model and must never override this direct responder.
     var aigModel = (document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna';
     var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel('aig') : 'default';
 
+    var provisional = null;
     var resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        messages: existingMessages,
+        messages: aigPromptBudget.messages,
+        prompt_budget: EvaPromptBudget.telemetry(aigPromptBudget),
         user_message: sQuestion,
+        session_id: sessionId,
         model: aigModel,
         acp_reasoning_effort: reasoningEffort === 'default' ? '' : reasoningEffort,
         lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
         lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
         github_pat: (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : '',
-        openai_api_key: (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : ''
+        openai_api_key: (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : '',
+        stream: true
       })
     });
 
@@ -216,7 +228,11 @@ async function aigSend() {
       return;
     }
 
-    var data = await resp.json();
+    var data = await readEvaStreamingResponse(resp, function (chunk) {
+      if (!provisional) provisional = createEvaStreamingBubble(txtOutput);
+      appendEvaStreamingChunk(provisional, chunk, txtOutput);
+    });
+    removeEvaStreamingBubble(provisional);
     var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
     var modelUsed = data.model || 'aig';
 
@@ -263,6 +279,7 @@ async function aigSend() {
     }
 
   } catch (err) {
+    removeEvaStreamingBubble(typeof provisional === 'undefined' ? null : provisional);
     var errorMessage = err.message || String(err);
     if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError')) {
       errorMessage += ' — Is the ACP bridge server running? Start it with: python3 tools/acp_bridge.py --enable-kusto-mcp';

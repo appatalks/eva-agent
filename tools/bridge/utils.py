@@ -383,6 +383,72 @@ def _classify_request_type(msg_lower):
     return "general"
 
 
+def _effective_routing_message(user_message, internal=False, recall_query=""):
+    """Use the raw user turn to route internal cognition prompts."""
+    query = str(recall_query or "").strip()
+    if internal and query:
+        return query
+    return str(user_message or "")
+
+
+def _classify_fast_route(message):
+    """Classify only low-risk, self-contained requests for one responder pass."""
+    text = re.sub(r"\s+", " ", str(message or "").strip().lower())
+    normalized = re.sub(r"[^a-z0-9\s]", "", text).strip()
+    if re.fullmatch(
+        r"(?:hi|hey|hello|howdy|yo|sup|good morning|good afternoon|good evening|"
+        r"thanks|thank you|ok|okay|bye|goodbye|see you|great|cool|nice|sure|yes|no|"
+        r"nah|yep|nope)(?: eva)?",
+        normalized,
+    ):
+        return "greeting"
+
+    date_time = re.fullmatch(
+        r"(?:what(?:'s| is)? (?:the )?(?:current )?(?:date|time|day|today's date|todays date)(?: today)?|"
+        r"what time is it(?: right now)?|what day is it(?: today)?|"
+        r"(?:current|today's|todays) (?:date|time|day))",
+        text.rstrip("?.! "),
+    )
+    if date_time:
+        return "date-time"
+
+    arithmetic = re.sub(
+        r"^(?:what is|calculate|compute|solve)\s+", "", text.rstrip("?.! ")
+    )
+    if (
+        len(arithmetic) <= 80
+        and re.fullmatch(r"[0-9\s()+\-*/%.]+", arithmetic)
+        and re.search(r"[+*/%\-]", arithmetic[1:] if arithmetic else "")
+    ):
+        return "basic-arithmetic"
+    return ""
+
+
+def _is_passive_memory_recall(message):
+    """Return true for read-only questions about Eva's existing memory/context."""
+    text = re.sub(r"\s+", " ", str(message or "").strip().lower())
+    if not re.search(
+        r"\b(?:remember|recall|memories|memory|knowledge banks?|original (?:design|concept)|"
+        r"what (?:do|did) you know|what was our|who (?:am i|is))\b",
+        text,
+    ):
+        return False
+    return not bool(re.search(
+        r"\b(?:save|store|commit|write|delete|remove|update|change|run|execute|"
+        r"query|schema|tables?|rows?|export|download)\b",
+        text,
+    ))
+
+
+def _passive_recall_session_key(conversation_id):
+    """Return a stable scoped key, or a unique key for anonymous API callers."""
+    value = str(conversation_id or "").strip()[:120]
+    if value:
+        return value + ":recall"
+    import uuid
+    return "anonymous-recall-" + uuid.uuid4().hex
+
+
 def _needs_acp_preflight(msg_lower, request_type):
     """Return true only when ACP pre-retrieval is needed before responding.
 
@@ -419,6 +485,31 @@ def _needs_acp_preflight(msg_lower, request_type):
         message,
     ))
     return artifact_request or (not explanatory_question and (github_operation or platform_operation))
+
+
+def _select_acp_tool_profile(message, request_type=None, fast_route="", no_tools=False):
+    """Choose the smallest MCP profile required by a deterministic route."""
+    if fast_route or no_tools or _is_passive_memory_recall(message):
+        return "none"
+    text = str(message or "").lower()
+    request_type = request_type or _classify_request_type(text)
+    if request_type in {"news-search", "weather-search", "financial-data", "web-search"}:
+        return "web"
+    if request_type in {"kusto-query", "kusto-operator"} or re.search(
+        r"\b(?:memory|remember|knowledge|goals?|skills?|emotion|kusto|adx|database|schema|table)\b", text
+    ):
+        return "kusto"
+    if re.search(r"\bgithub\b", text) and re.search(
+        r"\b(?:search|find|list|check|review|open|create|update|close|comment|manage|run|query|get|describe|issue|pull request|repository|repo)\b",
+        text,
+    ):
+        return "github"
+    if re.search(r"\b(?:azure|mcp|kubernetes|kubectl|browser|desktop|camera|signal)\b", text) or re.search(
+        r"\b(?:create|generate|make|export|download|write|save)\b[^.!?]{0,100}\b(?:file|report|pdf|csv|json|markdown|document)\b",
+        text,
+    ):
+        return "broad"
+    return "none"
 _MEMORY_TABLES = _cfg.MEMORY_TABLES
 
 # Injected into tool-active ACP prompts so Eva persists durable facts herself.

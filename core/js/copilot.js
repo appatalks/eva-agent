@@ -174,11 +174,15 @@ async function copilotSend() {
 async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, storageKey, signalContext) {
   var githubToken = getAuthKey('GITHUB_PAT');
   var model = modelValue.replace(/^copilot-/, '');
+  var requestMessages = EvaPromptBudget.compactMessages(messages, {
+    budget: 12000,
+    recentTurns: 6
+  }).messages;
 
   // --- Cognition: Fetch memory context from bridge and inject into system message ---
   var lastUserMsg = '';
-  for (var i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') { lastUserMsg = messages[i].content || ''; break; }
+  for (var i = requestMessages.length - 1; i >= 0; i--) {
+    if (requestMessages[i].role === 'user') { lastUserMsg = requestMessages[i].content || ''; break; }
   }
   try {
     var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
@@ -190,15 +194,15 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
       if (ctxData.context && ctxData.cognition_enabled) {
         // Prepend memory context to the first system message, or insert one
         var injected = false;
-        for (var j = 0; j < messages.length; j++) {
-          if (messages[j].role === 'system' || messages[j].role === 'developer') {
-            messages[j].content = ctxData.context + '\n\n' + messages[j].content;
+        for (var j = 0; j < requestMessages.length; j++) {
+          if (requestMessages[j].role === 'system' || requestMessages[j].role === 'developer') {
+            requestMessages[j].content = ctxData.context + '\n\n' + requestMessages[j].content;
             injected = true;
             break;
           }
         }
         if (!injected) {
-          messages.unshift({ role: 'system', content: ctxData.context });
+          requestMessages.unshift({ role: 'system', content: ctxData.context });
         }
       }
     }
@@ -208,6 +212,10 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
 
   var temp = (typeof getModelTemperature === 'function') ? getModelTemperature() : 0.7;
   var maxTok = (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 4096;
+  var requestBudget = EvaPromptBudget.compactMessages(requestMessages, {
+    budget: 12000,
+    recentTurns: 6
+  });
 
   // Map short model names to GitHub Models API publisher/model format
   // See: https://github.com/marketplace/models/catalog
@@ -232,7 +240,7 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
 
   var payload = {
     model: apiModel,
-    messages: messages,
+    messages: requestBudget.messages,
     temperature: temp,
     max_tokens: maxTok
   };
@@ -292,10 +300,17 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
 
   setStatus('info', 'Sending to ' + modelLabel + ' via ' + bridgeUrl + '...');
 
+  var provisional = null;
   try {
     var url = bridgeUrl.replace(/\/+$/, '') + '/v1/chat/completions';
 
-    var payload = { messages: messages, model: 'copilot-acp' };
+    var payload = {
+        messages: EvaPromptBudget.compactMessages(messages, { budget: 12000, recentTurns: 6 }).messages,
+      model: 'copilot-acp',
+      stream: true,
+      session_id: (typeof ensureActiveSessionId === 'function')
+        ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')
+    };
     if (acpModel) payload.acp_model = acpModel;
     var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel('copilot-acp') : 'default';
     if (reasoningEffort !== 'default') payload.acp_reasoning_effort = reasoningEffort;
@@ -311,10 +326,15 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
       return;
     }
 
-    var data = await resp.json();
-    _copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext);
+    var data = await readEvaStreamingResponse(resp, function (chunk) {
+      if (!provisional) provisional = createEvaStreamingBubble(txtOutput);
+      appendEvaStreamingChunk(provisional, chunk, txtOutput);
+    });
+    removeEvaStreamingBubble(provisional);
+    await _copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext);
 
   } catch (err) {
+    removeEvaStreamingBubble(provisional);
     var errorMessage = err.message || String(err);
     if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError')) {
       errorMessage += ' \u2014 Is the ACP bridge server running? Start it with: python3 tools/acp_bridge.py';
@@ -355,7 +375,9 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, 
         body: JSON.stringify({
           user_message: userMessage,
           assistant_message: content.substring(0, 500),
-          model: modelLabel
+          model: modelLabel,
+          session_id: (typeof ensureActiveSessionId === 'function')
+            ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')
         }),
         signal: AbortSignal.timeout(5000)
       }).catch(function() {}); // fire-and-forget

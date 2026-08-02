@@ -158,7 +158,9 @@ class LocalTranscriptionService:
         if len(audio) > MAX_AUDIO_BYTES:
             raise ValueError("audio input exceeds the maximum size")
         language = normalize_speech_language(language)
-        model_language = "en" if language == "en" else "ko"
+        # Auto mode should start with the lightweight English model used by
+        # Eva's wake phrase. Korean remains explicitly available in Settings.
+        model_language = "ko" if language == "ko" else "en"
 
         with self._lock:
             model = self.model(model_language)

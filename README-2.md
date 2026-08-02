@@ -107,9 +107,29 @@ Browser -> XHR/fetch -> Provider API -> JSON response -> `renderEvaResponse()`
 **ACP models (Copilot CLI):**
 1. Browser -> `POST /v1/chat/completions` -> ACP Bridge (HTTP)
 2. Bridge -> `session/prompt` -> Copilot CLI (JSON-RPC over NDJSON/stdio)
-3. Copilot may invoke MCP tools (bridge auto-grants permissions)
+3. Copilot may request MCP tools; standalone Eva shows an in-chat Allow once/Reject decision unless revocable routine read/search consent applies
 4. Copilot streams `session/update` notifications with text chunks
-5. Bridge accumulates chunks -> returns OpenAI-compatible JSON response
+5. Bridge accumulates chunks and can forward them as flushed NDJSON events; the final event remains an OpenAI-compatible response
+
+### Streaming contract
+
+`POST /v1/aig/chat` and `POST /v1/chat/completions` accept `stream: true`. A supported
+stream responds as newline-delimited JSON (`application/x-ndjson`):
+
+```json
+{"type":"chunk","text":"partial assistant text"}
+{"type":"done","response":{"object":"chat.completion","choices":[...]}}
+```
+
+The bridge keeps the existing JSON response when `stream` is false or a client does
+not receive the streaming content type. AIG streams only the final responder; its
+memory, ACP preflight, and cognition calls remain internal and non-streaming. The
+browser puts chunks in a text-only provisional bubble, so action, Signal, file, and
+browser markers cannot execute early. It removes that bubble and calls
+`renderEvaResponse()` once for the final response, preserving persistence, reflection,
+and auto-speak behavior. Bridge telemetry records request start, TTFT, completion and
+total timing, chunk count, route, and model labels without prompt or response text;
+`GET /v1/telemetry` aggregates TTFT under `summary.stream_ttft_ms`.
 
 **LM Studio (local):**
 1. Browser fetches `/v1/memory/context` + `/v1/data/retrieve` in parallel from bridge
@@ -296,29 +316,45 @@ The bridge implements the [Agent Client Protocol (ACP)](https://agentclientproto
 | `session/new` | Client -> Agent | Create conversation session |
 | `session/prompt` | Client -> Agent | Send user message |
 | `session/update` | Agent -> Client | Stream response chunks, tool calls, plans |
-| `session/request_permission` | Agent -> Client | Request tool execution permission (auto-granted) |
+| `session/request_permission` | Agent -> Client | Request tool execution permission (in-chat decision; routine read/search may use revocable standing consent) |
 | `session/cancel` | Client -> Agent | Cancel ongoing operation |
-| `terminal/create` | Agent -> Client | Execute shell command |
-| `terminal/output` | Agent -> Client | Get command output |
-| `terminal/release` | Agent -> Client | Release terminal |
+| `terminal/create` | Agent -> Client | Unsupported and rejected; Eva does not advertise ACP terminal capability |
+| `terminal/output` | Agent -> Client | Unsupported and rejected |
+| `terminal/release` | Agent -> Client | Unsupported and rejected |
 
 ### ACP Client Lifecycles
 
-The primary AIG/chat path maintains a pool of up to 4 `ACPClient` instances, one
-per model. Each pooled client is a separate `copilot` subprocess with its own
-conversation session.
+The primary AIG/chat path maintains a pool of up to 4 `ACPClient` instances, keyed
+by model, reasoning effort, route tool profile, and a secret-safe MCP configuration
+fingerprint. Each pooled client is a separate warm `copilot` subprocess. Within a
+client, prompts are routed to bounded conversation-scoped ACP sessions using the
+browser session ID. A conversation session rotates after 20 prompts or 30 minutes
+of idle time, and each client retains at most 8 session routes. This keeps warm
+process reuse without allowing one hidden ACP context to grow forever. ACP does
+not expose session deletion in the protocol version used here, so rotation drops
+old sessions from bridge routing while retaining only the bounded live route set.
+
+Copilot CLI MCP exposure is process-scoped: an existing ACP session cannot safely
+change its server set for one request. The bridge therefore selects a narrow
+profile (`none`, `web`, `github`, or `kusto`) for ordinary routes and uses `broad`
+only when the request needs general tool access. Profile-specific warm processes
+are isolated in the same bounded pool, so a web-search request does not inherit
+GitHub, Kusto, or computer-use tools. MCP fingerprints hash only non-secret
+configuration shape; credential values are excluded from pool keys and telemetry.
 
 ```python
-acp_pool: dict[model_key -> ACPClient]   # keyed by model name
-acp_pool_order: list[model_key]          # LRU eviction order
+  acp_pool: dict[profiled_model_key -> ACPClient]  # model + profile + config
+  acp_pool_order: list[profiled_model_key]         # LRU eviction order
 acp_pool_lock: threading.RLock()         # thread-safe access
 ACP_POOL_MAX = 4
 ```
 
 When a primary request arrives for a model not in the pool, the bridge spawns a
 new Copilot CLI process (`copilot --acp --stdio`), runs the ACP `initialize` and
-`session/new` handshake, and registers it in the pool. If the pool is full, the
-least-recently-used client is evicted and its subprocess terminated.
+`session/new` handshake, and registers it in the pool. New browser conversations
+use `session/new` on the existing warm process instead of spawning another one.
+If the pool is full, the least-recently-used client is evicted and its subprocess
+terminated.
 
 Subagents do not use this model-keyed pool. Every accepted subagent worker owns
 a dedicated `ACPClient` and session for the task lifetime, including when other
@@ -671,6 +707,9 @@ Memory recall expands query terms via synonyms to catch differently-worded facts
 ```
 Browser -> POST /v1/aig/chat -> ACP Bridge
   |
+  +-- Step 0: Fast-route simple greetings, basic arithmetic, and plain date/time asks
+  |   +-- One responder model call; skip memory assembly and ACP preflight
+  |
   +-- Step 1: Build memory context (Kusto/SQLite queries)
   |   +-- User Profile (Knowledge where Entity="User")
   |   +-- Skills manifest + workflow instructions
@@ -704,6 +743,9 @@ The bridge classifies each user message to determine routing and prompt tuning:
 
 | Classification | Pattern | Action |
 |---|---|---|
+| fast/greeting | Whole-message greeting or acknowledgement | One responder call; skip memory and ACP preflight |
+| fast/basic-arithmetic | Self-contained numeric expression | One responder call; model answers normally, without deterministic arithmetic output |
+| fast/date-time | Plain current date/time question | One responder call with bridge UTC context; skip memory and ACP preflight |
 | greeting/trivial | "hi", "thanks", etc. (<=4 words) | Skip data retrieval |
 | meta-question | "what can you do", "who are you" (<=6 words) | Skip data retrieval |
 | news-search | "news", "headlines", "breaking" | Web search prompt |
@@ -712,6 +754,14 @@ The bridge classifies each user message to determine routing and prompt tuning:
 | kusto-query | KQL keywords, table names | Kusto tool prompt |
 | web-search | "search", "look up", "find" | Web search prompt |
 | general | Everything else | General-purpose prompt |
+
+Every browser provider keeps its complete conversation history in local storage but
+sends an ephemeral bounded view through `core/js/prompt-budget.js`. The view keeps
+system/developer instructions pinned, deduplicates exact repeated static messages,
+retains recent turns, and carries dropped action outcomes, corrections, and open task
+state in a bounded rolling summary. Telemetry records only component sizes and token
+estimates, never prompt text. Requests outside the strict fast-route patterns retain
+the existing factual, action, and high-risk escalation behavior.
 
 ### AIG vs Copilot ACP
 
@@ -1271,8 +1321,9 @@ Current state (2026-06-15):
 ## Security
 
 - Bridge binds to `127.0.0.1` by default (localhost only)
-- `--allow-all-tools` bypasses ACP permission prompts (required for non-interactive MCP)
-- Terminal commands execute with bridge process's user permissions
+- ACP tool permissions are never globally bypassed. Standalone Eva requires an authenticated in-chat decision; hosted/file clients fail closed.
+- Routine standing consent is limited to read, search, fetch, and think tool kinds. Execute, edit, move, delete, and unknown operations always require a fresh decision.
+- ACP client-terminal capability is disabled because the protocol does not reliably correlate `terminal/create` with a permission decision. Authorized execution uses Eva's browser/desktop agent confirmation paths instead.
 - MCP env vars (tokens) are redacted from `/v1/mcp` responses and persisted configs
 - URL fetching uses SSRF protection: DNS resolution validated, all IPs must be public, IP pinning prevents DNS rebinding, redirect hops re-validated
 - Skill import treats source text as untrusted data (explicit anti-injection prompt)
@@ -1299,13 +1350,16 @@ Runs on every PR to `main`:
 |---|---|---|
 | `tools/test_static.py` | No | CI-safe static tests |
 | `tools/test_eva.py` | Yes | 64-check integration suite |
-| `tools/test_latency.py` | Yes | Latency benchmarks |
+| `tools/test_latency.py` | Yes | Production-shaped AIG latency probe with NDJSON TTFT/total timings, cold/warm repetitions, and optional thresholds |
+| `tools/test_latency_fake_server.py` | No | Fake HTTP-server coverage for fast, approval, and revision call paths |
 | `tools/test_skills_e2e.py` | Yes | Skill import end-to-end |
 | `tools/eval/run.py --mode mock` | No | Behavioral eval with synthetic responses |
 | `tools/eval/run.py --mode live` | Yes | Behavioral eval against live bridge |
 
 ```bash
 python3 tools/test_static.py                          # CI-safe
+python3 tools/test_latency_fake_server.py              # latency harness without a bridge
+python3 tools/test_latency.py --bridge http://localhost:8888 --mode both --repetitions 2
 python3 tools/test_eva.py --verbose                   # full integration
 python3 tools/eval/run.py --mode mock                 # synthetic eval
 python3 tools/eval/run.py --mode live --bridge http://localhost:8888  # live eval

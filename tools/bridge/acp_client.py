@@ -1,6 +1,7 @@
 """Bridge domain: acp_client."""
 
 import json
+import hashlib
 import os
 import re
 import subprocess
@@ -12,40 +13,92 @@ from contextlib import contextmanager
 from bridge import config as _cfg
 from bridge import state as _st
 from bridge.kusto import _inject_kusto_token
+from bridge.learning import get_consent as _get_learning_consent
 from bridge.telemetry import _telemetry_emit
 
 _ACP_POOL_MAX = _cfg.ACP_POOL_MAX
+_ACP_SESSION_MAX = _cfg.ACP_SESSION_MAX
+_ACP_SESSION_MAX_PROMPTS = _cfg.ACP_SESSION_MAX_PROMPTS
+_ACP_SESSION_IDLE_SECONDS = _cfg.ACP_SESSION_IDLE_SECONDS
 _ARTIFACTS_DIR = _cfg.ARTIFACTS_DIR
+_ACP_TOOL_PROFILES = _cfg.ACP_TOOL_PROFILES
+_SECRET_MARKERS = ("TOKEN", "KEY", "SECRET", "PAT", "PASSWORD", "CREDENTIAL")
+
+
+def _normalize_tool_profile(profile, has_config=False):
+    value = str(profile or ("broad" if has_config else "none")).strip().lower()
+    return value if value in _ACP_TOOL_PROFILES else "broad"
+
+
+def _acp_tool_profile_config(mcp_config, profile):
+    """Return only the configured MCP servers allowed by a route profile."""
+    source = mcp_config if isinstance(mcp_config, dict) else {}
+    selected = _normalize_tool_profile(profile, bool(source))
+    if selected == "none":
+        return {}
+    if selected == "broad":
+        return dict(source)
+    if selected == "github":
+        names = {"github-mcp-server"}
+    elif selected == "kusto":
+        names = {"kusto-mcp-server"}
+    else:
+        names = {name for name in source if "web" in name.lower() or "search" in name.lower()}
+    return {name: cfg for name, cfg in source.items() if name in names}
+
+
+def _acp_config_fingerprint(mcp_config):
+    """Hash non-secret MCP shape and settings; secret values never enter the hash."""
+    safe = []
+    for name in sorted((mcp_config or {}).keys()):
+        cfg = mcp_config.get(name) or {}
+        env = {}
+        for key in sorted((cfg.get("env") or {}).keys()):
+            upper = str(key).upper()
+            env[str(key)] = "<secret>" if str(key).startswith("_") or any(marker in upper for marker in _SECRET_MARKERS) else str(cfg["env"][key])
+        safe.append({"name": name, "command": cfg.get("command", ""), "args": list(cfg.get("args") or []), "env": env})
+    encoded = json.dumps(safe, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 class ACPClient:
     """Manages the copilot --acp --stdio subprocess and ACP JSON-RPC protocol."""
 
     PROTOCOL_VERSION = 1  # ACP protocol major version
 
-    def __init__(self, copilot_path="copilot", cwd=None, model=None, mcp_config=None, reasoning_effort=None):
+    def __init__(self, copilot_path="copilot", cwd=None, model=None, mcp_config=None, reasoning_effort=None, tool_profile=None):
         self.copilot_path = copilot_path
         self.cwd = cwd or os.getcwd()
         self.model = model  # None = use CLI default
         self.reasoning_effort = reasoning_effort  # None = use model default
         self.mcp_config = mcp_config or {}  # MCP servers config dict
+        self.tool_profile = _normalize_tool_profile(tool_profile, bool(self.mcp_config))
+        self.config_fingerprint = _acp_config_fingerprint(self.mcp_config)
         self.process = None
         self.request_id = 0
         self.lock = threading.Lock()
+        self.write_lock = threading.Lock()
         self.prompt_lock = threading.Lock()
         self.pending = {}           # id -> {"event": Event, "result": None, "error": None}
         self.session_id = None
+        self._conversation_sessions = {}
+        self._conversation_session_order = []
         self.response_chunks = {}   # prompt_id -> accumulated text
+        self.session_usage = {}     # session_id -> latest context usage metadata
+        self._prompt_state_lock = threading.RLock()
+        self._active_prompts = {}   # prompt_id -> session/callback/timing state
         self.reader_thread = None
         self.agent_info = {}
         self.alive = False
         self.active_requests = 0
         self.terminals = {}  # terminal_id -> {"process": Popen, "output": str}
+        self.permission_lock = threading.RLock()
+        self.pending_permissions = {}
 
     # --- Lifecycle ---
 
     def start(self):
         """Spawn copilot subprocess, initialize ACP, create session."""
-        cmd = [self.copilot_path, "--acp", "--stdio", "--allow-all-tools"]
+        cmd = [self.copilot_path, "--acp", "--stdio"]
         if self.model:
             cmd.extend(["--model", self.model])
         if self.reasoning_effort:
@@ -93,7 +146,7 @@ class ACPClient:
         init_result = self._send_request("initialize", {
             "protocolVersion": self.PROTOCOL_VERSION,
             "clientCapabilities": {
-                "terminal": True
+                "terminal": False
             },
             "clientInfo": {
                 "name": "eva-acp-bridge",
@@ -123,6 +176,7 @@ class ACPClient:
 
         if session_result and "sessionId" in session_result:
             self.session_id = session_result["sessionId"]
+            self._remember_conversation_session("__default__", self.session_id)
             print(f"[ACP] Session created: {self.session_id}")
         else:
             print(f"[ACP] Warning: session/new returned: {session_result}")
@@ -159,8 +213,9 @@ class ACPClient:
         }) + "\n"
 
         try:
-            self.process.stdin.write(msg.encode("utf-8"))
-            self.process.stdin.flush()
+            with self.write_lock:
+                self.process.stdin.write(msg.encode("utf-8"))
+                self.process.stdin.flush()
         except (BrokenPipeError, OSError) as e:
             self.pending.pop(rid, None)
             return {"error": f"Copilot process pipe error: {e}"}
@@ -180,8 +235,31 @@ class ACPClient:
             "result": result
         }) + "\n"
         try:
-            self.process.stdin.write(msg.encode("utf-8"))
-            self.process.stdin.flush()
+            with self.write_lock:
+                self.process.stdin.write(msg.encode("utf-8"))
+                self.process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+
+    def _send_rpc_error(self, rid, code, message):
+        msg = json.dumps({
+            "jsonrpc": "2.0",
+            "id": rid,
+            "error": {"code": int(code), "message": str(message)[:160]},
+        }) + "\n"
+        try:
+            with self.write_lock:
+                self.process.stdin.write(msg.encode("utf-8"))
+                self.process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+
+    def _send_notification(self, method, params):
+        msg = json.dumps({"jsonrpc": "2.0", "method": method, "params": params}) + "\n"
+        try:
+            with self.write_lock:
+                self.process.stdin.write(msg.encode("utf-8"))
+                self.process.stdin.flush()
         except (BrokenPipeError, OSError):
             pass
 
@@ -248,22 +326,14 @@ class ACPClient:
 
         # Server-initiated request: session/request_permission
         if "id" in msg and msg.get("method") == "session/request_permission":
-            # Auto-grant permissions for chat usage
-            print(f"[ACP] Permission requested: {json.dumps(msg.get('params', {}))}")
-            self._send_response(msg["id"], {"outcome": {"outcome": "granted"}})
+            self._handle_permission_request(msg["id"], msg.get("params", {}))
             return
 
         # Server-initiated requests for terminal
-        if "id" in msg and msg.get("method") == "terminal/create":
-            self._handle_terminal_create(msg["id"], msg.get("params", {}))
-            return
-
-        if "id" in msg and msg.get("method") == "terminal/output":
-            self._handle_terminal_output(msg["id"], msg.get("params", {}))
-            return
-
-        if "id" in msg and msg.get("method") == "terminal/release":
-            self._handle_terminal_release(msg["id"], msg.get("params", {}))
+        if "id" in msg and msg.get("method", "").startswith("terminal/"):
+            self._send_response(msg["id"], {
+                "error": {"code": -32601, "message": "Terminal capability is disabled by Eva permission policy"}
+            })
             return
 
         # Server-initiated requests for fs (decline)
@@ -291,12 +361,30 @@ class ACPClient:
             content = update.get("content", {})
             if content.get("type") == "text":
                 text = content.get("text", "")
-                # Accumulate into current prompt's response
-                if "_current_prompt_id" in self.__dict__ and self._current_prompt_id:
-                    pid = self._current_prompt_id
-                    if pid not in self.response_chunks:
-                        self.response_chunks[pid] = ""
-                    self.response_chunks[pid] += text
+                if not text:
+                    return
+                session_id = params.get("sessionId") or params.get("session_id")
+                callback = None
+                with self._prompt_state_lock:
+                    candidates = [
+                        (pid, state) for pid, state in self._active_prompts.items()
+                        if not session_id or state["session_id"] == session_id
+                    ]
+                    if len(candidates) != 1:
+                        return
+                    pid, state = candidates[0]
+                    self.response_chunks[pid] = self.response_chunks.get(pid, "") + text
+                    state["chunk_count"] += 1
+                    if state["first_chunk_at"] is None:
+                        state["first_chunk_at"] = time.perf_counter()
+                    callback = state.get("on_chunk")
+                # The reader remains the ordering authority, but user callbacks
+                # never run while the prompt registry lock is held.
+                if callable(callback):
+                    try:
+                        callback(text)
+                    except Exception as callback_error:
+                        print(f"[ACP] Chunk callback failed: {callback_error}")
 
         elif update_type == "plan":
             # Log the plan for debugging
@@ -306,9 +394,121 @@ class ACPClient:
 
         elif update_type in ("tool_call", "tool_call_update"):
             status = update.get("status", "")
-            title = update.get("title", "")
-            if title or status:
-                print(f"[ACP] Tool: {title} [{status}]")
+            kind = str(update.get("kind") or "other")[:32]
+            if status:
+                print(f"[ACP] Tool update: kind={kind} status={str(status)[:24]}")
+
+        elif update_type == "usage_update":
+            session_id = str(params.get("sessionId") or params.get("session_id") or "")[:120]
+            used = update.get("used")
+            size = update.get("size")
+            if not isinstance(used, int) or isinstance(used, bool) or used < 0:
+                return
+            if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+                return
+            usage = {
+                "used": used,
+                "size": size,
+                "percent": round(used / size * 100.0, 2),
+            }
+            cost = update.get("cost")
+            if isinstance(cost, dict) and isinstance(cost.get("amount"), (int, float)):
+                usage["cost_amount"] = round(float(cost["amount"]), 6)
+                usage["cost_currency"] = str(cost.get("currency") or "")[:8]
+            self.session_usage[session_id] = usage
+            _telemetry_emit("acp_usage", model=self.model or "default", **usage)
+
+    def _handle_permission_request(self, rpc_id, params):
+        params = params if isinstance(params, dict) else {}
+        tool_call = params.get("toolCall") if isinstance(params.get("toolCall"), dict) else {}
+        options = []
+        for option in params.get("options", []) if isinstance(params.get("options"), list) else []:
+            if not isinstance(option, dict) or not option.get("optionId"):
+                continue
+            options.append({
+                "option_id": str(option["optionId"])[:120],
+                "kind": str(option.get("kind") or "")[:32],
+            })
+        tool_kind = str(tool_call.get("kind") or "other")[:32]
+        session_id = str(params.get("sessionId") or "")[:120]
+        with self._prompt_state_lock:
+            prompt_states = [
+                state for state in self._active_prompts.values()
+                if state.get("session_id") == session_id
+            ]
+        permission_mode = prompt_states[0].get("permission_mode", "interactive") \
+            if len(prompt_states) == 1 else "interactive"
+        if permission_mode == "passive_recall":
+            reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
+            if reject_option is None:
+                reject_option = next((option for option in options if option["kind"] == "reject_always"), None)
+            if reject_option:
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": reject_option["option_id"]}
+                })
+                _telemetry_emit("acp_permission", decision="policy-reject",
+                                tool_kind=tool_kind, option_count=len(options))
+            else:
+                self._send_rpc_error(rpc_id, -32602, "Eva passive recall does not authorize tools")
+                _telemetry_emit("acp_permission", decision="policy-deny",
+                                tool_kind=tool_kind, option_count=len(options))
+            return
+        routine_allowed = bool(_get_learning_consent().get("routine_tools")) and tool_kind in {
+            "read", "search", "fetch", "think"
+        }
+        allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
+        if routine_allowed and allow_once:
+            self._send_response(rpc_id, {"outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}})
+            _telemetry_emit("acp_permission", decision="standing-consent", tool_kind=tool_kind, option_count=len(options))
+            return
+
+        permission_id = uuid.uuid4().hex
+        entry = {
+            "id": permission_id,
+            "rpc_id": rpc_id,
+            "session_id": str(params.get("sessionId") or "")[:120],
+            "tool_kind": tool_kind,
+            "options": options,
+            "created_at": time.time(),
+        }
+        with self.permission_lock:
+            self.pending_permissions[permission_id] = entry
+        _telemetry_emit("acp_permission", decision="pending", tool_kind=tool_kind, option_count=len(options))
+        timer = threading.Timer(60, self._expire_permission, args=(permission_id,))
+        timer.daemon = True
+        timer.start()
+
+    def list_pending_permissions(self):
+        with self.permission_lock:
+            return [{
+                "id": entry["id"],
+                "tool_kind": entry["tool_kind"],
+                "options": list(entry["options"]),
+                "created_at": entry["created_at"],
+            } for entry in self.pending_permissions.values()]
+
+    def resolve_permission(self, permission_id, option_id=None):
+        with self.permission_lock:
+            entry = self.pending_permissions.pop(str(permission_id), None)
+        if not entry:
+            return False
+        selected = next((
+            option for option in entry["options"]
+            if option["option_id"] == str(option_id or "")
+            and option["kind"] in {"allow_once", "reject_once"}
+        ), None)
+        if selected:
+            self._send_response(entry["rpc_id"], {"outcome": {"outcome": "selected", "optionId": selected["option_id"]}})
+            decision = selected["kind"] or "selected"
+        else:
+            self._send_notification("session/cancel", {"sessionId": entry["session_id"]})
+            self._send_response(entry["rpc_id"], {"outcome": {"outcome": "cancelled"}})
+            decision = "cancelled"
+        _telemetry_emit("acp_permission", decision=decision, tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
+        return True
+
+    def _expire_permission(self, permission_id):
+        self.resolve_permission(permission_id, None)
 
     # --- Terminal handlers (for ACP tool execution) ---
 
@@ -324,7 +524,7 @@ class ACPClient:
         if args:
             full_cmd = command + " " + " ".join(args)
 
-        print(f"[ACP Terminal] Creating terminal: {full_cmd[:100]}")
+        print("[ACP Terminal] Creating authorized terminal")
 
         # Build environment
         env = os.environ.copy()
@@ -410,98 +610,184 @@ class ACPClient:
 
     # --- Public API ---
 
-    def prompt(self, text, timeout=120):
+    def prompt(self, text, timeout=120, conversation_id=None, on_chunk=None,
+               permission_mode="interactive"):
         with _pin_acp_client(self) as acquired:
             if not acquired:
                 return {"error": "ACP client is unavailable"}
             with self.prompt_lock:
-                return self._prompt(text, timeout)
+                return self._prompt(text, timeout, conversation_id, on_chunk, permission_mode)
 
-    def _prompt(self, text, timeout=120):
+    def _begin_prompt(self, prompt_id, session_id, on_chunk, permission_mode="interactive"):
+        with self._prompt_state_lock:
+            self.response_chunks[prompt_id] = ""
+            self._active_prompts[prompt_id] = {
+                "session_id": session_id,
+                "on_chunk": on_chunk,
+                "permission_mode": permission_mode,
+                "chunk_count": 0,
+                "first_chunk_at": None,
+                "started_at": time.perf_counter(),
+            }
+
+    def _finish_prompt(self, prompt_id):
+        with self._prompt_state_lock:
+            state = self._active_prompts.pop(prompt_id, {})
+            response_text = self.response_chunks.pop(prompt_id, "")
+        first_chunk_at = state.get("first_chunk_at")
+        started_at = state.get("started_at")
+        return response_text, {
+            "chunk_count": state.get("chunk_count", 0),
+            "first_chunk_ms": round((first_chunk_at - started_at) * 1000.0, 1)
+            if first_chunk_at is not None and started_at is not None else None,
+        }
+
+    def _prompt(self, text, timeout=120, conversation_id=None, on_chunk=None,
+                permission_mode="interactive"):
         """Send a text prompt and return the accumulated response text."""
-        if not self.session_id:
+        session_id = self._session_for_conversation(conversation_id)
+        if not session_id:
             return {"error": "No active ACP session"}
 
         pid = self._next_id()
-        self._current_prompt_id = pid
-        self.response_chunks[pid] = ""
+        self._begin_prompt(pid, session_id, on_chunk, permission_mode)
 
         _t0 = time.perf_counter()
-        result = self._send_request("session/prompt", {
-            "sessionId": self.session_id,
-            "prompt": [{"type": "text", "text": text}]
-        }, timeout=timeout)
-
-        response_text = self.response_chunks.pop(pid, "")
-        self._current_prompt_id = None
+        try:
+            result = self._send_request("session/prompt", {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": text}]
+            }, timeout=timeout)
+        finally:
+            response_text, prompt_metrics = self._finish_prompt(pid)
         _ms = round((time.perf_counter() - _t0) * 1000.0, 1)
 
         if result and isinstance(result, dict):
             if "error" in result:
                 _telemetry_emit("acp_prompt", model=self.model or "default",
                                 prompt_chars=len(text or ""), response_chars=0,
-                                ms=_ms, stop_reason="error")
+                                ms=_ms, stop_reason="error",
+                                chunk_count=prompt_metrics["chunk_count"],
+                                first_chunk_ms=prompt_metrics["first_chunk_ms"])
                 return {"error": result["error"]}
             stop_reason = result.get("stopReason", "end_turn")
             _telemetry_emit("acp_prompt", model=self.model or "default",
                             prompt_chars=len(text or ""), response_chars=len(response_text or ""),
-                            ms=_ms, stop_reason=stop_reason)
+                            ms=_ms, stop_reason=stop_reason,
+                            chunk_count=prompt_metrics["chunk_count"],
+                            first_chunk_ms=prompt_metrics["first_chunk_ms"])
             return {"text": response_text, "stop_reason": stop_reason}
 
         _telemetry_emit("acp_prompt", model=self.model or "default",
                         prompt_chars=len(text or ""), response_chars=len(response_text or ""),
-                        ms=_ms, stop_reason="end_turn")
+                        ms=_ms, stop_reason="end_turn",
+                        chunk_count=prompt_metrics["chunk_count"],
+                        first_chunk_ms=prompt_metrics["first_chunk_ms"])
         return {"text": response_text, "stop_reason": "end_turn"}
 
-    def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120):
+    def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None):
         with _pin_acp_client(self) as acquired:
             if not acquired:
                 return {"error": "ACP client is unavailable"}
             with self.prompt_lock:
-                return self._prompt_with_image(text, image_b64, mime, timeout)
+                return self._prompt_with_image(text, image_b64, mime, timeout, conversation_id, on_chunk)
 
-    def _prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120):
+    def _prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None):
         """Send a text + image prompt and return the accumulated response text.
 
         Uses the ACP content-block image type (the agent advertised
         promptCapabilities.image=true). image_b64 is base64 with no data: prefix.
         """
-        if not self.session_id:
+        session_id = self._session_for_conversation(conversation_id)
+        if not session_id:
             return {"error": "No active ACP session"}
 
         pid = self._next_id()
-        self._current_prompt_id = pid
-        self.response_chunks[pid] = ""
+        self._begin_prompt(pid, session_id, on_chunk)
 
         _t0 = time.perf_counter()
-        result = self._send_request("session/prompt", {
-            "sessionId": self.session_id,
-            "prompt": [
-                {"type": "text", "text": text},
-                {"type": "image", "data": image_b64, "mimeType": mime},
-            ]
-        }, timeout=timeout)
-
-        response_text = self.response_chunks.pop(pid, "")
-        self._current_prompt_id = None
+        try:
+            result = self._send_request("session/prompt", {
+                "sessionId": session_id,
+                "prompt": [
+                    {"type": "text", "text": text},
+                    {"type": "image", "data": image_b64, "mimeType": mime},
+                ]
+            }, timeout=timeout)
+        finally:
+            response_text, prompt_metrics = self._finish_prompt(pid)
         _ms = round((time.perf_counter() - _t0) * 1000.0, 1)
 
         if result and isinstance(result, dict):
             if "error" in result:
                 _telemetry_emit("acp_vision", model=self.model or "default",
                                 prompt_chars=len(text or ""), response_chars=0,
-                                ms=_ms, stop_reason="error")
+                                ms=_ms, stop_reason="error",
+                                chunk_count=prompt_metrics["chunk_count"],
+                                first_chunk_ms=prompt_metrics["first_chunk_ms"])
                 return {"error": result["error"]}
             stop_reason = result.get("stopReason", "end_turn")
             _telemetry_emit("acp_vision", model=self.model or "default",
                             prompt_chars=len(text or ""), response_chars=len(response_text or ""),
-                            ms=_ms, stop_reason=stop_reason)
+                            ms=_ms, stop_reason=stop_reason,
+                            chunk_count=prompt_metrics["chunk_count"],
+                            first_chunk_ms=prompt_metrics["first_chunk_ms"])
             return {"text": response_text, "stop_reason": stop_reason}
 
         _telemetry_emit("acp_vision", model=self.model or "default",
                         prompt_chars=len(text or ""), response_chars=len(response_text or ""),
-                        ms=_ms, stop_reason="end_turn")
+                        ms=_ms, stop_reason="end_turn",
+                        chunk_count=prompt_metrics["chunk_count"],
+                        first_chunk_ms=prompt_metrics["first_chunk_ms"])
         return {"text": response_text, "stop_reason": "end_turn"}
+
+    def _new_session(self):
+        """Create an ACP conversation without restarting the warm CLI process."""
+        result = self._send_request("session/new", {
+            "cwd": self.cwd,
+            "mcpServers": []
+        }, timeout=30)
+        if result and isinstance(result, dict) and result.get("sessionId"):
+            return result["sessionId"]
+        return None
+
+    def _remember_conversation_session(self, key, session_id, prompts=0):
+        self._conversation_sessions[key] = {
+            "session_id": session_id,
+            "prompts": prompts,
+            "last_used": time.monotonic(),
+        }
+        try:
+            self._conversation_session_order.remove(key)
+        except ValueError:
+            pass
+        self._conversation_session_order.append(key)
+        while len(self._conversation_session_order) > _ACP_SESSION_MAX:
+            evicted = self._conversation_session_order.pop(0)
+            self._conversation_sessions.pop(evicted, None)
+
+    def _session_for_conversation(self, conversation_id):
+        """Return a bounded ACP session for one frontend conversation.
+
+        ACP has no session-delete method in the protocol version used here, so
+        old sessions are dropped from the bridge routing table. The prompt and
+        idle caps ensure a browser conversation cannot keep one hidden ACP
+        context growing forever while the CLI process remains warm.
+        """
+        key = str(conversation_id or "").strip()[:120] or "__default__"
+        now = time.monotonic()
+        entry = self._conversation_sessions.get(key)
+        if entry and entry["prompts"] < _ACP_SESSION_MAX_PROMPTS and now - entry["last_used"] <= _ACP_SESSION_IDLE_SECONDS:
+            entry["prompts"] += 1
+            entry["last_used"] = now
+            self._remember_conversation_session(key, entry["session_id"], entry["prompts"])
+            return entry["session_id"]
+
+        session_id = self._new_session()
+        if not session_id:
+            return None
+        self._remember_conversation_session(key, session_id, prompts=1)
+        return session_id
 
 
 # ---------------------------------------------------------------------------
@@ -509,11 +795,13 @@ class ACPClient:
 # ---------------------------------------------------------------------------
 
 
-def _acp_model_key(model, reasoning_effort=None):
+def _acp_model_key(model, reasoning_effort=None, tool_profile=None, mcp_config=None):
     """Normalize model and reasoning effort into a warm-client pool key."""
     model_key = (model or "").strip() or "__default__"
     effort_key = (reasoning_effort or "").strip() or "__default__"
-    return f"{model_key}::{effort_key}"
+    profile_key = _normalize_tool_profile(tool_profile, bool(mcp_config))
+    fingerprint = _acp_config_fingerprint(mcp_config or {})
+    return f"{model_key}::{effort_key}::{profile_key}::{fingerprint}"
 
 
 
@@ -532,7 +820,7 @@ def _acp_pool_register(client):
     reconfigured client) into the pool under its model key. Caller holds the lock."""
     if not client:
         return
-    key = _acp_model_key(client.model, client.reasoning_effort)
+    key = _acp_model_key(client.model, client.reasoning_effort, client.tool_profile, client.mcp_config)
     _st.acp_pool[key] = client
     _acp_pool_touch(key)
 
@@ -575,7 +863,8 @@ def _release_acp_client(client):
         client.active_requests = max(0, client.active_requests - 1)
         current_key = None
         if _st.acp_client is not None:
-            current_key = _acp_model_key(_st.acp_client.model, _st.acp_client.reasoning_effort)
+            current_key = _acp_model_key(_st.acp_client.model, _st.acp_client.reasoning_effort,
+                                         _st.acp_client.tool_profile, _st.acp_client.mcp_config)
         _acp_pool_evict_if_needed(current_key)
 
 
@@ -612,7 +901,7 @@ def _reset_acp_pool(keep_client):
 
 
 
-def _ensure_acp_model(requested_model, reasoning_effort=None):
+def _ensure_acp_model(requested_model, reasoning_effort=None, tool_profile=None):
     """Ensure a warm ACP client for requested_model is selected as _st.acp_client.
 
     Uses a warm pool so switching between the cognition draft model and the
@@ -622,20 +911,25 @@ def _ensure_acp_model(requested_model, reasoning_effort=None):
 
     with _st.acp_pool_lock:
         # Seed the pool with the startup singleton on first use.
-        if _st.acp_client and _acp_model_key(_st.acp_client.model, _st.acp_client.reasoning_effort) not in _st.acp_pool:
+        if _st.acp_client and _acp_model_key(_st.acp_client.model, _st.acp_client.reasoning_effort,
+                                             _st.acp_client.tool_profile, _st.acp_client.mcp_config) not in _st.acp_pool:
             _acp_pool_register(_st.acp_client)
 
         if not _st.acp_client and not _st.acp_pool:
             return False, "ACP bridge not connected to Copilot"
 
-        key = _acp_model_key(requested_model, reasoning_effort)
+        profile = _normalize_tool_profile(tool_profile, bool(_st.configured_mcp_config))
+        profile_config = _acp_tool_profile_config(_st.configured_mcp_config, profile)
+        key = _acp_model_key(requested_model, reasoning_effort, profile, profile_config)
 
         # Fast path: a live warm client already exists for this model.
         existing = _st.acp_pool.get(key)
         if existing and existing.alive:
             _st.acp_client = existing
             _acp_pool_touch(key)
-            _telemetry_emit("acp_pool", result="hit", model=key, pool_size=len(_st.acp_pool))
+            _telemetry_emit("acp_pool", result="hit", model=existing.model or "default",
+                            tool_profile=existing.tool_profile, server_count=len(existing.mcp_config),
+                            pool_hit=True, pool_warm=False, pool_size=len(_st.acp_pool))
             return True, existing.model or "default"
 
         # Need to warm a new client. Use any live client as the cwd/path/MCP template.
@@ -673,8 +967,9 @@ def _ensure_acp_model(requested_model, reasoning_effort=None):
                 copilot_path=template.copilot_path,
                 cwd=template.cwd,
                 model=(requested_model or None),
-                mcp_config=_inject_kusto_token(template.mcp_config),
+                mcp_config=_inject_kusto_token(profile_config),
                 reasoning_effort=reasoning_effort,
+                tool_profile=profile,
             )
             _warm_t0 = time.perf_counter()
             new_client.start()
@@ -687,20 +982,24 @@ def _ensure_acp_model(requested_model, reasoning_effort=None):
         _acp_pool_touch(key)
         _st.acp_client = new_client
         _acp_pool_evict_if_needed(key)
-        _telemetry_emit("acp_pool", result="warm", model=key, pool_size=len(_st.acp_pool),
-                        warm_ms=round((time.perf_counter() - _warm_t0) * 1000.0, 1))
+        _telemetry_emit("acp_pool", result="warm", model=new_client.model or "default",
+                tool_profile=new_client.tool_profile, server_count=len(new_client.mcp_config),
+                pool_hit=False, pool_warm=True, pool_size=len(_st.acp_pool),
+                warm_ms=round((time.perf_counter() - _warm_t0) * 1000.0, 1))
         return True, new_client.model or "default"
 
 
 @contextmanager
-def _acquire_acp_client(requested_model, reasoning_effort=None):
+def _acquire_acp_client(requested_model, reasoning_effort=None, tool_profile=None):
     """Atomically select and pin a model/effort client from the warm pool."""
     selected_client = None
     detail = "ACP bridge not connected to Copilot"
     with _st.acp_pool_lock:
-        switched, detail = _ensure_acp_model(requested_model, reasoning_effort)
+        profile = _normalize_tool_profile(tool_profile, bool(_st.configured_mcp_config))
+        switched, detail = _ensure_acp_model(requested_model, reasoning_effort, profile)
         if switched:
-            key = _acp_model_key(requested_model, reasoning_effort)
+            profile_config = _acp_tool_profile_config(_st.configured_mcp_config, profile)
+            key = _acp_model_key(requested_model, reasoning_effort, profile, profile_config)
             candidate = _st.acp_pool.get(key)
             if candidate and candidate.alive:
                 candidate.active_requests += 1

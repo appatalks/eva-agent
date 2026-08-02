@@ -285,9 +285,22 @@ from bridge.utils import (  # noqa: F401
     _load_client_prefs,
     _save_client_prefs,
     _subagent_worker,
+    _effective_routing_message,
     _classify_request_type,
+    _classify_fast_route,
+    _is_passive_memory_recall,
+    _passive_recall_session_key,
     _needs_acp_preflight,
+    _select_acp_tool_profile,
     _MEMORY_CAPTURE_DIRECTIVE,
+)
+from bridge.learning import (  # noqa: F401
+    create_signal as _create_learning_signal,
+    delete_signals as _delete_learning_signals,
+    get_consent as _get_learning_consent,
+    list_signals as _list_learning_signals,
+    mark_applied as _mark_learning_applied,
+    update_consent as _update_learning_consent,
 )
 
 # Constants needed by BridgeHandler (imported from config)
@@ -318,6 +331,34 @@ def _subagent_active_count(tasks=None):
         1 for task in active_tasks.values()
         if task.get("status") in _SUBAGENT_ACTIVE_STATUSES
     )
+
+
+def _prompt_budget_fields(value):
+    """Flatten numeric prompt-budget metadata without retaining prompt text."""
+    if not isinstance(value, dict):
+        return {}
+    fields = {}
+    for source, target in (
+        ("estimatedTokens", "prompt_estimated_tokens"),
+        ("inputMessages", "prompt_input_messages"),
+        ("outputMessages", "prompt_output_messages"),
+        ("droppedMessages", "prompt_dropped_messages"),
+        ("dedupedMessages", "prompt_deduped_messages"),
+    ):
+        number = value.get(source)
+        if isinstance(number, (int, float)) and not isinstance(number, bool):
+            fields[target] = max(0, round(number, 1))
+    components = value.get("components")
+    if isinstance(components, dict):
+        for name in ("pinned", "summary", "recent", "actions", "corrections", "unresolved"):
+            item = components.get(name)
+            if not isinstance(item, dict):
+                continue
+            for metric in ("chars", "tokens"):
+                number = item.get(metric)
+                if isinstance(number, (int, float)) and not isinstance(number, bool):
+                    fields[f"prompt_{name}_{metric}"] = max(0, round(number, 1))
+    return fields
 
 
 def _reserve_subagent_task(task):
@@ -589,6 +630,110 @@ except Exception as _cam_err:  # pragma: no cover - defensive
 class BridgeHandler(BaseHTTPRequestHandler):
     """HTTP handler that bridges browser requests to ACP."""
 
+    protocol_version = "HTTP/1.1"
+
+    def _new_stream_state(self, route, model):
+        return {
+            "request_start": _to_utc_iso(_utc_now()),
+            "started_at": time.perf_counter(),
+            "route": route,
+            "model": model or "unknown",
+            "started": False,
+            "finished": False,
+            "disconnected": False,
+            "chunk_count": 0,
+            "first_chunk_at": None,
+        }
+
+    def _stream_start(self, state):
+        if state["disconnected"]:
+            return False
+        if state["started"]:
+            return True
+        try:
+            self.close_connection = True
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self.wfile.flush()
+            state["started"] = True
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            state["disconnected"] = True
+            return False
+
+    def _stream_event(self, state, event):
+        if state["disconnected"] or not self._stream_start(state):
+            return False
+        try:
+            self.wfile.write((json.dumps(event, ensure_ascii=True) + "\n").encode("utf-8"))
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            state["disconnected"] = True
+            return False
+
+    def _stream_chunk(self, state, text):
+        if not text:
+            return
+        state["chunk_count"] += 1
+        if state["first_chunk_at"] is None:
+            state["first_chunk_at"] = time.perf_counter()
+        self._stream_event(state, {"type": "chunk", "text": text})
+
+    def _stream_finish(self, state, response):
+        if state["finished"]:
+            return
+        state["finished"] = True
+        content = ((response.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+        if not state["chunk_count"] and content:
+            self._stream_chunk(state, content)
+        if not state["disconnected"]:
+            self._stream_event(state, {
+                "type": "done",
+                "response": response,
+                "metrics": {
+                    "route": state["route"],
+                    "model": state["model"],
+                    "chunk_count": state["chunk_count"],
+                },
+            })
+            try:
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                state["disconnected"] = True
+        now = time.perf_counter()
+        first_chunk_ms = (
+            round((state["first_chunk_at"] - state["started_at"]) * 1000.0, 1)
+            if state["first_chunk_at"] is not None else None
+        )
+        total_ms = round((now - state["started_at"]) * 1000.0, 1)
+        _telemetry_emit(
+            "stream_turn",
+            request_start=state["request_start"],
+            first_chunk_ms=first_chunk_ms,
+            ttft_ms=first_chunk_ms,
+            completion_ms=total_ms,
+            total_ms=total_ms,
+            chunk_count=state["chunk_count"],
+            route=state["route"],
+            model=state["model"],
+            disconnected=state["disconnected"],
+        )
+
+    def _stream_error(self, state, message, status=500):
+        if state["finished"]:
+            return
+        state["finished"] = True
+        self._stream_event(state, {
+            "type": "error",
+            "status": int(status),
+            "message": str(message or "Streaming request failed")[:240],
+        })
+
     def _trusted_origin(self):
         return self._normalized_cors_origin() is not None
 
@@ -691,6 +836,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._camera_frame()
         elif parsed_path == "/v1/prefs":
             self._prefs_get()
+        elif parsed_path == "/v1/learning/consent":
+            self._learning_consent_get()
+        elif parsed_path == "/v1/learning/signals":
+            self._learning_signals_list()
+        elif parsed_path == "/v1/acp/permissions":
+            self._acp_permissions_list()
         elif parsed_path == "/v1/mode":
             self._get_mode()
         elif parsed_path == "/v1/files":
@@ -743,6 +894,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._camera_stop()
         elif parsed_path == "/v1/prefs":
             self._prefs_set()
+        elif parsed_path == "/v1/learning/signals":
+            self._learning_signal_create()
+        elif parsed_path == "/v1/learning/consent":
+            self._learning_consent_update()
+        elif parsed_path.startswith("/v1/acp/permissions/"):
+            self._acp_permission_resolve(urllib.parse.unquote(parsed_path.rsplit("/", 1)[1]))
         elif parsed_path == "/v1/mode":
             self._set_mode()
         elif parsed_path == "/v1/vision/look":
@@ -801,6 +958,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._cron_delete(urllib.parse.unquote(parsed_path.split("/v1/cron/", 1)[1]))
         elif parsed_path.startswith("/v1/subagent/"):
             self._subagent_dismiss(urllib.parse.unquote(parsed_path.split("/v1/subagent/", 1)[1]))
+        elif parsed_path == "/v1/learning/signals" or parsed_path.startswith("/v1/learning/signals/"):
+            signal_prefix = "/v1/learning/signals/"
+            signal_id = urllib.parse.unquote(parsed_path[len(signal_prefix):]) if parsed_path.startswith(signal_prefix) else ""
+            self._learning_signals_delete(signal_id)
+        elif parsed_path == "/v1/learning/consent":
+            self._learning_consent_revoke()
         else:
             self.send_error(404, "Not Found")
 
@@ -820,6 +983,169 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return None, "Invalid JSON"
         return data, ""
+
+    def _learning_authorized(self):
+        """Learning data is local-control data, so use the bridge capability gate."""
+        return self._require_bridge_capability()
+
+    def _learning_body(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return None, "Invalid Content-Length"
+        if content_length <= 0:
+            return None, "Empty request body"
+        if content_length > 16 * 1024:
+            return None, "Request body exceeds learning limit"
+        return self._read_json_body()
+
+    def _learning_consent_get(self):
+        if not self._learning_authorized():
+            return
+        self._json_response(200, _get_learning_consent())
+
+    def _learning_consent_update(self):
+        if not self._learning_authorized():
+            return
+        data, error = self._learning_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            self._json_response(200, _update_learning_consent(data))
+        except ValueError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+
+    def _learning_consent_revoke(self):
+        if not self._learning_authorized():
+            return
+        self._json_response(200, _update_learning_consent({
+            "explicit_feedback": False,
+            "action_outcomes": False,
+            "voice_diagnostics": False,
+            "routine_tools": False,
+        }))
+
+    @staticmethod
+    def _acp_clients():
+        seen = set()
+        clients = []
+        for client in list(_st.acp_pool.values()) + ([_st.acp_client] if _st.acp_client else []):
+            if client and id(client) not in seen:
+                seen.add(id(client))
+                clients.append(client)
+        return clients
+
+    def _acp_permissions_list(self):
+        if not self._require_bridge_capability():
+            return
+        rows = []
+        for client in self._acp_clients():
+            rows.extend(client.list_pending_permissions())
+        rows.sort(key=lambda row: row.get("created_at", 0))
+        self._json_response(200, {"permissions": rows[:20]})
+
+    def _acp_permission_resolve(self, permission_id):
+        if not self._require_bridge_capability():
+            return
+        data, error = self._learning_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        option_id = str((data or {}).get("option_id") or "")[:120]
+        resolved = any(client.resolve_permission(permission_id, option_id or None) for client in self._acp_clients())
+        self._json_response(200 if resolved else 404, {"resolved": resolved})
+
+    def _learning_signals_list(self):
+        if not self._learning_authorized():
+            return
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        scope = (params.get("scope") or [None])[0]
+        session_id = (params.get("session_id") or [None])[0]
+        if not scope:
+            self._json_response(400, {"error": {"message": "learning signal list requires an explicit scope"}})
+            return
+        if scope == "session" and not session_id:
+            self._json_response(400, {"error": {"message": "session scope requires session_id"}})
+            return
+        try:
+            rows = _list_learning_signals(
+                scope=scope,
+                session_id=session_id,
+                limit=(params.get("limit") or [100])[0],
+            )
+        except (TypeError, ValueError) as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        self._json_response(200, {"signals": rows})
+
+    def _learning_signal_create(self):
+        if not self._learning_authorized():
+            return
+        data, error = self._learning_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            signal, reason = _create_learning_signal(data)
+        except ValueError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        if not signal:
+            self._json_response(403, {"error": {"message": "learning category is not enabled", "code": reason}})
+            return
+        applied = self._apply_learning_signal(signal)
+        if applied:
+            signal = _mark_learning_applied(signal["id"], applied) or signal
+        self._json_response(201, {"signal": signal})
+
+    def _learning_signals_delete(self, signal_id=""):
+        if not self._learning_authorized():
+            return
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        scope = (params.get("scope") or [None])[0]
+        session_id = (params.get("session_id") or [None])[0]
+        delete_all = (params.get("all") or ["0"])[0].lower() in ("1", "true", "yes")
+        if signal_id and (scope != "session" or not session_id):
+            self._json_response(400, {"error": {"message": "individual learning signal deletion requires session scope and session_id"}})
+            return
+        try:
+            deleted = _delete_learning_signals(
+                signal_id=signal_id or None,
+                scope=scope,
+                session_id=session_id,
+                delete_all=delete_all,
+            )
+        except ValueError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        self._json_response(200, {"deleted": deleted})
+
+    def _apply_learning_signal(self, signal):
+        """Apply only explicit, bounded preference effects; inferred data never overwrites facts."""
+        if signal.get("source") != "explicit-user" or signal.get("kind") != "feedback":
+            return "recorded; inferred signals do not alter memory"
+        effect_by_status = {
+            "helpful": "retain response style",
+            "unhelpful": "avoid response pattern",
+            "misunderstood": "ask for clarification before proceeding",
+        }
+        effect = effect_by_status.get(signal.get("status"))
+        if not effect:
+            return "recorded"
+        if not _st.cognition_enabled:
+            return "recorded; cognition disabled"
+        columns = ["Timestamp", "Trigger", "Observation", "ActionTaken", "Effectiveness"]
+        row = [{
+            "Timestamp": signal["timestamp"],
+            "Trigger": "explicit response feedback",
+            "Observation": "User marked a response as " + signal["status"],
+            "ActionTaken": effect,
+            "Effectiveness": 0.0,
+        }]
+        if _memory_ingest("Reflections", columns, row):
+            return effect
+        return "recorded; reflection store unavailable"
 
     def _kusto_context(self):
         cluster, db = _get_kusto_config()
@@ -1794,7 +2120,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "session_id": _st.acp_client.session_id if _st.acp_client else None,
             "agent": _st.acp_client.agent_info if _st.acp_client else None,
             "model": _st.acp_client.model if _st.acp_client else None,
-            "mcp_servers": list(_st.acp_client.mcp_config.keys()) if _st.acp_client and _st.acp_client.mcp_config else [],
+            "mcp_servers": list(_st.configured_mcp_config.keys()),
             "cognition_enabled": _st.cognition_enabled,
             "cognition_launch_id": _st.cognition_launch_id,
             "cognition_launch_iso": _st.cognition_launch_iso,
@@ -1822,7 +2148,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             report["blockers"].append("ACP client not connected. Run: copilot auth login")
 
         # MCP servers
-        mcp_names = list(_st.acp_client.mcp_config.keys()) if _st.acp_client and _st.acp_client.mcp_config else []
+        mcp_names = list(_st.configured_mcp_config.keys())
         report["subsystems"]["mcp"] = {"configured": mcp_names, "count": len(mcp_names)}
 
         # Browser agent
@@ -2657,7 +2983,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _mcp_status(self):
         """Return current MCP server configuration status."""
-        config = _st.acp_client.mcp_config if _st.acp_client else {}
+        config = _st.configured_mcp_config
         # Redact sensitive env vars (tokens, keys, secrets) before sending to browser
         safe_config = {}
         for srv_name, srv_cfg in config.items():
@@ -2715,12 +3041,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # has the draft and the user message, so it must NOT re-run web/Kusto/MCP
         # tools (that duplicated the draft's retrieval and doubled latency).
         no_tools = bool(data.get("no_tools"))
+        conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
         model_for_response = data.get("model", "gpt-5.6-luna")  # frontend-selectable, default gpt-5.6-luna
         raw_reasoning_effort = data.get("acp_reasoning_effort", "")
         if not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort not in ACP_REASONING_EFFORTS | {""}:
             self._json_response(400, {"error": {"message": "Unsupported acp_reasoning_effort"}})
             return
         reasoning_effort = raw_reasoning_effort
+        stream_requested = data.get("stream") is True
         _set_openai_key_from(data)  # cache key for semantic recall (incl. background threads)
 
         if not user_message and messages:
@@ -2735,13 +3063,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _mark_user_activity()
         _turn_t0 = time.perf_counter()
 
+        import re as _re
+        _routing_message = _effective_routing_message(user_message, internal, recall_query)
+        msg_lower = _routing_message.lower()
+        _request_type = _classify_request_type(msg_lower)
+        _fast_route = _classify_fast_route(_routing_message)
+        _passive_recall = _is_passive_memory_recall(_routing_message)
+        _prompt_fields = _prompt_budget_fields(data.get("prompt_budget"))
+        stream_state = self._new_stream_state("aig", model_for_response) if stream_requested else None
+
         print(f"[AIG] Processing: {user_message[:80]}...")
 
         # Step 1: Build memory context. Timings stay privacy-safe: no prompt or
         # response content is emitted into telemetry.
         _memory_t0 = time.perf_counter()
         # Skip for internal calls (cognition sub-calls already have context)
-        if internal:
+        if _fast_route:
+            memory_context = ""
+            print(f"[AIG] Fast route: skipping memory assembly ({_fast_route})")
+        elif internal:
             # Cognition draft/revise stages opt in to recall via recall_query so
             # the cognitive layer (default ON) does not bypass persistent memory.
             if inject_memory and recall_query and _st.cognition_enabled:
@@ -2762,8 +3102,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Step 2: ACP-first routing — ACP is the default path (it has MCP tools).
         # Skip ACP data retrieval for internal calls (cognition sub-calls)
         # and for trivial conversational messages with high confidence.
-        import re as _re
-        msg_lower = user_message.lower()
         msg_stripped = _re.sub(r'[^\w\s]', '', msg_lower).strip()
         msg_words = msg_stripped.split()
 
@@ -2774,7 +3112,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # retrieval even though they are internal. Without it the draft model
         # never sees [Data Retrieved] and fabricates everything.
         force_retrieve = bool(data.get("retrieve_data"))
-        if internal and not force_retrieve:
+        if _fast_route:
+            skip_acp = True
+            _acp_route = "fast/" + _fast_route
+        elif internal and not force_retrieve:
             skip_acp = True
             _acp_route = "internal-cognition"
         elif not _st.acp_client and not _st.local_mode:
@@ -2793,9 +3134,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             skip_acp = True
             _acp_route = "meta-question"
 
-        # Classify the request type for logging and prompt tuning
-        _request_type = _classify_request_type(msg_lower)
-
         # ACP pre-retrieval is useful only when the classifier identified a
         # live-data/query request. Running an agentic ACP pass for every
         # ordinary question serializes two model turns before Eva can answer.
@@ -2803,6 +3141,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # go directly to the selected responder; their local capability routes
         # remain available in the final response.
         needs_acp_tools = not skip_acp and _needs_acp_preflight(msg_lower, _request_type)
+        _tool_profile = _select_acp_tool_profile(
+            _routing_message, _request_type, fast_route=_fast_route, no_tools=no_tools
+        ) if needs_acp_tools else "none"
+        _escalation = "fast-responder" if _fast_route else (
+            "acp-preflight" if needs_acp_tools else "direct-responder"
+        )
         if not skip_acp and not needs_acp_tools:
             skip_acp = True
             _acp_route = "direct/general"
@@ -2836,7 +3180,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # Ensure ACP is alive before attempting tool calls.
             # The CLI may have died between requests (idle timeout, crash).
             if not _st.acp_client.alive:
-                ok, _ = _ensure_acp_model(_st.acp_client.model or "")
+                ok, _ = _ensure_acp_model(_st.acp_client.model or "", tool_profile=_tool_profile)
                 if not ok:
                     needs_acp_tools = False
                     print("[AIG] ACP restart failed, skipping data retrieval")
@@ -2877,10 +3221,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # Skipped in raw mode so strict query output is not polluted.
             if not raw_output_requested:
                 acp_prompt += _MEMORY_CAPTURE_DIRECTIVE
-            acp_result = _st.acp_client.prompt(acp_prompt, timeout=90)
+            with _acquire_acp_client(_st.acp_client.model or "", reasoning_effort or None,
+                                     tool_profile=_tool_profile) as (preflight_client, acquire_detail):
+                acp_result = preflight_client.prompt(
+                    acp_prompt, timeout=90, conversation_id=conversation_id
+                ) if preflight_client else {"error": acquire_detail}
             if acp_result and "text" in acp_result and acp_result["text"]:
                 acp_data = acp_result["text"]
-                acp_model_used = _st.acp_client.model or "copilot-acp"
+                acp_model_used = preflight_client.model if preflight_client else "copilot-acp"
                 print(f"[AIG] ACP returned {len(acp_data)} chars of data")
             _preflight_succeeded = bool(acp_result and not acp_result.get("error"))
         if _preflight_attempted:
@@ -2942,6 +3290,29 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         if memory_context:
             eva_system += memory_context
+
+        if _passive_recall:
+            eva_system += (
+                "\n[Passive Memory Recall - AUTHORITATIVE]\n"
+                "Answer only from the injected Identity, User Profile, Memory, and prior-conversation excerpts. "
+                "Do not invoke tools, shell commands, MCP operations, database queries, or permission requests. "
+                "Prior-conversation excerpts are unverified recollections: distinguish them from durable Knowledge facts. "
+                "If the requested fact is absent, say what you do remember and ask the user to confirm the missing fact.\n"
+            )
+
+        if _fast_route:
+            eva_system += (
+                "\n[Fast Route - AUTHORITATIVE]\n"
+                "This is a low-risk, self-contained request. Use exactly one responder model pass. "
+                "Do not invoke tools, memory, ACP preflight, or cognition for this turn. "
+                "For arithmetic, reason and answer normally; do not use a deterministic application answer.\n"
+            )
+            if _fast_route == "date-time":
+                eva_system += (
+                    "The bridge's current UTC date/time is "
+                    + datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+                    + ". State the timezone if you use this value.\n"
+                )
 
         if acp_data:
             # Strip blob URLs from ACP data so the model doesn't parrot them.
@@ -3060,7 +3431,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
             if response_text and _st.cognition_enabled and not internal:
                 threading.Thread(target=_post_response_reflection,
-                                 args=(user_message, response_text, model_used),
+                                 args=(user_message, response_text, model_used, conversation_id),
                                  daemon=True).start()
 
             response = {
@@ -3075,7 +3446,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 }],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             }
-            self._json_response(200, response)
+            if stream_state:
+                stream_state["route"] = _acp_route
+                stream_state["model"] = model_used
+                self._stream_finish(stream_state, response)
+            else:
+                self._json_response(200, response)
             _telemetry_emit(
                 "aig_turn",
                 model=model_for_response,
@@ -3091,6 +3467,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 responder_ms=round((time.perf_counter() - _responder_t0) * 1000.0, 1),
                 preflight_attempted=_preflight_attempted,
                 preflight_succeeded=_preflight_succeeded,
+                fast_route=_fast_route or "",
+                escalation=_escalation,
+                **_prompt_fields,
                 response_chars=len(response_text or ""),
                 total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
             )
@@ -3294,12 +3673,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         full_prompt += "\n\nUser: " + user_message
                 else:
                     full_prompt = eva_system + "\n\nUser: " + user_message
-                with _acquire_acp_client(acp_response_model, reasoning_effort or None) as (response_client, acquire_detail):
+                with _acquire_acp_client(acp_response_model, reasoning_effort or None,
+                                         tool_profile="none") as (response_client, acquire_detail):
                     if not response_client:
                         response_text = f"ACP model switch failed: {acquire_detail}"
                         model_used = "aig:unavailable"
                     else:
-                        acp_result = response_client.prompt(full_prompt, timeout=120)
+                        on_chunk = (lambda chunk: self._stream_chunk(stream_state, chunk)) if stream_state else None
+                        acp_result = response_client.prompt(
+                            full_prompt, timeout=120,
+                            conversation_id=_passive_recall_session_key(conversation_id)
+                            if _passive_recall else conversation_id,
+                            on_chunk=on_chunk,
+                            permission_mode="passive_recall" if _passive_recall else "interactive",
+                        )
                         response_text = acp_result.get("text", "I'm having trouble processing that right now.")
                         active_model = response_client.model or "acp-default"
                         model_used = f"aig:{active_model}"
@@ -3312,7 +3699,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Step 5: Post-response reflection (background)
         if response_text and _st.cognition_enabled and not internal:
             threading.Thread(target=_post_response_reflection,
-                           args=(user_message, response_text, model_used),
+                           args=(user_message, response_text, model_used, conversation_id),
                            daemon=True).start()
 
         # Return OpenAI-compatible response
@@ -3331,7 +3718,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             }],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
-        self._json_response(200, response)
+        if stream_state:
+            stream_state["route"] = _acp_route
+            stream_state["model"] = model_used
+            self._stream_finish(stream_state, response)
+        else:
+            self._json_response(200, response)
         print(f"[AIG] Complete: {model_used} ({len(response_text)} chars)")
         _telemetry_emit(
             "aig_turn",
@@ -3348,6 +3740,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             responder_ms=round((time.perf_counter() - _responder_t0) * 1000.0, 1),
             preflight_attempted=_preflight_attempted,
             preflight_succeeded=_preflight_succeeded,
+            fast_route=_fast_route or "",
+            escalation=_escalation,
+            **_prompt_fields,
             response_chars=len(response_text or ""),
             total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
         )
@@ -3399,7 +3794,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # Shared ACP data retrieval — used by AIG pipeline and /v1/data/retrieve
     # ------------------------------------------------------------------
     @staticmethod
-    def _retrieve_acp_data_for(user_message):
+    def _retrieve_acp_data_for(user_message, conversation_id=""):
         """Run data retrieval for a user message and return (data_text, model_used).
 
         Routes to ACP (Copilot CLI) or the local MCP agent depending on
@@ -3438,6 +3833,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return "", ""
 
         _request_type = _classify_request_type(msg_lower)
+        _tool_profile = _select_acp_tool_profile(user_message, _request_type)
         print(f"[DataRetrieve] ACP query ({_request_type}): {user_message[:80]}")
 
         if _request_type in ("news-search", "weather-search", "financial-data", "web-search"):
@@ -3466,7 +3862,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         acp_prompt += _MEMORY_CAPTURE_DIRECTIVE
 
         try:
-            acp_result = _st.acp_client.prompt(acp_prompt, timeout=90)
+            with _acquire_acp_client(_st.acp_client.model or "", tool_profile=_tool_profile) as (retrieve_client, acquire_detail):
+                acp_result = retrieve_client.prompt(
+                    acp_prompt, timeout=90, conversation_id=conversation_id
+                ) if retrieve_client else {"error": acquire_detail}
         except Exception as e:
             print(f"[DataRetrieve] ACP error: {e}")
             return "", ""
@@ -3475,7 +3874,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             data = acp_result["text"]
             # Strip blob URLs
             data = _re.sub(r'blob:file:///[a-f0-9-]+', '', data)
-            model = _st.acp_client.model or "copilot-acp"
+            model = retrieve_client.model if retrieve_client else "copilot-acp"
             print(f"[DataRetrieve] ACP returned {len(data)} chars")
             return data, model
         return "", ""
@@ -3509,10 +3908,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         user_message = params.get("message", [""])[0]
+        conversation_id = str(params.get("session_id", [""])[0] or params.get("conversation_id", [""])[0]).strip()[:120]
         if not user_message:
             self._json_response(200, {"data": "", "model": "", "retrieved": False, "mode": "local" if _st.local_mode else "cloud"})
             return
-        data, model = self._retrieve_acp_data_for(user_message)
+        data, model = self._retrieve_acp_data_for(user_message, conversation_id)
         self._json_response(200, {
             "data": data,
             "model": model,
@@ -3561,12 +3961,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
         user_msg = data.get("user_message", "")
         assistant_msg = data.get("assistant_message", "")
         model = data.get("model", "unknown")
+        conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
         if user_msg:
             _mark_user_activity()
 
         if user_msg and assistant_msg:
             threading.Thread(target=_post_response_reflection,
-                           args=(user_msg, assistant_msg, model),
+                           args=(user_msg, assistant_msg, model, conversation_id),
                            daemon=True).start()
 
         self._json_response(200, {"status": "ok"})
@@ -3651,7 +4052,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 applied += 1
 
         warning = "Schema-only seed: existing tables are unchanged and no rows were ingested." if schema_only else "Re-running this seed will duplicate inline rows."
-        mcp_config = getattr(_st.acp_client, "mcp_config", {}) if _st.acp_client is not None else {}
+        mcp_config = dict(_st.configured_mcp_config)
         if (
             failed == 0
             and not _st.cognition_enabled
@@ -3740,6 +4141,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             _try_kusto_silent_auth()
         mcp_servers = _inject_kusto_token(mcp_servers)
         _capture_active_kusto_env(mcp_servers)
+        _st.configured_mcp_config = copy.deepcopy(mcp_servers)
 
         # Restart ACP client with new MCP config
         old_path = _st.acp_client.copilot_path if _st.acp_client else "copilot"
@@ -3749,8 +4151,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if _st.acp_client:
             _st.acp_client.stop()
 
-        _st.acp_client = ACPClient(copilot_path=old_path, cwd=old_cwd, model=old_model, mcp_config=mcp_servers,
-                                   reasoning_effort=old_reasoning_effort)
+        _st.acp_client = ACPClient(copilot_path=old_path, cwd=old_cwd, model=old_model, mcp_config={},
+                       reasoning_effort=old_reasoning_effort, tool_profile="none")
         try:
             _st.acp_client.start()
             # MCP config changed: drop stale warm clients so the pool only holds
@@ -3817,11 +4219,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         _set_openai_key_from(data)  # cache key for semantic recall
         requested_model = data.get("acp_model", "") or ""
+        conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
         raw_reasoning_effort = data.get("acp_reasoning_effort", "")
         if not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort not in ACP_REASONING_EFFORTS | {""}:
             self._json_response(400, {"error": {"message": "Unsupported acp_reasoning_effort"}})
             return
         reasoning_effort = raw_reasoning_effort
+        stream_requested = data.get("stream") is True
 
         # Build prompt text from messages (combine for context)
         # ACP doesn't have native message roles, so we format them
@@ -3854,17 +4258,40 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if last_user_msg:
             _mark_user_activity()
 
+        direct_request_type = _classify_request_type(last_user_msg.lower()) if last_user_msg else "general"
+        direct_profile = _select_acp_tool_profile(last_user_msg, direct_request_type)
+        direct_passive_recall = _is_passive_memory_recall(last_user_msg)
+
         memory_context = _build_memory_context(last_user_msg)
         if memory_context:
             prompt_text = memory_context + prompt_text
             print(f"[Cognition] Injected {len(memory_context)} chars of memory context")
+        if direct_passive_recall:
+            prompt_text = (
+                "[Passive Memory Recall - AUTHORITATIVE]\n"
+                "Answer only from injected memory and untrusted prior-conversation excerpts. "
+                "Do not invoke tools, shell commands, MCP operations, database queries, or permission requests. "
+                "Ask for confirmation when a fact is not durable Knowledge.\n\n"
+                + prompt_text
+            )
 
         # Send to ACP
-        with _acquire_acp_client(requested_model, reasoning_effort or None) as (selected_client, acquire_detail):
+        with _acquire_acp_client(requested_model, reasoning_effort or None,
+                     tool_profile=direct_profile) as (selected_client, acquire_detail):
             if not selected_client:
                 self._json_response(503, {"error": {"message": acquire_detail}})
                 return
-            result = selected_client.prompt(prompt_text, timeout=180)
+            stream_state = self._new_stream_state(
+                "copilot-acp", f"copilot-acp:{requested_model}" if requested_model else "copilot-acp"
+            ) if stream_requested else None
+            on_chunk = (lambda chunk: self._stream_chunk(stream_state, chunk)) if stream_state else None
+            result = selected_client.prompt(
+                prompt_text, timeout=180,
+                conversation_id=_passive_recall_session_key(conversation_id)
+                if direct_passive_recall else conversation_id,
+                on_chunk=on_chunk,
+                permission_mode="passive_recall" if direct_passive_recall else "interactive",
+            )
 
         if "error" in result:
             error_detail = result["error"]
@@ -3872,7 +4299,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 error_msg = error_detail.get("message", str(error_detail))
             else:
                 error_msg = str(error_detail)
-            self._json_response(500, {"error": {"message": error_msg}})
+            if stream_state and stream_state.get("started"):
+                self._stream_error(stream_state, error_msg, 500)
+            else:
+                self._json_response(500, {"error": {"message": error_msg}})
             return
 
         # Format as OpenAI-compatible response
@@ -3895,14 +4325,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "total_tokens": 0
             }
         }
-        self._json_response(200, response)
+        if stream_state:
+            self._stream_finish(stream_state, response)
+        else:
+            self._json_response(200, response)
 
         # --- Cognition: Post-response reflection (background) ---
         response_text = result.get("text", "")
         model_label = f"copilot-acp:{requested_model}" if requested_model else "copilot-acp"
         if last_user_msg and response_text:
             threading.Thread(target=_post_response_reflection,
-                           args=(last_user_msg, response_text, model_label),
+                           args=(last_user_msg, response_text, model_label, conversation_id),
                            daemon=True).start()
 
     # ------------------------------------------------------------------
@@ -4289,8 +4722,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     from bridge.local_mcp import LocalMCPManager
                     mcp_config = {}
                     # Reuse the same MCP config that ACP uses (minus cloud-only servers)
-                    if _st.acp_client and _st.acp_client.mcp_config:
-                        mcp_config = dict(_st.acp_client.mcp_config)
+                    if _st.configured_mcp_config:
+                        mcp_config = dict(_st.configured_mcp_config)
                     if not mcp_config:
                         mcp_config = _load_persisted_mcp_config()
                     # Always include the web search MCP server for local mode
@@ -4534,6 +4967,7 @@ def main():
             kusto_env["KUSTO_DATABASE"] = locked_db
         kusto_env["KUSTO_DATABASE_LOCKED"] = "1"
     _capture_active_kusto_env(mcp_config)
+    _st.configured_mcp_config = copy.deepcopy(mcp_config)
 
     # global statement removed — writes go to _st.*
     print(f"[Bridge] Starting ACP bridge on port {args.port}...")
@@ -4543,7 +4977,8 @@ def main():
         print(f"[Bridge] MCP Servers: {', '.join(mcp_config.keys())}")
 
     # Start ACP client
-    _st.acp_client = ACPClient(copilot_path=args.copilot_path, cwd=args.cwd, model=args.model, mcp_config=mcp_config)
+    # Start a tool-free base client; route-specific profiles are warmed lazily.
+    _st.acp_client = ACPClient(copilot_path=args.copilot_path, cwd=args.cwd, model=args.model, mcp_config={}, tool_profile="none")
     try:
         _st.acp_client.start()
     except RuntimeError as e:

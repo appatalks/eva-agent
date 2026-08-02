@@ -393,6 +393,13 @@ body.eva-standalone #settingsMenu {
     .background-inline-button { padding: 6px 10px; font-size: 12px; }
     .background-activity-row { padding: 8px 10px; }
     body.theme-lcars .settings-subhead { color: #eef5ff; }
+    .learning-signal-list { display: grid; gap: 4px; max-height: 180px; overflow-y: auto; margin-top: 6px; }
+    .learning-signal-row { padding: 6px 8px; border-left: 2px solid #8aa4b8; font-size: 11px; color: #59636b; overflow-wrap: anywhere; }
+    .eva-feedback { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+    .eva-feedback-button { border: 1px solid rgba(127,127,127,.35); background: transparent; color: inherit; border-radius: 4px; padding: 3px 7px; cursor: pointer; font-size: 11px; }
+    .eva-feedback-button:hover, .eva-feedback-button:focus-visible { border-color: #5b8def; outline: 2px solid rgba(91,141,239,.25); outline-offset: 1px; }
+    .eva-feedback-button.selected { background: rgba(91,141,239,.16); border-color: #5b8def; }
+    body.theme-lcars .learning-signal-row { color: #d0defa; border-color: var(--ld-arctic-ice); }
     body.theme-lcars .background-row { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.15); }
     body.theme-lcars .background-title { color: #eef5ff; }
     body.theme-lcars .background-meta,

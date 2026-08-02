@@ -37,6 +37,15 @@ function _activeSessionId() {
   return localStorage.getItem(SESSION_ACTIVE_KEY) || null;
 }
 
+function ensureActiveSessionId() {
+  var id = _activeSessionId();
+  if (id) return id;
+
+  id = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
+  localStorage.setItem(SESSION_ACTIVE_KEY, id);
+  return id;
+}
+
 /** Snapshot current conversation state into a session object */
 function _snapshotSession() {
   var data = {};
@@ -134,12 +143,17 @@ function saveCurrentSession() {
     index.unshift({ id: id, title: _sessionTitle(snapshot), created: Date.now(), updated: Date.now() });
   } else {
     // Update existing
+    var found = false;
     for (var i = 0; i < index.length; i++) {
       if (index[i].id === id) {
         if (!index[i].customTitle) index[i].title = _sessionTitle(snapshot);
         index[i].updated = Date.now();
+        found = true;
         break;
       }
+    }
+    if (!found) {
+      index.unshift({ id: id, title: _sessionTitle(snapshot), created: Date.now(), updated: Date.now() });
     }
   }
 

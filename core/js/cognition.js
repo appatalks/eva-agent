@@ -677,7 +677,7 @@
   // ---------------------------------------------------------------------------
   // Bridge call primitive
   // ---------------------------------------------------------------------------
-  async function callAgent(role, model, systemPrompt, conversation, taskMessage, extra) {
+  async function callAgent(role, model, systemPrompt, conversation, taskMessage, extra, sessionId) {
     var url = bridgeUrl().replace(/\/+$/, '') + '/v1/aig/chat';
     var msgs = [{ role: 'system', content: systemPrompt }];
     if (Array.isArray(conversation) && conversation.length) {
@@ -687,10 +687,17 @@
     if (taskMessage) {
       msgs.push({ role: 'user', content: taskMessage });
     }
+    var promptBudget = EvaPromptBudget.compactMessages(msgs, {
+      budget: 10000,
+      recentTurns: 4
+    });
     var payload = {
-      messages: msgs,
+      messages: promptBudget.messages,
+      prompt_budget: EvaPromptBudget.telemetry(promptBudget),
       user_message: taskMessage || '',
-      model: model,
+        model: model,
+        session_id: sessionId || ((typeof ensureActiveSessionId === 'function')
+          ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')),
       acp_reasoning_effort: (typeof getReasoningEffortForModel === 'function' && getReasoningEffortForModel('aig') !== 'default') ? getReasoningEffortForModel('aig') : '',
       lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
       lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
@@ -822,6 +829,8 @@
     var cfg = getCfg();
     var userMsg = String(opts.userMessage || '').trim();
     var convo = Array.isArray(opts.messages) ? opts.messages.slice() : [];
+    var sessionId = String(opts.sessionId || ((typeof ensureActiveSessionId === 'function')
+      ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')));
     var trace = [];
     var _turnStart = Date.now();
     var _draftMs = 0, _reviewMs = 0, _reviseMs = 0;
@@ -887,7 +896,7 @@
     ].join('\n');
     var draft = await callAgent(
       'eva', cfg.evaModel, cfg.evaPrompt, convo, draftTask,
-      { inject_memory: true, recall_query: userMsg, retrieve_data: true }
+      { inject_memory: true, recall_query: userMsg, retrieve_data: true }, sessionId
     );
 
     // Eva's silent self-review signal decides whether a second opinion runs.
@@ -950,7 +959,7 @@
       try {
         review = await callAgent(
           'reviewer', cfg.reviewerModel, cfg.reviewerPrompt, convo, reviewTask,
-          { no_tools: true }
+          { no_tools: true }, sessionId
         );
       } catch (reviewErr) {
         // Review failed (timeout, network). Skip review and use the draft as-is.
@@ -991,7 +1000,7 @@
       try {
         revised = await callAgent(
           'eva', cfg.evaModel, cfg.evaPrompt, convo, reviseTask,
-          { inject_memory: true, recall_query: userMsg }
+          { inject_memory: true, recall_query: userMsg }, sessionId
         );
       } catch (reviseErr) {
         // Revise failed (timeout, network error). Fall back to the draft

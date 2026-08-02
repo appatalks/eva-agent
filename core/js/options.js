@@ -1,6 +1,72 @@
 // Javascript for Options
 // 
 
+// Streaming responses are provisional text only. Marker execution remains
+// exclusively in renderEvaResponse after the final event arrives.
+function createEvaStreamingBubble(txtOutput) {
+  var bubble = document.createElement('div');
+  bubble.className = 'chat-bubble eva-bubble eva-streaming-bubble';
+  var label = document.createElement('span');
+  label.className = 'eva';
+  label.textContent = 'Eva:';
+  var text = document.createElement('span');
+  text.className = 'eva-streaming-text';
+  bubble.appendChild(label);
+  bubble.appendChild(document.createTextNode(' '));
+  bubble.appendChild(text);
+  txtOutput.appendChild(bubble);
+  return { bubble: bubble, text: text, value: '' };
+}
+
+function appendEvaStreamingChunk(provisional, chunk, txtOutput) {
+  if (!provisional || !chunk) return;
+  provisional.value += String(chunk);
+  provisional.text.textContent = provisional.value;
+  txtOutput.scrollTop = txtOutput.scrollHeight;
+}
+
+function removeEvaStreamingBubble(provisional) {
+  if (provisional && provisional.bubble && provisional.bubble.parentNode) {
+    provisional.bubble.parentNode.removeChild(provisional.bubble);
+  }
+}
+
+async function readEvaStreamingResponse(response, onChunk) {
+  var contentType = (response.headers.get('Content-Type') || '').toLowerCase();
+  if (contentType.indexOf('application/x-ndjson') < 0 || !response.body || !response.body.getReader) {
+    return response.json();
+  }
+  var reader = response.body.getReader();
+  var decoder = new TextDecoder();
+  var pending = '';
+  var finalResponse = null;
+
+  function consumeLine(line) {
+    if (!line.trim()) return;
+    var event = JSON.parse(line);
+    if (event.type === 'chunk') {
+      if (typeof event.text === 'string') onChunk(event.text);
+    } else if (event.type === 'done') {
+      finalResponse = event.response || null;
+    } else if (event.type === 'error') {
+      throw new Error(event.message || ('Streaming error ' + (event.status || '')));
+    }
+  }
+
+  while (true) {
+    var part = await reader.read();
+    if (part.done) break;
+    pending += decoder.decode(part.value, { stream: true });
+    var lines = pending.split('\n');
+    pending = lines.pop();
+    lines.forEach(consumeLine);
+  }
+  pending += decoder.decode();
+  if (pending.trim()) consumeLine(pending);
+  if (!finalResponse) throw new Error('Streaming response ended without a final event');
+  return finalResponse;
+}
+
 // Global Variables
 var lastResponse = "";
 var userMasterResponse = "";
@@ -1387,6 +1453,7 @@ function injectProactiveBubble(notif) {
 // fact rather than from the intent Eva announced before acting.
 function _evaAgentFeedback(status, endpoint, title) {
   if (!status) return;
+  if (typeof EvaLearning !== 'undefined' && EvaLearning) EvaLearning.recordActionOutcome(status, endpoint, title);
   // Clear the progress-narration throttle so the completion line is never
   // suppressed as a near-duplicate of the last "working on it" update.
   try { if (typeof _agentProgress !== 'undefined') { _agentProgress.last = 0; _agentProgress.lastText = ''; } } catch (_) {}
@@ -1699,6 +1766,66 @@ function initNotifications() {
   // First poll shortly after load, then on a steady cadence.
   setTimeout(pollNotifications, 8000);
   _notifState.timer = setInterval(pollNotifications, _notifState.intervalMs);
+}
+
+var _acpPermissionState = { shown: {}, polling: false, intervalMs: 10000, timer: null };
+
+function _resolveACPPermission(permissionId, optionId, bubble) {
+  backgroundBridgeRequest('/v1/acp/permissions/' + encodeURIComponent(permissionId), {
+    method: 'POST',
+    headers: getBridgeCapabilityHeaders(),
+    body: JSON.stringify({ option_id: optionId || '' })
+  }).then(function() {
+    if (bubble && bubble.parentNode) bubble.parentNode.removeChild(bubble);
+  }).catch(function() {});
+}
+
+function _renderACPPermission(permission) {
+  if (!permission || _acpPermissionState.shown[permission.id]) return;
+  _acpPermissionState.shown[permission.id] = true;
+  var output = document.getElementById('txtOutput');
+  if (!output) return;
+  var bubble = document.createElement('div');
+  bubble.className = 'chat-bubble eva-bubble';
+  var text = document.createElement('div');
+  text.className = 'md';
+  text.textContent = 'Allow this ' + String(permission.tool_kind || 'tool') + ' action once?';
+  bubble.appendChild(text);
+  var actions = document.createElement('div');
+  actions.className = 'background-actions';
+  var allow = (permission.options || []).filter(function(option) { return option.kind === 'allow_once'; })[0];
+  var reject = (permission.options || []).filter(function(option) { return option.kind === 'reject_once'; })[0];
+  var allowButton = document.createElement('button');
+  allowButton.type = 'button';
+  allowButton.className = 'auth-toggle';
+  allowButton.textContent = 'Allow once';
+  allowButton.disabled = !allow;
+  allowButton.addEventListener('click', function() { _resolveACPPermission(permission.id, allow && allow.option_id, bubble); });
+  var rejectButton = document.createElement('button');
+  rejectButton.type = 'button';
+  rejectButton.className = 'auth-toggle';
+  rejectButton.textContent = 'Reject';
+  rejectButton.addEventListener('click', function() { _resolveACPPermission(permission.id, reject && reject.option_id, bubble); });
+  actions.appendChild(allowButton);
+  actions.appendChild(rejectButton);
+  bubble.appendChild(actions);
+  output.appendChild(bubble);
+  output.scrollTop = output.scrollHeight;
+}
+
+function pollACPPermissions() {
+  if (_acpPermissionState.polling || !isEvaStandalone()) return;
+  _acpPermissionState.polling = true;
+  backgroundBridgeRequest('/v1/acp/permissions', { headers: getBridgeCapabilityHeaders() })
+    .then(function(data) { (data.permissions || []).forEach(_renderACPPermission); })
+    .catch(function() {})
+    .finally(function() { _acpPermissionState.polling = false; });
+}
+
+function initACPPermissions() {
+  if (_acpPermissionState.timer) return;
+  setTimeout(pollACPPermissions, 1500);
+  _acpPermissionState.timer = setInterval(pollACPPermissions, _acpPermissionState.intervalMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -2018,6 +2145,7 @@ function initAudioPreferences() {
   var engine = document.getElementById('selEngine');
   var voice = document.getElementById('selVoice');
   var autoSpeak = document.getElementById('autoSpeak');
+  var endpointDelay = document.getElementById('voiceEndpointDelay');
 
   if (engine) {
     var savedEngine = localStorage.getItem('tts_engine');
@@ -2043,6 +2171,18 @@ function initAudioPreferences() {
     autoSpeak.checked = localStorage.getItem('tts_auto_speak') === '1';
     autoSpeak.addEventListener('change', function() {
       localStorage.setItem('tts_auto_speak', autoSpeak.checked ? '1' : '0');
+    });
+  }
+
+  if (endpointDelay) {
+    var savedEndpointDelay = parseInt(localStorage.getItem('voice_endpoint_delay_ms'), 10);
+    if (Array.from(endpointDelay.options).some(function(option) { return parseInt(option.value, 10) === savedEndpointDelay; })) {
+      endpointDelay.value = String(savedEndpointDelay);
+    }
+    endpointDelay.addEventListener('change', function() {
+      _vv.endpointDelayMs = parseInt(endpointDelay.value, 10) || 2200;
+      localStorage.setItem('voice_endpoint_delay_ms', String(_vv.endpointDelayMs));
+      if (_vv.endpoint) _vv.endpoint.setDelay(_vv.endpointDelayMs);
     });
   }
 }
@@ -2709,6 +2849,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (typeof initAlerts === 'function') initAlerts();
   if (typeof initSkills === 'function') initSkills();
   if (typeof initNotifications === 'function') initNotifications();
+  if (typeof initACPPermissions === 'function') initACPPermissions();
 
   // Initialize status panel with any pending config/init notes
   setStatus('info', document.getElementById('idText') && document.getElementById('idText').textContent ? document.getElementById('idText').textContent : '');
@@ -2765,6 +2906,8 @@ var _vv = {
   awakeTimer: null,
   convoMode: true,        // stay in an active conversation after the wake word
   convoTimeoutMs: 30000,  // quiet period before dropping back to standby
+  endpointDelayMs: 2200,
+  endpoint: null,
   lastTranscript: '',
   lastEvaReply: '',
   speakObserver: null,
@@ -2799,6 +2942,10 @@ function openVoiceView() {
     var savedTimeout = parseInt(localStorage.getItem('vvConvoTimeoutMs'), 10);
     if (Number.isInteger(savedTimeout) && savedTimeout >= 5000 && savedTimeout <= 300000) {
       _vv.convoTimeoutMs = savedTimeout;
+    }
+    var savedEndpointDelay = parseInt(localStorage.getItem('voice_endpoint_delay_ms'), 10);
+    if (Number.isInteger(savedEndpointDelay) && savedEndpointDelay >= 1000 && savedEndpointDelay <= 5000) {
+      _vv.endpointDelayMs = savedEndpointDelay;
     }
   } catch (e) {}
   _vvSyncConvoControls();
@@ -3626,6 +3773,38 @@ function _vvHideAssets() {
 
 // --- Voice recognition ---
 
+function _vvGetEndpoint() {
+  if (_vv.endpoint || typeof VoiceEndpoint === 'undefined') return _vv.endpoint;
+  _vv.endpoint = new VoiceEndpoint({
+    delayMs: _vv.endpointDelayMs,
+    onCommit: function(transcript) { _vvHandleTranscript(transcript); },
+    onEvent: function(event) {
+      if (event.type === 'merged' || event.type === 'duplicate') {
+        try {
+          var ring = JSON.parse(localStorage.getItem('voice_endpoint_events') || '[]');
+          if (!Array.isArray(ring)) ring = [];
+          ring.push({ ts: Date.now(), type: event.type, provider: event.provider || '', fragments: event.fragments || 0 });
+          localStorage.setItem('voice_endpoint_events', JSON.stringify(ring.slice(-100)));
+        } catch (_) {}
+      }
+    }
+  });
+  return _vv.endpoint;
+}
+
+function _vvQueueTranscript(transcript, provider) {
+  var endpoint = _vvGetEndpoint();
+  if (!endpoint) {
+    _vvHandleTranscript(transcript);
+    return;
+  }
+  endpoint.setDelay(_vv.endpointDelayMs);
+  endpoint.accept(transcript, {
+    provider: provider || '',
+    delayMs: provider === 'local' ? Math.min(800, _vv.endpointDelayMs) : _vv.endpointDelayMs
+  });
+}
+
 function _vvToggleListening() {
   // Note: the desktop agent guard was removed because it also blocked the real
   // user from clicking the orb after an agent task completed. The agent's
@@ -3666,7 +3845,7 @@ function _vvStartListening() {
     _vv._lastResultTime = Date.now();
     for (var i = event.resultIndex; i < event.results.length; i++) {
       if (!event.results[i].isFinal) continue;
-      _vvHandleTranscript(event.results[i][0].transcript.trim());
+      _vvQueueTranscript(event.results[i][0].transcript.trim(), 'browser');
     }
   };
 
@@ -3749,6 +3928,7 @@ function _vvStopListening() {
   if (_vv._watchdog) { clearInterval(_vv._watchdog); _vv._watchdog = null; }
   if (_vv._whisperWatchdog) { clearInterval(_vv._whisperWatchdog); _vv._whisperWatchdog = null; }
   if (_vv._energyMonitor) { clearInterval(_vv._energyMonitor); _vv._energyMonitor = null; }
+  if (_vv.endpoint) _vv.endpoint.reset();
   if (_vv.recognition) {
     var rec = _vv.recognition;
     _vv.recognition = null;
@@ -3906,8 +4086,10 @@ function _vvWhisperRecord() {
 function _vvWhisperMonitor(capture) {
   if (!_vv.open || !_vv.whisperMode || !_vv.analyser || !_vv.dataArray) return;
 
-  var threshold = 25;
-  var silenceDelay = 1500;
+  // A fixed high threshold can animate the waveform without ever qualifying
+  // ordinary near-field speech for transcription, especially on laptop mics.
+  var threshold = 12;
+  var silenceDelay = _vv.endpointDelayMs;
 
   // Use setInterval instead of requestAnimationFrame so that Electron does not
   // throttle the energy monitor to 0 fps when the window is unfocused.
@@ -3978,7 +4160,17 @@ function _vvWhisperTranscribe(blob) {
     if (generation !== _vv.listenGeneration || !_vv.whisperMode) return;
     _vv._whisperInflight = false;
     if (data.text && data.text.trim()) {
-      _vvHandleTranscript(data.text.trim());
+      // Local STT returns complete utterances after VAD. Buffering those again
+      // can lose the wake phrase when voice lifecycle state changes, so retain
+      // the established direct dispatch path for standalone transcription.
+      if (_vv.whisperProvider === 'local') {
+        _vvHandleTranscript(data.text.trim());
+      } else {
+        _vvQueueTranscript(data.text.trim(), _vv.whisperProvider);
+      }
+    } else {
+      var emptyTranscriptEl = document.getElementById('vvTranscript');
+      if (emptyTranscriptEl) emptyTranscriptEl.textContent = 'I did not catch that.';
     }
     if (_vv.open && _vv.whisperMode && _vv.phase !== 'thinking') {
       _vvWhisperRecord();
@@ -4157,8 +4349,10 @@ function _vvStopBargeMonitor() {
   _vv._bargeEnergyFrames = 0;
 }
 
-function _vvWakeWordIndex(transcript) {
-  return String(transcript || '').search(/\beva\b/i);
+function _vvWakeWordMatch(transcript) {
+  // Faster Whisper commonly renders Eva as "Ava". Treat that close phonetic
+  // variant as the wake name only inside the voice interaction.
+  return String(transcript || '').match(/\b(eva|ava)\b/i);
 }
 
 function _vvHandleTranscript(transcript) {
@@ -4181,7 +4375,7 @@ function _vvHandleTranscript(transcript) {
   // an immediate redirect.
   if (_vv.phase === 'speaking') {
     if (!transcript || transcript.trim().length <= 1) return;
-    if (_vv.whisperProvider !== 'local' && _vvWakeWordIndex(transcript) < 0) return;
+    if (_vv.whisperProvider !== 'local' && !_vvWakeWordMatch(transcript)) return;
     _vvBargeIn();
   }
 
@@ -4190,10 +4384,10 @@ function _vvHandleTranscript(transcript) {
   if (transcriptEl) transcriptEl.textContent = transcript;
 
   var lower = transcript.toLowerCase();
-  var evaIdx = _vvWakeWordIndex(lower);
+  var wakeMatch = _vvWakeWordMatch(lower);
 
-  if (evaIdx >= 0) {
-    var command = transcript.substring(evaIdx + 3).trim().replace(/^[,.\s]+/, '').trim();
+  if (wakeMatch) {
+    var command = transcript.substring(wakeMatch.index + wakeMatch[0].length).trim().replace(/^[,.\s]+/, '').trim();
     if (command.length > 1) {
       _vvSendCommand(command, true);
     } else {
@@ -6150,6 +6344,9 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   renderOptions = renderOptions || {};
   var artifactNames = [];
   var surfacedAssets = [];
+  var feedbackKey = renderOptions.feedbackId || ('response_' + Array.from(text).reduce(function (hash, character) {
+    return ((hash << 5) - hash + character.charCodeAt(0)) | 0;
+  }, 0).toString(36));
 
   // Detect Eva browser-agent launch marker:
   // [[EVA_BROWSER]]{"goal":"...","start_url":"..."}[[/EVA_BROWSER]]
@@ -6477,6 +6674,10 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     });
     txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> <div class="md">' + html2 + '</div></div>';
   }
+
+  var feedbackBubbles = txtOutput.querySelectorAll('.chat-bubble.eva-bubble');
+  var feedbackBubble = feedbackBubbles.length ? feedbackBubbles[feedbackBubbles.length - 1] : null;
+  if (feedbackBubble && typeof EvaLearning !== 'undefined' && EvaLearning) EvaLearning.attachFeedback(feedbackBubble, feedbackKey);
 
   appendArtifactLinks();
 
