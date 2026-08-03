@@ -27,7 +27,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh            # install dependencies
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.5.4.AppImage'
+./dist/'Eva Standalone-5.5.5.AppImage'
 ```
 
 Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).
@@ -65,7 +65,7 @@ supported on Windows.
 | **Cron scheduler** | Standard cron expressions, recurring prompts, morning briefings, alerts |
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |
 | **Agent operations** | Live scorecard for subagents, browser/desktop runs, steering, and animated memory topology |
-| **Multi-provider** | OpenAI, Google Gemini, GitHub Copilot, lm-studio (local) |
+| **Multi-provider** | Eva AIG via direct OpenAI API, GitHub Copilot ACP, or LM Studio; direct Gemini and provider routes remain available in the browser UI |
 | **Prompt budgets** | Bounded provider payloads with pinned instructions, recent turns, rolling summaries, and privacy-safe estimates |
 | **Reasoning controls** | Model-specific effort levels for OpenAI, GitHub Models, and Copilot CLI ACP |
 | **Streaming responses** | AIG and direct Copilot ACP show safe incremental text with TTFT telemetry; final actions run once |
@@ -78,6 +78,25 @@ supported on Windows.
 ## Get started
 
 Select **Eva (AIG)** in the model dropdown for the full experience.
+
+In Settings > Models, **Eva Backend Model** includes both Copilot ACP models and
+**OpenAI API (direct)** models. Direct OpenAI keeps Eva's memory, persona,
+adaptive review, response rendering, and browser/desktop/camera action markers;
+it requires an OpenAI key but not a Copilot license. ACP-specific MCP retrieval
+and ACP subagents still require Copilot, while LM Studio local mode provides the
+no-cloud tool path.
+
+| Direct OpenAI model | Best Eva role | Standard short-context input / output per 1M tokens |
+|---|---|---:|
+| GPT-5.6 Luna | Fast, cost-sensitive conversation and review | $0.20 / $1.20 |
+| GPT-5.6 Terra | Balanced intelligence and cost | $2.00 / $12.00 |
+| GPT-5.6 Sol | Premium complex reasoning | $5.00 / $30.00 |
+| GPT-4.1 Nano | Lightweight routing and classification | $0.10 / $0.40 |
+
+Eva defaults to a 16,384-token completion ceiling, accepts explicit limits up
+to 128,000, and caps adaptive reviewer calls at 8,192 tokens. The ceiling does
+not force longer responses; provider `length` finishes are surfaced as a
+truncation warning.
 
 For persistent memory, point Settings > MCP at an Azure Data Explorer cluster, or use the default local SQLite backend (zero setup). For semantic recall, add an OpenAI key in Settings > Auth (falls back to keyword matching without one).
 

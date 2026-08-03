@@ -210,6 +210,7 @@ async function aigSend() {
         user_message: sQuestion,
         session_id: sessionId,
         model: aigModel,
+        max_completion_tokens: (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384,
         acp_reasoning_effort: reasoningEffort === 'default' ? '' : reasoningEffort,
         lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
         lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
@@ -259,13 +260,16 @@ async function aigSend() {
     var firstSegment = stripped.split('+')[0] || stripped;
     if (firstSegment) responder = firstSegment;
     var acpTagRe = /(^|\+)(copilot-acp|acp-data|raw-acp|raw-acp-unavailable|acp-default)$/;
-    if (/^(claude-|gemini-)/.test(responder) || acpTagRe.test(stripped) || responder === 'acp-default') {
+    if (/(^|\+)openai-direct($|\+)/.test(stripped)) {
+      routeLabel = ' via OpenAI API';
+    } else if (/^(claude-|gemini-)/.test(responder) || acpTagRe.test(stripped) || responder === 'acp-default') {
       routeLabel = ' via ACP';
     } else if (/^(gpt-|o\d|deepseek-|llama-)/.test(responder)) {
       routeLabel = ' via GitHub Models';
     }
     if (responder === 'unavailable' || responder === 'raw-acp-unavailable') {
       setStatus('error', 'Eva (AIG) responder unavailable (' + modelUsed + ')');
+    } else if (typeof reportCompletionTruncation === 'function' && reportCompletionTruncation(data)) {
     } else {
       setStatus('info', 'Eva (AIG) \u2014 ' + responder + routeLabel + '  [' + modelUsed + ']');
     }

@@ -104,6 +104,7 @@ async function trboSend() {
               signalRequest: sQuestion,
               signalContext: signalContext
             });
+            if (typeof reportCompletionTruncation === 'function') reportCompletionTruncation(oJson);
        	
             // Send to Local Storage - possibly way to intigrate into memory
 	    let outputWithoutTags = txtOutput.innerText + "\n";
@@ -144,7 +145,7 @@ async function trboSend() {
 
     // payload parameters
     var sModel = selModel.value; 
-    var iMaxTokens = (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 4096;
+    var iMaxTokens = (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384;
   var dTemperature = (typeof getModelTemperature === 'function') ? getModelTemperature() : 0.7; 
     var eFrequency_penalty = 0.0; 
     var cPresence_penalty = 0.0; 

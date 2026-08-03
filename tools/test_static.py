@@ -74,6 +74,8 @@ def test_required_files():
         "tools/kusto_mcp.py",
         "tools/test_prompt_budget.js",
         "tools/test_request_routing.js",
+        "tools/test_cognition_provider.js",
+        "tools/test_provider_token_budget.js",
         "tools/test_fast_route.py",
         "tools/test_tool_profiles.py",
         "tools/test_kusto_cache.py",
@@ -509,6 +511,7 @@ def test_model_selector():
 
     selector_html = match.group(1)
     values = re.findall(r'value="([^"]+)"', selector_html)
+    report("model_max_tokens_default", 'id="txtMaxTokens" value="16384"' in html and 'max="128000"' in html)
 
     required_models = ["gpt-4o", "copilot-acp", "aig", "gemini", "lm-studio", "dall-e-3"]
     for model in required_models:
@@ -525,6 +528,24 @@ def test_model_selector():
     aig_values = re.findall(r'value="([^"]+)"', aig_match.group(1)) if aig_match else []
     report("aig_backend_lmstudio_option", "lmstudio" in aig_values,
            "missing" if "lmstudio" not in aig_values else "")
+    direct_openai_models = {"openai:gpt-5.6-luna", "openai:gpt-5.6-terra", "openai:gpt-5.6-sol", "openai:gpt-4.1-nano", "openai:gpt-5.2", "openai:gpt-5", "openai:gpt-5-mini", "openai:gpt-4.1", "openai:gpt-4o", "openai:o3", "openai:o3-mini"}
+    report("aig_backend_openai_direct_options", direct_openai_models.issubset(set(aig_values)))
+    report("aig_backend_model_info_panel", all(marker in html for marker in ("aigModelInfo", "aigModelRole", "aigModelInputCost", "aigModelOutputCost")))
+
+    with open("core/js/aig.js") as f:
+        aig_source = f.read()
+    with open("core/js/cognition.js") as f:
+        cognition_source = f.read()
+    with open("core/js/options.js") as f:
+        options_source = f.read()
+    report("aig_openai_direct_key", "openai_api_key:" in aig_source)
+    report("aig_completion_token_budget", "max_completion_tokens:" in aig_source and "getModelMaxTokens()" in aig_source)
+    report("cognition_openai_direct_key", "openai_api_key: authOpenAI()" in cognition_source)
+    report("cognition_reviewer_token_cap", "Math.min" in cognition_source and "8192" in cognition_source and "max_completion_tokens:" in cognition_source)
+    report("provider_completion_truncation_warning", "function reportCompletionTruncation" in options_source and all("reportCompletionTruncation" in source for source in (aig_source, open("core/js/gpt-core.js").read(), open("core/js/copilot.js").read(), open("core/js/lm-studio.js").read())))
+    report("lmstudio_completion_token_budget", "max_tokens:" in open("core/js/lm-studio.js").read() and "getModelMaxTokens()" in open("core/js/lm-studio.js").read())
+    report("cognition_openai_direct_reviewer", "openai:gpt-5.6-luna" in cognition_source)
+    report("aig_backend_model_info_catalog", all(marker in options_source for marker in ("DIRECT_OPENAI_MODEL_INFO", "Balanced intelligence and cost", "Premium complex reasoning", "Lightweight routing and classification", "updateAIGModelInfo")))
 
     chats_button = re.search(r'<button id="evaChatsBtn"[^>]*title="([^"]+)"[^>]*>(.*?)</button>', html, re.DOTALL)
     report("sidebar_sessions_label", bool(chats_button and chats_button.group(1) == "Sessions" and "Sessions" in chats_button.group(2)))
@@ -648,7 +669,7 @@ def test_reasoning_effort_contract():
     report("reasoning_effort_js_default_high", "DEFAULT_REASONING_EFFORT = 'high'" in options_js)
     report("aig_js_default_gpt_5_6_luna", "|| 'gpt-5.6-luna'" in aig_js)
     report("cognition_default_gpt_5_6_luna", "? el.value : 'gpt-5.6-luna'" in cognition_js)
-    report("cognition_default_reviewer_terra", "reviewerModel: ls('cogReviewerModel', '') || 'gpt-5.6-terra'" in cognition_js)
+    report("cognition_default_reviewer_provider_aware", "openai:gpt-5.6-luna" in cognition_js and "gpt-5.6-terra" in cognition_js and "reviewerModel.indexOf('openai:') !== 0" in cognition_js and "lsSet('cogReviewerModel', reviewerModel)" in cognition_js)
     report("cognition_adaptive_gate", "adaptiveReviewReason(userMessage)" in cognition_js and "reason: 'adaptive:' + adaptiveReason" in cognition_js)
     report("cognition_selected_turn_forces_review", "requestedReviewReason === 'phrase'" in cognition_js and "requestedReviewReason.indexOf('adaptive:') === 0" in cognition_js)
     report("cognition_legacy_eva_model_not_active", "evaModel:      def" in cognition_js and "cogModelCfg.enabled" not in aig_js)

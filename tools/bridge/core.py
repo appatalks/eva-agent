@@ -52,6 +52,65 @@ from bridge import config as _cfg
 from bridge import state as _st
 
 ACP_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+_AIG_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+
+
+def _parse_aig_backend(value):
+    requested = str(value or "gpt-5.6-luna").strip()
+    if requested.startswith("openai:"):
+        model = requested[len("openai:"):].strip()
+        if not _AIG_MODEL_RE.fullmatch(model):
+            raise ValueError("Unsupported OpenAI model name")
+        return "openai", model
+    if not _AIG_MODEL_RE.fullmatch(requested):
+        raise ValueError("Unsupported Eva backend model name")
+    return "auto", requested
+
+
+def _openai_chat_completions_url():
+    default_url = "https://api.openai.com/v1/chat/completions"
+    configured = os.environ.get("EVA_OPENAI_CHAT_COMPLETIONS_URL", "").strip()
+    if not configured:
+        return default_url
+    parsed = urllib.parse.urlparse(configured)
+    if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("EVA_OPENAI_CHAT_COMPLETIONS_URL must use a loopback HTTP address")
+    return configured
+
+
+def _completion_token_limit(value, default=16384):
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        raise ValueError("max_completion_tokens must be an integer")
+    if isinstance(value, float):
+        raise ValueError("max_completion_tokens must be an integer")
+    if isinstance(value, str) and not re.fullmatch(r"[0-9]+", value.strip()):
+        raise ValueError("max_completion_tokens must be an integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("max_completion_tokens must be an integer")
+    if parsed < 1 or parsed > 128000:
+        raise ValueError("max_completion_tokens must be between 1 and 128000")
+    return parsed
+
+
+def _openai_chat_payload(model, messages, reasoning_effort="", max_completion_tokens=16384):
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_completion_tokens": max_completion_tokens,
+    }
+    if model.startswith("gpt-5.6") and reasoning_effort in {"none", "low", "medium", "high", "xhigh", "max"}:
+        payload["reasoning_effort"] = reasoning_effort
+    elif model == "gpt-5.2" and reasoning_effort in {"none", "low", "medium", "high", "xhigh"}:
+        payload["reasoning_effort"] = reasoning_effort
+    elif model.startswith("gpt-5") and reasoning_effort in {"minimal", "low", "medium", "high"}:
+        payload["reasoning_effort"] = reasoning_effort
+    elif re.match(r"^o\d", model) and reasoning_effort in {"low", "medium", "high"}:
+        payload["reasoning_effort"] = reasoning_effort
+    return payload
 
 
 def _is_affirmative_signal_request(text):
@@ -3043,7 +3102,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # tools (that duplicated the draft's retrieval and doubled latency).
         no_tools = bool(data.get("no_tools"))
         conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
-        model_for_response = data.get("model", "gpt-5.6-luna")  # frontend-selectable, default gpt-5.6-luna
+        requested_backend = data.get("model", "gpt-5.6-luna")
+        try:
+            responder_provider, model_for_response = _parse_aig_backend(requested_backend)
+        except ValueError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+            return
+        openai_api_key = (data.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")).strip()
+        if responder_provider == "openai" and not openai_api_key:
+            self._json_response(400, {"error": {"message": "An OpenAI API key is required for the selected Eva backend."}})
+            return
+        try:
+            max_completion_tokens = _completion_token_limit(data.get("max_completion_tokens"))
+        except ValueError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+            return
         raw_reasoning_effort = data.get("acp_reasoning_effort", "")
         if not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort not in ACP_REASONING_EFFORTS | {""}:
             self._json_response(400, {"error": {"message": "Unsupported acp_reasoning_effort"}})
@@ -3071,7 +3144,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _fast_route = _classify_fast_route(_routing_message)
         _passive_recall = _is_passive_memory_recall(_routing_message)
         _prompt_fields = _prompt_budget_fields(data.get("prompt_budget"))
-        stream_state = self._new_stream_state("aig", model_for_response) if stream_requested else None
+        stream_state = self._new_stream_state("aig", requested_backend) if stream_requested else None
 
         print(f"[AIG] Processing: {user_message[:80]}...")
 
@@ -3377,12 +3450,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 import requests as _req
                 lms_resp = _req.post(
                     lms_base + "/chat/completions",
-                    json={"model": lms_model, "messages": lms_messages, "temperature": 0.7},
+                    json={
+                        "model": lms_model,
+                        "messages": lms_messages,
+                        "temperature": 0.7,
+                        "max_tokens": max_completion_tokens,
+                    },
                     timeout=180,
                 )
                 if lms_resp.status_code == 200:
                     lms_body = lms_resp.json()
-                    response_text = (lms_body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                    lms_choice = (lms_body.get("choices") or [{}])[0]
+                    response_text = lms_choice.get("message", {}).get("content", "")
+                    lms_finish_reason = lms_choice.get("finish_reason") or "stop"
                     model_used = "aig:lmstudio:" + lms_model
                 else:
                     print(f"[AIG] LM Studio HTTP error: {lms_resp.status_code}")
@@ -3443,7 +3523,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "choices": [{
                     "index": 0,
                     "message": {"role": "assistant", "content": response_text},
-                    "finish_reason": "stop"
+                    "finish_reason": lms_finish_reason
                 }],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             }
@@ -3479,11 +3559,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Step 4: Pick the best responder. This timing separates the final
         # model pass from memory and optional ACP pre-retrieval.
         # Priority: request body PAT > env var > Copilot CLI OAuth token > ACP fallback
-        github_pat = data.get("github_pat", "") or os.environ.get("GITHUB_PAT", "")
+        github_pat = "" if responder_provider == "openai" else (data.get("github_pat", "") or os.environ.get("GITHUB_PAT", ""))
 
         # Fallback: read Copilot CLI's OAuth token (works with GitHub Models API — OpenAI models only)
         _using_oauth_token = False
-        if not github_pat:
+        if responder_provider != "openai" and not github_pat:
             try:
                 oauth_path = os.path.expanduser("~/.config/github-copilot/oauth.json")
                 if os.path.isfile(oauth_path):
@@ -3530,6 +3610,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         print(f"[AIG] Model requested: {model_for_response}, API model: {api_model}, PAT present: {bool(github_pat)} ({len(github_pat)} chars)")
         response_text = ""
         model_used = "aig"
+        response_finish_reason = "stop"
 
         if raw_output_requested and acp_data:
             active_raw_model = acp_model_used or (_st.acp_client.model if _st.acp_client else "copilot-acp")
@@ -3558,7 +3639,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Note: _st.cognition_enabled is only set at startup when Kusto MCP + token
         # are confirmed, so ACP availability is guaranteed at that point.
         # The alive check is deferred to the actual ACP prompt call.
-        if _st.cognition_enabled and _st.acp_client:
+        if responder_provider != "openai" and _st.cognition_enabled and _st.acp_client:
             if model_for_response not in ("lmstudio",):
                 github_pat = ""
                 acp_response_model = model_for_response if model_for_response != "acp" else ""
@@ -3571,7 +3652,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         # Inject runtime info so Eva can answer truthfully when asked about her model.
         # Decided after routing fall-throughs above so it reflects the path that will run.
-        if github_pat:
+        if responder_provider == "openai":
+            _route_label = "OpenAI API (direct)"
+            _runtime_model = model_for_response
+        elif github_pat:
             _route_label = "GitHub Models API (PAT)" if not _using_oauth_token else "GitHub Models API (Copilot OAuth)"
             _runtime_model = model_for_response
         else:
@@ -3591,6 +3675,79 @@ class BridgeHandler(BaseHTTPRequestHandler):
             f"If 'Active responder model' is '{_runtime_model}', then your answer is "
             f"'{_runtime_model}' and nothing else. Do not second-guess this block.\n\n"
         )
+
+        if responder_provider == "openai" and not response_text:
+            print(f"[AIG] Step 3: Generating response via OpenAI API ({model_for_response})...")
+            try:
+                import requests as _req
+                openai_messages = [{"role": "system", "content": eva_system}]
+                for msg in messages[-6:]:
+                    if msg.get("role") in ("user", "assistant"):
+                        openai_messages.append({"role": msg["role"], "content": msg.get("content", "")[:500]})
+                if not openai_messages or openai_messages[-1].get("content") != user_message:
+                    openai_messages.append({"role": "user", "content": user_message})
+                openai_payload = _openai_chat_payload(
+                    model_for_response, openai_messages, reasoning_effort, max_completion_tokens
+                )
+                if stream_state:
+                    openai_payload["stream"] = True
+                openai_resp = _req.post(
+                    _openai_chat_completions_url(),
+                    headers={
+                        "Authorization": f"Bearer {openai_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=openai_payload,
+                    timeout=120,
+                    stream=bool(stream_state),
+                )
+                if openai_resp.status_code < 200 or openai_resp.status_code >= 300:
+                    detail = openai_resp.text[:500] if openai_resp.text else "(empty response)"
+                    self._json_response(openai_resp.status_code if openai_resp.status_code < 500 else 502, {
+                        "error": {"message": f"OpenAI API failed ({openai_resp.status_code}): {detail}"}
+                    })
+                    return
+                if stream_state:
+                    response_parts = []
+                    for raw_line in openai_resp.iter_lines(chunk_size=1, decode_unicode=True):
+                        line = str(raw_line or "").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        event_data = line[len("data:"):].strip()
+                        if event_data == "[DONE]":
+                            break
+                        event = json.loads(event_data)
+                        if event.get("error"):
+                            raise RuntimeError(str(event["error"].get("message") or event["error"]))
+                        choice = event.get("choices", [{}])[0]
+                        if choice.get("finish_reason"):
+                            response_finish_reason = choice["finish_reason"]
+                        delta = choice.get("delta", {}).get("content", "")
+                        if delta:
+                            response_parts.append(delta)
+                            self._stream_chunk(stream_state, delta)
+                    response_text = "".join(response_parts)
+                else:
+                    openai_data = openai_resp.json()
+                    openai_choice = openai_data.get("choices", [{}])[0]
+                    response_text = openai_choice.get("message", {}).get("content", "")
+                    response_finish_reason = openai_choice.get("finish_reason") or "stop"
+                if not response_text:
+                    if stream_state and stream_state["started"]:
+                        self._stream_error(stream_state, "OpenAI API returned an empty response.", 502)
+                    else:
+                        self._json_response(502, {"error": {"message": "OpenAI API returned an empty response."}})
+                    return
+                model_used = f"aig:{model_for_response}+openai-direct"
+                if acp_model_used:
+                    model_used += f"+{acp_model_used}"
+                print(f"[AIG] OpenAI response: {len(response_text)} chars")
+            except Exception as error:
+                if stream_state and stream_state["started"]:
+                    self._stream_error(stream_state, f"OpenAI API request failed: {error}", 502)
+                else:
+                    self._json_response(502, {"error": {"message": f"OpenAI API request failed: {error}"}})
+                return
 
         if github_pat:
             # Use GitHub Models API (PAT) for persona-friendly response
@@ -3614,13 +3771,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     json={
                         "model": api_model,
                         "messages": pat_messages,
-                        "max_tokens": 4096
+                        "max_tokens": max_completion_tokens
                     },
                     timeout=60
                 )
                 if pat_resp.status_code == 200:
                     pat_data = pat_resp.json()
-                    response_text = pat_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    pat_choice = pat_data.get("choices", [{}])[0]
+                    response_text = pat_choice.get("message", {}).get("content", "")
+                    response_finish_reason = pat_choice.get("finish_reason") or "stop"
                     model_used = f"aig:{model_for_response}"
                     if acp_model_used:
                         model_used += f"+{acp_model_used}"
@@ -3655,7 +3814,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 print(f"[AIG] PAT error: {e}, falling back to ACP")
                 github_pat = ""
 
-        if not response_text:
+        if not response_text and responder_provider != "openai":
             # ACP response generation — primary path when cognition is active,
             # fallback path when PAT is unavailable or failed.
             print(f"[AIG] Using ACP for response generation...")
@@ -3689,6 +3848,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             permission_mode="passive_recall" if _passive_recall else "interactive",
                         )
                         response_text = acp_result.get("text", "I'm having trouble processing that right now.")
+                        if acp_result.get("stop_reason") in ("max_tokens", "length"):
+                            response_finish_reason = "length"
                         active_model = response_client.model or "acp-default"
                         model_used = f"aig:{active_model}"
                         if acp_model_used and acp_model_used != active_model:
@@ -3715,7 +3876,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "role": "assistant",
                     "content": response_text
                 },
-                "finish_reason": "stop"
+                "finish_reason": response_finish_reason
             }],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
@@ -4318,7 +4479,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "role": "assistant",
                     "content": result.get("text", "")
                 },
-                "finish_reason": "stop" if result.get("stop_reason") == "end_turn" else result.get("stop_reason", "stop")
+                "finish_reason": (
+                    "length" if result.get("stop_reason") in ("max_tokens", "length")
+                    else "stop" if result.get("stop_reason") == "end_turn"
+                    else result.get("stop_reason", "stop")
+                )
             }],
             "usage": {
                 "prompt_tokens": 0,

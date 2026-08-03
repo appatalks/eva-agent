@@ -211,7 +211,7 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
   }
 
   var temp = (typeof getModelTemperature === 'function') ? getModelTemperature() : 0.7;
-  var maxTok = (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 4096;
+  var maxTok = (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384;
   var requestBudget = EvaPromptBudget.compactMessages(requestMessages, {
     budget: 12000,
     recentTurns: 6
@@ -363,7 +363,9 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, 
     localStorage.setItem('masterOutput', masterOutput);
   }
 
-  setStatus('info', 'Response received from ' + modelLabel);
+  if (!(typeof reportCompletionTruncation === 'function' && reportCompletionTruncation(data))) {
+    setStatus('info', 'Response received from ' + modelLabel);
+  }
 
   // --- Cognition: Trigger post-response reflection via bridge ---
   if (content && userMessage) {

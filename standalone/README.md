@@ -55,14 +55,14 @@ automation and camera discovery remain unsupported on Windows.
 
 ```sh
 cd standalone/dist
-chmod +x "Eva Standalone-5.5.4.AppImage"
-"./Eva Standalone-5.5.4.AppImage"
+chmod +x "Eva Standalone-5.5.5.AppImage"
+"./Eva Standalone-5.5.5.AppImage"
 ```
 
 If the host is missing FUSE (common on minimal containers and some distros), launch with extraction instead:
 
 ```sh
-"./Eva Standalone-5.5.4.AppImage" --appimage-extract-and-run
+"./Eva Standalone-5.5.5.AppImage" --appimage-extract-and-run
 ```
 
 The AppImage is self-contained: it spawns the bundled ACP bridge on a random
@@ -75,5 +75,6 @@ not.
 - Electron starts `tools/acp_bridge.py` with `python3` on `127.0.0.1` using a free dynamic port.
 - The renderer receives the bridge URL through `window.evaStandalone.acpBaseUrl`.
 - Standalone exposes Eva (AIG) only. All routing, cognition, AIG backend selection, and Settings sub-controls remain available.
+- Eva backend models can use Copilot ACP, the OpenAI API directly, or LM Studio. Direct OpenAI preserves Eva's memory, adaptive review, and action-marker pipeline without requiring Copilot; ACP-specific MCP retrieval and subagents still require Copilot CLI.
 - The Kusto database field is intentionally blank on first run. Configure it in Settings > MCP.
 - TTS engines: standalone defaults to OpenAI TTS when an OpenAI API key is set in Settings > Auth, otherwise falls back to browser SpeechSynthesis. Optional Local Voices uses an authorized imported PCM WAV profile plus `./install.sh --voice-deps`; its token-protected loopback service also provides local Faster Whisper transcription with Silero VAD for Voice View. Polly engines (Standard, Neural, Generative) require AWS credentials and are not configured through the standalone Auth tab.

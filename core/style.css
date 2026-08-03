@@ -397,6 +397,34 @@ body.eva-standalone #settingsMenu {
     /* Model options */
     .model-options { margin-top: 12px; }
     .model-opt { margin-bottom: 10px; }
+    .aig-model-info {
+      display: grid;
+      grid-template-columns: minmax(0, 1.6fr) repeat(2, minmax(120px, .7fr));
+      gap: 18px;
+      margin: 10px 0 2px;
+      padding: 12px 0 0;
+      border-top: 1px solid #dce2e0;
+    }
+    .aig-model-info div { min-width: 0; }
+    .aig-model-info dt {
+      color: #71807c;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+    .aig-model-info dd {
+      margin: 4px 0 0;
+      color: #26312f;
+      font-size: 12px;
+      font-weight: 650;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 560px) {
+      .aig-model-info { grid-template-columns: 1fr 1fr; }
+      .aig-model-info div:first-child { grid-column: 1 / -1; }
+    }
     /* Cognitive layer section */
     .cog-section { padding: 10px 12px; border: 1px solid #cfd8dc; border-radius: 8px; background: rgba(0,0,0,0.02); }
     .cog-section .cog-toggle-row { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
@@ -1495,6 +1523,9 @@ body.theme-lcars .settings-panel textarea {
   border-color: rgba(255,255,255,0.2);
 }
 body.theme-lcars .settings-panel select optgroup { background: #0c0f14; color: #eef5ff; }
+body.theme-lcars .aig-model-info { border-color: rgba(255,255,255,.1); }
+body.theme-lcars .aig-model-info dt { color: #6677aa; }
+body.theme-lcars .aig-model-info dd { color: #eef5ff; }
 body.theme-lcars .auth-note { color: #8899bb; }
 body.theme-lcars .auth-toggle { background: var(--ld-night-cloud); color: #eef5ff; border-color: rgba(255,255,255,0.2); }
 body.theme-lcars .auth-toggle:hover { background: var(--ld-arctic-ice); color: #000; }

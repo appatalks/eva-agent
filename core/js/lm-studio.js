@@ -128,6 +128,7 @@ function lmsSend() {
 
             messages: _lmsPromptBudget.messages,
             temperature: 0.7, // Adjust as needed
+            max_tokens: (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384,
         }),
     };
 
@@ -167,6 +168,7 @@ function lmsSend() {
                           signalRequest: sQuestion,
                           signalContext: signalContext
                         });
+                        if (typeof reportCompletionTruncation === 'function') reportCompletionTruncation(result);
 
                         // Keep the global last-response synced so Auto Speak
                         // and other consumers do not pick up a stale prior turn.

@@ -2321,9 +2321,32 @@ function getModelTemperature() {
   return el ? parseFloat(el.value) : 0.7;
 }
 
+function normalizeModelMaxTokens(rawValue) {
+  var text = String(rawValue == null ? '' : rawValue).trim();
+  if (!/^[0-9]+$/.test(text)) return null;
+  var value = Number(text);
+  if (!Number.isSafeInteger(value)) return null;
+  return Math.max(1, Math.min(128000, value));
+}
+
 function getModelMaxTokens() {
   var el = document.getElementById('txtMaxTokens');
-  return el ? (parseInt(el.value) || 4096) : 4096;
+  var value = normalizeModelMaxTokens(el ? el.value : '16384');
+  if (value === null) {
+    value = 16384;
+    if (typeof setStatus === 'function') setStatus('warn', 'Max Tokens must be a whole number; reset to 16,384.');
+  }
+  if (el) el.value = String(value);
+  return value;
+}
+
+function reportCompletionTruncation(data) {
+  var finishReason = data && data.choices && data.choices[0] && data.choices[0].finish_reason;
+  if (finishReason !== 'length') return false;
+  if (typeof setStatus === 'function') {
+    setStatus('warn', 'Eva reached Max Tokens; this response may be incomplete.');
+  }
+  return true;
 }
 
 function getReasoningEffort() {
@@ -2336,6 +2359,41 @@ function getReasoningEffortForModel(model) {
   var effort = getReasoningEffort();
   if (model === 'copilot-acp' || model === 'aig') return effort;
   return ['low', 'medium', 'high'].indexOf(effort) >= 0 ? effort : 'default';
+}
+
+var DIRECT_OPENAI_MODEL_INFO = {
+  'openai:gpt-5.6-luna': { role: 'Fast, cost-sensitive conversation', input: '$0.20', output: '$1.20', efforts: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+  'openai:gpt-5.6-terra': { role: 'Balanced intelligence and cost', input: '$2.00', output: '$12.00', efforts: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+  'openai:gpt-5.6-sol': { role: 'Premium complex reasoning', input: '$5.00', output: '$30.00', efforts: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+  'openai:gpt-4.1-nano': { role: 'Lightweight routing and classification', input: '$0.10', output: '$0.40', efforts: ['default'] },
+  'openai:gpt-5.2': { role: 'Previous-frontier professional work', input: '$1.75', output: '$14.00', efforts: ['default', 'none', 'low', 'medium', 'high', 'xhigh'] },
+  'openai:gpt-5': { role: 'General reasoning', input: '$1.25', output: '$10.00', efforts: ['default', 'minimal', 'low', 'medium', 'high'] },
+  'openai:gpt-5-mini': { role: 'Efficient routine reasoning', input: '$0.25', output: '$2.00', efforts: ['default', 'minimal', 'low', 'medium', 'high'] },
+  'openai:gpt-4.1': { role: 'Reliable non-reasoning work', input: '$2.00', output: '$8.00', efforts: ['default'] },
+  'openai:gpt-4o': { role: 'General conversation and vision', input: '$2.50', output: '$10.00', efforts: ['default'] },
+  'openai:o3': { role: 'Deep analysis and hard problems', input: '$2.00', output: '$8.00', efforts: ['default', 'low', 'medium', 'high'] },
+  'openai:o3-mini': { role: 'Compact analytical reasoning', input: '$1.10', output: '$4.40', efforts: ['default', 'low', 'medium', 'high'] }
+};
+
+function getDirectOpenAIReasoningEfforts(model) {
+  if (DIRECT_OPENAI_MODEL_INFO[model]) return DIRECT_OPENAI_MODEL_INFO[model].efforts;
+  if (model.indexOf('openai:') === 0) return ['default'];
+  return null;
+}
+
+function updateAIGModelInfo() {
+  var model = (document.getElementById('selAIGBackend') || {}).value || '';
+  var info = DIRECT_OPENAI_MODEL_INFO[model];
+  var panel = document.getElementById('aigModelInfo');
+  if (!panel) return;
+  panel.style.display = info ? 'grid' : 'none';
+  if (!info) return;
+  var role = document.getElementById('aigModelRole');
+  var input = document.getElementById('aigModelInputCost');
+  var output = document.getElementById('aigModelOutputCost');
+  if (role) role.textContent = info.role;
+  if (input) input.textContent = info.input;
+  if (output) output.textContent = info.output;
 }
 
 var _modeInitDone = false;
@@ -2355,18 +2413,26 @@ function onModelSettingsChange() {
     var cognitionUsesCloud = cognitionEnabled && cognitionModels.some(function (cognitionModel) {
       return cognitionModel && cognitionModel !== 'lmstudio';
     });
-    var supportsReasoning = reasoningModels.indexOf(model) >= 0 || (model === 'aig' && (aigBackend !== 'lmstudio' || cognitionUsesCloud));
+    var directOpenAIEfforts = model === 'aig' ? getDirectOpenAIReasoningEfforts(aigBackend) : null;
+    var supportsReasoning = reasoningModels.indexOf(model) >= 0 || (model === 'aig' && (
+      directOpenAIEfforts ? directOpenAIEfforts.length > 1 : (aigBackend !== 'lmstudio' || cognitionUsesCloud)
+    ));
     reOpt.style.display = supportsReasoning ? 'block' : 'none';
     var reasoningSelect = document.getElementById('selReasoningEffort');
     if (reasoningSelect) {
       var savedEffort = localStorage.getItem('reasoningEffort') || DEFAULT_REASONING_EFFORT;
       var hasSavedEffort = Array.from(reasoningSelect.options).some(function (option) { return option.value === savedEffort; });
       if (!hasSavedEffort) savedEffort = DEFAULT_REASONING_EFFORT;
-      var supportsFullReasoningRange = model === 'copilot-acp' || model === 'aig';
+      var supportsFullReasoningRange = model === 'copilot-acp' || (model === 'aig' && !directOpenAIEfforts);
+      var allowedEfforts = directOpenAIEfforts || (supportsFullReasoningRange ? null : ['default', 'low', 'medium', 'high']);
       Array.from(reasoningSelect.options).forEach(function (option) {
-        option.disabled = !supportsFullReasoningRange && ['default', 'low', 'medium', 'high'].indexOf(option.value) < 0;
+        option.disabled = !!allowedEfforts && allowedEfforts.indexOf(option.value) < 0;
       });
-      reasoningSelect.value = supportsFullReasoningRange || ['low', 'medium', 'high'].indexOf(savedEffort) >= 0 ? savedEffort : DEFAULT_REASONING_EFFORT;
+      if (allowedEfforts && allowedEfforts.indexOf(savedEffort) < 0) {
+        savedEffort = allowedEfforts.indexOf(DEFAULT_REASONING_EFFORT) >= 0 ? DEFAULT_REASONING_EFFORT : 'default';
+        localStorage.setItem('reasoningEffort', savedEffort);
+      }
+      reasoningSelect.value = savedEffort;
     }
   }
   // Show/hide temperature (hidden for reasoning models, gpt-5 family, latest, copilot-acp)
@@ -2380,6 +2446,7 @@ function onModelSettingsChange() {
   if (aigOpt) {
     aigOpt.style.display = (model === 'aig') ? 'block' : 'none';
   }
+  updateAIGModelInfo();
   // Show/hide ACP model selector (only for copilot-acp)
   var acpOpt = document.getElementById('opt-acpModel');
   if (acpOpt) {
@@ -2539,12 +2606,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     aigBackendSel.addEventListener('change', function () {
       localStorage.setItem('aigBackend', aigBackendSel.value);
+      if (aigBackendSel.value.indexOf('openai:') === 0 && typeof Cognition !== 'undefined') {
+        var cognitionCfg = Cognition.getCfg();
+        if (cognitionCfg.reviewerModel.indexOf('openai:') !== 0) {
+          Cognition.setCfg({ reviewerModel: 'openai:gpt-5.6-luna' });
+        }
+      }
       // Keep cognition model selectors in sync with the live catalog.
       if (typeof cogInit === 'function') cogInit();
       // Re-evaluate data mode when AIG backend changes
       if (typeof onModelSettingsChange === 'function') onModelSettingsChange();
     });
-
+    updateAIGModelInfo();
   }
 
   // Camera presence (auto-wake): toggle the local webcam sensor. Restore the

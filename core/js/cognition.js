@@ -143,10 +143,17 @@
 
   function getCfg() {
     var def = getDefaultModel();
+    var defaultReviewer = def.indexOf('openai:') === 0 ? 'openai:gpt-5.6-luna' :
+      (def === 'lmstudio' ? 'lmstudio' : 'gpt-5.6-terra');
+    var reviewerModel = ls('cogReviewerModel', '') || defaultReviewer;
+    if (def.indexOf('openai:') === 0 && reviewerModel.indexOf('openai:') !== 0) {
+      reviewerModel = 'openai:gpt-5.6-luna';
+      lsSet('cogReviewerModel', reviewerModel);
+    }
     return {
       enabled: ls('cogEnabled', '1') === '1',
       evaModel:      def,
-      reviewerModel: ls('cogReviewerModel', '') || 'gpt-5.6-terra',
+      reviewerModel: reviewerModel,
       maxCycles: 1,
       evaPrompt:      ls('cogEvaPrompt', '')      || DEFAULT_PROMPTS.eva,
       reviewerPrompt: ls('cogReviewerPrompt', '') || DEFAULT_PROMPTS.reviewer,
@@ -181,6 +188,10 @@
 
   function authPat() {
     return (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : '';
+  }
+
+  function authOpenAI() {
+    return (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : '';
   }
 
   function status(text, kind) {
@@ -695,13 +706,17 @@
       messages: promptBudget.messages,
       prompt_budget: EvaPromptBudget.telemetry(promptBudget),
       user_message: taskMessage || '',
-        model: model,
-        session_id: sessionId || ((typeof ensureActiveSessionId === 'function')
-          ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')),
+      model: model,
+      session_id: sessionId || ((typeof ensureActiveSessionId === 'function')
+        ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')),
+      max_completion_tokens: role === 'reviewer'
+        ? Math.min((typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384, 8192)
+        : ((typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384),
       acp_reasoning_effort: (typeof getReasoningEffortForModel === 'function' && getReasoningEffortForModel('aig') !== 'default') ? getReasoningEffortForModel('aig') : '',
       lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
       lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
       github_pat: authPat(),
+      openai_api_key: authOpenAI(),
       internal: true
     };
     if (extra && typeof extra === 'object') {

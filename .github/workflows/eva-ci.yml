@@ -217,11 +217,20 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - name: Install dependencies
         run: pip install requests
 
       - name: Run Python unit tests
-        run: python3 tools/test_static.py
+        run: |
+          python3 tools/test_static.py
+          python3 tools/test_openai_aig.py
+          node tools/test_cognition_provider.js
+          node tools/test_provider_token_budget.js
 
   # ── 3. Accessibility (manual trigger only — kept from existing) ───
   accessibility:

@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current release:** Eva 5.5.4. This document describes the matching browser UI,
+> **Current release:** Eva 5.5.5. This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -14,7 +14,7 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 
 | Provider | Models |
 |---|---|
-| Eva (AIG) | Multi-agent orchestration over GitHub Models, ACP, and LM Studio |
+| Eva (AIG) | Orchestration over direct OpenAI API, GitHub Models, ACP, and LM Studio |
 | OpenAI | GPT-4o, GPT-4o Mini, o1, o1-preview, o1-mini, o3-mini, latest |
 | GitHub Copilot (PAT) | GPT-4o, GPT-4o Mini, o3-mini, GPT-5.6 Sol/Terra/Luna, GPT-5, o4-mini, DeepSeek-R1, Llama 4 Maverick |
 | GitHub Copilot (ACP) | Claude, GPT-5.x, GPT-4.1 via Copilot CLI |
@@ -268,7 +268,7 @@ tools/
 standalone/
   main.js                  Electron shell: port allocation, bridge spawn, health polling
   preload.js               Context bridge (exposes evaStandalone API to renderer)
-  package.json             Electron + electron-builder config (v5.5.4)
+  package.json             Electron + electron-builder config (v5.5.5)
 ```
 
 ## Dependencies
@@ -295,7 +295,7 @@ standalone/
 ### API Keys
 | Key | Used by | Get it from |
 |---|---|---|
-| `OPENAI_API_KEY` | OpenAI models, DALL-E 3, embeddings | [platform.openai.com](https://platform.openai.com/api-keys) |
+| `OPENAI_API_KEY` | Direct OpenAI Eva backends, OpenAI models, image generation, TTS/transcription, embeddings | [platform.openai.com](https://platform.openai.com/api-keys) |
 | `GITHUB_PAT` | Copilot Models API | [github.com/settings/tokens](https://github.com/settings/tokens) (needs "Models" permission) |
 | `GOOGLE_GL_KEY` | Google Gemini | [aistudio.google.com](https://aistudio.google.com/apikey) |
 | `GOOGLE_VISION_KEY` | Google Vision (image analysis) | [console.cloud.google.com](https://console.cloud.google.com/apis/credentials) |
@@ -1286,7 +1286,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.5.4.AppImage'
+./dist/'Eva Standalone-5.5.5.AppImage'
 ```
 
 **Electron lifecycle:**
