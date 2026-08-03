@@ -1,6 +1,6 @@
 {
   "name": "eva-standalone",
-  "version": "5.5.0",
+  "version": "5.5.4",
   "description": "Localhost Electron shell for Eva AI Assistant.",
   "main": "main.js",
   "private": true,
@@ -8,7 +8,8 @@
     "start": "electron .",
     "dist": "electron-builder --linux AppImage",
     "dist:mac": "electron-builder --mac",
-    "dist:all": "electron-builder --linux AppImage --mac"
+    "dist:win": "electron-builder --win nsis",
+    "dist:all": "electron-builder --linux AppImage --mac --win nsis"
   },
   "engines": {
     "node": ">=24"
@@ -69,6 +70,10 @@
           "!**/.env*",
           "!standalone/**"
         ]
+      },
+      {
+        "from": "runtime/install-windows-prereqs.ps1",
+        "to": "runtime/install-windows-prereqs.ps1"
       }
     ],
     "linux": {
@@ -95,6 +100,19 @@
         }
       ],
       "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "include": "installer.nsh"
     }
   }
 }

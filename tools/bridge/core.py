@@ -2116,7 +2116,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _health(self):
         backend = _resolve_memory_backend()
         status = {
-            "status": "ok" if (_st.acp_client and _st.acp_client.alive) else "error",
+            "status": "ok",
+            "acp_connected": bool(_st.acp_client and _st.acp_client.alive),
             "session_id": _st.acp_client.session_id if _st.acp_client else None,
             "agent": _st.acp_client.agent_info if _st.acp_client else None,
             "model": _st.acp_client.model if _st.acp_client else None,
@@ -3118,7 +3119,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         elif internal and not force_retrieve:
             skip_acp = True
             _acp_route = "internal-cognition"
-        elif not _st.acp_client and not _st.local_mode:
+        elif not (_st.acp_client and _st.acp_client.alive) and not _st.local_mode:
             skip_acp = True
             _acp_route = "acp-unavailable"
         elif len(msg_words) <= 4 and _re.match(
@@ -4982,8 +4983,8 @@ def main():
     try:
         _st.acp_client.start()
     except RuntimeError as e:
-        print(f"[Bridge] ERROR: {e}")
-        sys.exit(1)
+        print(f"[Bridge] Warning: {e}")
+        print("[Bridge] Starting without ACP. Select LM Studio local mode, or install and authenticate Copilot CLI to enable cloud features.")
 
     # Enable cognition layer if memory backend is available
     # global statement removed — writes go to _st.*

@@ -7,6 +7,10 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { fileURLToPath } = require('url');
 
+if (process.platform === 'win32') {
+  app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+}
+
 let bridgeProcess = null;
 let readyBridgeProcess = null;
 let bridgeStopTimer = null;
@@ -74,6 +78,22 @@ function clearBridgeStopTimer() {
 
 function groupSignal(child, signal) {
   if (!child) return;
+  if (process.platform === 'win32') {
+    if (child.pid) {
+      try {
+        const taskkill = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
+          windowsHide: true,
+          stdio: 'ignore'
+        });
+        taskkill.unref();
+        return;
+      } catch (_) {}
+    }
+    try {
+      child.kill(signal);
+    } catch (_) {}
+    return;
+  }
   try {
     if (child.pid) {
       process.kill(-child.pid, signal);
@@ -107,7 +127,7 @@ function getStartupErrorTitle(err) {
 
 function getStartupErrorMessage(err) {
   if (err && err.code === 'ENOENT') {
-    return 'Eva Standalone needs python3 to start the bundled ACP bridge. Install Python 3.12 or newer and try again.';
+    return 'Eva Standalone needs Python 3.12 or newer to start the bundled ACP bridge. Install Python and try again.';
   }
   return err && err.message ? err.message : String(err);
 }
@@ -133,7 +153,52 @@ function getAppRoot() {
 }
 
 function getLocalVoicesDirectory() {
+  if (process.platform === 'win32') {
+    return path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'Eva Standalone', 'local-voices', 'voices');
+  }
   return path.join(process.env.HOME || '', '.local', 'share', 'eva', 'local-voices', 'voices');
+}
+
+function getWindowsRuntime() {
+  if (process.platform !== 'win32') return null;
+  const manifestPath = path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'Eva Standalone', 'runtime', 'runtime.json');
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8').replace(/^\uFEFF/, ''));
+    return manifest && typeof manifest === 'object' ? manifest : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function getPythonInvocation() {
+  if (process.env.EVA_PYTHON) return { command: process.env.EVA_PYTHON, args: [] };
+  const windowsRuntime = getWindowsRuntime();
+  if (windowsRuntime && typeof windowsRuntime.python === 'string' && Array.isArray(windowsRuntime.pythonArgs)) {
+    return { command: windowsRuntime.python, args: windowsRuntime.pythonArgs };
+  }
+  if (process.platform === 'win32') return { command: 'py', args: ['-3'] };
+  return { command: 'python3', args: [] };
+}
+
+function getCopilotInvocation() {
+  const windowsRuntime = getWindowsRuntime();
+  if (windowsRuntime && typeof windowsRuntime.copilot === 'string' && fs.existsSync(windowsRuntime.copilot)) {
+    return windowsRuntime.copilot;
+  }
+  return null;
+}
+
+function getLocalSpeechInvocation(pythonPath) {
+  if (pythonPath) return { command: pythonPath, args: [] };
+  if (process.env.LOCAL_VOICES_PYTHON) return { command: process.env.LOCAL_VOICES_PYTHON, args: [] };
+  if (process.env.EVA_PYTHON) return { command: process.env.EVA_PYTHON, args: [] };
+  const windowsRuntime = getWindowsRuntime();
+  if (windowsRuntime && typeof windowsRuntime.localSpeechPython === 'string' && fs.existsSync(windowsRuntime.localSpeechPython)) {
+    return { command: windowsRuntime.localSpeechPython, args: [] };
+  }
+  const managedPython = path.join(process.env.HOME || '', '.local', 'share', 'eva', 'local-voices', '.venv', 'bin', 'python');
+  if (fs.existsSync(managedPython)) return { command: managedPython, args: [] };
+  return getPythonInvocation();
 }
 
 const DEFAULT_LOCAL_VOICE_PROFILE = 'bundled:eva-english';
@@ -413,13 +478,19 @@ function waitForBridgeExit(childProcess, timeoutMs) {
 function startBridge(port, bridgeToken) {
   const appRoot = getAppRoot();
   const bridgePath = path.join(appRoot, 'tools', 'acp_bridge.py');
-  const args = [bridgePath, '--bind', '127.0.0.1', '--port', String(port), '--cwd', appRoot];
+  const python = getPythonInvocation();
+  const copilot = getCopilotInvocation();
+  const args = python.args.concat([bridgePath, '--bind', '127.0.0.1', '--port', String(port), '--cwd', appRoot]);
+  if (copilot) args.push('--copilot-path', copilot);
   const env = Object.assign({}, process.env, {
     EVA_ACP_PORT: String(port),
     EVA_BRIDGE_TOKEN: bridgeToken,
     KUSTO_DATABASE_LOCKED: '1',
     PYTHONUNBUFFERED: '1'
   });
+  if (process.platform === 'win32') {
+    env.EVA_CONFIG_DIR = path.join(app.getPath('userData'), 'bridge');
+  }
 
   // GUI-launched apps on macOS inherit a stripped PATH that often misses
   // Homebrew, python.org, and nvm bin directories. Augment PATH so the bridge
@@ -439,11 +510,11 @@ function startBridge(port, bridgeToken) {
     env.PATH = merged;
   }
 
-  const pythonCmd = process.env.EVA_PYTHON || 'python3';
-  const child = spawn(pythonCmd, args, {
+  const child = spawn(python.command, args, {
     cwd: appRoot,
     env: env,
-    detached: true,
+    detached: process.platform !== 'win32',
+    windowsHide: process.platform === 'win32',
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let stderrBuffer = '';
@@ -498,14 +569,15 @@ function forceKillBridgeSync() {
   const child = bridgeProcess;
   if (!child || !child.pid) return;
 
-  try {
-    process.kill(-child.pid, 'SIGKILL');
-    return;
-  } catch (err) {
+  if (process.platform !== 'win32') {
     try {
-      child.kill('SIGKILL');
+      process.kill(-child.pid, 'SIGKILL');
+      return;
     } catch (_) {}
   }
+  try {
+    child.kill('SIGKILL');
+  } catch (_) {}
 }
 
 function stopBridge() {
@@ -612,15 +684,17 @@ async function startLocalVoices(pythonPath, voiceId) {
 
   const appRoot = getAppRoot();
   const bridgePath = path.join(appRoot, 'tools', 'local_voices_bridge.py');
-  const managedPython = path.join(process.env.HOME || '', '.local', 'share', 'eva', 'local-voices', '.venv', 'bin', 'python');
-  const pythonCmd = String(pythonPath || process.env.LOCAL_VOICES_PYTHON || process.env.EVA_PYTHON || (fs.existsSync(managedPython) ? managedPython : 'python3')).trim() || 'python3';
+  const localSpeech = getLocalSpeechInvocation(pythonPath);
+  const pythonCmd = localSpeech.command;
+  const pythonArgs = localSpeech.args;
   localSpeechBaseUrl = '';
   localSpeechToken = crypto.randomBytes(32).toString('hex');
-  const args = [bridgePath, '--host', '127.0.0.1', '--port', '0'];
+  const args = pythonArgs.concat([bridgePath, '--host', '127.0.0.1', '--port', '0']);
   const child = spawn(pythonCmd, args, {
     cwd: appRoot,
     env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1', EVA_LOCAL_SPEECH_TOKEN: localSpeechToken }),
-    detached: true,
+    detached: process.platform !== 'win32',
+    windowsHide: process.platform === 'win32',
     stdio: ['ignore', 'pipe', 'pipe']
   });
   localVoicesProcess = child;

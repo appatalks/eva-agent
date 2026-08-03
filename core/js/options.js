@@ -6015,7 +6015,30 @@ function _ttsSpeakOpenAIChunked(text, key, voice) {
   playFrom(0);
 }
 
-function _ttsSpeakLocalChunked(text) {
+function _ttsSpeakWithBrowser(text, voiceId) {
+  if (typeof window.speechSynthesis === 'undefined' || typeof window.SpeechSynthesisUtterance === 'undefined') return false;
+  var voiceLangMap = {
+    Salli: 'en-US',
+    Ruth: 'en-US',
+    Seoyeon: 'ko-KR',
+    Mia: 'es-MX',
+    Tatyana: 'uk-UA'
+  };
+  try {
+    window.speechSynthesis.cancel();
+    var utter = new SpeechSynthesisUtterance(text);
+    utter.lang = voiceLangMap[voiceId] || 'en-US';
+    utter.rate = 1.0;
+    utter.pitch = 1.0;
+    window.speechSynthesis.speak(utter);
+    return true;
+  } catch (error) {
+    console.warn('SpeechSynthesis error:', error);
+    return false;
+  }
+}
+
+function _ttsSpeakLocalChunked(text, voiceId) {
   if (!window.evaStandalone || typeof window.evaStandalone.localSpeechSynthesize !== 'function') {
     throw new Error('Local Voices requires Eva Standalone.');
   }
@@ -6034,6 +6057,7 @@ function _ttsSpeakLocalChunked(text) {
   var requests = new Array(chunks.length);
   var index = 0;
   var runId = _ttsChunk.runId + 1;
+  var fellBackToBrowser = false;
   _ttsChunk.runId = runId;
   _ttsChunk.cancelled = false;
   _ttsChunk.active = true;
@@ -6092,6 +6116,14 @@ function _ttsSpeakLocalChunked(text) {
     }).catch(function(error) {
       if (runId !== _ttsChunk.runId || _ttsChunk.cancelled) { finish(); return; }
       console.warn('Local Voices chunk error:', error && error.message ? error.message : error);
+      var isWindowsStandalone = window.evaStandalone && window.evaStandalone.isStandalone && /Windows/i.test(navigator.userAgent || '');
+      if (isWindowsStandalone && !fellBackToBrowser && _ttsSpeakWithBrowser(text, voiceId)) {
+        fellBackToBrowser = true;
+        var resultEl = document.getElementById('result');
+        if (resultEl) resultEl.textContent = 'Local Voices is unavailable; using the Windows browser voice.';
+        finish();
+        return;
+      }
       if (index + 1 < chunks.length) playFrom(index + 1); else finish();
     });
   }
@@ -6185,29 +6217,10 @@ function speakText() {
 
     // Browser SpeechSynthesis: offline, no credentials. Used by standalone.
     if (speechParams.Engine === "browser") {
-      if (typeof window.speechSynthesis === 'undefined' || typeof window.SpeechSynthesisUtterance === 'undefined') {
+      if (!_ttsSpeakWithBrowser(speechParams.Text, speechParams.VoiceId)) {
         var resultEl = document.getElementById('result');
         var msg = 'Browser TTS not supported in this runtime.';
         if (resultEl) resultEl.textContent = msg; else console.warn(msg);
-        return;
-      }
-      try { window.speechSynthesis.cancel(); } catch (_) {}
-      var utter = new SpeechSynthesisUtterance(speechParams.Text);
-      // Map the Polly voice id to a BCP-47 language so the browser picks a sensible voice.
-      var voiceLangMap = {
-        Salli: 'en-US',
-        Ruth: 'en-US',
-        Seoyeon: 'ko-KR',
-        Mia: 'es-MX',
-        Tatyana: 'uk-UA'
-      };
-      utter.lang = voiceLangMap[speechParams.VoiceId] || 'en-US';
-      utter.rate = 1.0;
-      utter.pitch = 1.0;
-      try {
-        window.speechSynthesis.speak(utter);
-      } catch (e) {
-        console.warn('SpeechSynthesis error:', e);
       }
       return;
     }
@@ -6215,7 +6228,7 @@ function speakText() {
 
     if (speechParams.Engine === "local-voices") {
       try {
-        _ttsSpeakLocalChunked(speechParams.Text);
+        _ttsSpeakLocalChunked(speechParams.Text, speechParams.VoiceId);
       } catch (error) {
         var message = 'Local Voices unavailable: ' + (error && error.message ? error.message : error);
         if (typeof setStatus === 'function') setStatus('error', message);

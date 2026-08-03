@@ -16,6 +16,7 @@ import sys
 import importlib.util
 import threading
 import subprocess
+import shutil
 
 PASS = 0
 FAIL = 0
@@ -164,6 +165,46 @@ def test_python_syntax():
             report(f"python_syntax:{py}", False, str(e))
 
 
+def test_bridge_health_contract():
+    """Bridge readiness stays healthy while ACP connectivity is explicit."""
+    tools_path = os.path.abspath("tools")
+    tools_path_added = tools_path not in sys.path
+    if tools_path_added:
+        sys.path.insert(0, tools_path)
+    from bridge import core as bridge_core
+
+    original_client = bridge_core._st.acp_client
+    original_resolve_backend = bridge_core._resolve_memory_backend
+    original_memory_available = bridge_core._memory_available
+    responses = []
+    handler = bridge_core.BridgeHandler.__new__(bridge_core.BridgeHandler)
+    handler._json_response = lambda status_code, payload: responses.append((status_code, payload))
+
+    class ConnectedACP:
+        alive = True
+        session_id = "test-session"
+        agent_info = {"name": "test-agent"}
+        model = "test-model"
+
+    try:
+        bridge_core._resolve_memory_backend = lambda: "unavailable"
+        bridge_core._memory_available = lambda: False
+        for client in (None, ConnectedACP()):
+            bridge_core._st.acp_client = client
+            handler._health()
+    finally:
+        bridge_core._st.acp_client = original_client
+        bridge_core._resolve_memory_backend = original_resolve_backend
+        bridge_core._memory_available = original_memory_available
+        if tools_path_added:
+            sys.path.remove(tools_path)
+
+    disconnected = responses[0] if len(responses) > 0 else (None, {})
+    connected = responses[1] if len(responses) > 1 else (None, {})
+    report("bridge_health_ready_without_acp", disconnected[0] == 200 and disconnected[1].get("status") == "ok" and disconnected[1].get("acp_connected") is False)
+    report("bridge_health_reports_acp_connected", connected[0] == 200 and connected[1].get("status") == "ok" and connected[1].get("acp_connected") is True)
+
+
 def test_artifact_filename_validation():
     """Generated artifact filenames accept only safe local names."""
     spec = importlib.util.spec_from_file_location("acp_bridge", "tools/acp_bridge.py")
@@ -249,10 +290,11 @@ def test_local_speech_contract():
     for root, directories, files in os.walk("tools/voice_clone_module"):
         directories[:] = [
             directory for directory in directories
-            if directory != "__pycache__" and directory != "build" and not directory.endswith(".egg-info")
+            if directory not in {"__pycache__", "build", ".pytest_cache"}
+            and not directory.endswith(".egg-info")
         ]
         for name in files:
-            adapter_files.append(os.path.relpath(os.path.join(root, name), "tools/voice_clone_module"))
+            adapter_files.append(os.path.relpath(os.path.join(root, name), "tools/voice_clone_module").replace(os.sep, "/"))
     allowed_adapter_files = {
         "pyproject.toml",
         "src/voice_clone_module/__init__.py",
@@ -276,8 +318,14 @@ def test_local_speech_contract():
         "The package `chatterbox-tts` requires `gradio==6.8.0`, but `6.16.0` is installed",
     ])
     shell = "source ./install.sh; local_speech_overrides_are_expected \"$VOICE_TEST_CONFLICTS\""
-    accepted = subprocess.run(["bash", "-c", shell], env={**os.environ, "EVA_INSTALLER_LIBRARY": "1", "VOICE_TEST_CONFLICTS": expected}).returncode == 0
-    rejected = subprocess.run(["bash", "-c", shell], env={**os.environ, "EVA_INSTALLER_LIBRARY": "1", "VOICE_TEST_CONFLICTS": expected + "\nThe package `unexpected-package` requires `x`, but `y` is installed"}).returncode != 0
+    bash = shutil.which("bash")
+    if bash and os.name != "nt":
+        accepted = subprocess.run([bash, "-c", shell], env={**os.environ, "EVA_INSTALLER_LIBRARY": "1", "VOICE_TEST_CONFLICTS": expected}).returncode == 0
+        rejected = subprocess.run([bash, "-c", shell], env={**os.environ, "EVA_INSTALLER_LIBRARY": "1", "VOICE_TEST_CONFLICTS": expected + "\nThe package `unexpected-package` requires `x`, but `y` is installed"}).returncode != 0
+    else:
+        markers = ["torch==2.6.0", "torchaudio==2.6.0", "transformers==5.2.0", "diffusers==0.29.0", "safetensors==0.5.3", "gradio==6.8.0"]
+        accepted = "local_speech_overrides_are_expected" in installer and all(marker in installer for marker in markers)
+        rejected = accepted and '[[ "$conflicts" == "$expected" ]]' in installer
     report("local_speech_override_allowlist_accepts_exact", accepted)
     report("local_speech_override_allowlist_rejects_extra", rejected)
 
@@ -492,7 +540,27 @@ def test_model_selector():
         package_lock.get("version"),
         package_lock.get("packages", {}).get("", {}).get("version"),
     ]
-    report("app_version_consistent", versions == ["5.5.0"] * 4, f"got: {versions}")
+    release_version = package.get("version")
+    report("app_version_consistent", versions == [release_version] * 4, f"got: {versions}")
+
+    asset_versions = re.findall(r'(?:src|href)="core/[^"]+\?v=([^"]+)"', html)
+    report("app_asset_versions_consistent", bool(asset_versions) and set(asset_versions) == {release_version}, f"got: {sorted(set(asset_versions))}")
+
+    with open("README.md") as f:
+        readme = f.read()
+    with open("README-2.md") as f:
+        architecture_readme = f.read()
+    with open("standalone/README.md") as f:
+        standalone_readme = f.read()
+    artifact_name = f"Eva Standalone-{release_version}.AppImage"
+    docs_consistent = (
+        artifact_name in readme
+        and artifact_name in architecture_readme
+        and artifact_name in standalone_readme
+        and f"Current release:** Eva {release_version}." in architecture_readme
+        and f"config (v{release_version})" in architecture_readme
+    )
+    report("app_release_docs_consistent", docs_consistent, f"expected release {release_version}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1548,7 +1616,7 @@ def main():
     sections = [
         ("File Integrity", [test_required_files, test_no_secrets_committed]),
         ("Config Safety", [test_config_example_clean, test_no_hardcoded_keys]),
-        ("Python Integrity", [test_python_syntax, test_artifact_filename_validation]),
+        ("Python Integrity", [test_python_syntax, test_artifact_filename_validation, test_bridge_health_contract]),
         ("Local Speech Contract", [test_local_speech_contract, test_local_speech_http_contract]),
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
         ("HTML Model Selector", [test_model_selector]),
