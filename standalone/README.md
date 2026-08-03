@@ -55,14 +55,14 @@ automation and camera discovery remain unsupported on Windows.
 
 ```sh
 cd standalone/dist
-chmod +x "Eva Standalone-5.5.2.AppImage"
-"./Eva Standalone-5.5.2.AppImage"
+chmod +x "Eva Standalone-5.5.4.AppImage"
+"./Eva Standalone-5.5.4.AppImage"
 ```
 
 If the host is missing FUSE (common on minimal containers and some distros), launch with extraction instead:
 
 ```sh
-"./Eva Standalone-5.5.2.AppImage" --appimage-extract-and-run
+"./Eva Standalone-5.5.4.AppImage" --appimage-extract-and-run
 ```
 
 The AppImage is self-contained: it spawns the bundled ACP bridge on a random

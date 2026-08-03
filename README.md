@@ -27,7 +27,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh            # install dependencies
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.5.2.AppImage'
+./dist/'Eva Standalone-5.5.4.AppImage'
 ```
 
 Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).

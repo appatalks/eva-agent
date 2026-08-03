@@ -69,10 +69,10 @@ def test_health():
 
         report("health_status_code", "pass", "200")
 
-        if d.get("status") == "ok":
+        if d.get("acp_connected") is True:
             report("health_acp_connected", "pass")
         else:
-            report("health_acp_connected", "fail", f"status={d.get('status')}")
+            report("health_acp_connected", "fail", f"acp_connected={d.get('acp_connected')}")
 
         if d.get("session_id"):
             report("health_session_id", "pass", d["session_id"][:12])

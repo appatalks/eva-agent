@@ -207,6 +207,7 @@ try {
   @{ error = $_.Exception.Message; updatedAt = (Get-Date -Format o) } |
     ConvertTo-Json | Set-Content -Path $manifestPath -Encoding utf8
   Write-BootstrapLog "Runtime bootstrap failed: $($_.Exception.Message)"
+  exit 1
 }
 
 exit 0

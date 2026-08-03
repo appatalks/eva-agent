@@ -77,7 +77,7 @@ jobs:
           done
 
           # Check all JS files referenced in index.html exist
-          for js in $(grep -oP 'src="core/js/[^"]+' index.html | sed 's/src="//'); do
+          for js in $(grep -oP 'src="core/js/[^"]+' index.html | sed 's/src="//' | cut -d? -f1); do
             if [ ! -f "$js" ]; then
               echo "::error::Referenced script '$js' does not exist"
               FAIL=1
@@ -85,7 +85,7 @@ jobs:
           done
 
           # Check CSS files exist
-          for css in $(grep -oP 'href="core/[^"]+\.css' index.html | sed 's/href="//'); do
+          for css in $(grep -oP 'href="core/[^"]+' index.html | sed 's/href="//' | cut -d? -f1); do
             if [ ! -f "$css" ]; then
               echo "::error::Referenced stylesheet '$css' does not exist"
               FAIL=1
