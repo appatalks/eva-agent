@@ -43,6 +43,81 @@ def _get_sqlite_mem():
     return _st.sqlite_mem
 
 
+def _get_protected_vault(create=True):
+    """Return the isolated protected vault, never the ordinary memory DB."""
+    from protected_memory import ProtectedVault
+
+    root_dir = os.path.realpath(_cfg.EVA_CONFIG_DIR)
+    artifact_dir = os.path.realpath(os.path.join(_cfg.EVA_CONFIG_DIR, "protected-artifacts"))
+    db_path = os.path.join(_cfg.EVA_CONFIG_DIR, "protected.sqlite3")
+    with _st.protected_vault_lock:
+        current = _st.protected_vault
+        if current is not None:
+            if os.path.realpath(str(current.root_dir)) == root_dir and os.path.realpath(str(current.artifact_dir)) == artifact_dir:
+                return current
+            current.close()
+            _st.protected_vault = None
+        if not create and not os.path.isfile(db_path):
+            return None
+        _st.protected_vault = ProtectedVault(_cfg.EVA_CONFIG_DIR, artifact_dir=artifact_dir)
+        return _st.protected_vault
+
+
+def _protected_memory_metadata():
+    """Return only locked-safe metadata for prompt awareness."""
+    vault = _get_protected_vault(create=False)
+    return vault.list_metadata() if vault is not None else []
+
+
+def _protected_memory_context(message):
+    """Return prompt-safe protected-memory state and explicitly released values.
+
+    Values are included only when the user has approved model release for this
+    unlocked session and the current message matches a record category or its
+    public label. Artifacts are never injected into prompts.
+    """
+    vault = _get_protected_vault(create=False)
+    if vault is None:
+        return {"state": "absent", "metadata": [], "records": []}
+    metadata = vault.list_metadata()
+    if not vault.is_unlocked:
+        return {"state": "locked", "metadata": metadata, "records": []}
+    if not _st.protected_memory_model_release:
+        return {"state": "unlocked_no_release", "metadata": metadata, "records": []}
+
+    text = str(message or "").lower()
+    category_terms = {
+        "government_identifier": {"ssn", "social security", "social-security", "tax id", "identifier", "last four", "last 4", "four digits", "last digits"},
+        "financial": {"financial", "account", "routing", "card", "bank"},
+        "medical": {"medical", "health", "prescription", "insurance"},
+        "document": {"document", "file", "record"},
+        "general": set(),
+    }
+    records = []
+    for item in metadata:
+        if item.get("kind") != "memory":
+            continue
+        category = str(item.get("Category", "general") or "general").lower()
+        label_terms = set(re.findall(r"[a-z0-9]{3,}", str(item.get("PublicLabel", "")).lower()))
+        matches_category = any(term in text for term in category_terms.get(category, set()))
+        matches_label = bool(label_terms and any(term in text for term in label_terms))
+        if not (matches_category or matches_label):
+            continue
+        try:
+            record = vault.get_memory(item["RecordId"])
+        except Exception:
+            continue
+        value = record.get("value")
+        if isinstance(value, bytes):
+            continue
+        records.append({
+            "label": record.get("public_label", "protected record"),
+            "category": record.get("category", "general"),
+            "value": value,
+        })
+    return {"state": "released", "metadata": metadata, "records": records}
+
+
 def _set_memory_backend(backend):
     """Switch the active memory backend and persist the choice."""
     # global statement removed — writes go to _st.*

@@ -2703,6 +2703,7 @@ document.addEventListener('DOMContentLoaded', () => {
       syncLocalVoicesEngine(false);
       if (typeof loadBackgroundData === 'function') loadBackgroundData(true);
       if (typeof loadDataMode === 'function') loadDataMode();
+      if (typeof refreshProtectedMemoryStatus === 'function') refreshProtectedMemoryStatus();
     }
   }
 
@@ -2882,6 +2883,7 @@ document.addEventListener('DOMContentLoaded', () => {
       refreshLocalVoicesProfiles();
       syncLocalVoicesEngine(false);
       if (typeof loadBackgroundData === 'function') loadBackgroundData(true);
+      if (typeof refreshProtectedMemoryStatus === 'function') refreshProtectedMemoryStatus();
     }
     if (tabName) {
       var requestedTab = activateSettingsTab(tabName);
@@ -5070,39 +5072,27 @@ function updateButton() {
 
   if (selModel.value === 'aig') {
         btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            aigSend();
+            sendData();
         };
     } else if (selModel.value.indexOf('copilot-') === 0) {
         btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            copilotSend();
+            sendData();
         };
     } else if (selModel.value == "gpt-4o-mini" || selModel.value == "o1" || selModel.value == "o1-mini" || selModel.value == "gpt-4o" || selModel.value == "o3-mini" || selModel.value == "o1-preview" || selModel.value == "gpt-5-mini" || selModel.value == "latest") {
         btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            trboSend();
+          sendData();
         };
     } else if (selModel.value == "gemini") {
         btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            geminiSend();
+          sendData();
         };
    } else if (selModel.value == "lm-studio") {
         btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            lmsSend();
+          sendData();
         };
     } else if (selModel.value == "dall-e-3") {
         btnSend.onclick = function() {
-            _detectGenerationIntent();
-            clearText();
-            dalle3Send();
+          sendData();
         };
     } else {
         btnSend.onclick = function() {
@@ -5114,7 +5104,7 @@ function updateButton() {
     }
 }
 
-function sendData() {
+async function sendData() {
     // Natural agent confirmation: if the browser/desktop agent is parked waiting
     // on a yes/no (e.g. the final purchase), interpret this message as the answer
     // and route it to the agent instead of sending a normal chat turn.
@@ -5125,6 +5115,11 @@ function sendData() {
         if (_txtMsgEl) _txtMsgEl.innerHTML = '';
         return;
       }
+    }
+    var protectedInput = document.getElementById('txtMsg');
+    var protectedRawText = protectedInput ? (protectedInput.innerText || protectedInput.textContent || '') : '';
+    if (typeof captureProtectedMemoryFromChat === 'function' && await captureProtectedMemoryFromChat(protectedRawText)) {
+      return;
     }
     // Hide Eva welcome MOTD on first send
     hideEvaWelcome();

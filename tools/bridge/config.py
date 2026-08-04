@@ -35,6 +35,7 @@ def to_utc_iso(value):
 # ── Filesystem paths ────────────────────────────────────────────────
 EVA_CONFIG_DIR = os.path.expanduser(os.environ.get("EVA_CONFIG_DIR", "~/.config/eva-standalone"))
 ARTIFACTS_DIR = os.path.join(EVA_CONFIG_DIR, "artifacts")
+PROTECTED_ARTIFACTS_DIR = os.path.join(EVA_CONFIG_DIR, "protected-artifacts")
 KUSTO_CLUSTER_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "kusto_cluster.txt")
 MCP_CONFIG_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "mcp_config.json")
 ALERTS_CONFIG_PATH = os.path.join(EVA_CONFIG_DIR, "alerts.json")

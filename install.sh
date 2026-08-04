@@ -273,6 +273,7 @@ register_dependencies() {
   hr; info "Bridge Python packages"; hr
   need_pymod requests        requests        "requests"
   need_pymod azure.identity  azure-identity  "azure-identity"
+  need_pymod cryptography    cryptography    "protected-memory encryption"
   need_pymod msal            msal            "msal"
 
   hr; info "Browser agent"; hr

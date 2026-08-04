@@ -130,6 +130,12 @@ try {
   }
   if (-not $python) { throw 'Python 3.12 was not available after installation.' }
 
+  Write-BootstrapLog 'Installing protected-memory encryption dependency.'
+  & $python -3.12 -m pip install --user cryptography
+  if ($LASTEXITCODE -ne 0) { throw "could not install the protected-memory encryption dependency (exit code $LASTEXITCODE)." }
+  & $python -3.12 -c "import cryptography" 2>$null
+  if ($LASTEXITCODE -ne 0) { throw 'cryptography could not be imported after installation.' }
+
   $node = Get-Node24
   if (-not $node) {
     Install-WingetPackage 'OpenJS.NodeJS.LTS'
