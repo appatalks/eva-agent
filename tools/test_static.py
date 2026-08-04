@@ -1027,6 +1027,20 @@ def test_security_alert_contract():
         local_mcp = f.read()
     with open("tools/bridge/core.py") as f:
         bridge_core = f.read()
+    with open("tools/bridge/utils.py") as f:
+        bridge_utils = f.read()
+    with open("tools/bridge/acp_client.py") as f:
+        acp_client = f.read()
+    with open("core/js/gl-google.js") as f:
+        google_js = f.read()
+    with open("core/js/gpt-core.js") as f:
+        gpt_js = f.read()
+    with open("core/js/pandora.js") as f:
+        pandora_js = f.read()
+    with open("core/js/copilot.js") as f:
+        copilot_js = f.read()
+    with open("mcp.json") as f:
+        mcp_json = f.read()
     with open("tools/sqlite_memory.py") as f:
         sqlite_memory = f.read()
     with open("core/js/sessions.js") as f:
@@ -1040,6 +1054,12 @@ def test_security_alert_contract():
 
     report("security_mcp_fixed_launch_specs", "def normalize_mcp_config" in local_mcp and "_mcp_launch_spec(name)" in local_mcp and "normalize_mcp_config(requested_mcp_servers)" in bridge_core)
     report("security_mcp_env_allowlist", "_MCP_ENV_KEYS" in local_mcp and "LD_PRELOAD" not in local_mcp)
+    report("security_bridge_private_route_gate", "def _require_private_route" in bridge_core and "parsed_path not in (\"/health\", \"/v1/models\")" in bridge_core and bridge_core.count("if not self._require_private_route():") >= 3)
+    report("security_child_env_allowlist", "def _safe_child_environment" in bridge_utils and "_safe_child_environment()" in acp_client and "os.environ.copy()" not in local_mcp + acp_client)
+    report("security_provider_dom_output_escaped", "escapeHtml(thoughts)" in google_js and "escapeHtml(error.message)" in google_js and "escapeHtml(oHttp.responseText)" in gpt_js)
+    report("security_pandora_no_dynamic_eval", "eval(" not in pandora_js and "dynamic code execution is disabled" in pandora_js)
+    report("security_protected_mime_header_safe", '_safe_content_type(metadata.get("MimeType") or "")' in bridge_core and 'mime_type=mime_type' in bridge_core)
+    report("security_mcp_versions_pinned", "@playwright/mcp@latest" not in local_mcp + mcp_json and "@azure/mcp@latest" not in local_mcp + copilot_js)
     report("security_sqlite_read_authorizer", "set_authorizer(authorize)" in sqlite_memory and 'startswith(("SELECT ", "WITH "))' in sqlite_memory)
     report("security_linear_marker_parser", "def _strip_marker_blocks" in bridge_core and "[\\s\\S]*?" not in bridge_core)
     report("security_artifact_dirfd_write", "dir_fd=directory_fd" in bridge_core and "def _existing_artifact_path" in bridge_core)

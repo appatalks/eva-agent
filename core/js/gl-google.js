@@ -63,7 +63,7 @@ function geminiSend() {
 
     getGoogleGlKey().then(GOOGLE_GL_KEY => {
         document.getElementById("txtMsg").innerHTML = "";
-        document.getElementById("txtOutput").innerHTML += '<span class="user">You: </span>' + sQuestion + "<br>\n";
+        document.getElementById("txtOutput").innerHTML += '<span class="user">You: </span>' + escapeHtml(sQuestion).replace(/\n/g, '<br>') + "<br>\n";
 
     const geminiUrl = `https://generativelanguage.googleapis.com/v1alpha/models/gemini-2.0-flash-thinking-exp:generateContent?key=${GOOGLE_GL_KEY}`;
 
@@ -96,7 +96,7 @@ function geminiSend() {
 
                     // Display thoughts (if any)
                     if (thoughts) {
-                        document.getElementById("txtOutput").innerHTML += '<span class="eva-thoughts">Eva\'s Thoughts:</span><br>' + thoughts + "<br><br>\n";
+                        document.getElementById("txtOutput").innerHTML += '<span class="eva-thoughts">Eva\'s Thoughts:</span><br>' + escapeHtml(thoughts).replace(/\n/g, '<br>') + "<br><br>\n";
                     }
 
                     // Display main response via unified renderer
@@ -119,7 +119,7 @@ function geminiSend() {
 	    })
             .catch(error => {
                 console.error("Error:", error);
-                document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + error.message + "<br>\n";
+                document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + escapeHtml(error.message) + "<br>\n";
             });
     });
 }

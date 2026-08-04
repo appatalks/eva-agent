@@ -345,6 +345,7 @@ from bridge.utils import (  # noqa: F401
     _env_truthy,
     _is_loopback_bind,
     _valid_artifact_name,
+    _safe_content_type,
     _is_local_or_private,
     _validate_lmstudio_base_url,
     _sanitize_mcp_for_persist,
@@ -830,10 +831,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
         expected_token = os.environ.get("EVA_BRIDGE_TOKEN", "")
         supplied_token = self.headers.get("Authorization", "")
         if not expected_token or not hmac.compare_digest(supplied_token, "Bearer " + expected_token):
+            if self.command not in ("GET", "HEAD", "OPTIONS"):
+                self.close_connection = True
             self._json_response(401, {"error": {"message": "Bridge authorization failed"}})
             return False
         if not self._trusted_origin():
+            if self.command not in ("GET", "HEAD", "OPTIONS"):
+                self.close_connection = True
             self._json_response(403, {"error": {"message": "Request origin is not allowed"}})
+            return False
+        return True
+
+    def _require_private_route(self):
+        """Authorize private routes while preserving direct loopback development mode."""
+        if os.environ.get("EVA_BRIDGE_TOKEN", "").strip():
+            return self._require_bridge_capability()
+        if not _is_loopback_bind():
+            if self.command not in ("GET", "HEAD", "OPTIONS"):
+                self.close_connection = True
+            self._json_response(403, {"error": {"message": "private bridge routes are restricted to localhost"}})
             return False
         return True
 
@@ -850,6 +866,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed_path = urllib.parse.urlparse(self.path).path
+        if parsed_path not in ("/health", "/v1/models") and not self._require_private_route():
+            return
         if parsed_path == "/health":
             self._health()
         elif parsed_path == "/v1/doctor":
@@ -931,6 +949,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed_path = urllib.parse.urlparse(self.path).path
+        if not self._require_private_route():
+            return
         if parsed_path == "/v1/chat/completions":
             self._chat_completions()
         elif parsed_path == "/v1/mcp/configure":
@@ -1020,6 +1040,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_PATCH(self):
         parsed_path = urllib.parse.urlparse(self.path).path
+        if not self._require_private_route():
+            return
         if parsed_path.startswith("/v1/goals/"):
             self._goals_patch(urllib.parse.unquote(parsed_path.split("/v1/goals/", 1)[1]))
         elif parsed_path.startswith("/v1/skills/"):
@@ -1031,6 +1053,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed_path = urllib.parse.urlparse(self.path).path
+        if not self._require_private_route():
+            return
         if parsed_path.startswith("/v1/goals/"):
             self._goals_delete(urllib.parse.unquote(parsed_path.split("/v1/goals/", 1)[1]))
         elif parsed_path.startswith("/v1/alerts/"):
@@ -2090,6 +2114,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             self._json_response(400, {"error": {"message": "Request body must be an object"}})
             return
+        requested_mime_type = str(data.get("mime_type") or "")
+        mime_type = _safe_content_type(requested_mime_type) if requested_mime_type else ""
         try:
             vault = self._protected_memory_vault()
             if kind == "memory":
@@ -2103,7 +2129,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     value,
                     public_label=data.get("public_label", "protected memory record"),
                     category=data.get("category", "general"),
-                    mime_type=data.get("mime_type", ""),
+                    mime_type=mime_type,
                 )
             else:
                 content = base64.b64decode(str(data.get("content_base64") or ""), validate=True)
@@ -2111,7 +2137,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     content,
                     public_label=data.get("public_label", "protected artifact"),
                     category=data.get("category", "file"),
-                    mime_type=data.get("mime_type", ""),
+                    mime_type=mime_type,
                 )
         except VaultLockedError:
             self._json_response(423, {"error": {"message": "protected memory is locked"}})
@@ -2149,7 +2175,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 raise
             self.send_response(200)
             self._cors_headers()
-            self.send_header("Content-Type", metadata.get("MimeType") or "application/octet-stream")
+            self.send_header("Content-Type", _safe_content_type(metadata.get("MimeType") or ""))
             self.send_header("Content-Length", str(metadata.get("SizeBytes", 0)))
             self.send_header("Content-Disposition", 'attachment; filename="protected-artifact.bin"')
             self.send_header("Cache-Control", "no-store")

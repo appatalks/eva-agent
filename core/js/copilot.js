@@ -543,7 +543,7 @@ async function applyMCPConfig() {
   if (azureCheck && azureCheck.checked) {
     mcpServers['azure-mcp-server'] = {
       command: 'npx',
-      args: ['-y', '@azure/mcp@latest', 'server', 'start'],
+      args: ['-y', '@azure/mcp@3.0.0-beta.31', 'server', 'start'],
       env: { AZURE_MCP_COLLECT_TELEMETRY: 'false' }
     };
   }

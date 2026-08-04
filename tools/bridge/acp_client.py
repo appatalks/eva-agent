@@ -12,6 +12,7 @@ import uuid
 from contextlib import contextmanager
 from bridge import config as _cfg
 from bridge import state as _st
+from bridge.utils import _safe_child_environment
 from bridge.kusto import _inject_kusto_token
 from bridge.learning import get_consent as _get_learning_consent
 from bridge.telemetry import _telemetry_emit
@@ -123,7 +124,7 @@ class ACPClient:
             # Pass env vars from MCP config to the copilot process itself
             # (copilot spawns MCP servers as children, inheriting the env)
             os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
-            process_env = os.environ.copy()
+            process_env = _safe_child_environment()
             process_env.pop("EVA_BRIDGE_TOKEN", None)
             for srv_name, srv_cfg in self.mcp_config.items():
                 for k, v in srv_cfg.get('env', {}).items():
@@ -540,11 +541,12 @@ class ACPClient:
         print("[ACP Terminal] Creating authorized terminal")
 
         # Build environment
-        env = os.environ.copy()
+        env = _safe_child_environment()
         env.pop("EVA_BRIDGE_TOKEN", None)
         for ev in env_vars:
             if isinstance(ev, dict) and "name" in ev and "value" in ev:
                 env[ev["name"]] = ev["value"]
+        env.pop("EVA_BRIDGE_TOKEN", None)
         os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
         env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
 

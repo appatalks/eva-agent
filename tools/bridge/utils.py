@@ -18,6 +18,24 @@ _HTTP_CONTENT_TYPE_RE = _cfg.HTTP_CONTENT_TYPE_RE
 _LMSTUDIO_ALLOWED_PORTS = _cfg.LMSTUDIO_ALLOWED_PORTS
 _MCP_CONFIG_CACHE_PATH = _cfg.MCP_CONFIG_CACHE_PATH
 _MCP_SECRET_ENV_MARKERS = ("TOKEN", "KEY", "SECRET", "PAT", "PASSWORD", "CREDENTIAL")
+_CHILD_ENV_KEYS = frozenset({
+    "APPDATA", "COMSPEC", "HOME", "LANG", "LOGNAME", "LOCALAPPDATA",
+    "PATH", "PATHEXT", "SYSTEMROOT", "TEMP", "TERM", "TMP", "USER",
+    "USERNAME", "WINDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LC_ALL",
+    "LC_COLLATE", "LC_CTYPE", "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC",
+    "LC_TIME",
+})
+
+
+def _safe_child_environment(extra=None):
+    """Build a subprocess environment without inheriting ambient secrets."""
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key in _CHILD_ENV_KEYS
+    }
+    for key, value in (extra or {}).items():
+        environment[str(key)] = str(value) if not isinstance(value, str) else value
+    return environment
 
 def _env_truthy(name):
     """Return True when an environment flag uses the shared truthy form."""

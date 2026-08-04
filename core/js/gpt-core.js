@@ -29,22 +29,22 @@ async function trboSend() {
         if (oHttp.readyState === 4) {
     	  // Check for errors
     	  if (oHttp.status === 500) {
-      	    txtOutput.innerHTML += "<br> Error 500: Internal Server Error" + "<br>" + oHttp.responseText;
+            txtOutput.innerHTML += "<br> Error 500: Internal Server Error" + "<br>" + escapeHtml(oHttp.responseText);
       	    console.log("Error 500: Internal Server Error gpt-core.js");
       	    return;
     	  }
     	  if (oHttp.status === 429) {
-      	    txtOutput.innerHTML += "<br> Error 429: Too Many Requests" + "<br>" + oHttp.responseText;
+            txtOutput.innerHTML += "<br> Error 429: Too Many Requests" + "<br>" + escapeHtml(oHttp.responseText);
             console.log("Error 429: Too Many Requests gpt-core.js");
       	    return;
     	  }
           if (oHttp.status === 404) {
-            txtOutput.innerHTML += "<br> Error 404: Not Found" + "<br>" + oHttp.responseText;
+            txtOutput.innerHTML += "<br> Error 404: Not Found" + "<br>" + escapeHtml(oHttp.responseText);
             console.log("Error 404: Not Found gpt-core.js");
             return;
           }
           if (oHttp.status === 400) {
-            txtOutput.innerHTML += "<br> Error 400: Invalid Request" + "<br>" + oHttp.responseText;
+            txtOutput.innerHTML += "<br> Error 400: Invalid Request" + "<br>" + escapeHtml(oHttp.responseText);
             console.log("Error 400: Invalid Request gpt-core.js");
             return;
           }
@@ -86,7 +86,7 @@ async function trboSend() {
                 return;
             }
 	    else {
-                txtOutput.innerHTML += "Error Other: " + oJson.error.message;
+                txtOutput.innerHTML += "Error Other: " + escapeHtml(oJson.error.message);
 	        console.log("Error Other: gpt-core.js Line 89");
                 retryCount = 0;	  
 	    }

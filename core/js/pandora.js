@@ -14,25 +14,11 @@ async function pandora() {
     // Call autoSelect with the current code of box to get updated code
     const updatedBoxCode = await autoSelect(boxCode);
 
-    // Safety Check logic
-    // (ie dont take over humans)
-	// ... 
-
-    // Run the updated code .. Careful, do not open.
-    eval('box = ' + updatedBoxCode);
-
-    // Log the update 
-    const updateLog = {
-      updatedOn: new Date().toISOString(),
-      updatedCode: updatedBoxCode
-    };
-
-    // Append logs in an array
-    const logs = JSON.parse(localStorage.getItem('pandoraLogs') || '[]');
-    logs.push(updateLog);
-    localStorage.setItem('pandoraLogs', JSON.stringify(logs));
-
-    console.log('pandora box opened and updated successfully');
+    // Dynamic model-produced code is intentionally not executable in the renderer.
+    if (typeof updatedBoxCode !== 'string' || !updatedBoxCode.trim()) {
+      throw new Error('Pandora update was empty');
+    }
+    console.warn('Pandora update rejected: dynamic code execution is disabled');
   } catch (error) {
     console.error('Failed to update pandora box:', error);
   }

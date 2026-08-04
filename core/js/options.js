@@ -354,6 +354,33 @@ function getBridgeCapabilityHeaders() {
   };
 }
 
+function installBridgeCapabilityFetch() {
+  if (typeof window === 'undefined' || typeof window.fetch !== 'function' || window._evaBridgeFetchInstalled) return;
+  var nativeFetch = window.fetch.bind(window);
+  window.fetch = function(input, init) {
+    var token = (window.evaStandalone && window.evaStandalone.bridgeToken) || '';
+    if (!token) return nativeFetch(input, init);
+    var requestUrl = typeof input === 'string' ? input : (input && input.url);
+    var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : '';
+    try {
+      if (!requestUrl || !bridgeUrl || new URL(requestUrl, window.location.href).origin !== new URL(bridgeUrl).origin) {
+        return nativeFetch(input, init);
+      }
+    } catch (_) {
+      return nativeFetch(input, init);
+    }
+    var options = Object.assign({}, init || {});
+    var sourceHeaders = options.headers || (input && input.headers) || undefined;
+    var headers = new Headers(sourceHeaders);
+    headers.set('Authorization', 'Bearer ' + token);
+    options.headers = headers;
+    return nativeFetch(input, options);
+  };
+  window._evaBridgeFetchInstalled = true;
+}
+
+installBridgeCapabilityFetch();
+
 function isAffirmativeSignalSendRequest(text) {
   var value = String(text || '').toLowerCase();
   // Quoted text may describe a request without making one. Keep the original

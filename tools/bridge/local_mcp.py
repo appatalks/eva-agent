@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+from bridge.utils import _safe_child_environment
 
 _ARTIFACTS_DIR = os.path.expanduser("~/.config/eva-standalone/artifacts")
 _TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,9 +36,9 @@ _MCP_ENV_KEYS = {
 def _mcp_launch_spec(name):
     """Return a fixed executable and arguments for a supported MCP server."""
     if name == "playwright":
-        return "npx", ["-y", "@playwright/mcp@latest"]
+        return "npx", ["-y", "@playwright/mcp@0.0.78"]
     if name == "azure-mcp-server":
-        return "npx", ["-y", "@azure/mcp@latest", "server", "start"]
+        return "npx", ["-y", "@azure/mcp@3.0.0-beta.31", "server", "start"]
     if name == "github-mcp-server":
         return "docker", [
             "run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
@@ -94,11 +95,9 @@ class MCPServer:
     def start(self):
         """Spawn the MCP server process and initialize."""
         cmd = [self.command] + self.args
-        process_env = os.environ.copy()
+        process_env = _safe_child_environment({"EVA_ARTIFACTS_DIR": _ARTIFACTS_DIR})
+        process_env.update(_safe_child_environment(self.env))
         process_env.pop("EVA_BRIDGE_TOKEN", None)
-        process_env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
-        for k, v in self.env.items():
-            process_env[k] = str(v) if not isinstance(v, str) else v
         try:
             self.process = subprocess.Popen(
                 cmd,
