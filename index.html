@@ -1050,6 +1050,40 @@
           <div id="memoryBackendStatus" class="mcp-status" aria-live="polite" style="margin-top:6px"></div>
         </div>
 
+        <div class="mcp-preset protected-memory-panel" id="protectedMemoryPanel">
+          <strong>Protected Memory</strong>
+          <div id="protectedMemoryStatus" class="mcp-status" aria-live="polite" style="margin:8px 0"></div>
+          <div id="protectedMemorySetup" class="protected-memory-setup">
+            <strong>First-time setup</strong>
+            <p id="protectedMemorySetupText">Connect a YubiKey with a touch-enabled challenge-response slot, then enroll it here. Eva will not store the YubiKey secret.</p>
+            <button type="button" class="auth-save" id="protectedMemoryEnrollButton">Enroll connected YubiKey</button>
+          </div>
+          <div class="background-actions" id="protectedMemorySessionActions" hidden>
+            <button type="button" class="auth-toggle" id="protectedMemoryUnlockButton">Unlock</button>
+            <button type="button" class="auth-toggle" id="protectedMemoryLockButton">Lock</button>
+            <button type="button" class="auth-toggle" id="protectedMemoryRefreshButton">Refresh</button>
+          </div>
+          <div class="protected-memory-fields" id="protectedMemoryStoreFields" hidden>
+            <label for="protectedMemoryLabel">Public label</label>
+            <input type="text" id="protectedMemoryLabel" value="protected memory record" autocomplete="off" maxlength="160">
+            <label for="protectedMemoryCategory">Category</label>
+            <select id="protectedMemoryCategory">
+              <option value="general">General</option>
+              <option value="government_identifier">Government identifier</option>
+              <option value="financial">Financial</option>
+              <option value="medical">Medical</option>
+              <option value="document">Document</option>
+            </select>
+            <label for="protectedMemoryValue">Protected text</label>
+            <textarea id="protectedMemoryValue" rows="3" autocomplete="off" spellcheck="false"></textarea>
+            <button type="button" class="auth-save" id="protectedMemoryStoreButton">Store protected text</button>
+            <label for="protectedMemoryFile">Protected file</label>
+            <input type="file" id="protectedMemoryFile" autocomplete="off">
+            <button type="button" class="auth-toggle" id="protectedMemoryStoreFileButton">Store protected file</button>
+          </div>
+          <div id="protectedMemoryRecords" class="auth-note" aria-live="polite" style="margin-top:8px"></div>
+        </div>
+
         <h4 class="settings-subhead" style="margin-top:18px">MCP Servers</h4>
         <p class="auth-note">MCP (Model Context Protocol) servers extend the AI with tools for Azure, GitHub, and more. Requires the ACP bridge (<code>tools/acp_bridge.py</code>).</p>
 

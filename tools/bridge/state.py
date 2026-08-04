@@ -52,6 +52,11 @@ embedding_cache = None      # lazy dict: sha1(text) -> [floats]
 embedding_cache_lock = threading.Lock()
 embedding_disabled_logged = False
 
+# ── Protected memory ──────────────────────────────────────────────
+protected_vault = None
+protected_vault_lock = threading.RLock()
+protected_memory_model_release = False
+
 # ── Background loop ────────────────────────────────────────────────
 bg_loop_thread = None
 bg_loop_stop = threading.Event()

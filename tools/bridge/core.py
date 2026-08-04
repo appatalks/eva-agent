@@ -50,6 +50,13 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 # Aliased with underscore prefix so existing code keeps working as-is.
 from bridge import config as _cfg
 from bridge import state as _st
+from protected_memory import (
+    ProtectedMemoryError,
+    ProtectedVault,
+    UnlockError,
+    VaultLockedError,
+    YkmanChallengeResponseProvider,
+)
 
 ACP_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 _AIG_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
@@ -206,6 +213,8 @@ from bridge.kusto import (  # noqa: F401
 from bridge.memory import (  # noqa: F401
     _resolve_memory_backend,
     _get_sqlite_mem,
+    _get_protected_vault,
+    _protected_memory_metadata,
     _set_memory_backend,
     _set_openai_key_from,
     _load_embedding_cache,
@@ -879,6 +888,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._notifications_list()
         elif parsed_path == "/v1/memory/context":
             self._memory_context()
+        elif parsed_path == "/v1/protected-memory/status":
+            self._protected_memory_status()
+        elif re.fullmatch(r"/v1/protected-memory/(records|artifacts)/[^/]+", parsed_path):
+            kind, record_id = parsed_path.split("/v1/protected-memory/", 1)[1].split("/", 1)
+            self._protected_memory_read(kind, urllib.parse.unquote(record_id))
         elif parsed_path == "/v1/data/retrieve":
             self._data_retrieve()
         elif parsed_path == "/v1/browser/status":
@@ -925,6 +939,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._memory_reflect()
         elif parsed_path == "/v1/memory/backend":
             self._memory_backend_set()
+        elif parsed_path == "/v1/protected-memory/enroll":
+            self._protected_memory_enroll()
+        elif parsed_path == "/v1/protected-memory/unlock":
+            self._protected_memory_unlock()
+        elif parsed_path == "/v1/protected-memory/lock":
+            self._protected_memory_lock()
+        elif parsed_path == "/v1/protected-memory/records":
+            self._protected_memory_write("memory")
+        elif parsed_path == "/v1/protected-memory/artifacts":
+            self._protected_memory_write("artifact")
         elif parsed_path == "/v1/aig/chat":
             self._aig_chat()
         elif parsed_path == "/v1/telemetry":
@@ -1023,6 +1047,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._learning_signals_delete(signal_id)
         elif parsed_path == "/v1/learning/consent":
             self._learning_consent_revoke()
+        elif re.fullmatch(r"/v1/protected-memory/(records|artifacts)/[^/]+", parsed_path):
+            kind, record_id = parsed_path.split("/v1/protected-memory/", 1)[1].split("/", 1)
+            self._protected_memory_delete(kind, urllib.parse.unquote(record_id))
         else:
             self.send_error(404, "Not Found")
 
@@ -1939,6 +1966,217 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(500, {"error": {"message": "Skill write failed"}})
             return
         self._json_response(200, {"skill": row, "status": "deleted"})
+
+    def _protected_memory_loopback(self):
+        if _is_loopback_bind():
+            return True
+        self._json_response(403, {"error": {"message": "protected memory is only available on localhost"}})
+        return False
+
+    def _protected_memory_vault(self):
+        return _get_protected_vault()
+
+    @staticmethod
+    def _protected_memory_provider():
+        executable = os.environ.get("EVA_YKMAN_PATH", "ykman").strip() or "ykman"
+        slot = os.environ.get("EVA_YUBIKEY_CHALLENGE_SLOT", "2").strip() or "2"
+        return YkmanChallengeResponseProvider(executable=executable, slot=slot)
+
+    def _protected_memory_body(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            return None, "Invalid Content-Length"
+        if content_length > 64 * 1024 * 1024:
+            return None, "Protected memory request is too large"
+        return self._read_json_body()
+
+    def _protected_memory_status(self):
+        if not self._protected_memory_loopback():
+            return
+        try:
+            vault = self._protected_memory_vault()
+            executable = os.environ.get("EVA_YKMAN_PATH", "ykman").strip() or "ykman"
+            provider_available = bool(shutil.which(executable) or os.path.isfile(executable))
+            self._json_response(200, {
+                "locked": not vault.is_unlocked,
+                "enrolled": bool(vault.enrolled_slots()),
+                "model_release_allowed": bool(_st.protected_memory_model_release and vault.is_unlocked),
+                "key_provider": "yubikey-challenge-response",
+                "key_provider_available": provider_available,
+                "key_slots": vault.enrolled_slots(),
+                "records": vault.list_metadata(),
+            })
+        except ProtectedMemoryError:
+            self._json_response(500, {"error": {"message": "protected memory status unavailable"}})
+
+    def _protected_memory_enroll(self):
+        if not self._protected_memory_loopback():
+            return
+        data, error = self._protected_memory_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        try:
+            result = self._protected_memory_vault().enroll(
+                self._protected_memory_provider(), data.get("slot_id")
+            )
+        except (TypeError, ValueError) as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+            return
+        except UnlockError:
+            self._json_response(503, {"error": {"message": "YubiKey enrollment failed"}})
+            return
+        _st.protected_memory_model_release = False
+        self._json_response(201, {"status": "enrolled", "slot": result})
+
+    def _protected_memory_unlock(self):
+        if not self._protected_memory_loopback():
+            return
+        data, error = self._protected_memory_body()
+        if error and error != "Empty request body":
+            self._json_response(400, {"error": {"message": error}})
+            return
+        data = data if isinstance(data, dict) else {}
+        allow_model_release = data.get("allow_model_release") is True
+        try:
+            result = self._protected_memory_vault().unlock(
+                self._protected_memory_provider(), data.get("slot_id")
+            )
+        except (TypeError, ValueError) as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+            return
+        except UnlockError:
+            self._json_response(403, {"error": {"message": "YubiKey unlock failed"}})
+            return
+        _st.protected_memory_model_release = allow_model_release
+        self._json_response(200, {
+            "status": "unlocked",
+            "slot": result,
+            "model_release_allowed": allow_model_release,
+        })
+
+    def _protected_memory_lock(self):
+        if not self._protected_memory_loopback():
+            return
+        # Consume legacy clients' JSON body before replying. Otherwise a body
+        # like "{}" remains on the HTTP/1.1 connection and corrupts the next
+        # request line as "{}GET ...".
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            self._json_response(400, {"error": {"message": "Invalid Content-Length"}})
+            return
+        if content_length < 0 or content_length > 64 * 1024:
+            self.close_connection = True
+            self._json_response(400, {"error": {"message": "Protected memory lock request is too large"}})
+            return
+        if content_length:
+            self.rfile.read(content_length)
+        self._protected_memory_vault().lock()
+        _st.protected_memory_model_release = False
+        self._json_response(200, {"status": "locked"})
+
+    def _protected_memory_write(self, kind):
+        if not self._protected_memory_loopback():
+            return
+        data, error = self._protected_memory_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        try:
+            vault = self._protected_memory_vault()
+            if kind == "memory":
+                if "value_base64" in data:
+                    value = base64.b64decode(str(data.get("value_base64") or ""), validate=True)
+                elif "value" in data:
+                    value = data["value"]
+                else:
+                    raise ValueError("value or value_base64 is required")
+                record_id = vault.put_memory(
+                    value,
+                    public_label=data.get("public_label", "protected memory record"),
+                    category=data.get("category", "general"),
+                    mime_type=data.get("mime_type", ""),
+                )
+            else:
+                content = base64.b64decode(str(data.get("content_base64") or ""), validate=True)
+                record_id = vault.put_artifact(
+                    content,
+                    public_label=data.get("public_label", "protected artifact"),
+                    category=data.get("category", "file"),
+                    mime_type=data.get("mime_type", ""),
+                )
+        except VaultLockedError:
+            self._json_response(423, {"error": {"message": "protected memory is locked"}})
+            return
+        except (TypeError, ValueError, base64.binascii.Error) as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+            return
+        except ProtectedMemoryError:
+            self._json_response(500, {"error": {"message": "protected memory write failed"}})
+            return
+        self._json_response(201, {"status": "stored", "record_id": record_id, "kind": kind})
+
+    def _protected_memory_read(self, kind, record_id):
+        if not self._protected_memory_loopback():
+            return
+        try:
+            vault = self._protected_memory_vault()
+            if kind == "records":
+                result = vault.get_memory(record_id)
+                value = result.pop("value")
+                if isinstance(value, bytes):
+                    result["value_base64"] = base64.b64encode(value).decode("ascii")
+                else:
+                    result["value"] = value
+                self._json_response(200, result)
+                return
+            metadata = next((item for item in vault.list_metadata() if item["RecordId"] == record_id and item["kind"] == "artifact"), None)
+            if metadata is None:
+                self._json_response(404, {"error": {"message": "protected artifact not found"}})
+                return
+            chunks = vault.iter_artifact_chunks(record_id)
+            try:
+                first_chunk = next(chunks, b"")
+            except ProtectedMemoryError:
+                raise
+            self.send_response(200)
+            self._cors_headers()
+            self.send_header("Content-Type", metadata.get("MimeType") or "application/octet-stream")
+            self.send_header("Content-Length", str(metadata.get("SizeBytes", 0)))
+            self.send_header("Content-Disposition", 'attachment; filename="protected-artifact.bin"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if first_chunk:
+                self.wfile.write(first_chunk)
+            for chunk in chunks:
+                self.wfile.write(chunk)
+        except VaultLockedError:
+            self._json_response(423, {"error": {"message": "protected memory is locked"}})
+        except KeyError:
+            self._json_response(404, {"error": {"message": "protected record not found"}})
+        except ProtectedMemoryError:
+            self._json_response(500, {"error": {"message": "protected memory read failed"}})
+
+    def _protected_memory_delete(self, kind, record_id):
+        if not self._protected_memory_loopback():
+            return
+        try:
+            self._protected_memory_vault().delete(record_id)
+        except VaultLockedError:
+            self._json_response(423, {"error": {"message": "protected memory is locked"}})
+            return
+        except ProtectedMemoryError:
+            self._json_response(500, {"error": {"message": "protected memory delete failed"}})
+            return
+        self._json_response(200, {"status": "deleted", "record_id": record_id, "kind": kind})
 
     def _list_artifacts(self):
         """List all artifacts in ARTIFACTS_DIR with name, size, and mtime."""
@@ -4128,9 +4366,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             _mark_user_activity()
 
         if user_msg and assistant_msg:
+            if _st.protected_memory_model_release:
+                self._json_response(200, {"status": "skipped_protected_release"})
+                return
             threading.Thread(target=_post_response_reflection,
-                           args=(user_msg, assistant_msg, model, conversation_id),
-                           daemon=True).start()
+                             args=(user_msg, assistant_msg, model, conversation_id),
+                             daemon=True).start()
 
         self._json_response(200, {"status": "ok"})
 

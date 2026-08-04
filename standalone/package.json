@@ -59,6 +59,7 @@
           "tools/web_search_mcp.py",
           "tools/sqlite_memory.py",
           "tools/sqlite_mcp.py",
+          "tools/protected_memory.py",
           "tools/eva_seed.kql",
           "!config.json",
           "!config.local.js",

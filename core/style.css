@@ -498,6 +498,16 @@ body.eva-standalone #settingsMenu {
     .mcp-preset strong { font-size: 14px; }
     .mcp-preset .prompt-hint { margin: 6px 0 0 26px; }
     .mcp-status { margin: 12px 0; padding: 10px; border-radius: 6px; background: #f0f4ff; font-size: 13px; min-height: 24px; }
+    .protected-memory-panel { border-color: rgba(183, 104, 55, 0.55); }
+    .protected-memory-setup { margin-top: 10px; padding: 10px; border: 1px solid rgba(183, 104, 55, 0.3); border-radius: 5px; text-align: left; }
+    .protected-memory-setup p { margin: 6px 0 10px; font-size: 12px; line-height: 1.45; }
+    .protected-memory-fields { display: grid; gap: 6px; margin-top: 10px; text-align: left; }
+    .protected-memory-fields label { font-size: 12px; opacity: 0.85; }
+    .protected-memory-fields input[type="text"],
+    .protected-memory-fields input[type="file"],
+    .protected-memory-fields select,
+    .protected-memory-fields textarea { width: 100%; box-sizing: border-box; }
+    .protected-memory-fields textarea { resize: vertical; min-height: 64px; }
     .mcp-badge {
       display: inline-block;
       padding: 2px 8px;

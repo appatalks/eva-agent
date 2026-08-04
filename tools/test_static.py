@@ -84,6 +84,8 @@ def test_required_files():
         "tools/test_streaming.py",
         "tools/test_learning.py",
         "tools/test_learning.js",
+        "tools/protected_memory.py",
+        "tools/test_protected_memory.py",
         ".gitignore",
     ]
     for f in required:
@@ -155,7 +157,7 @@ def test_no_hardcoded_keys():
 
 def test_python_syntax():
     """All Python files compile without errors."""
-    for py in ["tools/acp_bridge.py", "tools/kusto_mcp.py", "tools/local_voices_bridge.py", "tools/voice_clone_module/src/voice_clone_module/service.py", "tools/test_eva.py", "tools/eval/run.py"]:
+    for py in ["tools/acp_bridge.py", "tools/kusto_mcp.py", "tools/local_voices_bridge.py", "tools/protected_memory.py", "tools/test_protected_memory.py", "tools/voice_clone_module/src/voice_clone_module/service.py", "tools/test_eva.py", "tools/eval/run.py"]:
         if not os.path.isfile(py):
             report(f"python_syntax:{py}", None, "file missing")
             continue
@@ -582,6 +584,34 @@ def test_model_selector():
         and f"config (v{release_version})" in architecture_readme
     )
     report("app_release_docs_consistent", docs_consistent, f"expected release {release_version}")
+
+
+def test_protected_memory_settings_contract():
+    """Protected-memory setup stays in Settings and gates storage controls."""
+    with open("index.html") as f:
+        html = f.read()
+    with open("core/js/copilot.js") as f:
+        copilot = f.read()
+    with open("core/js/options.js") as f:
+        options = f.read()
+    with open("standalone/package.json") as f:
+        package = json.load(f)
+    resource_filters = package["build"]["extraResources"][0]["filter"]
+    required_markup = [
+        'id="protectedMemoryPanel"',
+        'id="protectedMemorySetup"',
+        'id="protectedMemoryEnrollButton"',
+        'id="protectedMemoryStoreFields" hidden',
+        'id="protectedMemoryValue"',
+        'id="protectedMemoryFile"',
+    ]
+    report("protected_memory_settings_markup", all(marker in html for marker in required_markup))
+    report("protected_memory_setup_state", "data.enrolled" in copilot and "storeFieldsEl.hidden = !enrolled || locked" in copilot)
+    report("protected_memory_unlock_gates_writes", "storeButton.disabled = !enrolled || locked" in copilot and "storeFileButton.disabled = !enrolled || locked" in copilot)
+    report("protected_memory_refreshes_on_settings_open", "refreshProtectedMemoryStatus" in options)
+    report("protected_memory_module_packaged", "tools/protected_memory.py" in resource_filters)
+    report("protected_memory_chat_capture_intercept", "function captureProtectedMemoryFromChat" in copilot and "await captureProtectedMemoryFromChat(protectedRawText)" in options)
+    report("protected_memory_capture_does_not_route_raw_text", "if (input) input.innerHTML = ''" in copilot and "Stored in protected memory." in copilot)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1641,6 +1671,7 @@ def main():
         ("Local Speech Contract", [test_local_speech_contract, test_local_speech_http_contract]),
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
         ("HTML Model Selector", [test_model_selector]),
+        ("Protected Memory Settings", [test_protected_memory_settings_contract]),
         ("JS Routing Functions", [test_js_routing_functions]),
         ("Learning Contract", [test_learning_static_contract]),
         ("Reasoning Effort", [test_reasoning_effort_contract]),

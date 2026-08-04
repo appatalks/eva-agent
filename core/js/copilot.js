@@ -833,6 +833,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Memory backend selector
   initMemoryBackendSelector();
+  initProtectedMemoryControls();
 
   // Re-push saved MCP servers (Kusto cluster/db, Azure, GitHub) to the freshly
   // started bridge so they persist across restarts without manual reconfigure.
@@ -926,4 +927,259 @@ function _doSwitchMemoryBackend(backend) {
     if (statusEl) statusEl.textContent = err;
     if (statusGeneral) statusGeneral.textContent = err;
   });
+}
+
+function protectedMemoryBridgeRequest(path, options) {
+  var bridgeUrl = getACPBridgeUrl();
+  return fetch(bridgeUrl.replace(/\/+$/, '') + path, options || {}).then(function(response) {
+    return response.text().then(function(text) {
+      var data = {};
+      if (text) {
+        try { data = JSON.parse(text); } catch (_) { data = { message: text }; }
+      }
+      if (!response.ok) {
+        var message = data && data.error && data.error.message
+          ? data.error.message : (data.message || ('HTTP ' + response.status));
+        var error = new Error(message);
+        error.status = response.status;
+        error.data = data;
+        throw error;
+      }
+      return data;
+    });
+  });
+}
+
+function renderProtectedMemoryStatus(data) {
+  var statusEl = document.getElementById('protectedMemoryStatus');
+  var recordsEl = document.getElementById('protectedMemoryRecords');
+  var setupEl = document.getElementById('protectedMemorySetup');
+  var setupTextEl = document.getElementById('protectedMemorySetupText');
+  var sessionActionsEl = document.getElementById('protectedMemorySessionActions');
+  var storeFieldsEl = document.getElementById('protectedMemoryStoreFields');
+  var enrollButton = document.getElementById('protectedMemoryEnrollButton');
+  var unlockButton = document.getElementById('protectedMemoryUnlockButton');
+  var lockButton = document.getElementById('protectedMemoryLockButton');
+  var storeButton = document.getElementById('protectedMemoryStoreButton');
+  var storeFileButton = document.getElementById('protectedMemoryStoreFileButton');
+  if (!statusEl || !recordsEl) return;
+  if (!data) {
+    statusEl.textContent = 'Protected memory status unavailable.';
+    recordsEl.textContent = '';
+    return;
+  }
+  var enrolled = !!data.enrolled;
+  var locked = data.locked !== false;
+  var releaseAllowed = !!data.model_release_allowed;
+  var state = enrolled ? (locked ? 'Locked' : 'Unlocked') : 'Not configured';
+  var provider = data.key_provider_available ? data.key_provider : 'YubiKey provider unavailable';
+  var registration = enrolled ? 'YubiKey: registered' : 'YubiKey: not registered';
+  var release = locked ? 'model release: off' : (releaseAllowed ? 'model release: approved' : 'model release: off');
+  statusEl.textContent = state + ' | ' + registration + ' | ' + release + ' | ' + provider + ' | ' + (data.records || []).length + ' record(s)';
+  statusEl.setAttribute('data-status', enrolled ? (locked ? 'warn' : 'info') : 'warn');
+  if (setupEl) setupEl.hidden = enrolled;
+  if (sessionActionsEl) sessionActionsEl.hidden = !enrolled;
+  if (storeFieldsEl) storeFieldsEl.hidden = !enrolled || locked;
+  if (enrollButton) enrollButton.disabled = enrolled || !data.key_provider_available;
+  if (unlockButton) unlockButton.disabled = !enrolled || !locked;
+  if (lockButton) lockButton.disabled = !enrolled || locked;
+  if (storeButton) storeButton.disabled = !enrolled || locked;
+  if (storeFileButton) storeFileButton.disabled = !enrolled || locked;
+  if (setupTextEl && !enrolled) {
+    setupTextEl.textContent = data.key_provider_available
+      ? 'Connect a touch-enabled YubiKey, then enroll it here. Eva will not store the YubiKey secret.'
+      : 'Install the YubiKey manager on this computer, connect a YubiKey, and return here to enroll it.';
+  }
+  var records = data.records || [];
+  if (!records.length) {
+    recordsEl.textContent = 'No protected records.';
+    return;
+  }
+  recordsEl.textContent = records.map(function(item) {
+    var label = item.PublicLabel || 'protected record';
+    var category = item.Category || 'general';
+    return label + ' (' + category + ')';
+  }).join(' | ');
+}
+
+async function refreshProtectedMemoryStatus() {
+  var statusEl = document.getElementById('protectedMemoryStatus');
+  if (!statusEl) return;
+  try {
+    var data = await protectedMemoryBridgeRequest('/v1/protected-memory/status');
+    renderProtectedMemoryStatus(data);
+  } catch (error) {
+    statusEl.textContent = error && error.message ? error.message : 'Protected memory status unavailable.';
+    statusEl.setAttribute('data-status', 'warn');
+  }
+}
+
+function protectedMemorySetBusy(button, busy) {
+  if (button) button.disabled = !!busy;
+}
+
+function _protectedMemoryCaptureIntent(text) {
+  var raw = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return null;
+  var explicit = raw.match(/^(?:save|store|remember|add)\s+(?:this\s+|that\s+|it\s+)?(?:to|in)\s+protected\s+memory\s*:\s*(.+)$/i);
+  if (explicit && explicit[1].trim()) {
+    return { value: explicit[1].trim(), label: 'protected memory record', category: 'general' };
+  }
+  var ssn = raw.match(/\b(?:my\s+)?(?:ssn|social\s+security(?:\s+number)?)\s+(?:is|:)?\s*([0-9]{3}-?[0-9]{2}-?[0-9]{4})\b/i);
+  var asksProtected = /\b(?:save|store|remember|add)\b[\s\S]{0,80}\bprotected\s+memory\b|\bprotected\s+memory\b[\s\S]{0,80}\b(?:save|store|remember|add)\b/i.test(raw);
+  if (ssn && asksProtected) {
+    return { value: ssn[1], label: 'government identifier', category: 'government_identifier' };
+  }
+  return null;
+}
+
+function _appendProtectedMemoryCaptureNotice(text) {
+  var output = document.getElementById('txtOutput');
+  if (!output) return;
+  var bubble = document.createElement('div');
+  bubble.className = 'chat-bubble eva-bubble';
+  var label = document.createElement('span');
+  label.className = 'eva';
+  label.textContent = 'Eva:';
+  bubble.appendChild(label);
+  bubble.appendChild(document.createTextNode(' ' + text));
+  output.appendChild(bubble);
+  output.scrollTop = output.scrollHeight;
+}
+
+async function captureProtectedMemoryFromChat(rawText) {
+  var intent = _protectedMemoryCaptureIntent(rawText);
+  if (!intent) return false;
+  var input = document.getElementById('txtMsg');
+  if (input) input.innerHTML = '';
+  try {
+    await protectedMemoryBridgeRequest('/v1/protected-memory/records', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        value: intent.value,
+        public_label: intent.label,
+        category: intent.category
+      })
+    });
+    _appendProtectedMemoryCaptureNotice('Stored in protected memory.');
+    refreshProtectedMemoryStatus();
+  } catch (error) {
+    var message = error && error.status === 423
+      ? 'Protected memory is locked. Unlock it in Settings before storing this value.'
+      : (error && error.message ? error.message : 'Protected memory storage failed.');
+    _appendProtectedMemoryCaptureNotice(message);
+  }
+  return true;
+}
+
+function initProtectedMemoryControls() {
+  var panel = document.getElementById('protectedMemoryPanel');
+  if (!panel || panel.dataset.initialized === '1') return;
+  panel.dataset.initialized = '1';
+  var enrollButton = document.getElementById('protectedMemoryEnrollButton');
+  var unlockButton = document.getElementById('protectedMemoryUnlockButton');
+  var lockButton = document.getElementById('protectedMemoryLockButton');
+  var refreshButton = document.getElementById('protectedMemoryRefreshButton');
+  var storeButton = document.getElementById('protectedMemoryStoreButton');
+  var storeFileButton = document.getElementById('protectedMemoryStoreFileButton');
+  var valueEl = document.getElementById('protectedMemoryValue');
+  var fileEl = document.getElementById('protectedMemoryFile');
+
+  function runAction(button, path, body) {
+    protectedMemorySetBusy(button, true);
+    return protectedMemoryBridgeRequest(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {})
+    }).then(function() {
+      return refreshProtectedMemoryStatus();
+    }).catch(function(error) {
+      var statusEl = document.getElementById('protectedMemoryStatus');
+      if (statusEl) statusEl.textContent = error && error.message ? error.message : 'Protected memory action failed.';
+    }).finally(function() {
+      protectedMemorySetBusy(button, false);
+    });
+  }
+
+  if (enrollButton) enrollButton.addEventListener('click', function() {
+    runAction(enrollButton, '/v1/protected-memory/enroll', { slot_id: 'yubikey-default' });
+  });
+  if (unlockButton) unlockButton.addEventListener('click', function() {
+    var allowModelRelease = confirm(
+      'Allow Eva to use relevant unlocked protected values in this chat session? '
+      + 'Those values may be sent to the active AI provider. Locking protected memory revokes this permission.'
+    );
+    runAction(unlockButton, '/v1/protected-memory/unlock', { allow_model_release: allowModelRelease });
+  });
+  if (lockButton) lockButton.addEventListener('click', function() {
+    protectedMemorySetBusy(lockButton, true);
+    protectedMemoryBridgeRequest('/v1/protected-memory/lock', { method: 'POST' })
+      .then(function() { return refreshProtectedMemoryStatus(); })
+      .catch(function(error) {
+        var statusEl = document.getElementById('protectedMemoryStatus');
+        if (statusEl) statusEl.textContent = error && error.message ? error.message : 'Protected memory lock failed.';
+      }).finally(function() {
+        protectedMemorySetBusy(lockButton, false);
+      });
+  });
+  if (refreshButton) refreshButton.addEventListener('click', refreshProtectedMemoryStatus);
+
+  if (storeButton) storeButton.addEventListener('click', function() {
+    var value = valueEl ? valueEl.value : '';
+    if (!value) return;
+    protectedMemorySetBusy(storeButton, true);
+    protectedMemoryBridgeRequest('/v1/protected-memory/records', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        value: value,
+        public_label: (document.getElementById('protectedMemoryLabel') || {}).value || 'protected memory record',
+        category: (document.getElementById('protectedMemoryCategory') || {}).value || 'general'
+      })
+    }).then(function() {
+      return refreshProtectedMemoryStatus();
+    }).catch(function(error) {
+      var statusEl = document.getElementById('protectedMemoryStatus');
+      if (statusEl) statusEl.textContent = error && error.message ? error.message : 'Protected text storage failed.';
+    }).finally(function() {
+      if (valueEl) valueEl.value = '';
+      protectedMemorySetBusy(storeButton, false);
+    });
+  });
+
+  if (storeFileButton) storeFileButton.addEventListener('click', function() {
+    var file = fileEl && fileEl.files ? fileEl.files[0] : null;
+    if (!file) return;
+    var reader = new FileReader();
+    protectedMemorySetBusy(storeFileButton, true);
+    reader.onload = function() {
+      var encoded = String(reader.result || '').split(',')[1] || '';
+      protectedMemoryBridgeRequest('/v1/protected-memory/artifacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content_base64: encoded,
+          public_label: (document.getElementById('protectedMemoryLabel') || {}).value || 'protected artifact',
+          category: (document.getElementById('protectedMemoryCategory') || {}).value || 'file',
+          mime_type: file.type || 'application/octet-stream'
+        })
+      }).then(function() {
+        return refreshProtectedMemoryStatus();
+      }).catch(function(error) {
+        var statusEl = document.getElementById('protectedMemoryStatus');
+        if (statusEl) statusEl.textContent = error && error.message ? error.message : 'Protected file storage failed.';
+      }).finally(function() {
+        if (fileEl) fileEl.value = '';
+        protectedMemorySetBusy(storeFileButton, false);
+      });
+    };
+    reader.onerror = function() {
+      if (fileEl) fileEl.value = '';
+      protectedMemorySetBusy(storeFileButton, false);
+    };
+    reader.readAsDataURL(file);
+  });
+
+  refreshProtectedMemoryStatus();
 }
