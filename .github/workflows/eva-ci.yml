@@ -223,7 +223,7 @@ jobs:
           node-version: '24'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests cryptography
 
       - name: Run Python unit tests
         run: |
