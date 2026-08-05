@@ -89,6 +89,35 @@ class ACPConversationSessionTests(unittest.TestCase):
         self.assertIn("conversation-b", client._conversation_sessions)
         self.assertIn("conversation-c", client._conversation_sessions)
 
+    def test_plan_and_tool_updates_emit_sanitized_prompt_events(self):
+        client = FakeACPClient()
+        events = []
+        client._active_prompts[1] = {
+            "session_id": "session-a",
+            "on_event": events.append,
+        }
+
+        client._handle_session_update({
+            "sessionId": "session-a",
+            "update": {
+                "sessionUpdate": "plan",
+                "entries": [{"content": "Inspect secrets and internal reasoning"}],
+            },
+        })
+        client._handle_session_update({
+            "sessionId": "session-a",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "kind": "read_file",
+                "status": "running",
+            },
+        })
+
+        self.assertEqual(events, [
+            {"kind": "plan", "label": "Planning next steps"},
+            {"kind": "tool", "label": "Using read file (running)"},
+        ])
+
     def test_frontend_request_paths_emit_conversation_identity(self):
         def source(relative_path):
             with open(os.path.join(REPO_DIR, relative_path), encoding="utf-8") as handle:

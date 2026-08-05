@@ -401,16 +401,23 @@ class ACPClient:
                         print(f"[ACP] Chunk callback failed: {callback_error}")
 
         elif update_type == "plan":
-            # Log the plan for debugging
             entries = update.get("entries", [])
             if entries:
                 print(f"[ACP] Agent plan: {', '.join(e.get('content','') for e in entries[:5])}")
+                self._dispatch_prompt_event(params, {
+                    "kind": "plan",
+                    "label": "Planning next steps",
+                })
 
         elif update_type in ("tool_call", "tool_call_update"):
             status = update.get("status", "")
             kind = str(update.get("kind") or "other")[:32]
             if status:
                 print(f"[ACP] Tool update: kind={kind} status={str(status)[:24]}")
+                self._dispatch_prompt_event(params, {
+                    "kind": "tool",
+                    "label": "Using " + kind.replace("_", " ") + " (" + str(status)[:24] + ")",
+                })
 
         elif update_type == "usage_update":
             session_id = str(params.get("sessionId") or params.get("session_id") or "")[:120]
@@ -431,6 +438,23 @@ class ACPClient:
                 usage["cost_currency"] = str(cost.get("currency") or "")[:8]
             self.session_usage[session_id] = usage
             _telemetry_emit("acp_usage", model=self.model or "default", **usage)
+
+    def _dispatch_prompt_event(self, params, event):
+        """Deliver a sanitized lifecycle event to the matching active prompt."""
+        session_id = params.get("sessionId") or params.get("session_id")
+        callback = None
+        with self._prompt_state_lock:
+            candidates = [
+                state for state in self._active_prompts.values()
+                if not session_id or state["session_id"] == session_id
+            ]
+            if len(candidates) == 1:
+                callback = candidates[0].get("on_event")
+        if callable(callback):
+            try:
+                callback(event)
+            except Exception as callback_error:
+                print(f"[ACP] Event callback failed: {callback_error}")
 
     def _handle_permission_request(self, rpc_id, params):
         params = params if isinstance(params, dict) else {}
@@ -627,19 +651,20 @@ class ACPClient:
     # --- Public API ---
 
     def prompt(self, text, timeout=120, conversation_id=None, on_chunk=None,
-               permission_mode="interactive"):
+               permission_mode="interactive", on_event=None):
         with _pin_acp_client(self) as acquired:
             if not acquired:
                 return {"error": "ACP client is unavailable"}
             with self.prompt_lock:
-                return self._prompt(text, timeout, conversation_id, on_chunk, permission_mode)
+                return self._prompt(text, timeout, conversation_id, on_chunk, permission_mode, on_event)
 
-    def _begin_prompt(self, prompt_id, session_id, on_chunk, permission_mode="interactive"):
+    def _begin_prompt(self, prompt_id, session_id, on_chunk, permission_mode="interactive", on_event=None):
         with self._prompt_state_lock:
             self.response_chunks[prompt_id] = ""
             self._active_prompts[prompt_id] = {
                 "session_id": session_id,
                 "on_chunk": on_chunk,
+                "on_event": on_event,
                 "permission_mode": permission_mode,
                 "chunk_count": 0,
                 "first_chunk_at": None,
@@ -659,14 +684,14 @@ class ACPClient:
         }
 
     def _prompt(self, text, timeout=120, conversation_id=None, on_chunk=None,
-                permission_mode="interactive"):
+                permission_mode="interactive", on_event=None):
         """Send a text prompt and return the accumulated response text."""
         session_id = self._session_for_conversation(conversation_id)
         if not session_id:
             return {"error": "No active ACP session"}
 
         pid = self._next_id()
-        self._begin_prompt(pid, session_id, on_chunk, permission_mode)
+        self._begin_prompt(pid, session_id, on_chunk, permission_mode, on_event)
 
         _t0 = time.perf_counter()
         try:

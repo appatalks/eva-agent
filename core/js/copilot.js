@@ -293,6 +293,7 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
 async function _copilotSendACP(messages, question, txtOutput, storageKey, signalContext) {
   // Auto-detect bridge URL (tries configured, same-host, localhost)
   var bridgeUrl = await detectACPBridge();
+  if (typeof watchACPPermissions === 'function') watchACPPermissions(190000);
 
   // Get selected ACP model (empty string = use CLI default)
   var acpModel = (typeof getACPModel === 'function') ? getACPModel() : '';

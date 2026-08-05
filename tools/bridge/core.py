@@ -2791,6 +2791,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "model": task.get("model", ""),
                     "status": task.get("status", "unknown"),
                     "detail": task.get("prompt", ""),
+                    "activity": task.get("activity", ""),
                     "result": task.get("result"),
                     "started_at": task.get("started_at"),
                     "ended_at": task.get("ended_at"),

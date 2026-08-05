@@ -323,11 +323,38 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
         prompt_text = f"[Subagent task: {label}] {prompt}"
         if dependency_context:
             prompt_text += "\n\nUpstream agent outputs:\n" + dependency_context
+
+        live_chunks = []
+
+        def on_chunk(text):
+            """Expose bounded, user-visible output while the ACP prompt runs."""
+            if not text:
+                return
+            live_chunks.append(str(text))
+            with _st.subagent_lock:
+                active_task = _st.subagent_tasks.get(task_id)
+                if not active_task:
+                    return
+                active_task["result"] = "".join(live_chunks)[-4000:]
+                active_task["output_chars"] = sum(len(chunk) for chunk in live_chunks)
+                active_task["last_output_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        def on_event(event):
+            """Expose coarse ACP lifecycle progress without retaining private reasoning."""
+            label_text = str((event or {}).get("label") or "Working")[:160]
+            with _st.subagent_lock:
+                active_task = _st.subagent_tasks.get(task_id)
+                if not active_task:
+                    return
+                active_task["activity"] = label_text
+                active_task["last_activity_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         try:
-            result_text = _subagent_result_text(client.prompt(prompt_text, timeout=180))
+            result_text = _subagent_result_text(client.prompt(
+                prompt_text, timeout=180, on_chunk=on_chunk, on_event=on_event,
+            ))
             while True:
                 with _st.subagent_lock:
-                    task["result"] = result_text[:4000]
+                    task["result"] = result_text[-4000:]
                     steer_queue = task.setdefault("steer_queue", [])
                     instruction = steer_queue.pop(0) if steer_queue else ""
                     if not instruction:
@@ -341,7 +368,10 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                     f"Work so far:\n{result_text[:3000]}\n\n"
                     f"New direction:\n{instruction}"
                 )
-                result_text = _subagent_result_text(client.prompt(prompt_text, timeout=180))
+                live_chunks = []
+                result_text = _subagent_result_text(client.prompt(
+                    prompt_text, timeout=180, on_chunk=on_chunk, on_event=on_event,
+                ))
         finally:
             client.stop()
         try:

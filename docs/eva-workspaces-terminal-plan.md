@@ -254,7 +254,10 @@ Define JSON schemas and storage migrations for the records above. Add a
 feature flag, `eva_workspace_terminal_v1`, disabled by default. Validate
 `node-pty` prebuild/rebuild behavior in the current Electron/AppImage pipeline
 on supported operating systems. Prototype xterm mounting, PTY resize, close,
-and renderer reconnect with no agent integration.
+and renderer reconnect with no agent integration. In parallel, implement a
+read-only run-monitor stream and persisted monitor-tab layout fixture. A monitor
+may render agent status, events, selected attachments, and bounded output, but
+cannot create, resize, write to, kill, or revive a PTY.
 
 Exit criteria: a standalone-only test view can launch `/bin/sh` or the platform
 default shell in a fixed approved directory, stream ANSI output, resize, kill
@@ -282,6 +285,34 @@ retain a clear bridge-status fallback for static usage.
 Exit criteria: real interactive programs work, terminal state is correctly
 attached to a checkout, exit and cancellation propagate reliably, and no
 terminal regression breaks normal chat sessions.
+
+### Monitoring invariant
+
+Persisted tabs and split views are appropriate from Phase 0 when they are
+observation-only. They let a user silently monitor several agents or runs at
+once, restore that monitoring layout after a reload, and move between views
+without altering any agent's execution state.
+
+An observation surface consumes the durable run event stream and attachment
+references. It has no terminal broker write capability. A user explicitly
+opens an interactive terminal surface when they intend to send input or take
+ownership of a PTY. The renderer must clearly label monitor and interactive
+surfaces, while allowing both to appear in the same workspace layout.
+
+Automated coverage must prove that:
+
+- Opening, closing, duplicating, splitting, or restoring monitor tabs never
+  creates a PTY, sends terminal input, changes PTY dimensions, or restarts an
+  agent.
+- A hidden monitor continues to receive bounded run-status updates and marks
+  its view stale/reconnects cleanly after bridge or renderer recovery.
+- Multiple monitor tabs can observe one agent without duplicate polling or
+  duplicate event delivery; one shared subscription fans out to every view.
+- Restored layouts preserve stable `run_id`/`agent_run_id` content identities
+  and degrade to an unavailable state when the underlying run is gone, rather
+  than recreating it.
+- An interactive terminal tab can be opened only through an explicit user
+  action and receives its own permission and lifecycle checks.
 
 ### Phase 3: coding agents and child runs
 
@@ -367,3 +398,98 @@ logic in chat or ACP code.
 - The exact name and visual character of the ASCII Field. Its behavior and
   safety boundary are fixed above; the artistic treatment can evolve without
   changing the execution model.
+
+## Traycer Review: Adaptation Candidates
+
+Reviewed: `traycerai/traycer` public repository and documentation on
+2026-08-05. Traycer is MIT licensed, but Eva should adapt the underlying
+patterns rather than transplant its React/Yjs/host architecture. Eva remains a
+framework-free renderer with an Electron shell and Python bridge.
+
+### Adopt
+
+1. **Separate durable agent history from terminal scrollback.**
+  Traycer persists a terminal agent's upstream provider session identifier and
+  treats the PTY as an ephemeral renderer. A reopened agent restores provider
+  history rather than claiming a terminal buffer is a transcript. Eva's
+  `AgentRun` should store `provider_session_id`, `conversation_key`, and
+  `terminal_session_id` separately. Provider history is the only source for
+  an agent transcript; terminal output is bounded diagnostic evidence.
+
+2. **Use a capability matrix for agent-to-agent operations.**
+  Traycer distinguishes reference/discovery, transcript reading, and message
+  delivery instead of calling all three "shared memory." Eva should expose
+  the same distinctions per provider/runtime: discovery can be broad;
+  transcript access depends on durable local provider history; delivery
+  requires a local, active receiver with an inbox-capable adapter. Every
+  dispatched message needs a correlation ID, optional reply expectation,
+  timeout, and auditable delivery result. This is safer and more intelligible
+  than sharing raw chat history with every child.
+
+3. **Make terminal streams resumable and backpressure-aware.**
+  Traycer's PTY contract uses a snapshot plus streamed writes, explicit
+  action acknowledgements, and byte acknowledgements after xterm has parsed
+  the data. Eva Phase 2 should use this shape over Electron IPC: terminal
+  create/list/attach/write/resize/kill, initial bounded scrollback snapshot,
+  sequence numbers, output acknowledgements, exit reason, and current cwd.
+  Keep a bounded warm-session registry so switching away and back does not
+  recreate a running PTY. Reattach must use the actual measured grid before
+  replaying ANSI output.
+
+4. **Treat worktree ownership and cleanup as first-class evidence.**
+  Traycer records the agent owning a worktree and exposes dirty state,
+  in-use status, branch position, and cleanup safety separately. Eva should
+  retain the proposed `Checkout` record but add `owner_refs`, setup state,
+  dirty file count, last activity, branch/base revision, and a conservative
+  `safe_to_remove` result. Expensive Git/remote checks must be on-demand or
+  cached; absence of proof is never evidence that deletion is safe.
+
+5. **Unify artifacts as typed, run-scoped evidence.**
+  Traycer's workspace can open chats, terminal agents, artifacts, files, and
+  diffs using stable content identities. Eva's existing artifact directory,
+  browser-agent captures, test output, review notes, and diff snapshots
+  should all become `RunAttachment` records with a kind, source run/agent,
+  timestamp, checksum or immutable revision, access policy, and renderer.
+  An attachment is a reference, not automatic prompt context. Explicitly
+  adding it to an agent's context preserves token and privacy boundaries.
+
+6. **Route by declared capability and retain the rationale.**
+  Traycer keeps a provider/harness catalog, model availability, reasoning
+  controls, and explicit profile selection. Eva should extend its existing
+  provider routing with a local `AgentRuntimeProfile`: provider/model,
+  supported roles, terminal mode, transcript support, agent-inbox support,
+  tools, cost/latency class, and permission policy. A selection policy can
+  then choose planning, implementation, test, or review roles deliberately
+  and persist the reason in each `AgentRun`, while always allowing a user
+  override. Do not promise seamless cross-provider context transfer; Eva
+  should summarize/export structured handoff context with provenance.
+
+### Defer or avoid
+
+- **Cross-device realtime collaboration and Yjs replication.** It solves a
+  different product problem and would introduce identity, sync-conflict,
+  encryption, and hosted-service requirements. Eva's initial boundary is one
+  local desktop/bridge host.
+- **A general split-pane canvas.** Traycer's tab/split system is mature but
+  substantial. Eva can ship persisted, read-only monitor tabs and basic splits
+  early because they are independently testable and do not control execution.
+  Defer arbitrary canvas editing, interactive-terminal duplication, and other
+  execution-owning layout behaviors until the PTY broker and run restoration
+  are reliable.
+- **Raw terminal output as shared agent context.** It is noisy, fragile, and
+  can leak secrets. Share a structured final report, selected attachments,
+  and an explicitly requested provider transcript instead.
+- **Unlimited terminal retention.** Traycer's own registry bounds warm plain
+  terminal retention. Eva must cap scrollback, session count, output bytes,
+  and idle lifetimes, with agent-run evidence persisted independently.
+
+### Plan adjustments
+
+Phase 0's PTY proof of concept should validate the stream lifecycle above,
+not merely `node-pty` launch and resize, and should prove read-only monitor-tab
+restoration against a fake run stream. Phase 1 should add checkout ownership
+and cleanup-proof fields. Phase 3 should introduce the capability matrix and
+structured, correlated agent handoffs before autonomous agent-to-agent loops.
+The workspace UI should initially use stable content IDs with monitor tabs and
+basic splits; execution-owning terminal duplication and arbitrary canvas
+topology remain later, separately scoped enhancements.

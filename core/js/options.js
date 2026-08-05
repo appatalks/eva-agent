@@ -1795,7 +1795,35 @@ function initNotifications() {
   _notifState.timer = setInterval(pollNotifications, _notifState.intervalMs);
 }
 
-var _acpPermissionState = { shown: {}, polling: false, intervalMs: 10000, timer: null };
+var _acpPermissionState = {
+  shown: {},
+  polling: false,
+  idleIntervalMs: 60000,
+  activeIntervalMs: 2000,
+  activeUntil: 0,
+  timer: null
+};
+
+function _acpPermissionPollDelay() {
+  return Date.now() < _acpPermissionState.activeUntil
+    ? _acpPermissionState.activeIntervalMs : _acpPermissionState.idleIntervalMs;
+}
+
+function _scheduleACPPermissionPoll(delay) {
+  if (!isEvaStandalone()) return;
+  if (_acpPermissionState.timer) clearTimeout(_acpPermissionState.timer);
+  _acpPermissionState.timer = setTimeout(function() {
+    _acpPermissionState.timer = null;
+    pollACPPermissions();
+  }, typeof delay === 'number' ? delay : _acpPermissionPollDelay());
+}
+
+function watchACPPermissions(durationMs) {
+  if (!isEvaStandalone()) return;
+  var duration = Math.max(0, Number(durationMs) || 0);
+  _acpPermissionState.activeUntil = Math.max(_acpPermissionState.activeUntil, Date.now() + duration);
+  _scheduleACPPermissionPoll(0);
+}
 
 function _resolveACPPermission(permissionId, optionId, bubble) {
   backgroundBridgeRequest('/v1/acp/permissions/' + encodeURIComponent(permissionId), {
@@ -1804,6 +1832,7 @@ function _resolveACPPermission(permissionId, optionId, bubble) {
     body: JSON.stringify({ option_id: optionId || '' })
   }).then(function() {
     if (bubble && bubble.parentNode) bubble.parentNode.removeChild(bubble);
+    _scheduleACPPermissionPoll(0);
   }).catch(function() {});
 }
 
@@ -1841,18 +1870,26 @@ function _renderACPPermission(permission) {
 }
 
 function pollACPPermissions() {
-  if (_acpPermissionState.polling || !isEvaStandalone()) return;
+  if (_acpPermissionState.polling || !isEvaStandalone()) return Promise.resolve();
   _acpPermissionState.polling = true;
-  backgroundBridgeRequest('/v1/acp/permissions', { headers: getBridgeCapabilityHeaders() })
-    .then(function(data) { (data.permissions || []).forEach(_renderACPPermission); })
+  return backgroundBridgeRequest('/v1/acp/permissions', { headers: getBridgeCapabilityHeaders() })
+    .then(function(data) {
+      var permissions = (data && Array.isArray(data.permissions)) ? data.permissions : [];
+      if (permissions.length) {
+        _acpPermissionState.activeUntil = Math.max(_acpPermissionState.activeUntil, Date.now() + 60000);
+      }
+      permissions.forEach(_renderACPPermission);
+    })
     .catch(function() {})
-    .finally(function() { _acpPermissionState.polling = false; });
+    .finally(function() {
+      _acpPermissionState.polling = false;
+      _scheduleACPPermissionPoll();
+    });
 }
 
 function initACPPermissions() {
   if (_acpPermissionState.timer) return;
-  setTimeout(pollACPPermissions, 1500);
-  _acpPermissionState.timer = setInterval(pollACPPermissions, _acpPermissionState.intervalMs);
+  _scheduleACPPermissionPoll(1500);
 }
 
 // ---------------------------------------------------------------------------

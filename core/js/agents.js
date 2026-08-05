@@ -1,6 +1,8 @@
 // Agent Operations dashboard: live agent sessions and memory graph topology.
 
 var EvaAgents = (function() {
+  var AGENT_ACTIVE_POLL_MS = 2000;
+  var AGENT_IDLE_POLL_MS = 20000;
   var state = {
     open: false,
     data: null,
@@ -58,8 +60,7 @@ var EvaAgents = (function() {
     var button = document.getElementById('evaAgentsBtn');
     if (view) view.setAttribute('aria-hidden', 'false');
     if (button) button.classList.add('active');
-    refresh();
-    state.pollTimer = setInterval(refresh, 2000);
+    refreshAndSchedule();
     startGraph();
   }
 
@@ -76,6 +77,21 @@ var EvaAgents = (function() {
     if (state.refreshController) state.refreshController.abort();
     state.refreshController = null;
     stopGraph();
+  }
+
+  function nextPollDelay() {
+    return state.data && (state.data.active_total || 0) > 0
+      ? AGENT_ACTIVE_POLL_MS : AGENT_IDLE_POLL_MS;
+  }
+
+  function scheduleNextRefresh() {
+    if (!state.open) return;
+    if (state.pollTimer) clearTimeout(state.pollTimer);
+    state.pollTimer = setTimeout(refreshAndSchedule, nextPollDelay());
+  }
+
+  function refreshAndSchedule() {
+    Promise.resolve(refresh()).finally(scheduleNextRefresh);
   }
 
   function toggle() {
@@ -308,11 +324,15 @@ var EvaAgents = (function() {
     promptLabel.textContent = 'CURRENT OBJECTIVE';
     var prompt = document.createElement('p');
     prompt.textContent = agent.detail || 'No objective detail reported.';
+    var activityLabel = document.createElement('h3');
+    activityLabel.textContent = 'LATEST ACTIVITY';
+    var activity = document.createElement('p');
+    activity.textContent = agent.activity || (isActive(agent.status) ? 'Working...' : 'No activity reported.');
     var resultLabel = document.createElement('h3');
     resultLabel.textContent = 'LATEST OUTPUT';
     var result = document.createElement('pre');
     result.textContent = agent.result || (isActive(agent.status) ? 'Agent is working...' : 'No output reported.');
-    content.append(kicker, title, status, promptLabel, prompt, resultLabel, result);
+    content.append(kicker, title, status, promptLabel, prompt, activityLabel, activity, resultLabel, result);
     if (agent.kind === 'subagent') content.appendChild(buildSteerForm(agent));
     panel.setAttribute('aria-hidden', 'false');
   }
