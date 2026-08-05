@@ -1960,7 +1960,7 @@ body.theme-lcars #txtOutput .md tr:nth-child(even) { background: rgba(255,255,25
 .session-panel {
   position: fixed;
   top: 0; left: 0;
-  width: 300px; height: 100vh;
+  width: 380px; max-width: 94vw; height: 100vh;
   background: #1a1a2e;
   color: #eef5ff;
   z-index: 9000;
@@ -2046,6 +2046,28 @@ body.theme-eva .skills-panel .session-panel-header { border-color: var(--eva-bor
   font-size: 13px;
 }
 .session-panel-actions button:hover { background: rgba(255,255,255,0.15); }
+.session-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 16px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+.session-tabs button {
+  min-height: 30px;
+  padding: 5px 9px;
+  color: #aebbd6;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.session-tabs button[aria-selected="true"] { color: #eef5ff; border-bottom-color: #6e8efb; }
+.session-tabs #sessionActiveRefreshBtn { margin-left: auto; font-size: 16px; }
+.session-tab-view { display: flex; flex: 1; min-height: 0; }
+.session-tab-view[hidden] { display: none; }
 
 .session-list {
   list-style: none; margin: 0; padding: 0;
@@ -2065,8 +2087,8 @@ body.theme-eva .skills-panel .session-panel-header { border-color: var(--eva-bor
 .session-item.active { background: rgba(100,140,255,0.12); border-left: 3px solid #6e8efb; }
 .session-title {
   grid-column: 1; grid-row: 1;
-  font-size: 13px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 13px; line-height: 1.3;
+  white-space: normal; overflow-wrap: anywhere;
 }
 .session-time {
   grid-column: 1; grid-row: 2;
@@ -2102,6 +2124,11 @@ body.theme-eva .skills-panel .session-panel-header { border-color: var(--eva-bor
 .session-pin.active { color: #fbbf24; opacity: 1; }
 .session-item.pinned { border-left: 3px solid #fbbf24; background: rgba(251,191,36,0.06); }
 .session-item.pinned.active { border-left-color: #fbbf24; }
+.active-session-item { border-left: 3px solid #4adec7; }
+.active-session-kind { grid-column: 1; grid-row: 2; color: #85e6d5; font-size: 11px; letter-spacing: 0.04em; }
+.active-session-status { grid-column: 1; grid-row: 3; color: #aebbd6; font-size: 11px; }
+.active-session-item .session-actions { grid-row: 1 / 4; }
+.session-active-summary { padding: 8px 16px; color: #85e6d5; font-size: 11px; letter-spacing: 0.05em; border-bottom: 1px solid rgba(133,230,213,0.18); }
 
 /* ── Assets Panel ──────────────────────────────────────────── */
 .assets-panel {

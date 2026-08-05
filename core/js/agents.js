@@ -712,7 +712,14 @@ var EvaAgents = (function() {
       }
     });
     refresh();
-    setInterval(function() { if (!state.open) refresh(); }, 15000);
+  }
+
+  function openAgent(agentId) {
+    open();
+    return Promise.resolve(refresh()).then(function() {
+      var agent = ((state.data && state.data.agents) || []).filter(function(item) { return item.id === agentId; })[0];
+      if (agent) openAgentDetail(agent);
+    });
   }
 
   document.addEventListener('DOMContentLoaded', init);
@@ -726,6 +733,7 @@ var EvaAgents = (function() {
     close: close,
     toggle: toggle,
     refresh: refresh,
+    openAgent: openAgent,
     invalidateGraph: invalidateGraph,
     _selectGraphNodes: selectGraphNodes
   };

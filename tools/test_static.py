@@ -243,6 +243,8 @@ def test_local_speech_contract():
         standalone = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
+    with open("core/js/sessions.js") as f:
+        session_ui = f.read()
     with open("install.sh") as f:
         installer = f.read()
     with open("standalone/package.json") as f:
@@ -653,6 +655,8 @@ def test_learning_static_contract():
         browser = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
+    with open("core/js/sessions.js") as f:
+        session_ui = f.read()
     with open("index.html") as f:
         html = f.read()
     report("learning_signal_sources", all(value in backend for value in ("explicit-user", "action-result", "voice-inferred")))
@@ -1233,6 +1237,8 @@ def test_agent_operations_contract():
         sessions = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
+    with open("core/js/sessions.js") as f:
+        session_ui = f.read()
     with open("index.html") as f:
         html = f.read()
 
@@ -1245,13 +1251,24 @@ def test_agent_operations_contract():
     report("agent_operations_script", re.search(r'src="core/js/agents\.js(?:\?[^" ]+)?"', html) is not None)
     report("agent_operations_adaptive_polling",
            "AGENT_ACTIVE_POLL_MS = 2000" in ui and "AGENT_IDLE_POLL_MS = 20000" in ui
-           and "function scheduleNextRefresh" in ui and "setInterval(refresh, 2000)" not in ui,
+            and "function scheduleNextRefresh" in ui and "setInterval(refresh, 2000)" not in ui
+            and "setInterval(function() { if (!state.open) refresh(); }, 15000);" not in ui,
            "Agent Operations must use active/idle timeout polling")
     report("acp_permission_adaptive_polling",
             "idleIntervalMs: 60000" in options and "requestIntervalMs: 15000" in options
             and "pendingIntervalMs: 2000" in options and "_acpPermissionState.pending" in options
            and "function watchACPPermissions" in options and "setInterval(pollACPPermissions" not in options,
             "ACP permissions must use request, pending, and idle timeout polling")
+    report("session_active_navigation",
+           'id="sessionActiveTab"' in html and 'id="activeSessionList"' in html
+           and "function refreshActiveSessionList" in session_ui and "EvaAgents.openAgent" in session_ui,
+           "Sessions must expose active agents and navigate to their detail view")
+    report("session_titles_preserved",
+           "SESSION_TITLE_MAX_LENGTH = 140" in session_ui and "white-space: normal" in open("core/style.css").read(),
+           "Session titles must retain and render longer names")
+    report("agent_capacity_guidance",
+           "Open Sessions > Active to monitor or steer them" in cognition,
+           "Capacity errors must direct users to active sessions")
     report("agent_operations_keyed_cards", "existing[child.dataset.agentId]" in ui and "updateAgentCard(card, agent)" in ui)
     report("agent_operations_entry_animation_new_only", "agent-card agent-card-enter" in ui and ".agent-card.agent-card-enter" in open("core/style.css").read())
     report("agent_operations_graph_fetch", "data.graph" in ui)
