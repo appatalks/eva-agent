@@ -1248,9 +1248,10 @@ def test_agent_operations_contract():
            and "function scheduleNextRefresh" in ui and "setInterval(refresh, 2000)" not in ui,
            "Agent Operations must use active/idle timeout polling")
     report("acp_permission_adaptive_polling",
-           "idleIntervalMs: 60000" in options and "activeIntervalMs: 2000" in options
+            "idleIntervalMs: 60000" in options and "requestIntervalMs: 15000" in options
+            and "pendingIntervalMs: 2000" in options and "_acpPermissionState.pending" in options
            and "function watchACPPermissions" in options and "setInterval(pollACPPermissions" not in options,
-           "ACP permissions must use an active watcher and slow idle polling")
+            "ACP permissions must use request, pending, and idle timeout polling")
     report("agent_operations_keyed_cards", "existing[child.dataset.agentId]" in ui and "updateAgentCard(card, agent)" in ui)
     report("agent_operations_entry_animation_new_only", "agent-card agent-card-enter" in ui and ".agent-card.agent-card-enter" in open("core/style.css").read())
     report("agent_operations_graph_fetch", "data.graph" in ui)

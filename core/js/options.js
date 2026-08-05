@@ -1799,14 +1799,17 @@ var _acpPermissionState = {
   shown: {},
   polling: false,
   idleIntervalMs: 60000,
-  activeIntervalMs: 2000,
+  requestIntervalMs: 15000,
+  pendingIntervalMs: 2000,
   activeUntil: 0,
+  pending: false,
   timer: null
 };
 
 function _acpPermissionPollDelay() {
+  if (_acpPermissionState.pending) return _acpPermissionState.pendingIntervalMs;
   return Date.now() < _acpPermissionState.activeUntil
-    ? _acpPermissionState.activeIntervalMs : _acpPermissionState.idleIntervalMs;
+    ? _acpPermissionState.requestIntervalMs : _acpPermissionState.idleIntervalMs;
 }
 
 function _scheduleACPPermissionPoll(delay) {
@@ -1875,6 +1878,7 @@ function pollACPPermissions() {
   return backgroundBridgeRequest('/v1/acp/permissions', { headers: getBridgeCapabilityHeaders() })
     .then(function(data) {
       var permissions = (data && Array.isArray(data.permissions)) ? data.permissions : [];
+      _acpPermissionState.pending = permissions.length > 0;
       if (permissions.length) {
         _acpPermissionState.activeUntil = Math.max(_acpPermissionState.activeUntil, Date.now() + 60000);
       }
