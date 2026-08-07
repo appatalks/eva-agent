@@ -1114,6 +1114,8 @@ def test_sidebar_workflow_contract():
     report("workflow_encrypted_auth_persistence", "safeStorage.encryptString" in standalone_main and "safeStorage.decryptString" in standalone_main and "authLoad" in standalone_preload)
     report("workflow_auth_ipc_trusted_renderer", "isTrustedEvaRenderer" in standalone_main and "fileURLToPath(event.senderFrame.url)" in standalone_main)
     report("workflow_http_navigation_blocked", "event.preventDefault()" in standalone_main and "if (!url.startsWith('http://127.0.0.1')" in standalone_main)
+    report("workflow_native_context_menu", "webContents.on('context-menu'" in standalone_main and "'pasteAndMatchStyle'" in standalone_main and "'selectAll'" in standalone_main and "isExternalUrl(params.linkURL)" in standalone_main)
+    report("workflow_skills_database_copy", "stores it database" in html and "stores it in ADX" not in html)
     report("workflow_audio_settings_persist", "function initAudioPreferences" in options_js and "tts_engine" in options_js and "tts_auto_speak" in options_js and "tts_voice" in options_js)
 
 
