@@ -324,19 +324,23 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
         if dependency_context:
             prompt_text += "\n\nUpstream agent outputs:\n" + dependency_context
 
-        live_chunks = []
+        live_output = ""
+        live_output_chars = 0
 
         def on_chunk(text):
             """Expose bounded, user-visible output while the ACP prompt runs."""
+            nonlocal live_output, live_output_chars
             if not text:
                 return
-            live_chunks.append(str(text))
+            chunk = str(text)
+            live_output_chars += len(chunk)
+            live_output = (live_output + chunk)[-4000:]
             with _st.subagent_lock:
                 active_task = _st.subagent_tasks.get(task_id)
                 if not active_task:
                     return
-                active_task["result"] = "".join(live_chunks)[-4000:]
-                active_task["output_chars"] = sum(len(chunk) for chunk in live_chunks)
+                active_task["result"] = live_output
+                active_task["output_chars"] = live_output_chars
                 active_task["last_output_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         def on_event(event):
@@ -368,7 +372,8 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                     f"Work so far:\n{result_text[:3000]}\n\n"
                     f"New direction:\n{instruction}"
                 )
-                live_chunks = []
+                live_output = ""
+                live_output_chars = 0
                 result_text = _subagent_result_text(client.prompt(
                     prompt_text, timeout=180, on_chunk=on_chunk, on_event=on_event,
                 ))

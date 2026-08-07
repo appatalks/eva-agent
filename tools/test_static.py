@@ -1114,7 +1114,7 @@ def test_sidebar_workflow_contract():
     report("workflow_encrypted_auth_persistence", "safeStorage.encryptString" in standalone_main and "safeStorage.decryptString" in standalone_main and "authLoad" in standalone_preload)
     report("workflow_auth_ipc_trusted_renderer", "isTrustedEvaRenderer" in standalone_main and "fileURLToPath(event.senderFrame.url)" in standalone_main)
     report("workflow_http_navigation_blocked", "event.preventDefault()" in standalone_main and "if (!url.startsWith('http://127.0.0.1')" in standalone_main)
-    report("workflow_native_context_menu", "webContents.on('context-menu'" in standalone_main and "'pasteAndMatchStyle'" in standalone_main and "'selectAll'" in standalone_main and "isExternalUrl(params.linkURL)" in standalone_main)
+    report("workflow_native_context_menu", "webContents.on('context-menu'" in standalone_main and "buildContextMenuTemplate" in standalone_main and os.path.isfile("standalone/context-menu.js") and os.path.isfile("tools/test_context_menu.js"))
     report("workflow_skills_database_copy", "stores it database" in html and "stores it in ADX" not in html)
     report("workflow_audio_settings_persist", "function initAudioPreferences" in options_js and "tts_engine" in options_js and "tts_auto_speak" in options_js and "tts_voice" in options_js)
 
@@ -1584,9 +1584,16 @@ def test_agent_operations_behavior():
             if on_event:
                 on_event({"kind": "tool", "label": "Using read (running)"})
             if on_chunk:
-                on_chunk("visible ")
-                observed_live_output.append(bridge_utils._st.subagent_tasks["live-output"]["result"])
-                on_chunk("output")
+                on_chunk("x" * 4000)
+                observed_live_output.append((
+                    bridge_utils._st.subagent_tasks["live-output"]["result"],
+                    bridge_utils._st.subagent_tasks["live-output"]["output_chars"],
+                ))
+                on_chunk("y" * 4000)
+                observed_live_output.append((
+                    bridge_utils._st.subagent_tasks["live-output"]["result"],
+                    bridge_utils._st.subagent_tasks["live-output"]["output_chars"],
+                ))
             return {"text": "visible output"}
 
     class TemplateACPClient:
@@ -1611,9 +1618,9 @@ def test_agent_operations_behavior():
         live_task = bridge_utils._st.subagent_tasks["live-output"]
         report(
             "agent_operations_live_output",
-            observed_live_output == ["visible "]
+            observed_live_output == [("x" * 4000, 4000), ("y" * 4000, 8000)]
             and live_task["result"] == "visible output"
-            and live_task["output_chars"] == len("visible output")
+            and live_task["output_chars"] == 8000
             and live_task["activity"] == "Using read (running)"
             and live_task["status"] == "done"
             and bool(live_task["last_output_at"]),
