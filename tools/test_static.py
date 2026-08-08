@@ -598,6 +598,9 @@ def test_model_selector():
         and f"config (v{release_version})" in architecture_readme
     )
     report("app_release_docs_consistent", docs_consistent, f"expected release {release_version}")
+    with open("get-eva.sh") as f:
+        remote_installer = f.read()
+    report("workspace_installer_launcher_enabled", "--eva-workspace-terminal-v1" in remote_installer and "Created workspace-enabled launcher" in remote_installer)
 
 
 def test_protected_memory_settings_contract():
