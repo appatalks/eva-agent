@@ -65,6 +65,7 @@ async function aigSend() {
 
   // Send to AIG orchestrator via bridge
   var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
+  if (typeof watchACPPermissions === 'function') watchACPPermissions(190000);
 
   setStatus('info', 'Eva (AIG) processing...');
   // Optional cognitive layer (eva / reviewer).

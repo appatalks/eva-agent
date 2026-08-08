@@ -1,6 +1,8 @@
 // Agent Operations dashboard: live agent sessions and memory graph topology.
 
 var EvaAgents = (function() {
+  var AGENT_ACTIVE_POLL_MS = 2000;
+  var AGENT_IDLE_POLL_MS = 20000;
   var state = {
     open: false,
     data: null,
@@ -49,7 +51,7 @@ var EvaAgents = (function() {
   }
 
   function open() {
-    if (state.open) return;
+    if (state.open) return Promise.resolve();
     if (typeof closeVoiceView === 'function' && typeof _vv !== 'undefined' && _vv.open) closeVoiceView();
     closeSidePanels();
     state.open = true;
@@ -58,9 +60,9 @@ var EvaAgents = (function() {
     var button = document.getElementById('evaAgentsBtn');
     if (view) view.setAttribute('aria-hidden', 'false');
     if (button) button.classList.add('active');
-    refresh();
-    state.pollTimer = setInterval(refresh, 2000);
+    var refreshPromise = refreshAndSchedule();
     startGraph();
+    return refreshPromise;
   }
 
   function close() {
@@ -70,12 +72,27 @@ var EvaAgents = (function() {
     var button = document.getElementById('evaAgentsBtn');
     if (view) view.setAttribute('aria-hidden', 'true');
     if (button) button.classList.remove('active');
-    if (state.pollTimer) clearInterval(state.pollTimer);
+    if (state.pollTimer) clearTimeout(state.pollTimer);
     state.pollTimer = null;
     state.refreshSequence++;
     if (state.refreshController) state.refreshController.abort();
     state.refreshController = null;
     stopGraph();
+  }
+
+  function nextPollDelay() {
+    return state.data && (state.data.active_total || 0) > 0
+      ? AGENT_ACTIVE_POLL_MS : AGENT_IDLE_POLL_MS;
+  }
+
+  function scheduleNextRefresh() {
+    if (!state.open) return;
+    if (state.pollTimer) clearTimeout(state.pollTimer);
+    state.pollTimer = setTimeout(refreshAndSchedule, nextPollDelay());
+  }
+
+  function refreshAndSchedule() {
+    return Promise.resolve(refresh()).finally(scheduleNextRefresh);
   }
 
   function toggle() {
@@ -140,12 +157,7 @@ var EvaAgents = (function() {
     }
     renderCards(agents);
     updateGraph(graph.nodes || [], graph.edges || []);
-    if (state.selectedId) {
-      var steerInput = document.getElementById('agentSteerInput');
-      if (!steerInput || (!steerInput.value && document.activeElement !== steerInput)) {
-        renderDetail(state.selectedId);
-      }
-    }
+    if (state.selectedId) renderDetail(state.selectedId);
   }
 
   function setText(id, value) {
@@ -288,13 +300,35 @@ var EvaAgents = (function() {
     }
   }
 
+  function detailStatusText(agent) {
+    return statusLabel(agent.status) + '  ' + elapsed(agent) + (agent.model ? '  ' + agent.model : '') +
+      (agent.signal_status ? '  SIGNAL ' + String(agent.signal_status).toUpperCase() : '');
+  }
+
+  function updateDetail(agent, content) {
+    var status = content.querySelector('[data-agent-detail-status]');
+    var activity = content.querySelector('[data-agent-detail-activity]');
+    var result = content.querySelector('[data-agent-detail-result]');
+    if (!status || !activity || !result) return false;
+    status.className = 'agent-detail-status status-' + agent.status;
+    status.textContent = detailStatusText(agent);
+    activity.textContent = agent.activity || (isActive(agent.status) ? 'Working...' : 'No activity reported.');
+    result.textContent = agent.result || (isActive(agent.status) ? 'Agent is working...' : 'No output reported.');
+    return true;
+  }
+
   function renderDetail(agentId) {
     var agents = (state.data && state.data.agents) || [];
     var agent = agents.filter(function(item) { return item.id === agentId; })[0];
     var panel = document.getElementById('agentDetail');
     var content = document.getElementById('agentDetailContent');
     if (!panel || !content || !agent) return;
+    if (content.dataset.agentId === agent.id && updateDetail(agent, content)) {
+      panel.setAttribute('aria-hidden', 'false');
+      return;
+    }
     content.replaceChildren();
+    content.dataset.agentId = agent.id;
     var kicker = document.createElement('div');
     kicker.className = 'agents-kicker';
     kicker.textContent = kindLabel(agent.kind) + ' / ' + agent.id;
@@ -302,17 +336,23 @@ var EvaAgents = (function() {
     title.textContent = agent.label || 'Agent session';
     var status = document.createElement('div');
     status.className = 'agent-detail-status status-' + agent.status;
-    status.textContent = statusLabel(agent.status) + '  ' + elapsed(agent) + (agent.model ? '  ' + agent.model : '') +
-               (agent.signal_status ? '  SIGNAL ' + String(agent.signal_status).toUpperCase() : '');
+    status.dataset.agentDetailStatus = 'true';
+    status.textContent = detailStatusText(agent);
     var promptLabel = document.createElement('h3');
     promptLabel.textContent = 'CURRENT OBJECTIVE';
     var prompt = document.createElement('p');
     prompt.textContent = agent.detail || 'No objective detail reported.';
+    var activityLabel = document.createElement('h3');
+    activityLabel.textContent = 'LATEST ACTIVITY';
+    var activity = document.createElement('p');
+    activity.dataset.agentDetailActivity = 'true';
+    activity.textContent = agent.activity || (isActive(agent.status) ? 'Working...' : 'No activity reported.');
     var resultLabel = document.createElement('h3');
     resultLabel.textContent = 'LATEST OUTPUT';
     var result = document.createElement('pre');
+    result.dataset.agentDetailResult = 'true';
     result.textContent = agent.result || (isActive(agent.status) ? 'Agent is working...' : 'No output reported.');
-    content.append(kicker, title, status, promptLabel, prompt, resultLabel, result);
+    content.append(kicker, title, status, promptLabel, prompt, activityLabel, activity, resultLabel, result);
     if (agent.kind === 'subagent') content.appendChild(buildSteerForm(agent));
     panel.setAttribute('aria-hidden', 'false');
   }
@@ -692,7 +732,14 @@ var EvaAgents = (function() {
       }
     });
     refresh();
-    setInterval(function() { if (!state.open) refresh(); }, 15000);
+  }
+
+  function openAgent(agentId) {
+    var refreshPromise = state.open ? refreshAndSchedule() : open();
+    return Promise.resolve(refreshPromise).then(function() {
+      var agent = ((state.data && state.data.agents) || []).filter(function(item) { return item.id === agentId; })[0];
+      if (agent) openAgentDetail(agent);
+    });
   }
 
   document.addEventListener('DOMContentLoaded', init);
@@ -706,6 +753,7 @@ var EvaAgents = (function() {
     close: close,
     toggle: toggle,
     refresh: refresh,
+    openAgent: openAgent,
     invalidateGraph: invalidateGraph,
     _selectGraphNodes: selectGraphNodes
   };

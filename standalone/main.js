@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, safeStorage, session, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, session, shell } = require('electron');
 const http = require('http');
 const net = require('net');
 const path = require('path');
@@ -6,6 +6,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { fileURLToPath } = require('url');
+const { buildContextMenuTemplate } = require('./context-menu');
 
 if (process.platform === 'win32') {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -869,6 +870,18 @@ function createWindow(acpBaseUrl) {
   mainWindow.on('closed', function() {
     mainWindow = null;
     stopBridge();
+  });
+
+  mainWindow.webContents.on('context-menu', function(event, params) {
+    const template = buildContextMenuTemplate(params, {
+      openExternal: function(url) { shell.openExternal(url); },
+      copyText: function(text) { clipboard.writeText(text); },
+      copyImage: function(x, y) {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.copyImageAt(x, y);
+      }
+    });
+
+    if (template.length) Menu.buildFromTemplate(template).popup({ window: mainWindow });
   });
 
   // Open external links (http/https) in the system browser instead of

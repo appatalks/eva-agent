@@ -64,7 +64,7 @@ supported on Windows.
 | **Self-improving skills** | Auto-extracts reusable skills from successful tasks, stored as drafts |
 | **Cron scheduler** | Standard cron expressions, recurring prompts, morning briefings, alerts |
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |
-| **Agent operations** | Live scorecard for subagents, browser/desktop runs, steering, and animated memory topology |
+| **Agent operations** | Live subagent output and sanitized activity updates, browser/desktop runs, steering, and animated memory topology |
 | **Multi-provider** | Eva AIG via direct OpenAI API, GitHub Copilot ACP, or LM Studio; direct Gemini and provider routes remain available in the browser UI |
 | **Prompt budgets** | Bounded provider payloads with pinned instructions, recent turns, rolling summaries, and privacy-safe estimates |
 | **Reasoning controls** | Model-specific effort levels for OpenAI, GitHub Models, and Copilot CLI ACP |

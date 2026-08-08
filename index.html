@@ -168,7 +168,19 @@
       <button id="sessionNewBtn" title="New session">+ New</button>
       <button id="sessionExportBtn" title="Export session">&#x2913; Export</button>
     </div>
-    <ul id="sessionList" class="session-list"></ul>
+    <div class="session-tab-controls">
+      <div class="session-tabs" role="tablist" aria-label="Session views">
+      <button id="sessionChatsTab" type="button" role="tab" aria-selected="true" aria-controls="sessionChatsView">Chats</button>
+      <button id="sessionActiveTab" type="button" role="tab" aria-selected="false" aria-controls="sessionActiveView" tabindex="-1">Active</button>
+      </div>
+      <button id="sessionActiveRefreshBtn" type="button" title="Refresh active sessions" aria-label="Refresh active sessions">&#x21BB;</button>
+    </div>
+    <div id="sessionChatsView" class="session-tab-view" role="tabpanel" aria-labelledby="sessionChatsTab">
+      <ul id="sessionList" class="session-list"></ul>
+    </div>
+    <div id="sessionActiveView" class="session-tab-view" role="tabpanel" aria-labelledby="sessionActiveTab" hidden>
+      <ul id="activeSessionList" class="session-list active-session-list"></ul>
+    </div>
   </div>
 
   <!-- Skills panel (dedicated sidebar destination) -->
@@ -178,7 +190,7 @@
       <button id="skillsPanelClose" aria-label="Close skills">&times;</button>
     </div>
     <div class="skills-panel-body">
-      <p class="cog-help">Import a skill from any source. Eva normalizes ("Eva'rises") it into her own format, stores it in ADX, and applies it automatically when a request matches.</p>
+      <p class="cog-help">Import a skill from any source. Eva normalizes ("Eva'rises") it into her own format, stores it in the database, and applies it automatically when a request matches.</p>
 
       <div class="skills-import">
         <div class="auth-field">

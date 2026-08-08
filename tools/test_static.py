@@ -243,6 +243,8 @@ def test_local_speech_contract():
         standalone = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
+    with open("core/js/sessions.js") as f:
+        session_ui = f.read()
     with open("install.sh") as f:
         installer = f.read()
     with open("standalone/package.json") as f:
@@ -653,6 +655,8 @@ def test_learning_static_contract():
         browser = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
+    with open("core/js/sessions.js") as f:
+        session_ui = f.read()
     with open("index.html") as f:
         html = f.read()
     report("learning_signal_sources", all(value in backend for value in ("explicit-user", "action-result", "voice-inferred")))
@@ -1110,6 +1114,8 @@ def test_sidebar_workflow_contract():
     report("workflow_encrypted_auth_persistence", "safeStorage.encryptString" in standalone_main and "safeStorage.decryptString" in standalone_main and "authLoad" in standalone_preload)
     report("workflow_auth_ipc_trusted_renderer", "isTrustedEvaRenderer" in standalone_main and "fileURLToPath(event.senderFrame.url)" in standalone_main)
     report("workflow_http_navigation_blocked", "event.preventDefault()" in standalone_main and "if (!url.startsWith('http://127.0.0.1')" in standalone_main)
+    report("workflow_native_context_menu", "webContents.on('context-menu'" in standalone_main and "buildContextMenuTemplate" in standalone_main and os.path.isfile("standalone/context-menu.js") and os.path.isfile("tools/test_context_menu.js"))
+    report("workflow_skills_database_copy", "stores it in the database" in html and "stores it in ADX" not in html)
     report("workflow_audio_settings_persist", "function initAudioPreferences" in options_js and "tts_engine" in options_js and "tts_auto_speak" in options_js and "tts_voice" in options_js)
 
 
@@ -1231,6 +1237,10 @@ def test_agent_operations_contract():
         profiles = f.read()
     with open("core/js/sessions.js") as f:
         sessions = f.read()
+    with open("core/js/options.js") as f:
+        options = f.read()
+    with open("core/js/sessions.js") as f:
+        session_ui = f.read()
     with open("index.html") as f:
         html = f.read()
 
@@ -1241,7 +1251,35 @@ def test_agent_operations_contract():
         report(f"agent_operations_element:{element_id}", f'id="{element_id}"' in html,
                f"missing #{element_id}" if f'id="{element_id}"' not in html else "")
     report("agent_operations_script", re.search(r'src="core/js/agents\.js(?:\?[^" ]+)?"', html) is not None)
-    report("agent_operations_polling", "setInterval(refresh, 2000)" in ui)
+    report("agent_operations_adaptive_polling",
+           "AGENT_ACTIVE_POLL_MS = 2000" in ui and "AGENT_IDLE_POLL_MS = 20000" in ui
+            and "function scheduleNextRefresh" in ui and "return Promise.resolve(refresh()).finally(scheduleNextRefresh);" in ui and "setInterval(refresh, 2000)" not in ui
+            and "setInterval(function() { if (!state.open) refresh(); }, 15000);" not in ui,
+           "Agent Operations must use active/idle timeout polling")
+    report("acp_permission_adaptive_polling",
+            "idleIntervalMs: 60000" in options and "requestIntervalMs: 15000" in options
+            and "pendingIntervalMs: 2000" in options and "_acpPermissionState.pending" in options
+           and "function watchACPPermissions" in options and "setInterval(pollACPPermissions" not in options,
+            "ACP permissions must use request, pending, and idle timeout polling")
+    report("session_active_navigation",
+           'id="sessionActiveTab"' in html and 'id="activeSessionList"' in html
+            and 'aria-controls="sessionActiveView"' in html and 'aria-labelledby="sessionActiveTab"' in html
+            and "function refreshActiveSessionList" in session_ui and "EvaAgents.openAgent" in session_ui
+            and "event.key === 'ArrowRight'" in session_ui,
+           "Sessions must expose active agents and navigate to their detail view")
+    report("session_titles_preserved",
+            "SESSION_TITLE_MAX_LENGTH = 140" in session_ui and re.search(r"\.session-title\s*\{[^}]*white-space:\s*normal", open("core/style.css").read(), re.S) is not None,
+           "Session titles must retain and render longer names")
+    report("session_active_capacity_summary",
+            "active agents; " in session_ui and "subagent slots" in session_ui and "data.subagents_active" in session_ui,
+            "Active-agent counts must remain distinct from subagent capacity")
+    report("agent_operations_detail_updates_in_place",
+            "function updateDetail(agent, content)" in ui and "content.dataset.agentId === agent.id" in ui
+            and "if (state.selectedId) renderDetail(state.selectedId);" in ui,
+            "Agent details must refresh live fields without rebuilding steering input")
+    report("agent_capacity_guidance",
+           "Open Sessions > Active to monitor or steer them" in cognition,
+           "Capacity errors must direct users to active sessions")
     report("agent_operations_keyed_cards", "existing[child.dataset.agentId]" in ui and "updateAgentCard(card, agent)" in ui)
     report("agent_operations_entry_animation_new_only", "agent-card agent-card-enter" in ui and ".agent-card.agent-card-enter" in open("core/style.css").read())
     report("agent_operations_graph_fetch", "data.graph" in ui)
@@ -1533,6 +1571,75 @@ def test_agent_operations_behavior():
         and empty_signal_task["signal_status"] == "failed",
         "failed or empty completion Signal did not retain failed status",
     )
+
+    from bridge import acp_client as bridge_acp_client
+    original_acp_client_class = bridge_acp_client.ACPClient
+    original_template_client = bridge_utils._st.acp_client
+    original_live_tasks = bridge_utils._st.subagent_tasks
+    original_notification = bridge_utils._push_notification
+    observed_live_output = []
+
+    class ChunkingACPClient:
+        def __init__(self, **kwargs):
+            self.model = kwargs.get("model")
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def prompt(self, text, timeout=120, on_chunk=None, on_event=None):
+            if on_event:
+                on_event({"kind": "tool", "label": "Using read (running)"})
+            if on_chunk:
+                on_chunk("x" * 4000)
+                observed_live_output.append((
+                    bridge_utils._st.subagent_tasks["live-output"]["result"],
+                    bridge_utils._st.subagent_tasks["live-output"]["output_chars"],
+                ))
+                on_chunk("y" * 4000)
+                observed_live_output.append((
+                    bridge_utils._st.subagent_tasks["live-output"]["result"],
+                    bridge_utils._st.subagent_tasks["live-output"]["output_chars"],
+                ))
+            return {"text": "visible output"}
+
+    class TemplateACPClient:
+        alive = True
+        copilot_path = "copilot"
+        cwd = os.getcwd()
+        model = "test-model"
+        mcp_config = {}
+        reasoning_effort = None
+
+    try:
+        bridge_acp_client.ACPClient = ChunkingACPClient
+        bridge_utils._st.acp_client = TemplateACPClient()
+        bridge_utils._st.subagent_tasks = {
+            "live-output": {
+                "id": "live-output", "label": "Live output", "status": "running",
+                "result": None, "steer_queue": [], "signal_on_complete": False,
+            },
+        }
+        bridge_utils._push_notification = lambda *args, **kwargs: None
+        bridge_utils._subagent_worker("live-output", "show progress", "Live output")
+        live_task = bridge_utils._st.subagent_tasks["live-output"]
+        report(
+            "agent_operations_live_output",
+            observed_live_output == [("x" * 4000, 4000), ("y" * 4000, 8000)]
+            and live_task["result"] == "visible output"
+            and live_task["output_chars"] == 8000
+            and live_task["activity"] == "Using read (running)"
+            and live_task["status"] == "done"
+            and bool(live_task["last_output_at"]),
+            "streamed ACP output did not update the running task",
+        )
+    finally:
+        bridge_acp_client.ACPClient = original_acp_client_class
+        bridge_utils._st.acp_client = original_template_client
+        bridge_utils._st.subagent_tasks = original_live_tasks
+        bridge_utils._push_notification = original_notification
 
     bridge_core._st.subagent_tasks = {
         f"active-{index}": {"id": f"active-{index}", "status": "running"}

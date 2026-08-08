@@ -664,9 +664,12 @@
         actions.push({ ok: true, id: 'agent.spawn_batch', result: result, deterministic: true });
       } catch (error) {
         actions.push({ ok: false, id: 'agent.spawn_batch', error: 'run-failed', detail: error.message || String(error), deterministic: true });
+        var capacity = String(error.message || error).match(/batch needs (\d+) slots; (\d+) available/i);
+        var capacityMessage = capacity
+          ? 'The requested agent batch needs ' + capacity[1] + ' slots, but ' + capacity[2] + ' are available because existing agents are still active. Open Sessions > Active to monitor or steer them, then try again when capacity is free.'
+          : 'No agents were started: ' + String(error.message || error).replace(/</g, '&lt;');
         return {
-          content: '<div class="cog-action-err">No agents were started: ' +
-                   String(error.message || error).replace(/</g, '&lt;') + '</div>',
+          content: '<div class="cog-action-err">' + capacityMessage + '</div>',
           actions: actions,
           deferredSignal: _agentSignalIntent(userMessage)
         };

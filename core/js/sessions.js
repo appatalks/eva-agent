@@ -4,6 +4,8 @@
 
 var SESSION_INDEX_KEY = 'eva_sessions';
 var SESSION_ACTIVE_KEY = 'eva_active_session';
+var SESSION_PANEL_TAB_KEY = 'eva_session_panel_tab';
+var SESSION_TITLE_MAX_LENGTH = 140;
 
 // All provider message keys
 var SESSION_MSG_KEYS = ['messages', 'copilotMessages', 'copilotACPMessages', 'geminiMessages', 'openLLMessages', 'aigMessages'];
@@ -107,7 +109,8 @@ function _sessionTitle(data) {
           }
           var _prev; do { _prev = txt; txt = txt.replace(/<[^>]*>/g, ''); } while (txt !== _prev);
           txt = txt.replace(/[<>]/g, '').trim();
-          if (txt) return txt.length > 50 ? txt.substring(0, 47) + '...' : txt;
+          if (txt) return txt.length > SESSION_TITLE_MAX_LENGTH
+            ? txt.substring(0, SESSION_TITLE_MAX_LENGTH - 3) + '...' : txt;
         }
       }
     } catch(e) {}
@@ -250,9 +253,9 @@ async function renameSession(id) {
   var index = _getSessionIndex();
   var entry = index.filter(function(item) { return item.id === id; })[0];
   if (!entry) return;
-  var title = await evaTextPrompt('Session title', entry.title || 'Untitled', { maxLength: 80 });
+  var title = await evaTextPrompt('Session title', entry.title || 'Untitled', { maxLength: SESSION_TITLE_MAX_LENGTH });
   if (title === null) return;
-  title = title.trim().replace(/[\r\n\t]+/g, ' ').slice(0, 80);
+  title = title.trim().replace(/[\r\n\t]+/g, ' ').slice(0, SESSION_TITLE_MAX_LENGTH);
   if (!title) return;
   entry.title = title;
   entry.customTitle = true;
@@ -350,6 +353,102 @@ function activateSessionListItem(event) {
   loadSession(item.dataset.sessionId);
 }
 
+function _sessionPanelTab() {
+  return localStorage.getItem(SESSION_PANEL_TAB_KEY) === 'active' ? 'active' : 'chats';
+}
+
+function setSessionPanelTab(tab) {
+  var selected = tab === 'active' ? 'active' : 'chats';
+  localStorage.setItem(SESSION_PANEL_TAB_KEY, selected);
+  var chatsTab = document.getElementById('sessionChatsTab');
+  var activeTab = document.getElementById('sessionActiveTab');
+  var chatsView = document.getElementById('sessionChatsView');
+  var activeView = document.getElementById('sessionActiveView');
+  var actions = document.querySelector('#sessionPanel .session-panel-actions');
+  if (chatsTab) chatsTab.setAttribute('aria-selected', selected === 'chats' ? 'true' : 'false');
+  if (activeTab) activeTab.setAttribute('aria-selected', selected === 'active' ? 'true' : 'false');
+  if (chatsTab) chatsTab.tabIndex = selected === 'chats' ? 0 : -1;
+  if (activeTab) activeTab.tabIndex = selected === 'active' ? 0 : -1;
+  if (chatsView) chatsView.hidden = selected !== 'chats';
+  if (activeView) activeView.hidden = selected !== 'active';
+  if (actions) actions.hidden = selected !== 'chats';
+  if (selected === 'active') refreshActiveSessionList();
+  else renderSessionList();
+}
+
+function _activeSessionStatusLabel(status) {
+  return String(status || 'unknown').replace(/_/g, ' ').toUpperCase();
+}
+
+function _activeSessionKindLabel(kind) {
+  var labels = { subagent: 'SUBAGENT', browser: 'BROWSER AGENT', desktop: 'DESKTOP AGENT', background: 'BACKGROUND' };
+  return labels[kind] || String(kind || 'AGENT').toUpperCase();
+}
+
+function refreshActiveSessionList() {
+  var list = document.getElementById('activeSessionList');
+  if (!list) return;
+  list.textContent = '';
+  var loading = document.createElement('li');
+  loading.className = 'session-empty';
+  loading.textContent = 'Loading active sessions...';
+  list.appendChild(loading);
+  var base = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
+  fetch(String(base).replace(/\/+$/, '') + '/v1/agents/overview?include_graph=0').then(function(response) {
+    if (!response.ok) throw new Error('Bridge returned ' + response.status);
+    return response.json();
+  }).then(function(data) {
+    var active = (data.agents || []).filter(function(agent) {
+      return ['starting', 'waiting', 'running', 'steering', 'finalizing', 'awaiting_confirmation', 'awaiting_input'].indexOf(agent.status) !== -1;
+    });
+    list.replaceChildren();
+    if (!active.length) {
+      var empty = document.createElement('li');
+      empty.className = 'session-empty';
+      empty.textContent = 'No active agent sessions';
+      list.appendChild(empty);
+      return;
+    }
+    var summary = document.createElement('li');
+    summary.className = 'session-active-summary';
+    summary.textContent = active.length + ' active agents; ' + (data.subagents_active || 0) +
+      ' / ' + (data.capacity || 0) + ' subagent slots';
+    list.appendChild(summary);
+    active.forEach(function(agent) {
+      var item = document.createElement('li');
+      item.className = 'session-item active-session-item';
+      item.tabIndex = 0;
+      item.setAttribute('role', 'button');
+      item.setAttribute('aria-label', 'Open ' + (agent.label || 'agent') + ' details');
+      var title = document.createElement('span');
+      title.className = 'session-title';
+      title.textContent = agent.label || 'Agent session';
+      title.title = title.textContent;
+      var kind = document.createElement('span');
+      kind.className = 'active-session-kind';
+      kind.textContent = _activeSessionKindLabel(agent.kind) + (agent.model ? ' · ' + agent.model : '');
+      var status = document.createElement('span');
+      status.className = 'active-session-status';
+      status.textContent = _activeSessionStatusLabel(agent.status) + (agent.activity ? ' · ' + agent.activity : '');
+      var open = function() {
+        if (typeof EvaAgents !== 'undefined' && EvaAgents.openAgent) EvaAgents.openAgent(agent.id);
+      };
+      item.addEventListener('click', open);
+      item.addEventListener('keydown', function(event) {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
+      });
+      item.append(title, kind, status);
+      list.appendChild(item);
+    });
+  }).catch(function(error) {
+    list.replaceChildren();
+    var unavailable = document.createElement('li');
+    unavailable.className = 'session-empty';
+    unavailable.textContent = 'Active sessions are unavailable: ' + (error.message || error);
+    list.appendChild(unavailable);
+  });
+}
+
 /** Toggle the session panel visibility */
 function toggleSessionPanel() {
   var panel = document.getElementById('sessionPanel');
@@ -361,7 +460,7 @@ function toggleSessionPanel() {
     closeSidePanels('sessionPanel');
     panel.setAttribute('aria-hidden', 'false');
   }
-  if (!visible) renderSessionList();
+  if (!visible) setSessionPanelTab(_sessionPanelTab());
 }
 
 var EVA_SIDE_PANEL_IDS = ['sessionPanel', 'skillsPanel', 'assetsPanel', 'terminalPanel', 'profilePanel'];
@@ -389,6 +488,29 @@ function initSessions() {
 
   var exportBtn = document.getElementById('sessionExportBtn');
   if (exportBtn) exportBtn.addEventListener('click', function() { exportCurrentSession(); });
+
+  var chatsTab = document.getElementById('sessionChatsTab');
+  if (chatsTab) chatsTab.addEventListener('click', function() { setSessionPanelTab('chats'); });
+  var activeTab = document.getElementById('sessionActiveTab');
+  if (activeTab) activeTab.addEventListener('click', function() { setSessionPanelTab('active'); });
+  [chatsTab, activeTab].filter(Boolean).forEach(function(tab) {
+    tab.addEventListener('keydown', function(event) {
+      var tabs = [chatsTab, activeTab].filter(Boolean);
+      var index = tabs.indexOf(tab);
+      var nextIndex = index;
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (index + tabs.length - 1) % tabs.length;
+      else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (index + 1) % tabs.length;
+      else if (event.key === 'Home') nextIndex = 0;
+      else if (event.key === 'End') nextIndex = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      var nextTab = tabs[nextIndex];
+      setSessionPanelTab(nextTab === activeTab ? 'active' : 'chats');
+      nextTab.focus();
+    });
+  });
+  var activeRefresh = document.getElementById('sessionActiveRefreshBtn');
+  if (activeRefresh) activeRefresh.addEventListener('click', refreshActiveSessionList);
 
   var sessionList = document.getElementById('sessionList');
   if (sessionList && !sessionList.dataset.activationBound) {
