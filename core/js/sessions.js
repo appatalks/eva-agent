@@ -82,6 +82,8 @@ function _restoreSession(data) {
   if (txtOutput && data._htmlSnapshot) {
     txtOutput.innerHTML = data._htmlSnapshot;
     txtOutput.scrollTop = txtOutput.scrollHeight;
+  } else if (txtOutput) {
+    _restoreLegacySessionOutput(txtOutput, data);
   }
 
   // Restore model selection
@@ -92,6 +94,42 @@ function _restoreSession(data) {
       if (typeof updateButton === 'function') updateButton();
     }
   }
+}
+
+function _restoreLegacySessionOutput(output, data) {
+  output.replaceChildren();
+  var bestMessages = [];
+  SESSION_MSG_KEYS.forEach(function(key) {
+    try {
+      var messages = JSON.parse(data[key] || '[]');
+      if (Array.isArray(messages) && messages.length > bestMessages.length) bestMessages = messages;
+    } catch (_) {}
+  });
+  bestMessages.forEach(function(message) {
+    if (!message || message.role === 'system' || message.role === 'developer') return;
+    var content = typeof message.content === 'string' ? message.content : '';
+    if (!content && Array.isArray(message.content)) {
+      message.content.forEach(function(part) { if (part && part.text) content += part.text; });
+    }
+    if (!content) return;
+    var line = document.createElement('div');
+    line.className = 'message ' + (message.role === 'user' ? 'user' : 'eva');
+    line.textContent = (message.role === 'user' ? 'You: ' : 'Eva: ') + content;
+    output.appendChild(line);
+  });
+  if (!output.childNodes.length && data._masterOutput) {
+    var transcript = document.createElement('div');
+    transcript.className = 'message eva';
+    transcript.textContent = data._masterOutput;
+    output.appendChild(transcript);
+  }
+  if (!output.childNodes.length) {
+    var unavailable = document.createElement('div');
+    unavailable.className = 'session-empty';
+    unavailable.textContent = 'This session has no restorable transcript.';
+    output.appendChild(unavailable);
+  }
+  output.scrollTop = output.scrollHeight;
 }
 
 /** Derive a display name from the first user message */
@@ -214,6 +252,22 @@ function loadSession(id) {
       }
     }
     if (!data) {
+      var indexEntry = _getSessionIndex().find(function(entry) { return entry.id === id; });
+      var output = document.getElementById('txtOutput');
+      if (output) {
+        output.replaceChildren();
+        var notice = document.createElement('div');
+        notice.className = 'session-restore-unavailable';
+        var heading = document.createElement('strong');
+        heading.textContent = indexEntry && indexEntry.title ? indexEntry.title : 'Saved session';
+        var message = document.createElement('span');
+        message.textContent = 'The session name is still indexed, but its transcript snapshot is unavailable on this installation.';
+        notice.append(heading, message);
+        output.appendChild(notice);
+      }
+      var unavailablePanel = document.getElementById('sessionPanel');
+      if (unavailablePanel) unavailablePanel.setAttribute('aria-hidden', 'true');
+      if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
       if (typeof setStatus === 'function') setStatus('error', 'This saved session is unavailable. Its index entry was preserved.');
       return false;
     }
@@ -224,6 +278,7 @@ function loadSession(id) {
     var panel = document.getElementById('sessionPanel');
     if (panel) panel.setAttribute('aria-hidden', 'true');
     if (typeof EvaAgents !== 'undefined' && EvaAgents.close) EvaAgents.close();
+    if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
     if (typeof setStatus === 'function') setStatus('info', 'Session loaded.');
     return true;
   }).catch(function(e) {
@@ -463,8 +518,8 @@ function toggleSessionPanel() {
   if (!visible) setSessionPanelTab(_sessionPanelTab());
 }
 
-var EVA_SIDE_PANEL_IDS = ['sessionPanel', 'skillsPanel', 'assetsPanel', 'terminalPanel', 'profilePanel'];
-var EVA_SIDE_PANEL_TRIGGER_IDS = ['evaChatsBtn', 'sidebarSessionsBtn', 'evaSkillsBtn', 'evaAssetsBtn', 'evaTerminalBtn', 'evaUserBtn'];
+var EVA_SIDE_PANEL_IDS = ['sessionPanel', 'skillsPanel', 'assetsPanel', 'workspacePanel', 'terminalPanel', 'profilePanel'];
+var EVA_SIDE_PANEL_TRIGGER_IDS = ['evaChatsBtn', 'sidebarSessionsBtn', 'evaSkillsBtn', 'evaAssetsBtn', 'evaWorkspacesBtn', 'evaTerminalBtn', 'evaUserBtn'];
 
 function closeSidePanels(exceptId) {
   EVA_SIDE_PANEL_IDS.forEach(function(id) {
@@ -532,6 +587,8 @@ function initSessions() {
   // Terminal panel close button
   var termClose = document.getElementById('terminalPanelClose');
   if (termClose) termClose.addEventListener('click', toggleTerminalPanel);
+  var termExpand = document.getElementById('terminalPanelExpand');
+  if (termExpand) termExpand.addEventListener('click', toggleTerminalWidth);
 
   // Agent Operations is a full workspace view. Any other sidebar destination
   // must first reveal the normal workspace so its panel/view is visible.
@@ -541,6 +598,15 @@ function initSessions() {
     if (target && target.closest && !target.closest('#evaAgentsBtn')) {
       closeAgentOperationsForNavigation();
     }
+    if (target && target.closest && !target.closest('#evaWorkspacesBtn') && !target.closest('#evaTerminalBtn') && window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {
+      window.EvaWorkspaces.closeWorkbench();
+    }
+    if (target && target.closest && !target.closest('#evaAssetsBtn') && window.EvaAssets && typeof window.EvaAssets.close === 'function') {
+      window.EvaAssets.close();
+    }
+    if (target && target.closest && !target.closest('#evaSkillsBtn') && window.EvaSkills && typeof window.EvaSkills.close === 'function') {
+      window.EvaSkills.close();
+    }
   });
   var lcarsSidebar = document.getElementById('lcarsSidebar');
   if (lcarsSidebar) lcarsSidebar.addEventListener('click', function(event) {
@@ -548,6 +614,11 @@ function initSessions() {
     if (target && target.closest && !target.closest('#lcarsAgentsBtn')) {
       closeAgentOperationsForNavigation();
     }
+    if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {
+      window.EvaWorkspaces.closeWorkbench();
+    }
+    if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();
+    if (window.EvaSkills && typeof window.EvaSkills.close === 'function') window.EvaSkills.close();
   });
 
   // Migrate localStorage sessions, preserve the previous turn, and always
@@ -564,7 +635,7 @@ function initSessions() {
     if (target.closest('#' + EVA_SIDE_PANEL_IDS.join(',#'))) return;
     if (target.closest('#' + EVA_SIDE_PANEL_TRIGGER_IDS.join(',#'))) return;
     closeSidePanels();
-  });
+  }, true);
 
   // Auto-save on unload
   window.addEventListener('beforeunload', function() {
@@ -773,8 +844,16 @@ function purgeAssets() {
 function toggleTerminalPanel() {
   var panel = document.getElementById('terminalPanel');
   if (!panel) return;
+  panel.classList.toggle('terminal-panel-docked', document.body.classList.contains('workspace-workbench-open'));
   var visible = panel.getAttribute('aria-hidden') !== 'true';
-  if (visible) panel.setAttribute('aria-hidden', 'true');
+  if (visible) {
+    panel.setAttribute('aria-hidden', 'true');
+    if (panel.dataset.evaReturnWorkspace === 'true') {
+      panel.dataset.evaReturnWorkspace = '';
+      var workspacePanel = document.getElementById('workspacePanel');
+      if (workspacePanel) workspacePanel.setAttribute('aria-hidden', 'false');
+    }
+  }
   else {
     closeAgentOperationsForNavigation();
     closeSidePanels('terminalPanel');
@@ -783,24 +862,303 @@ function toggleTerminalPanel() {
   if (!visible) initTerminal();
 }
 
+function toggleTerminalWidth() {
+  var panel = document.getElementById('terminalPanel');
+  var button = document.getElementById('terminalPanelExpand');
+  if (!panel || !button) return;
+  var expanded = panel.classList.toggle('terminal-panel-expanded');
+  button.setAttribute('aria-label', expanded ? 'Restore terminal width' : 'Expand terminal');
+  button.title = expanded ? 'Restore terminal width' : 'Expand terminal';
+  var container = document.getElementById('terminalContainer');
+  if (container && typeof container._evaWorkspaceTerminalFit === 'function') {
+    setTimeout(container._evaWorkspaceTerminalFit, 0);
+  }
+}
+
+var _evaWorkspaceTerminalTarget = { rootId: 'app-root', label: 'Eva app root' };
+
+function openWorkspaceTerminal(rootId, label) {
+  if (typeof rootId !== 'string' || !rootId) return;
+  _evaWorkspaceTerminalTarget = { rootId: rootId, label: String(label || 'Workspace') };
+  var panel = document.getElementById('terminalPanel');
+  if (panel) panel.classList.toggle('terminal-panel-docked', document.body.classList.contains('workspace-workbench-open'));
+  var workspacePanel = document.getElementById('workspacePanel');
+  if (panel && workspacePanel && workspacePanel.getAttribute('aria-hidden') === 'false') {
+    panel.dataset.evaReturnWorkspace = 'true';
+  }
+  if (panel && panel.getAttribute('aria-hidden') === 'true') {
+    toggleTerminalPanel();
+    return;
+  }
+  initTerminal();
+  if (window.EvaTerminal && typeof window.EvaTerminal.open === 'function') {
+    window.EvaTerminal.open(_evaWorkspaceTerminalTarget);
+  }
+}
+
 function initTerminal() {
   var container = document.getElementById('terminalContainer');
   var fallback = document.getElementById('terminalFallback');
   var frame = document.getElementById('terminalFrame');
   if (!container) return;
 
-  var isElectron = window.evaStandalone && window.evaStandalone.isStandalone;
-
-  // detectACPBridge is async, so resolve it first
   var baseUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
 
   if (frame && fallback) {
     fallback.style.display = 'none';
     if (!frame._evaTermInit) {
       frame._evaTermInit = true;
-      _buildSimpleTerminal(frame, baseUrl);
+      if (window.evaStandalone && window.evaStandalone.workspaceTerminalV1) {
+        _buildWorkspaceTerminal(frame).catch(function(error) {
+          _buildSimpleTerminal(frame, baseUrl);
+          var output = document.getElementById('terminalOutput');
+          if (output) _termPrint(output, 'error', 'Local shell unavailable: ' + (error.message || error));
+        });
+      } else {
+        _buildSimpleTerminal(frame, baseUrl);
+      }
+    } else if (typeof container._evaWorkspaceTerminalFit === 'function') {
+      container._evaWorkspaceTerminalFit();
     }
   }
+}
+
+var _workspaceTerminalAssetsPromise = null;
+
+function _loadWorkspaceTerminalAssets() {
+  if (_workspaceTerminalAssetsPromise) return _workspaceTerminalAssetsPromise;
+  _workspaceTerminalAssetsPromise = new Promise(function(resolve, reject) {
+    var assets = window.evaStandalone && window.evaStandalone.terminalAssets;
+    if (!assets || !assets.xterm || !assets.css || !assets.fit || !assets.search || !assets.webLinks) {
+      reject(new Error('Terminal assets are unavailable.'));
+      return;
+    }
+    if (!document.getElementById('evaXtermStyles')) {
+      var stylesheet = document.createElement('link');
+      stylesheet.id = 'evaXtermStyles';
+      stylesheet.rel = 'stylesheet';
+      stylesheet.href = assets.css;
+      document.head.appendChild(stylesheet);
+    }
+    var scripts = [assets.xterm, assets.fit, assets.search, assets.webLinks];
+    function loadNext(index) {
+      if (index >= scripts.length) {
+        resolve();
+        return;
+      }
+      var script = document.createElement('script');
+      script.src = scripts[index];
+      script.onload = function() { loadNext(index + 1); };
+      script.onerror = function() { reject(new Error('Could not load terminal renderer.')); };
+      document.head.appendChild(script);
+    }
+    loadNext(0);
+  });
+  return _workspaceTerminalAssetsPromise;
+}
+
+function _workspaceTerminalColor(name, fallback) {
+  var value = getComputedStyle(document.body).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+async function _buildWorkspaceTerminal(frame) {
+  await _loadWorkspaceTerminalAssets();
+  var api = window.evaStandalone;
+  var parent = frame.parentNode;
+  frame.style.display = 'none';
+
+  var surface = document.createElement('section');
+  surface.className = 'workspace-terminal';
+  surface.setAttribute('aria-label', 'Interactive local terminal');
+
+  var toolbar = document.createElement('div');
+  toolbar.className = 'workspace-terminal-toolbar';
+
+  var identity = document.createElement('span');
+  identity.className = 'workspace-terminal-identity';
+  identity.textContent = 'LOCAL SHELL';
+  identity.title = 'Interactive user terminal in the selected approved workspace';
+
+  var rootLabel = document.createElement('span');
+  rootLabel.className = 'workspace-terminal-root';
+  rootLabel.textContent = _evaWorkspaceTerminalTarget.label;
+
+  var status = document.createElement('span');
+  status.className = 'workspace-terminal-status';
+  status.textContent = 'CONNECTING';
+  status.setAttribute('aria-live', 'polite');
+
+  var searchInput = document.createElement('input');
+  searchInput.className = 'workspace-terminal-search';
+  searchInput.type = 'search';
+  searchInput.placeholder = 'Find output';
+  searchInput.setAttribute('aria-label', 'Find terminal output');
+
+  var searchButton = document.createElement('button');
+  searchButton.type = 'button';
+  searchButton.className = 'workspace-terminal-tool';
+  searchButton.textContent = 'Find';
+  searchButton.title = 'Find next match';
+
+  var restartButton = document.createElement('button');
+  restartButton.type = 'button';
+  restartButton.className = 'workspace-terminal-tool';
+  restartButton.textContent = 'Restart';
+  restartButton.title = 'Close this shell and start a new one';
+
+  toolbar.append(identity, rootLabel, status, searchInput, searchButton, restartButton);
+
+  var terminalHost = document.createElement('div');
+  terminalHost.className = 'workspace-terminal-host';
+  surface.append(toolbar, terminalHost);
+  parent.appendChild(surface);
+
+  var terminal = new Terminal({
+    allowProposedApi: false,
+    convertEol: false,
+    cursorBlink: true,
+    cursorStyle: 'bar',
+    fontFamily: "'SFMono-Regular', 'Cascadia Code', 'Liberation Mono', monospace",
+    fontSize: 13,
+    scrollback: 5000,
+    theme: {
+      background: _workspaceTerminalColor('--eva-surface', '#0d0d1a'),
+      foreground: _workspaceTerminalColor('--eva-text', '#eef5ff'),
+      cursor: _workspaceTerminalColor('--eva-accent', '#78dce8'),
+      selectionBackground: 'rgba(120, 220, 232, 0.28)'
+    }
+  });
+  var fitAddon = new FitAddon.FitAddon();
+  var searchAddon = new SearchAddon.SearchAddon();
+  terminal.loadAddon(fitAddon);
+  terminal.loadAddon(searchAddon);
+  terminal.loadAddon(new WebLinksAddon.WebLinksAddon(function(event, uri) {
+    event.preventDefault();
+    window.open(uri, '_blank', 'noopener');
+  }));
+  terminal.open(terminalHost);
+
+  var terminalId = '';
+  var lastSequence = 0;
+  var replayReady = false;
+  var exited = false;
+  var pendingEvents = [];
+  var attachedRootId = '';
+
+  function setStatus(value, state) {
+    status.textContent = value;
+    status.dataset.state = state || '';
+  }
+
+  function handleData(payload) {
+    if (!terminalId || !payload || payload.id !== terminalId) return;
+    if (!replayReady) {
+      pendingEvents.push(payload);
+      return;
+    }
+    if (payload.sequence > lastSequence) {
+      lastSequence = payload.sequence;
+      terminal.write(payload.data);
+    }
+  }
+
+  var removeDataListener = api.onTerminalData(handleData);
+  var removeExitListener = api.onTerminalExit(function(payload) {
+    if (!payload || payload.id !== terminalId) return;
+    exited = true;
+    setStatus('EXIT ' + (payload.exitCode === null ? '?' : payload.exitCode), 'exited');
+  });
+
+  async function fitAndResize() {
+    if (!surface.isConnected) return;
+    fitAddon.fit();
+    if (terminalId && !exited) {
+      try {
+        await api.terminalResize(terminalId, terminal.cols, terminal.rows);
+      } catch (_) {}
+    }
+  }
+
+  async function attachTerminal(forceNew) {
+    var terminalTarget = _evaWorkspaceTerminalTarget;
+    setStatus('CONNECTING', 'connecting');
+    replayReady = false;
+    pendingEvents = [];
+    lastSequence = 0;
+    exited = false;
+    if (terminalId && (forceNew || attachedRootId !== terminalTarget.rootId)) {
+      if (forceNew) {
+        try { await api.terminalClose(terminalId); } catch (_) {}
+      }
+      terminalId = '';
+      terminal.reset();
+    }
+    var sessions = await api.terminalList();
+    var descriptor = forceNew ? null : sessions.find(function(item) {
+      return item.rootId === terminalTarget.rootId && !item.exited;
+    });
+    if (!descriptor && !forceNew) {
+      descriptor = sessions.find(function(item) { return item.rootId === terminalTarget.rootId; });
+    }
+    if (!descriptor) {
+      fitAddon.fit();
+      descriptor = await api.terminalCreate({
+        rootId: terminalTarget.rootId,
+        cols: terminal.cols,
+        rows: terminal.rows
+      });
+    }
+    terminalId = descriptor.id;
+    attachedRootId = terminalTarget.rootId;
+    rootLabel.textContent = terminalTarget.label;
+    var replay = await api.terminalReplay(terminalId);
+    if (replay.data) terminal.write(replay.data);
+    lastSequence = replay.sequence;
+    exited = replay.exited;
+    replayReady = true;
+    pendingEvents.sort(function(left, right) { return left.sequence - right.sequence; }).forEach(handleData);
+    pendingEvents = [];
+    setStatus(exited ? 'EXIT ' + (replay.exitCode === null ? '?' : replay.exitCode) : 'CONNECTED', exited ? 'exited' : 'connected');
+    await fitAndResize();
+    terminal.focus();
+  }
+
+  terminal.onData(function(data) {
+    if (!terminalId || exited) return;
+    api.terminalWrite(terminalId, data).catch(function(error) {
+      setStatus('WRITE FAILED', 'error');
+      terminal.write('\r\n\x1b[31m' + (error.message || error) + '\x1b[0m\r\n');
+    });
+  });
+  searchButton.addEventListener('click', function() {
+    if (searchInput.value) searchAddon.findNext(searchInput.value, { incremental: false });
+    terminal.focus();
+  });
+  searchInput.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter') searchButton.click();
+    if (event.key === 'Escape') terminal.focus();
+  });
+  restartButton.addEventListener('click', function() {
+    attachTerminal(true).catch(function(error) { setStatus(error.message || 'FAILED', 'error'); });
+  });
+
+  var resizeObserver = new ResizeObserver(function() { fitAndResize(); });
+  resizeObserver.observe(terminalHost);
+  parent._evaWorkspaceTerminalFit = fitAndResize;
+  window.EvaTerminal = window.EvaTerminal || {};
+  window.EvaTerminal.open = function(target) {
+    if (!target || typeof target.rootId !== 'string' || !target.rootId) return Promise.resolve();
+    _evaWorkspaceTerminalTarget = { rootId: target.rootId, label: String(target.label || 'Workspace') };
+    return attachTerminal(false);
+  };
+  window.addEventListener('beforeunload', function() {
+    removeDataListener();
+    removeExitListener();
+    resizeObserver.disconnect();
+  }, { once: true });
+
+  await attachTerminal(false);
 }
 
 function _buildSimpleTerminal(frame, bridgeBase) {

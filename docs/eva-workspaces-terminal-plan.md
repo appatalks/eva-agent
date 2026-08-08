@@ -1,6 +1,8 @@
 # Eva Workspaces and Terminal Plan
 
-Status: proposed implementation plan.
+Status: active implementation plan. Phases 0-2 and the first workspace-agent,
+monitor, Assets, and Skills integration slices are implemented behind the
+Standalone workspace feature path.
 
 ## Product decision
 
@@ -32,15 +34,16 @@ The plan builds on existing, useful pieces rather than starting over:
   unbounded hidden context in one warm Copilot CLI session.
 - The Electron shell already owns privileged APIs behind a narrow preload
   bridge and starts the local ACP bridge.
-- The current terminal panel is only an input that sends a chat prompt to ACP.
-  The ACP client also has an old, disabled shell-command handler. Neither is
-  suitable as a real terminal or an agent-execution boundary.
+- Eva Standalone now has an Electron-main `node-pty` broker and xterm renderer
+  with approved opaque roots, bounded replay, resize/search, reconnect, and
+  process-session cancellation. The old ACP shell-command handler remains
+  disabled and is not the execution boundary.
 - Eva already has browser-agent status and artifact handling that can become
   run attachments.
 
-The critical missing model is a durable association among project, checkout,
-agent run, terminal, and chat session. Filling that gap first prevents the UI
-from becoming another collection of disconnected panels.
+The bridge now persists projects, checkouts, coding runs, and agent runs and
+links them to existing chat sessions. Durable terminal metadata, typed evidence,
+approval/audit UX, review, and multi-agent handoff remain later slices.
 
 ## Goals
 
@@ -222,6 +225,30 @@ Add a Browser dock in a later UI milestone by attaching existing browser-agent
 runs to `RunAttachment`. It should show current screenshot/status, permission
 requests, and captured evidence; it must not silently grant browser automation
 to child agents.
+
+### Sidebar navigation decision
+
+Treat the Eva sidebar as primary navigation, not a collection of unrelated
+drawers. A destination that owns a durable collection, workflow, or monitoring
+surface opens in the main window. A tool that supplements the current context
+docks without replacing it. Small configuration and identity choices may use
+an overlay.
+
+| Destination | Target experience | Status / migration |
+| --- | --- | --- |
+| New Chat / Eva | Main conversation or voice view | Keep as main views. |
+| Agents | Main Agent Operations view | Implemented; converge its records with `AgentRun`. |
+| Sessions | Main session explorer with chat preview and active-run links | Migrate from the legacy drawer next; keep direct session restoration working during transition. |
+| Prompts / Models / Settings | Central settings workspace | Keep; these already navigate to a full settings surface. |
+| Skills | Main searchable skills library/editor with status/source filters and sorting | Implemented. |
+| Assets | Main unified library for generated artifacts and changed workspace files | Implemented; workspace paths remain opaque and open through Electron main. |
+| Workspaces | Main Workspace Monitor | Implemented. |
+| Terminal | Lower contextual dock while monitoring a workspace; resizable side surface elsewhere | Implemented. |
+| Profile | Settings/identity overlay | Move into Settings rather than creating another main domain. |
+
+The next navigation slice should migrate Sessions. Do not build a
+generic tab canvas first; preserve each domain's existing data and actions while
+moving its presentation into the shared main-view lifecycle.
 
 ### 6. ASCII interactive visual layer
 

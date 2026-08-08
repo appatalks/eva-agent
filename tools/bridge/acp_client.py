@@ -491,6 +491,19 @@ class ACPClient:
                 _telemetry_emit("acp_permission", decision="policy-deny",
                                 tool_kind=tool_kind, option_count=len(options))
             return
+        if permission_mode == "workspace_write":
+            allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
+            if allow_once:
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
+                })
+                _telemetry_emit("acp_permission", decision="workspace-auto-allow",
+                                tool_kind=tool_kind, option_count=len(options))
+            else:
+                self._send_rpc_error(rpc_id, -32602, "Workspace tool request has no one-time allow option")
+                _telemetry_emit("acp_permission", decision="workspace-policy-deny",
+                                tool_kind=tool_kind, option_count=len(options))
+            return
         routine_allowed = bool(_get_learning_consent().get("routine_tools")) and tool_kind in {
             "read", "search", "fetch", "think"
         }

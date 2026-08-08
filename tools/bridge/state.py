@@ -79,6 +79,10 @@ cron_lock = threading.Lock()
 subagent_tasks = {}
 subagent_lock = threading.Lock()
 
+# ── Durable coding workspaces ───────────────────────────────────────
+workspace_store = None
+workspace_lock = threading.RLock()
+
 # ── Telemetry ───────────────────────────────────────────────────────
 telemetry_enabled = os.environ.get("EVA_TELEMETRY", "1") not in ("0", "false", "no")
 telemetry_lock = threading.Lock()

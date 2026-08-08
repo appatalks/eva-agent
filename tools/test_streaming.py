@@ -111,6 +111,31 @@ class StreamingContractTests(unittest.TestCase):
         self.assertEqual(responses, [(56, {"outcome": {"outcome": "selected", "optionId": "read-once"}})])
         self.assertEqual(client.list_pending_permissions(), [])
 
+    def test_workspace_agent_auto_allows_each_tool_once(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        client._begin_prompt(202, "workspace-session", None, "workspace_write")
+        with patch("bridge.acp_client._telemetry_emit") as emit:
+            client._handle_message({
+                "id": 62,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "workspace-session",
+                    "toolCall": {"toolCallId": "call-7", "kind": "execute"},
+                    "options": [
+                        {"optionId": "allow-once", "kind": "allow_once"},
+                        {"optionId": "reject", "kind": "reject_once"},
+                    ],
+                },
+            })
+        client._finish_prompt(202)
+        self.assertEqual(responses, [(62, {
+            "outcome": {"outcome": "selected", "optionId": "allow-once"}
+        })])
+        self.assertEqual(client.list_pending_permissions(), [])
+        self.assertEqual(emit.call_args.kwargs["decision"], "workspace-auto-allow")
+
     def test_passive_recall_rejects_tool_immediately(self):
         client = CallbackACPClient()
         responses = []

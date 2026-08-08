@@ -13,6 +13,38 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   bridgeToken: ipcRenderer.sendSync('bridge-capability-token'),
   isStandalone: true,
   version: readArg('eva-version'),
+  workspaceTerminalV1: readArg('eva-workspace-terminal-v1') === '1',
+  terminalAssets: Object.freeze({
+    xterm: readArg('eva-xterm-url'),
+    css: readArg('eva-xterm-css-url'),
+    fit: readArg('eva-xterm-fit-url'),
+    search: readArg('eva-xterm-search-url'),
+    webLinks: readArg('eva-xterm-web-links-url')
+  }),
+  terminalList: function() { return ipcRenderer.invoke('terminal-list'); },
+  terminalCreate: function(request) { return ipcRenderer.invoke('terminal-create', request); },
+  terminalReplay: function(id) { return ipcRenderer.invoke('terminal-replay', id); },
+  terminalWrite: function(id, data) { return ipcRenderer.invoke('terminal-write', id, data); },
+  terminalResize: function(id, cols, rows) { return ipcRenderer.invoke('terminal-resize', id, cols, rows); },
+  terminalClose: function(id) { return ipcRenderer.invoke('terminal-close', id); },
+  terminalCloseRoot: function(rootId) { return ipcRenderer.invoke('terminal-close-root', rootId); },
+  onTerminalData: function(listener) {
+    const wrapped = function(_event, payload) { listener(payload); };
+    ipcRenderer.on('terminal:data', wrapped);
+    return function() { ipcRenderer.removeListener('terminal:data', wrapped); };
+  },
+  onTerminalExit: function(listener) {
+    const wrapped = function(_event, payload) { listener(payload); };
+    ipcRenderer.on('terminal:exit', wrapped);
+    return function() { ipcRenderer.removeListener('terminal:exit', wrapped); };
+  },
+  workspaceListProjects: function() { return ipcRenderer.invoke('workspace-list-projects'); },
+  workspaceSelectProject: function() { return ipcRenderer.invoke('workspace-select-project'); },
+  workspaceCreateRun: function(request) { return ipcRenderer.invoke('workspace-create-run', request); },
+  workspaceListRuns: function(projectId) { return ipcRenderer.invoke('workspace-list-runs', projectId); },
+  workspaceListAssets: function() { return ipcRenderer.invoke('workspace-list-assets'); },
+  workspaceOpenAsset: function(runId, relativePath) { return ipcRenderer.invoke('workspace-open-asset', runId, relativePath); },
+  workspaceRunAction: function(runId, action, options) { return ipcRenderer.invoke('workspace-run-action', runId, action, options); },
   authLoad: function() { return ipcRenderer.invoke('auth-load'); },
   authSave: function(values) { return ipcRenderer.invoke('auth-save', values); },
   minimize: function() { ipcRenderer.send('win-minimize'); },

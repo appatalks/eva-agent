@@ -16,7 +16,15 @@
 // Bridge calls reuse backgroundBridgeRequest() from options.js (same bridge).
 // ===========================================================================
 
-var _skillsState = { skills: [], draft: null, editingId: null };
+var _skillsState = {
+  skills: [],
+  draft: null,
+  editingId: null,
+  query: '',
+  statusFilter: 'all',
+  sourceFilter: 'all',
+  sort: 'updated'
+};
 
 function _skillsBridge(path, options) {
   if (typeof backgroundBridgeRequest === 'function') {
@@ -174,6 +182,68 @@ function _skillField(row, primary, alt) {
   return '';
 }
 
+function _skillCsv(value) {
+  return String(value || '').split(',').map(function(item) { return item.trim(); }).filter(Boolean);
+}
+
+function _skillUpdatedAt(skill) {
+  var value = _skillField(skill, 'UpdatedAt', 'updatedAt') || _skillField(skill, 'CreatedAt', 'createdAt');
+  var timestamp = Date.parse(value || '');
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function _skillSourceKind(value) {
+  var source = String(value || 'unknown').trim().toLowerCase();
+  var known = ['paste', 'url', 'github', 'file', 'auto-learned', 'edited'];
+  for (var i = 0; i < known.length; i++) {
+    if (source === known[i] || source.indexOf(known[i] + ':') === 0) return known[i];
+  }
+  return 'unknown';
+}
+
+function _filteredSkills() {
+  var query = _skillsState.query.toLowerCase();
+  var skills = _skillsState.skills.filter(function(skill) {
+    var status = String(_skillField(skill, 'Status', 'status') || 'active').toLowerCase();
+    var sourceValue = String(_skillField(skill, 'Source', 'source') || 'unknown');
+    var source = _skillSourceKind(sourceValue);
+    if (_skillsState.statusFilter !== 'all' && status !== _skillsState.statusFilter) return false;
+    if (_skillsState.sourceFilter !== 'all' && source !== _skillsState.sourceFilter) return false;
+    if (!query) return true;
+    var searchable = [
+      _skillField(skill, 'Name', 'name'),
+      _skillField(skill, 'Description', 'description'),
+      _skillField(skill, 'Instructions', 'instructions'),
+      _skillField(skill, 'Tools', 'tools'),
+      _skillField(skill, 'Tags', 'tags'),
+      sourceValue,
+      status
+    ].join(' ').toLowerCase();
+    return searchable.indexOf(query) !== -1;
+  });
+  skills.sort(function(left, right) {
+    if (_skillsState.sort === 'name') {
+      return String(_skillField(left, 'Name', 'name')).localeCompare(String(_skillField(right, 'Name', 'name')));
+    }
+    if (_skillsState.sort === 'status') {
+      var leftStatus = String(_skillField(left, 'Status', 'status') || 'active');
+      var rightStatus = String(_skillField(right, 'Status', 'status') || 'active');
+      return leftStatus.localeCompare(rightStatus) || String(_skillField(left, 'Name', 'name')).localeCompare(String(_skillField(right, 'Name', 'name')));
+    }
+    return _skillUpdatedAt(right) - _skillUpdatedAt(left);
+  });
+  return skills;
+}
+
+function _updateSkillSummary(visibleCount) {
+  var summary = document.getElementById('skillsViewSummary');
+  if (!summary) return;
+  var active = _skillsState.skills.filter(function(skill) {
+    return String(_skillField(skill, 'Status', 'status') || 'active') === 'active';
+  }).length;
+  summary.textContent = visibleCount + ' shown | ' + active + ' active | ' + _skillsState.skills.length + ' total';
+}
+
 function editSkill(skill) {
   var id = String(_skillField(skill, 'SkillId', 'skillId') || '');
   if (!id) return;
@@ -198,14 +268,16 @@ function renderSkillsList() {
   var listEl = document.getElementById('skillsList');
   if (!listEl) return;
   listEl.innerHTML = '';
-  if (!_skillsState.skills.length) {
+  var skills = _filteredSkills();
+  _updateSkillSummary(skills.length);
+  if (!skills.length) {
     var empty = document.createElement('div');
-    empty.className = 'auth-note';
-    empty.textContent = 'No skills yet. Import one above.';
+    empty.className = 'skills-view-empty';
+    empty.textContent = _skillsState.skills.length ? 'No skills match these filters.' : 'No skills yet. Import one from the editor.';
     listEl.appendChild(empty);
     return;
   }
-  _skillsState.skills.forEach(function (sk) {
+  skills.forEach(function (sk) {
     var id = String(_skillField(sk, 'SkillId', 'skillId') || '');
     var name = String(_skillField(sk, 'Name', 'name') || 'Untitled');
     var desc = String(_skillField(sk, 'Description', 'description') || '');
@@ -214,16 +286,20 @@ function renderSkillsList() {
     var tags = String(_skillField(sk, 'Tags', 'tags') || '');
     var enabled = status === 'active';
 
-    var row = document.createElement('div');
-    row.className = 'background-row';
+    var row = document.createElement('article');
+    row.className = 'skill-card' + (enabled ? '' : ' skill-card-disabled');
     var head = document.createElement('div');
-    head.className = 'background-row-head';
+    head.className = 'skill-card-head';
     var title = document.createElement('div');
-    title.className = 'background-title';
-    title.textContent = name + (enabled ? '' : ' (disabled)');
+    title.className = 'skill-card-title';
+    title.textContent = name;
     head.appendChild(title);
+    var badge = document.createElement('span');
+    badge.className = 'skill-status skill-status-' + status;
+    badge.textContent = status.toUpperCase();
+    head.appendChild(badge);
     var actions = document.createElement('div');
-    actions.className = 'background-actions';
+    actions.className = 'skill-card-actions';
     var editBtn = document.createElement('button');
     editBtn.type = 'button';
     editBtn.className = 'auth-save background-inline-button';
@@ -242,25 +318,85 @@ function renderSkillsList() {
     delBtn.textContent = 'Delete';
     delBtn.addEventListener('click', function () { deleteSkill(id); });
     actions.appendChild(delBtn);
-    head.appendChild(actions);
     row.appendChild(head);
 
     if (desc) {
       var d = document.createElement('div');
-      d.className = 'background-description';
+      d.className = 'skill-card-description';
       d.textContent = desc;
       row.appendChild(d);
     }
-    var metaBits = [];
-    if (tools) metaBits.push('Tools: ' + tools);
-    if (tags) metaBits.push('Tags: ' + tags);
-    if (metaBits.length) {
-      var meta = document.createElement('div');
-      meta.className = 'background-meta';
-      metaBits.forEach(function (t) { var s = document.createElement('span'); s.textContent = t; meta.appendChild(s); });
-      row.appendChild(meta);
-    }
+    var chips = document.createElement('div');
+    chips.className = 'skill-card-chips';
+    _skillCsv(tags).forEach(function(tag) {
+      var chip = document.createElement('span'); chip.textContent = '#' + tag; chips.appendChild(chip);
+    });
+    _skillCsv(tools).forEach(function(tool) {
+      var chip = document.createElement('span'); chip.className = 'skill-tool-chip'; chip.textContent = tool; chips.appendChild(chip);
+    });
+    var source = String(_skillField(sk, 'Source', 'source') || 'unknown');
+    var sourceChip = document.createElement('span'); sourceChip.className = 'skill-source-chip'; sourceChip.textContent = source; chips.appendChild(sourceChip);
+    row.appendChild(chips);
+    row.appendChild(actions);
     listEl.appendChild(row);
+  });
+}
+
+function _buildSkillsWorkspace() {
+  var panel = document.getElementById('skillsPanel');
+  var container = document.getElementById('idContainer');
+  var body = panel && panel.querySelector('.skills-panel-body');
+  if (!panel || !container || !body || panel.dataset.workspaceBuilt === 'true') return;
+  panel.dataset.workspaceBuilt = 'true';
+  panel.classList.add('skills-view');
+  container.insertBefore(panel, container.firstChild);
+
+  var intro = body.querySelector('.cog-help');
+  var importer = body.querySelector('.skills-import');
+  var draft = body.querySelector('.skills-draft');
+  var list = document.getElementById('skillsList');
+  var oldHeading = Array.prototype.find.call(body.querySelectorAll('.settings-subhead'), function(item) {
+    return item.textContent.trim() === 'My skills';
+  });
+
+  var toolbar = document.createElement('div');
+  toolbar.className = 'skills-view-toolbar';
+  toolbar.innerHTML =
+    '<input id="skillsSearch" type="search" placeholder="Search names, tags, tools, instructions" aria-label="Search skills">' +
+    '<select id="skillsStatusFilter" aria-label="Filter skills by status"><option value="all">All status</option><option value="active">Active</option><option value="draft">Draft</option><option value="disabled">Disabled</option></select>' +
+    '<select id="skillsSourceFilter" aria-label="Filter skills by source"><option value="all">All sources</option><option value="paste">Paste</option><option value="url">URL</option><option value="github">GitHub</option><option value="file">File</option><option value="auto-learned">Auto-learned</option><option value="edited">Edited</option></select>' +
+    '<select id="skillsSort" aria-label="Sort skills"><option value="updated">Recently updated</option><option value="name">Name</option><option value="status">Status</option></select>' +
+    '<span id="skillsViewSummary">0 shown</span>';
+
+  var layout = document.createElement('div');
+  layout.className = 'skills-view-layout';
+  var library = document.createElement('section');
+  library.className = 'skills-library';
+  var libraryHeading = document.createElement('div');
+  libraryHeading.className = 'skills-column-heading';
+  libraryHeading.innerHTML = '<span>SKILL LIBRARY</span><strong>Reusable capabilities</strong>';
+  library.append(libraryHeading, list);
+  var editor = document.createElement('section');
+  editor.className = 'skills-editor';
+  var editorHeading = document.createElement('div');
+  editorHeading.className = 'skills-column-heading';
+  editorHeading.innerHTML = '<span>IMPORT + EDIT</span><strong>Teach Eva a capability</strong>';
+  editor.append(editorHeading, intro, importer, draft);
+  layout.append(library, editor);
+  body.replaceChildren(toolbar, layout);
+  if (oldHeading) oldHeading.remove();
+
+  document.getElementById('skillsSearch').addEventListener('input', function(event) {
+    _skillsState.query = event.target.value.trim(); renderSkillsList();
+  });
+  document.getElementById('skillsStatusFilter').addEventListener('change', function(event) {
+    _skillsState.statusFilter = event.target.value; renderSkillsList();
+  });
+  document.getElementById('skillsSourceFilter').addEventListener('change', function(event) {
+    _skillsState.sourceFilter = event.target.value; renderSkillsList();
+  });
+  document.getElementById('skillsSort').addEventListener('change', function(event) {
+    _skillsState.sort = event.target.value; renderSkillsList();
   });
 }
 
@@ -310,6 +446,7 @@ async function deleteSkill(id) {
 }
 
 function initSkills() {
+  _buildSkillsWorkspace();
   var typeSel = document.getElementById('skillSourceType');
   if (typeSel) typeSel.addEventListener('change', updateSkillSourceFields);
   var evBtn = document.getElementById('skillEvariseButton');
@@ -325,15 +462,27 @@ function initSkills() {
   updateSkillSourceFields();
 }
 
-// Slide-in Skills panel toggled from the sidebar. Loads the list on open so it
-// always reflects the latest saved skills. Pass false to force-close.
 function toggleSkillsPanel(force) {
   var panel = document.getElementById('skillsPanel');
   if (!panel) return;
-  var visible = panel.getAttribute('aria-hidden') !== 'true';
-  var next = (typeof force === 'boolean') ? !force : visible;
-  if (!next && typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
-  if (!next && typeof closeSidePanels === 'function') closeSidePanels('skillsPanel');
-  panel.setAttribute('aria-hidden', next ? 'true' : 'false');
-  if (!next) loadSkills();
+  var open = document.body.classList.contains('skills-view-open');
+  var shouldOpen = typeof force === 'boolean' ? force : !open;
+  if (!shouldOpen) {
+    document.body.classList.remove('skills-view-open');
+    panel.setAttribute('aria-hidden', 'true');
+    return;
+  }
+  if (typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
+  if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();
+  if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
+  if (typeof closeSidePanels === 'function') closeSidePanels();
+  document.body.classList.add('skills-view-open');
+  panel.setAttribute('aria-hidden', 'false');
+  loadSkills();
 }
+
+window.EvaSkills = {
+  open: function() { toggleSkillsPanel(true); },
+  close: function() { toggleSkillsPanel(false); },
+  refresh: loadSkills
+};

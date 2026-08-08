@@ -371,6 +371,7 @@ from bridge.learning import (  # noqa: F401
     mark_applied as _mark_learning_applied,
     update_consent as _update_learning_consent,
 )
+from bridge.workspaces import WorkspaceError, WorkspaceStore
 
 # Constants needed by BridgeHandler (imported from config)
 _LOG_RING_MAX = _cfg.LOG_RING_MAX
@@ -392,6 +393,13 @@ _BG_PROPOSAL_COLUMNS = _cfg.BG_PROPOSAL_COLUMNS
 _SUBAGENT_MAX = 4
 _SUBAGENT_ACTIVE_STATUSES = {"starting", "waiting", "running", "steering", "finalizing"}
 _AGENT_ACTIVE_STATUSES = _SUBAGENT_ACTIVE_STATUSES | {"awaiting_confirmation", "awaiting_input"}
+
+
+def _workspace_store():
+    with _st.workspace_lock:
+        if _st.workspace_store is None:
+            _st.workspace_store = WorkspaceStore(_cfg.EVA_CONFIG_DIR)
+        return _st.workspace_store
 
 
 def _subagent_active_count(tasks=None):
@@ -437,6 +445,88 @@ def _reserve_subagent_task(task):
             return False
         _st.subagent_tasks[task["id"]] = task
         return True
+
+
+def _public_subagent_task(task):
+    return {
+        key: value for key, value in task.items()
+        if key != "thread" and not key.startswith("_")
+    }
+
+
+def _dispatch_workspace_run(run):
+    """Start one implementation agent in the run's bridge-resolved worktree."""
+    existing_agent = run.get("agent") or {}
+    if existing_agent.get("status") in {"starting", "running", "steering"}:
+        with _st.subagent_lock:
+            existing_task = _st.subagent_tasks.get(existing_agent.get("id"))
+            if existing_task and existing_task.get("status") in _SUBAGENT_ACTIVE_STATUSES:
+                return _public_subagent_task(existing_task)
+        _workspace_store().update_agent_run(
+            existing_agent["id"], "error", "Agent process ended before the coding run completed."
+        )
+    checkout = run.get("checkout") or {}
+    checkout_path = checkout.get("path", "")
+    if checkout.get("lifecycle") != "active" or not checkout_path or not os.path.isdir(checkout_path):
+        raise WorkspaceError("Coding run checkout is unavailable for agent dispatch.")
+    task_id = "sub-" + uuid.uuid4().hex[:8]
+    objective = str(run.get("objective") or "").strip()
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    full_prompt = (
+        "You are Eva's coding implementation agent. Work autonomously in the assigned Git worktree. "
+        "Do not wait for further approval. Inspect the repository, implement the objective, run focused tests, "
+        "and leave all requested files in the worktree. Do not access or modify paths outside the assigned "
+        "worktree. Finish with a concise report of changed files, tests, and any remaining issue.\n\n"
+        "Objective:\n" + objective
+    )
+    task = {
+        "id": task_id,
+        "label": "Workspace: " + objective[:96],
+        "prompt": objective[:1200],
+        "model": str(run.get("model_policy") or "")[:120],
+        "status": "starting",
+        "result": None,
+        "started_at": now_iso,
+        "ended_at": None,
+        "session_id": str(run.get("primary_session_id") or "")[:120],
+        "group_id": "workspace-" + run["id"],
+        "depends_on": [],
+        "signal_on_complete": False,
+        "signal_status": "",
+        "steer_queue": [],
+        "steer_history": [],
+        "coding_run_id": run["id"],
+        "checkout_id": checkout["id"],
+        "capability_policy": "workspace_write",
+        "_cwd": checkout_path,
+    }
+    if not _reserve_subagent_task(task):
+        raise WorkspaceError(f"Agent capacity is full ({_SUBAGENT_MAX} active agents).")
+    try:
+        _workspace_store().create_agent_run(
+            task_id,
+            run["id"],
+            checkout["id"],
+            "agent:" + task_id,
+            "workspace_write",
+        )
+        thread = threading.Thread(
+            target=_subagent_worker,
+            args=(task_id, full_prompt, task["label"], task["model"]),
+            name=f"workspace-agent-{task_id}",
+            daemon=True,
+        )
+        task["thread"] = thread
+        thread.start()
+        return _public_subagent_task(task)
+    except Exception as error:
+        with _st.subagent_lock:
+            _st.subagent_tasks.pop(task_id, None)
+        try:
+            _workspace_store().update_agent_run(task_id, "error", str(error))
+        except Exception:
+            pass
+        raise WorkspaceError("Workspace agent could not start: " + str(error))
 
 
 def _reserve_subagent_batch(tasks):
@@ -853,11 +943,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _require_workspace_capability(self):
+        """Workspace paths are privileged and may only be requested by Electron main."""
+        expected_capability = os.environ.get("EVA_WORKSPACE_CAPABILITY", "")
+        supplied_capability = self.headers.get("X-Eva-Workspace-Capability", "")
+        if not expected_capability or not hmac.compare_digest(supplied_capability, expected_capability):
+            if self.command not in ("GET", "HEAD", "OPTIONS"):
+                self.close_connection = True
+            self._json_response(403, {"error": {"message": "Workspace authorization failed"}})
+            return False
+        return True
+
     def _cors_headers(self):
         normalized_origin = self._normalized_cors_origin()
         self.send_header("Access-Control-Allow-Origin", normalized_origin or "null")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Eva-Workspace-Capability")
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -867,6 +968,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed_path = urllib.parse.urlparse(self.path).path
         if parsed_path not in ("/health", "/v1/models") and not self._require_private_route():
+            return
+        if parsed_path.startswith("/v1/workspaces/") and not self._require_workspace_capability():
             return
         if parsed_path == "/health":
             self._health()
@@ -904,6 +1007,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._alerts_list()
         elif parsed_path == "/v1/notifications":
             self._notifications_list()
+        elif parsed_path == "/v1/workspaces/projects":
+            self._workspace_projects_list()
+        elif parsed_path == "/v1/workspaces/runs":
+            self._workspace_runs_list()
+        elif parsed_path == "/v1/workspaces/assets":
+            self._workspace_assets_list()
+        elif re.fullmatch(r"/v1/workspaces/runs/[^/]+", parsed_path):
+            self._workspace_run_get(urllib.parse.unquote(parsed_path.rsplit("/", 1)[1]))
+        elif re.fullmatch(r"/v1/workspaces/checkouts/[^/]+/status", parsed_path):
+            self._workspace_checkout_status(urllib.parse.unquote(parsed_path.split("/v1/workspaces/checkouts/", 1)[1].rsplit("/status", 1)[0]))
         elif parsed_path == "/v1/memory/context":
             self._memory_context()
         elif parsed_path == "/v1/protected-memory/status":
@@ -950,6 +1063,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed_path = urllib.parse.urlparse(self.path).path
         if not self._require_private_route():
+            return
+        if parsed_path.startswith("/v1/workspaces/") and not self._require_workspace_capability():
             return
         if parsed_path == "/v1/chat/completions":
             self._chat_completions()
@@ -1029,6 +1144,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._signal_send_request()
         elif parsed_path == "/v1/notifications/seen":
             self._notifications_mark_seen()
+        elif parsed_path == "/v1/workspaces/projects":
+            self._workspace_project_register()
+        elif parsed_path == "/v1/workspaces/eva-ready":
+            self._workspace_eva_ready()
+        elif parsed_path == "/v1/workspaces/runs":
+            self._workspace_run_create()
+        elif parsed_path == "/v1/workspaces/assets/resolve":
+            self._workspace_asset_resolve()
+        elif re.fullmatch(r"/v1/workspaces/runs/[^/]+/(archive|discard)", parsed_path):
+            self._workspace_run_disposition(parsed_path)
+        elif re.fullmatch(r"/v1/workspaces/runs/[^/]+/dispatch", parsed_path):
+            self._workspace_run_dispatch(parsed_path)
         elif re.fullmatch(r"/v1/background/proposals/[^/]+/(approve|reject)", parsed_path):
             self._background_review(parsed_path)
         elif parsed_path == "/v1/files/purge":
@@ -1093,6 +1220,161 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return None, "Invalid JSON"
         return data, ""
+
+    def _workspace_body(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return None, "Invalid Content-Length"
+        if content_length <= 0:
+            return None, "Empty request body"
+        if content_length > 16 * 1024:
+            return None, "Workspace request body exceeds the limit"
+        data, error = self._read_json_body()
+        if error:
+            return None, error
+        if not isinstance(data, dict):
+            return None, "Workspace request body must be an object"
+        return data, ""
+
+    def _workspace_projects_list(self):
+        try:
+            self._json_response(200, {"projects": _workspace_store().list_projects()})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_project_register(self):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        path_value = data.get("path")
+        name_value = data.get("name")
+        if not isinstance(path_value, str) or len(path_value) > 4096:
+            self._json_response(400, {"error": {"message": "A valid project directory is required."}})
+            return
+        if name_value is not None and not isinstance(name_value, str):
+            self._json_response(400, {"error": {"message": "Project name must be text."}})
+            return
+        try:
+            project = _workspace_store().register_project(path_value, name_value)
+            self._json_response(201, {"project": project})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_eva_ready(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._json_response(400, {"error": {"message": "Invalid Content-Length"}})
+            return
+        if content_length > 0:
+            if content_length > 16 * 1024:
+                self._json_response(400, {"error": {"message": "Workspace request body exceeds the limit"}})
+                return
+            self.rfile.read(content_length)
+        try:
+            self._json_response(200, {"project": _workspace_store().ensure_eva_ready_project()})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_runs_list(self):
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        project_id = query.get("project_id", [""])[0]
+        if len(project_id) > 64:
+            self._json_response(400, {"error": {"message": "Invalid project ID."}})
+            return
+        try:
+            self._json_response(200, {"runs": _workspace_store().list_runs(project_id or None)})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_assets_list(self):
+        try:
+            self._json_response(200, {"assets": _workspace_store().list_workspace_assets()})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_asset_resolve(self):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        run_id = str(data.get("run_id") or "")
+        relative_path = data.get("relative_path")
+        try:
+            path_value = _workspace_store().resolve_workspace_asset(run_id, relative_path)
+            self._json_response(200, {"path": path_value})
+        except WorkspaceError as error:
+            self._json_response(404, {"error": {"message": str(error)}})
+
+    def _workspace_run_get(self, run_id):
+        try:
+            self._json_response(200, {"run": _workspace_store().get_run(run_id)})
+        except WorkspaceError as error:
+            self._json_response(404, {"error": {"message": str(error)}})
+
+    def _workspace_run_create(self):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            run = _workspace_store().create_run(
+                data.get("project_id"),
+                data.get("objective"),
+                data.get("primary_session_id", ""),
+                data.get("base_ref", "HEAD"),
+                data.get("model_policy", ""),
+            )
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+            return
+        task = None
+        dispatch_error = ""
+        if not _cfg.env_disabled("EVA_WORKSPACE_AGENT_AUTODISPATCH"):
+            try:
+                task = _dispatch_workspace_run(run)
+            except WorkspaceError as error:
+                dispatch_error = str(error)
+        self._json_response(201, {
+            "run": _workspace_store().get_run(run["id"]),
+            "task": task,
+            "dispatch_error": dispatch_error,
+        })
+
+    def _workspace_checkout_status(self, checkout_id):
+        try:
+            self._json_response(200, {"checkout": _workspace_store().checkout_status(checkout_id)})
+        except WorkspaceError as error:
+            self._json_response(404, {"error": {"message": str(error)}})
+
+    def _workspace_run_disposition(self, parsed_path):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        suffix = parsed_path.split("/v1/workspaces/runs/", 1)[1]
+        run_id, action = suffix.rsplit("/", 1)
+        try:
+            if action == "archive":
+                run = _workspace_store().archive_run(urllib.parse.unquote(run_id))
+            else:
+                run = _workspace_store().discard_run(
+                    urllib.parse.unquote(run_id), bool(data.get("confirm_dirty", False))
+                )
+            self._json_response(200, {"run": run})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_run_dispatch(self, parsed_path):
+        run_id = urllib.parse.unquote(parsed_path.split("/v1/workspaces/runs/", 1)[1].rsplit("/dispatch", 1)[0])
+        try:
+            run = _workspace_store().get_run(run_id)
+            task = _dispatch_workspace_run(run)
+            self._json_response(202, {"run": _workspace_store().get_run(run_id), "task": task})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
 
     def _learning_authorized(self):
         """Learning data is local-control data, so use the bridge capability gate."""
@@ -2799,6 +3081,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "group_id": task.get("group_id", ""),
                     "depends_on": task.get("depends_on", []),
                     "signal_status": task.get("signal_status", ""),
+                    "coding_run_id": task.get("coding_run_id", ""),
+                    "checkout_id": task.get("checkout_id", ""),
+                    "capability_policy": task.get("capability_policy", ""),
                 })
 
         for module, kind, label in (
@@ -2949,7 +3234,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         thread = threading.Thread(target=_subagent_worker, args=(task_id, prompt, label, model), name=f"subagent-{task_id}", daemon=True)
         thread.start()
-        self._json_response(202, {"task": {k: v for k, v in task.items() if k != "thread"}})
+        self._json_response(202, {"task": _public_subagent_task(task)})
 
     def _subagent_spawn_batch(self):
         """Atomically reserve and launch one collaborative or independent batch."""
@@ -3011,7 +3296,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(500, {"error": {"message": "batch worker startup failed; no tasks were launched"}})
             return
         self._json_response(202, {
-            "tasks": [{k: v for k, v in task.items() if not k.startswith("_")} for task in tasks],
+            "tasks": [_public_subagent_task(task) for task in tasks],
             "group_id": group_id,
             "collaborative": collaborative,
             "deferred_signal": signal_on_complete,
@@ -3044,7 +3329,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if steer is None:
                 self._json_response(429, {"error": {"message": f"max {_SUBAGENT_MAX} concurrent subagents"}})
                 return
-            public_task = {k: v for k, v in task.items() if k != "thread"}
+            public_task = _public_subagent_task(task)
 
         if steer["restart"]:
             thread = threading.Thread(
@@ -3066,9 +3351,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if not task:
                     self._json_response(404, {"error": {"message": "subagent task not found"}})
                     return
-                self._json_response(200, {"task": {k: v for k, v in task.items() if k != "thread"}})
+                self._json_response(200, {"task": _public_subagent_task(task)})
             else:
-                tasks = [{k: v for k, v in t.items() if k != "thread"} for t in _st.subagent_tasks.values()]
+                tasks = [_public_subagent_task(t) for t in _st.subagent_tasks.values()]
                 active = _subagent_active_count()
                 self._json_response(200, {"tasks": tasks[-20:], "running": active, "max": _SUBAGENT_MAX})
 

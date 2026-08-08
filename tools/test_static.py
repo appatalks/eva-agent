@@ -69,8 +69,11 @@ def test_required_files():
         "core/js/sessions.js",
         "core/js/voice.js",
         "core/js/agents.js",
+        "core/js/assets.js",
         "core/js/dialogs.js",
+        "core/js/workspaces.js",
         "tools/acp_bridge.py",
+        "tools/bridge/workspaces.py",
         "tools/kusto_mcp.py",
         "tools/test_prompt_budget.js",
         "tools/test_request_routing.js",
@@ -86,6 +89,13 @@ def test_required_files():
         "tools/test_learning.js",
         "tools/protected_memory.py",
         "tools/test_protected_memory.py",
+        "tools/test_terminal_broker.js",
+        "tools/test_workspaces.py",
+        "tools/test_workspaces_e2e.py",
+        "tools/test_workspace_electron_e2e.js",
+        "tools/test_workspace_projection.js",
+        "standalone/terminal-broker.js",
+        "standalone/workspace-projection.js",
         ".gitignore",
     ]
     for f in required:
@@ -505,6 +515,8 @@ def test_model_selector():
     """All expected model values present in the selector."""
     with open("index.html") as f:
         html = f.read()
+    with open("standalone/package.json") as f:
+        package = json.load(f)
 
     # Extract model select content
     match = re.search(r'<select id="selModel"[^>]*>(.*?)</select>', html, re.DOTALL)
@@ -757,6 +769,8 @@ def test_signal_and_github_mcp_contract():
     report("signal_repeat_marker_precedence", "var forceSignalRepeat = !!(signalContext && signalContext.repeat);" in options_js and "if (forceSignalRepeat) return '';" in options_js)
     with open("core/js/sessions.js") as f:
         sessions_js = f.read()
+    with open("core/style.css") as f:
+        style_css = f.read()
     report("signal_repeat_session_boundaries", sessions_js.count("clearLastDeliveredSignal") >= 2 and "function clearMessages()" in options_js and "clearLastDeliveredSignal();" in options_js)
     report("signal_repeat_provider_context", all("signalRequest:" in source and "signalContext:" in source and "captureSignalDeliveryContext" in source for source in (aig_js, copilot_js, gpt_core_js, google_js, lm_studio_js)))
     report("signal_repeat_stale_context_fails_closed", "signalContextValid = !signalContext || isSignalDeliveryContextValid" in options_js and "Signal repeat expired after the conversation changed" in options_js)
@@ -1101,6 +1115,7 @@ def test_sidebar_workflow_contract():
     report("workflow_session_delegated_activation", "function activateSessionListItem" in sessions_js and "data-session-id" in sessions_js and "activationBound" in sessions_js)
     report("workflow_session_awaits_save", "return Promise.resolve(saveCurrentSession()).then(function()" in sessions_js)
     report("workflow_session_legacy_fallback", "localStorage.getItem('session_' + id)" in sessions_js and "idbSaveSession(id, data)" in sessions_js)
+    report("workflow_session_legacy_visible_restore", "function _restoreLegacySessionOutput" in sessions_js and "Restorable transcript" not in sessions_js and "closeWorkbench" in sessions_js)
     report("workflow_session_reveals_chat", "EvaAgents.close" in sessions_js and "Session loaded." in sessions_js)
     report("workflow_sidebar_session_provider", "function getAllSessions" in sessions_js and "updatedAt:" in sessions_js)
     report("workflow_new_session_on_launch", "idbMigrateFromLocalStorage().then(function() {\n    newSession();" in sessions_js)
@@ -1108,6 +1123,9 @@ def test_sidebar_workflow_contract():
     report("workflow_side_panels_click_outside", "function closeSidePanels" in sessions_js and "EVA_SIDE_PANEL_IDS" in sessions_js and "document.addEventListener('click'" in sessions_js)
     report("workflow_agent_view_navigation", "function closeAgentOperationsForNavigation" in sessions_js and "#evaAgentsBtn" in sessions_js and "#lcarsAgentsBtn" in sessions_js)
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
+    report("workflow_skills_main_view", "_buildSkillsWorkspace" in skills_js and "skills-view-open" in skills_js and "window.EvaSkills" in skills_js and "body.skills-view-open" in open("core/style.css").read())
+    report("workflow_skills_organization", all(value in skills_js for value in ("skillsSearch", "skillsStatusFilter", 'value=\"draft\"', "skillsSourceFilter", "skillsSort", "_filteredSkills", "_skillSourceKind", "skillsViewSummary")))
+    report("workflow_skills_cross_navigation", "EvaSkills.close" in sessions_js and "EvaSkills.close" in open("core/js/agents.js").read() and "EvaSkills.close" in open("core/js/assets.js").read() and "EvaSkills.close" in open("core/js/workspaces.js").read())
     report("workflow_profile_picker", 'id="profilePanel"' in html and re.search(r'src="core/js/profiles\.js(?:\?[^" ]+)?"', html) is not None and "function switchEvaProfile" in profiles_js)
     report("workflow_profile_awaits_session_save", "async function switchEvaProfile" in profiles_js and "await saveCurrentSession()" in profiles_js)
     report("workflow_profile_scoped_sessions", "saveCurrentSession" in profiles_js and "eva_sessions" not in profiles_js)
@@ -1117,6 +1135,90 @@ def test_sidebar_workflow_contract():
     report("workflow_native_context_menu", "webContents.on('context-menu'" in standalone_main and "buildContextMenuTemplate" in standalone_main and os.path.isfile("standalone/context-menu.js") and os.path.isfile("tools/test_context_menu.js"))
     report("workflow_skills_database_copy", "stores it in the database" in html and "stores it in ADX" not in html)
     report("workflow_audio_settings_persist", "function initAudioPreferences" in options_js and "tts_engine" in options_js and "tts_auto_speak" in options_js and "tts_voice" in options_js)
+
+
+def test_workspace_terminal_contract():
+    """The experimental terminal stays confined to Electron's allowlisted broker."""
+    with open("standalone/main.js") as f:
+        standalone_main = f.read()
+    with open("standalone/preload.js") as f:
+        standalone_preload = f.read()
+    with open("standalone/terminal-broker.js") as f:
+        broker = f.read()
+    with open("core/js/sessions.js") as f:
+        sessions_js = f.read()
+    with open("standalone/package.json") as f:
+        package = json.load(f)
+
+    dependencies = package.get("dependencies", {})
+    packaged_files = package.get("build", {}).get("files", [])
+    report("workspace_terminal_feature_flagged", "EVA_WORKSPACE_TERMINAL_V1" in standalone_main and "--eva-workspace-terminal-v1" in standalone_main)
+    report("workspace_terminal_trusted_renderer", "requireTerminalBroker(event)" in standalone_main and "isTrustedEvaRenderer(event)" in standalone_main)
+    report("workspace_terminal_no_preload_process_access", "child_process" not in standalone_preload and "terminalCreate" in standalone_preload and "onTerminalData" in standalone_preload)
+    report("workspace_terminal_opaque_root", "registerRoot('app-root', getAppRoot(), { allowSymlinks: true })" in standalone_main and "CREATE_FIELDS = new Set(['rootId', 'cols', 'rows'])" in broker and "_assertNoSymlinkComponents" in broker)
+    report("workspace_terminal_secret_redaction", "EVA_BRIDGE_TOKEN" in broker and "EVA_LOCAL_SPEECH_TOKEN" in broker)
+    report("workspace_terminal_bounded_replay", "maxScrollbackBytes" in broker and "trimUtf8Tail" in broker and "sequence" in broker)
+    report("workspace_terminal_renderer", "_buildWorkspaceTerminal" in sessions_js and "terminalReplay" in sessions_js and "ResizeObserver" in sessions_js)
+    report("workspace_terminal_dependencies", all(name in dependencies for name in ("node-pty", "@xterm/xterm", "@xterm/addon-fit", "@xterm/addon-search", "@xterm/addon-web-links")))
+    report("workspace_terminal_packaged", all(name in packaged_files for name in ("context-menu.js", "terminal-broker.js")) and "node_modules/node-pty/**" in package.get("build", {}).get("asarUnpack", []))
+
+
+def test_coding_workspace_contract():
+    """Durable coding workspaces keep Git paths and execution ownership outside the renderer."""
+    with open("tools/bridge/workspaces.py") as f:
+        workspaces = f.read()
+    with open("tools/bridge/core.py") as f:
+        bridge_core = f.read()
+    with open("standalone/main.js") as f:
+        standalone_main = f.read()
+    with open("standalone/preload.js") as f:
+        standalone_preload = f.read()
+    with open("core/js/workspaces.js") as f:
+        workspace_ui = f.read()
+    with open("core/js/assets.js") as f:
+        assets_ui = f.read()
+    with open("core/js/sessions.js") as f:
+        sessions_js = f.read()
+    with open("core/style.css") as f:
+        style_css = f.read()
+    with open("index.html") as f:
+        html = f.read()
+    with open("standalone/package.json") as f:
+        package = json.load(f)
+
+    renderer_project = standalone_main.split("function workspaceProjectForRenderer", 1)[1].split("function workspaceRunForRenderer", 1)[0]
+    renderer_run = standalone_main.split("function workspaceRunForRenderer", 1)[1].split("async function workspaceListProjects", 1)[0]
+    list_projects_handler = standalone_main.split("async function workspaceListProjects", 1)[1].split("async function workspaceSelectProject", 1)[0]
+    list_runs_handler = standalone_main.split("async function workspaceListRuns", 1)[1].split("async function workspaceRunAction", 1)[0]
+    report("coding_workspace_sqlite_schema", all(value in workspaces for value in ("CREATE TABLE projects", "CREATE TABLE checkouts", "CREATE TABLE coding_runs", "CREATE TABLE agent_runs", "CREATE TABLE approvals")))
+    report("coding_workspace_git_arrays", "[\"git\", *arguments]" in workspaces and "shell=" not in workspaces and "reference.startswith(\"-\")" in workspaces)
+    report("coding_workspace_canonical_paths", "resolve(strict=True)" in workspaces and "_is_within(checkout_path, self.runtime_root)" in workspaces)
+    report("coding_workspace_dirty_confirmation", "Confirm dirty cleanup" in workspaces and "confirm_dirty" in workspaces)
+    report("coding_workspace_missing_worktree_recovery", '"worktree", "prune"' in workspaces and "_worktree_registered" in workspaces)
+    report("coding_workspace_bridge_routes", all(value in bridge_core for value in ("/v1/workspaces/projects", "/v1/workspaces/eva-ready", "/v1/workspaces/runs", "/v1/workspaces/assets", "_workspace_checkout_status")))
+    report("coding_workspace_eva_ready_bootstrap", "ensure_eva_ready_project" in workspaces and "Eva Ready Workspace" in workspaces and "ensureEvaReadyWorkspace" in standalone_main)
+    report("coding_workspace_agent_autodispatch", "_dispatch_workspace_run" in bridge_core and "create_agent_run" in workspaces and "dispatchPendingWorkspaceRuns" in standalone_main and "EVA_WORKSPACE_AGENT_AUTODISPATCH" in bridge_core)
+    workspace_utils = open("tools/bridge/utils.py").read()
+    acp_client = open("tools/bridge/acp_client.py").read()
+    report("coding_workspace_agent_cwd", 'task.get("_cwd")' in workspace_utils and 'cwd=assigned_cwd' in workspace_utils and '"coding_run_id": task.get("coding_run_id"' in bridge_core)
+    report("coding_workspace_agent_auto_permission", 'permission_mode == "workspace_write"' in acp_client and 'decision="workspace-auto-allow"' in acp_client and 'permission_mode=permission_mode' in workspace_utils)
+    report("coding_workspace_agent_durable_completion", "status = 'completed'" in workspaces and "agent_completed" in workspaces and '"agent": self._agent_payload' in workspaces)
+    report("coding_workspace_agent_no_private_path", "_public_subagent_task" in bridge_core and 'not key.startswith("_")' in bridge_core)
+    report("coding_workspace_bridge_capability", "_require_workspace_capability" in bridge_core and "EVA_WORKSPACE_CAPABILITY" in bridge_core and "workspaceCapabilityToken" in standalone_main and "workspaceCapabilityToken" not in standalone_preload)
+    report("coding_workspace_electron_picker", "dialog.showOpenDialog" in standalone_main and "workspace-select-project" in standalone_main)
+    report("coding_workspace_renderer_opaque", "path:" not in renderer_project and "path:" not in renderer_run and "workspaceCheckoutForRenderer" in standalone_main and "redactKnownPaths" in renderer_run)
+    broker = open("standalone/terminal-broker.js").read()
+    report("coding_workspace_ptys_close_before_discard", "await terminalBroker.terminateByRoot(checkoutId)" in standalone_main and "terminalBroker.unregisterRoot(checkoutId)" in standalone_main and "terminalCloseRoot" in workspace_ui and "terminateByRoot(rootId)" in broker and "scope: this._terminationScope(child.pid)" in broker and "this.signalProcess(-session.child.pid, signal)" in broker)
+    report("coding_workspace_preload_allowlist", all(value in standalone_preload for value in ("terminalCloseRoot", "workspaceListProjects", "workspaceSelectProject", "workspaceCreateRun", "workspaceRunAction")))
+    report("coding_workspace_ui_wired", "core/js/workspaces.js" in html and "workspacePanel" in html and "workspaceWorkbench" in html and "openWorkspaceTerminal" in workspace_ui and "_evaWorkspaceTerminalTarget" in sessions_js and "body.eva-standalone .workspace-panel" in style_css)
+    report("coding_workspace_monitor_observation_only", "setInterval(monitor, 10000)" in workspace_ui and "api().terminalList()" in workspace_ui and "terminalCreate" not in workspace_ui.split("async function monitor()", 1)[1].split("function openWorkbench", 1)[0] and "registerWorkspaceRoot" not in list_projects_handler and "registerWorkspaceRoot" not in list_runs_handler and "ensureTerminalRoot(rootId)" in standalone_main)
+    report("coding_workspace_monitor_text_voice_updates", "addMonitorActivity" in workspace_ui and "autoSpeak.checked" in workspace_ui and "speakText(message)" in workspace_ui and "lastPeriodicNoteAt" in workspace_ui)
+    report("coding_workspace_main_navigation", "openWorkbench" in workspace_ui and "workspace-workbench-open" in style_css and "closeWorkbench" in sessions_js and "closeWorkbench" in open("core/js/agents.js").read())
+    report("coding_workspace_monitor_responsive", "workspace-workbench-body" in style_css and "@media (max-width: 760px)" in style_css and "resize: horizontal" in style_css and "terminal-panel-expanded" in style_css and "terminal-panel-docked" in style_css and "text-align: left !important" in style_css and "toggleTerminalWidth" in sessions_js)
+    report("coding_workspace_assets_index", "list_workspace_assets" in workspaces and "resolve_workspace_asset" in workspaces and "_resolve_checkout_file" in workspaces and "_validated_managed_checkout" in workspaces and "../README.md" in open("tools/test_workspaces_e2e.py").read())
+    report("coding_workspace_assets_main_view", "assetsView" in html and "assets-view-open" in style_css and "workspaceListAssets" in assets_ui and "workspaceOpenAsset" in assets_ui)
+    report("coding_workspace_assets_path_private", "workspace-list-assets" in standalone_main and "workspace-open-asset" in standalone_main and "workspaceListAssets" in standalone_preload and "workspaceOpenAsset" in standalone_preload and "path:" not in assets_ui)
+    report("coding_workspace_report_path_redaction", "redactKnownPaths" in standalone_main and "workspace-projection.js" in json.dumps(package.get("build", {}).get("files", [])) and os.path.isfile("tools/test_workspace_projection.js"))
 
 
 def test_pages_comparison_contract():
@@ -1589,7 +1691,7 @@ def test_agent_operations_behavior():
         def stop(self):
             pass
 
-        def prompt(self, text, timeout=120, on_chunk=None, on_event=None):
+        def prompt(self, text, timeout=120, on_chunk=None, permission_mode="interactive", on_event=None):
             if on_event:
                 on_event({"kind": "tool", "label": "Using read (running)"})
             if on_chunk:
@@ -1805,6 +1907,8 @@ def main():
         ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract, test_issue_130_latency_contract, test_prompt_budget_contract, test_streaming_contract]),
         ("Security Alerts", [test_security_alert_contract]),
         ("Sidebar Workflows", [test_sidebar_workflow_contract]),
+        ("Workspace Terminal", [test_workspace_terminal_contract]),
+        ("Coding Workspaces", [test_coding_workspace_contract]),
         ("Pages Comparison", [test_pages_comparison_contract]),
         ("Seed File", [test_seed_file]),
         ("Goals Static Contract", [test_goals_static_contract]),
