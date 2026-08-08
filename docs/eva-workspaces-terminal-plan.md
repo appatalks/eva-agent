@@ -223,6 +223,30 @@ runs to `RunAttachment`. It should show current screenshot/status, permission
 requests, and captured evidence; it must not silently grant browser automation
 to child agents.
 
+### Sidebar navigation decision
+
+Treat the Eva sidebar as primary navigation, not a collection of unrelated
+drawers. A destination that owns a durable collection, workflow, or monitoring
+surface opens in the main window. A tool that supplements the current context
+docks without replacing it. Small configuration and identity choices may use
+an overlay.
+
+| Destination | Target experience | Status / migration |
+| --- | --- | --- |
+| New Chat / Eva | Main conversation or voice view | Keep as main views. |
+| Agents | Main Agent Operations view | Implemented; converge its records with `AgentRun`. |
+| Sessions | Main session explorer with chat preview and active-run links | Migrate from the legacy drawer next; keep direct session restoration working during transition. |
+| Prompts / Models / Settings | Central settings workspace | Keep; these already navigate to a full settings surface. |
+| Skills | Main searchable skills library/editor with status/source filters and sorting | Implemented. |
+| Assets | Main unified library for generated artifacts and changed workspace files | Implemented; workspace paths remain opaque and open through Electron main. |
+| Workspaces | Main Workspace Monitor | Implemented. |
+| Terminal | Lower contextual dock while monitoring a workspace; resizable side surface elsewhere | Implemented. |
+| Profile | Settings/identity overlay | Move into Settings rather than creating another main domain. |
+
+The next navigation slice should migrate Sessions. Do not build a
+generic tab canvas first; preserve each domain's existing data and actions while
+moving its presentation into the shared main-view lifecycle.
+
 ### 6. ASCII interactive visual layer
 
 The terminal gets an optional, compact "Eva Field" canvas in its header or

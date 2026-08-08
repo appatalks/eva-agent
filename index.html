@@ -31,6 +31,8 @@
   <script src="core/js/dalle3.js"></script>
   <script src="core/js/idb-store.js"></script>
   <script src="core/js/sessions.js?v=5.5.5"></script>
+  <script src="core/js/assets.js?v=5.5.5"></script>
+  <script src="core/js/workspaces.js?v=5.5.5"></script>
   <script src="core/js/agents.js?v=5.5.5"></script>
   <script src="core/js/voice.js"></script>
   <script src="core/js/aws-sdk-2.1304.0.min.js"></script>
@@ -103,8 +105,11 @@
       <button id="evaSkillsBtn" class="eva-nav-item" type="button" title="Skills" onclick="toggleSkillsPanel()">
         <span class="eva-nav-icon">&#x1F9E9;</span> Skills
       </button>
-      <button id="evaAssetsBtn" class="eva-nav-item" type="button" title="Assets" onclick="toggleAssetsPanel()">
+      <button id="evaAssetsBtn" class="eva-nav-item" type="button" title="Assets" onclick="EvaAssets.open()">
         <span class="eva-nav-icon">&#x1F4C1;</span> Assets
+      </button>
+      <button id="evaWorkspacesBtn" class="eva-nav-item" type="button" title="Workspaces" onclick="EvaWorkspaces.openWorkbench()">
+        <span class="eva-nav-icon">&#x25A3;</span> Workspaces
       </button>
       <button id="evaTerminalBtn" class="eva-nav-item" type="button" title="Terminal" onclick="toggleTerminalPanel()">
         <span class="eva-nav-icon">&#x1F4BB;</span> Terminal
@@ -272,11 +277,50 @@
     <ul id="assetsList" class="session-list assets-list"></ul>
   </div>
 
+  <div id="workspacePanel" class="workspace-panel" aria-hidden="true" aria-label="Coding workspaces">
+    <div class="session-panel-header">
+      <span>Workspaces</span>
+      <button id="workspacePanelClose" aria-label="Close workspaces">&times;</button>
+    </div>
+    <div class="workspace-panel-actions">
+      <button id="workspaceAddProjectBtn" type="button">Add project</button>
+      <button id="workspaceOpenWorkbenchBtn" type="button" title="Open workspace monitor">Monitor</button>
+      <button id="workspaceRefreshBtn" type="button" aria-label="Refresh workspaces" title="Refresh workspaces">&#x21BB;</button>
+    </div>
+    <div class="workspace-panel-body">
+      <div id="workspaceUnavailable" class="workspace-unavailable" hidden></div>
+      <form id="workspaceRunForm" class="workspace-run-form">
+        <label for="workspaceProjectSelect">Project</label>
+        <select id="workspaceProjectSelect" aria-label="Project for new coding run"></select>
+        <label for="workspaceObjective">Coding run</label>
+        <textarea id="workspaceObjective" rows="3" maxlength="4000" placeholder="Describe the change Eva should make"></textarea>
+        <div class="workspace-run-options">
+          <label for="workspaceBaseRef">Base</label>
+          <input id="workspaceBaseRef" type="text" value="HEAD" maxlength="256" autocomplete="off">
+          <button id="workspaceCreateRunBtn" type="submit">Start run</button>
+        </div>
+      </form>
+      <div id="workspaceStatus" class="workspace-status" aria-live="polite"></div>
+      <section class="workspace-section" aria-labelledby="workspaceProjectsHeading">
+        <h2 id="workspaceProjectsHeading">Projects</h2>
+        <ul id="workspaceProjectList" class="workspace-list"></ul>
+      </section>
+      <section class="workspace-section" aria-labelledby="workspaceRunsHeading">
+        <h2 id="workspaceRunsHeading">Coding runs</h2>
+        <ul id="workspaceRunList" class="workspace-list"></ul>
+      </section>
+      <section id="workspaceDetail" class="workspace-detail" aria-live="polite"></section>
+    </div>
+  </div>
+
   <!-- Terminal panel (inline copilot CLI) -->
   <div id="terminalPanel" class="terminal-panel" aria-hidden="true">
     <div class="session-panel-header">
       <span>Terminal</span>
-      <button id="terminalPanelClose" aria-label="Close terminal">&times;</button>
+      <span class="terminal-panel-controls">
+        <button id="terminalPanelExpand" type="button" title="Expand terminal" aria-label="Expand terminal">&#x2194;</button>
+        <button id="terminalPanelClose" aria-label="Close terminal">&times;</button>
+      </span>
     </div>
     <div id="terminalContainer" class="terminal-container">
       <iframe id="terminalFrame" class="terminal-frame" sandbox="allow-same-origin allow-scripts allow-forms" aria-label="Terminal"></iframe>
@@ -298,6 +342,66 @@
   </div>
 
   <div id="idContainer">
+    <section id="assetsView" class="assets-view" aria-hidden="true" aria-label="Assets library">
+      <header class="assets-view-header">
+        <div>
+          <div class="assets-view-kicker">GENERATED + WORKSPACE FILES</div>
+          <h1>Assets</h1>
+        </div>
+        <div class="assets-view-actions">
+          <span id="assetsViewUpdated" class="assets-view-updated">STANDBY</span>
+          <button id="assetsViewRefresh" class="assets-view-icon" type="button" title="Refresh assets" aria-label="Refresh assets">&#x21BB;</button>
+          <button id="assetsViewClose" class="assets-view-icon" type="button" title="Return to chat" aria-label="Return to chat">&times;</button>
+        </div>
+      </header>
+      <div class="assets-view-toolbar" role="toolbar" aria-label="Asset filters">
+        <button type="button" data-asset-filter="all" aria-pressed="true">All</button>
+        <button type="button" data-asset-filter="workspace" aria-pressed="false">Workspaces</button>
+        <button type="button" data-asset-filter="generated" aria-pressed="false">Generated</button>
+        <span id="assetsViewCount">0 files</span>
+      </div>
+      <div class="assets-view-body">
+        <div id="assetsViewList" class="assets-view-list" aria-live="polite"></div>
+        <aside id="assetsViewDetail" class="assets-view-detail" aria-label="Selected asset"></aside>
+      </div>
+    </section>
+    <section id="workspaceWorkbench" class="workspace-workbench" aria-hidden="true" aria-label="Coding workspace monitor">
+      <header class="workspace-workbench-header">
+        <div>
+          <div class="workspace-kicker">DURABLE CODING RUNS</div>
+          <h1>Workspace Monitor</h1>
+        </div>
+        <div class="workspace-workbench-actions">
+          <span id="workspaceMonitorUpdated" class="workspace-monitor-updated">STANDBY</span>
+          <button id="workspaceMonitorNewBtn" class="workspace-monitor-btn" type="button" title="Create a coding run">New run</button>
+          <button id="workspaceMonitorRefreshBtn" class="workspace-monitor-icon" type="button" title="Refresh workspace activity" aria-label="Refresh workspace activity">&#x21BB;</button>
+          <button id="workspaceMonitorCloseBtn" class="workspace-monitor-icon" type="button" title="Return to chat" aria-label="Return to chat">&times;</button>
+        </div>
+      </header>
+      <div class="workspace-monitor-metrics" aria-label="Workspace monitor summary">
+        <div><span>CODING RUNS</span><strong id="workspaceMonitorActiveRuns">0</strong></div>
+        <div><span>TERMINALS</span><strong id="workspaceMonitorTerminalCount">0</strong></div>
+        <div><span>DIRTY FILES</span><strong id="workspaceMonitorDirtyCount">0</strong></div>
+        <div><span>LAST CHECK</span><strong id="workspaceMonitorLastCheck">--</strong></div>
+      </div>
+      <div class="workspace-workbench-body">
+        <nav class="workspace-monitor-nav" aria-label="Coding runs">
+          <div class="workspace-monitor-pane-header">RUNS</div>
+          <div id="workspaceWorkbenchRuns" class="workspace-monitor-runs"></div>
+        </nav>
+        <section class="workspace-monitor-activity" aria-labelledby="workspaceMonitorActivityTitle">
+          <div class="workspace-monitor-pane-header">
+            <span id="workspaceMonitorActivityTitle">EVA ACTIVITY</span>
+            <span id="workspaceMonitorMode">WATCHING</span>
+          </div>
+          <ol id="workspaceMonitorFeed" class="workspace-monitor-feed" aria-live="polite"></ol>
+        </section>
+        <aside class="workspace-monitor-detail" aria-labelledby="workspaceMonitorDetailTitle">
+          <div class="workspace-monitor-pane-header" id="workspaceMonitorDetailTitle">RUN CONTEXT</div>
+          <div id="workspaceWorkbenchDetail" class="workspace-monitor-detail-content"></div>
+        </aside>
+      </div>
+    </section>
     <section id="agentsView" class="agents-view" aria-hidden="true" aria-label="Agent operations">
       <header class="agents-view-header">
         <div>

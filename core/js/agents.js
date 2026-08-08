@@ -53,6 +53,9 @@ var EvaAgents = (function() {
   function open() {
     if (state.open) return Promise.resolve();
     if (typeof closeVoiceView === 'function' && typeof _vv !== 'undefined' && _vv.open) closeVoiceView();
+    if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
+    if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();
+    if (window.EvaSkills && typeof window.EvaSkills.close === 'function') window.EvaSkills.close();
     closeSidePanels();
     state.open = true;
     document.body.classList.add('agents-view-open');
