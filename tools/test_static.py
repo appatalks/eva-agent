@@ -1115,7 +1115,7 @@ def test_sidebar_workflow_contract():
     report("workflow_auth_ipc_trusted_renderer", "isTrustedEvaRenderer" in standalone_main and "fileURLToPath(event.senderFrame.url)" in standalone_main)
     report("workflow_http_navigation_blocked", "event.preventDefault()" in standalone_main and "if (!url.startsWith('http://127.0.0.1')" in standalone_main)
     report("workflow_native_context_menu", "webContents.on('context-menu'" in standalone_main and "buildContextMenuTemplate" in standalone_main and os.path.isfile("standalone/context-menu.js") and os.path.isfile("tools/test_context_menu.js"))
-    report("workflow_skills_database_copy", "stores it database" in html and "stores it in ADX" not in html)
+    report("workflow_skills_database_copy", "stores it in the database" in html and "stores it in ADX" not in html)
     report("workflow_audio_settings_persist", "function initAudioPreferences" in options_js and "tts_engine" in options_js and "tts_auto_speak" in options_js and "tts_voice" in options_js)
 
 
@@ -1253,7 +1253,7 @@ def test_agent_operations_contract():
     report("agent_operations_script", re.search(r'src="core/js/agents\.js(?:\?[^" ]+)?"', html) is not None)
     report("agent_operations_adaptive_polling",
            "AGENT_ACTIVE_POLL_MS = 2000" in ui and "AGENT_IDLE_POLL_MS = 20000" in ui
-            and "function scheduleNextRefresh" in ui and "setInterval(refresh, 2000)" not in ui
+            and "function scheduleNextRefresh" in ui and "return Promise.resolve(refresh()).finally(scheduleNextRefresh);" in ui and "setInterval(refresh, 2000)" not in ui
             and "setInterval(function() { if (!state.open) refresh(); }, 15000);" not in ui,
            "Agent Operations must use active/idle timeout polling")
     report("acp_permission_adaptive_polling",
@@ -1263,11 +1263,20 @@ def test_agent_operations_contract():
             "ACP permissions must use request, pending, and idle timeout polling")
     report("session_active_navigation",
            'id="sessionActiveTab"' in html and 'id="activeSessionList"' in html
-           and "function refreshActiveSessionList" in session_ui and "EvaAgents.openAgent" in session_ui,
+            and 'aria-controls="sessionActiveView"' in html and 'aria-labelledby="sessionActiveTab"' in html
+            and "function refreshActiveSessionList" in session_ui and "EvaAgents.openAgent" in session_ui
+            and "event.key === 'ArrowRight'" in session_ui,
            "Sessions must expose active agents and navigate to their detail view")
     report("session_titles_preserved",
-           "SESSION_TITLE_MAX_LENGTH = 140" in session_ui and "white-space: normal" in open("core/style.css").read(),
+            "SESSION_TITLE_MAX_LENGTH = 140" in session_ui and re.search(r"\.session-title\s*\{[^}]*white-space:\s*normal", open("core/style.css").read(), re.S) is not None,
            "Session titles must retain and render longer names")
+    report("session_active_capacity_summary",
+            "active agents; " in session_ui and "subagent slots" in session_ui and "data.subagents_active" in session_ui,
+            "Active-agent counts must remain distinct from subagent capacity")
+    report("agent_operations_detail_updates_in_place",
+            "function updateDetail(agent, content)" in ui and "content.dataset.agentId === agent.id" in ui
+            and "if (state.selectedId) renderDetail(state.selectedId);" in ui,
+            "Agent details must refresh live fields without rebuilding steering input")
     report("agent_capacity_guidance",
            "Open Sessions > Active to monitor or steer them" in cognition,
            "Capacity errors must direct users to active sessions")

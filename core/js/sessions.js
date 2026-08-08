@@ -367,6 +367,8 @@ function setSessionPanelTab(tab) {
   var actions = document.querySelector('#sessionPanel .session-panel-actions');
   if (chatsTab) chatsTab.setAttribute('aria-selected', selected === 'chats' ? 'true' : 'false');
   if (activeTab) activeTab.setAttribute('aria-selected', selected === 'active' ? 'true' : 'false');
+  if (chatsTab) chatsTab.tabIndex = selected === 'chats' ? 0 : -1;
+  if (activeTab) activeTab.tabIndex = selected === 'active' ? 0 : -1;
   if (chatsView) chatsView.hidden = selected !== 'chats';
   if (activeView) activeView.hidden = selected !== 'active';
   if (actions) actions.hidden = selected !== 'chats';
@@ -409,7 +411,8 @@ function refreshActiveSessionList() {
     }
     var summary = document.createElement('li');
     summary.className = 'session-active-summary';
-    summary.textContent = active.length + ' active / ' + (data.capacity || active.length) + ' agent slots';
+    summary.textContent = active.length + ' active agents; ' + (data.subagents_active || 0) +
+      ' / ' + (data.capacity || 0) + ' subagent slots';
     list.appendChild(summary);
     active.forEach(function(agent) {
       var item = document.createElement('li');
@@ -490,6 +493,22 @@ function initSessions() {
   if (chatsTab) chatsTab.addEventListener('click', function() { setSessionPanelTab('chats'); });
   var activeTab = document.getElementById('sessionActiveTab');
   if (activeTab) activeTab.addEventListener('click', function() { setSessionPanelTab('active'); });
+  [chatsTab, activeTab].filter(Boolean).forEach(function(tab) {
+    tab.addEventListener('keydown', function(event) {
+      var tabs = [chatsTab, activeTab].filter(Boolean);
+      var index = tabs.indexOf(tab);
+      var nextIndex = index;
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = (index + tabs.length - 1) % tabs.length;
+      else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (index + 1) % tabs.length;
+      else if (event.key === 'Home') nextIndex = 0;
+      else if (event.key === 'End') nextIndex = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      var nextTab = tabs[nextIndex];
+      setSessionPanelTab(nextTab === activeTab ? 'active' : 'chats');
+      nextTab.focus();
+    });
+  });
   var activeRefresh = document.getElementById('sessionActiveRefreshBtn');
   if (activeRefresh) activeRefresh.addEventListener('click', refreshActiveSessionList);
 

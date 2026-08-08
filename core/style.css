@@ -2046,13 +2046,14 @@ body.theme-eva .skills-panel .session-panel-header { border-color: var(--eva-bor
   font-size: 13px;
 }
 .session-panel-actions button:hover { background: rgba(255,255,255,0.15); }
-.session-tabs {
+.session-tab-controls {
   display: flex;
   align-items: center;
   gap: 4px;
   padding: 0 16px 8px;
   border-bottom: 1px solid rgba(255,255,255,0.1);
 }
+.session-tabs { display: flex; align-items: center; gap: 4px; }
 .session-tabs button {
   min-height: 30px;
   padding: 5px 9px;
@@ -2065,7 +2066,7 @@ body.theme-eva .skills-panel .session-panel-header { border-color: var(--eva-bor
   font-size: 12px;
 }
 .session-tabs button[aria-selected="true"] { color: #eef5ff; border-bottom-color: #6e8efb; }
-.session-tabs #sessionActiveRefreshBtn { margin-left: auto; font-size: 16px; }
+.session-tab-controls #sessionActiveRefreshBtn { margin-left: auto; font-size: 16px; }
 .session-tab-view { display: flex; flex: 1; min-height: 0; }
 .session-tab-view[hidden] { display: none; }
 

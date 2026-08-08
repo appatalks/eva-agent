@@ -51,7 +51,7 @@ var EvaAgents = (function() {
   }
 
   function open() {
-    if (state.open) return;
+    if (state.open) return Promise.resolve();
     if (typeof closeVoiceView === 'function' && typeof _vv !== 'undefined' && _vv.open) closeVoiceView();
     closeSidePanels();
     state.open = true;
@@ -60,8 +60,9 @@ var EvaAgents = (function() {
     var button = document.getElementById('evaAgentsBtn');
     if (view) view.setAttribute('aria-hidden', 'false');
     if (button) button.classList.add('active');
-    refreshAndSchedule();
+    var refreshPromise = refreshAndSchedule();
     startGraph();
+    return refreshPromise;
   }
 
   function close() {
@@ -71,7 +72,7 @@ var EvaAgents = (function() {
     var button = document.getElementById('evaAgentsBtn');
     if (view) view.setAttribute('aria-hidden', 'true');
     if (button) button.classList.remove('active');
-    if (state.pollTimer) clearInterval(state.pollTimer);
+    if (state.pollTimer) clearTimeout(state.pollTimer);
     state.pollTimer = null;
     state.refreshSequence++;
     if (state.refreshController) state.refreshController.abort();
@@ -91,7 +92,7 @@ var EvaAgents = (function() {
   }
 
   function refreshAndSchedule() {
-    Promise.resolve(refresh()).finally(scheduleNextRefresh);
+    return Promise.resolve(refresh()).finally(scheduleNextRefresh);
   }
 
   function toggle() {
@@ -156,12 +157,7 @@ var EvaAgents = (function() {
     }
     renderCards(agents);
     updateGraph(graph.nodes || [], graph.edges || []);
-    if (state.selectedId) {
-      var steerInput = document.getElementById('agentSteerInput');
-      if (!steerInput || (!steerInput.value && document.activeElement !== steerInput)) {
-        renderDetail(state.selectedId);
-      }
-    }
+    if (state.selectedId) renderDetail(state.selectedId);
   }
 
   function setText(id, value) {
@@ -304,13 +300,35 @@ var EvaAgents = (function() {
     }
   }
 
+  function detailStatusText(agent) {
+    return statusLabel(agent.status) + '  ' + elapsed(agent) + (agent.model ? '  ' + agent.model : '') +
+      (agent.signal_status ? '  SIGNAL ' + String(agent.signal_status).toUpperCase() : '');
+  }
+
+  function updateDetail(agent, content) {
+    var status = content.querySelector('[data-agent-detail-status]');
+    var activity = content.querySelector('[data-agent-detail-activity]');
+    var result = content.querySelector('[data-agent-detail-result]');
+    if (!status || !activity || !result) return false;
+    status.className = 'agent-detail-status status-' + agent.status;
+    status.textContent = detailStatusText(agent);
+    activity.textContent = agent.activity || (isActive(agent.status) ? 'Working...' : 'No activity reported.');
+    result.textContent = agent.result || (isActive(agent.status) ? 'Agent is working...' : 'No output reported.');
+    return true;
+  }
+
   function renderDetail(agentId) {
     var agents = (state.data && state.data.agents) || [];
     var agent = agents.filter(function(item) { return item.id === agentId; })[0];
     var panel = document.getElementById('agentDetail');
     var content = document.getElementById('agentDetailContent');
     if (!panel || !content || !agent) return;
+    if (content.dataset.agentId === agent.id && updateDetail(agent, content)) {
+      panel.setAttribute('aria-hidden', 'false');
+      return;
+    }
     content.replaceChildren();
+    content.dataset.agentId = agent.id;
     var kicker = document.createElement('div');
     kicker.className = 'agents-kicker';
     kicker.textContent = kindLabel(agent.kind) + ' / ' + agent.id;
@@ -318,8 +336,8 @@ var EvaAgents = (function() {
     title.textContent = agent.label || 'Agent session';
     var status = document.createElement('div');
     status.className = 'agent-detail-status status-' + agent.status;
-    status.textContent = statusLabel(agent.status) + '  ' + elapsed(agent) + (agent.model ? '  ' + agent.model : '') +
-               (agent.signal_status ? '  SIGNAL ' + String(agent.signal_status).toUpperCase() : '');
+    status.dataset.agentDetailStatus = 'true';
+    status.textContent = detailStatusText(agent);
     var promptLabel = document.createElement('h3');
     promptLabel.textContent = 'CURRENT OBJECTIVE';
     var prompt = document.createElement('p');
@@ -327,10 +345,12 @@ var EvaAgents = (function() {
     var activityLabel = document.createElement('h3');
     activityLabel.textContent = 'LATEST ACTIVITY';
     var activity = document.createElement('p');
+    activity.dataset.agentDetailActivity = 'true';
     activity.textContent = agent.activity || (isActive(agent.status) ? 'Working...' : 'No activity reported.');
     var resultLabel = document.createElement('h3');
     resultLabel.textContent = 'LATEST OUTPUT';
     var result = document.createElement('pre');
+    result.dataset.agentDetailResult = 'true';
     result.textContent = agent.result || (isActive(agent.status) ? 'Agent is working...' : 'No output reported.');
     content.append(kicker, title, status, promptLabel, prompt, activityLabel, activity, resultLabel, result);
     if (agent.kind === 'subagent') content.appendChild(buildSteerForm(agent));
@@ -715,8 +735,8 @@ var EvaAgents = (function() {
   }
 
   function openAgent(agentId) {
-    open();
-    return Promise.resolve(refresh()).then(function() {
+    var refreshPromise = state.open ? refreshAndSchedule() : open();
+    return Promise.resolve(refreshPromise).then(function() {
       var agent = ((state.data && state.data.agents) || []).filter(function(item) { return item.id === agentId; })[0];
       if (agent) openAgentDetail(agent);
     });
