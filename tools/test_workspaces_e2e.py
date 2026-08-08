@@ -16,6 +16,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from bridge import core as bridge
 
+BRIDGE_TEST_TOKEN = "test-token"
+
 
 def git(directory, *args):
     return subprocess.run(
@@ -28,7 +30,7 @@ def request(base_url, method, route, body=None, workspace_capability=True):
     payload = json.dumps(body).encode("utf-8") if body is not None else None
     headers = {
         "Content-Type": "application/json",
-        "Authorization": "Bearer bridge-test-capability",
+        "Authorization": "Bearer " + BRIDGE_TEST_TOKEN,
     }
     if workspace_capability:
         headers["X-Eva-Workspace-Capability"] = "workspace-test-capability"
@@ -81,7 +83,7 @@ def main():
             bridge._st.workspace_store.update_agent_run(task_id, "done", task["result"])
 
         bridge._subagent_worker = fake_workspace_worker
-        os.environ["EVA_BRIDGE_TOKEN"] = "bridge-test-capability"
+        os.environ["EVA_BRIDGE_TOKEN"] = BRIDGE_TEST_TOKEN
         os.environ["EVA_WORKSPACE_CAPABILITY"] = "workspace-test-capability"
         server = bridge.ThreadingHTTPServer(("127.0.0.1", 0), bridge.BridgeHandler)
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
