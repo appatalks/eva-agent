@@ -1,6 +1,8 @@
 # Eva Workspaces and Terminal Plan
 
-Status: proposed implementation plan.
+Status: active implementation plan. Phases 0-2 and the first workspace-agent,
+monitor, Assets, and Skills integration slices are implemented behind the
+Standalone workspace feature path.
 
 ## Product decision
 
@@ -32,15 +34,16 @@ The plan builds on existing, useful pieces rather than starting over:
   unbounded hidden context in one warm Copilot CLI session.
 - The Electron shell already owns privileged APIs behind a narrow preload
   bridge and starts the local ACP bridge.
-- The current terminal panel is only an input that sends a chat prompt to ACP.
-  The ACP client also has an old, disabled shell-command handler. Neither is
-  suitable as a real terminal or an agent-execution boundary.
+- Eva Standalone now has an Electron-main `node-pty` broker and xterm renderer
+  with approved opaque roots, bounded replay, resize/search, reconnect, and
+  process-session cancellation. The old ACP shell-command handler remains
+  disabled and is not the execution boundary.
 - Eva already has browser-agent status and artifact handling that can become
   run attachments.
 
-The critical missing model is a durable association among project, checkout,
-agent run, terminal, and chat session. Filling that gap first prevents the UI
-from becoming another collection of disconnected panels.
+The bridge now persists projects, checkouts, coding runs, and agent runs and
+links them to existing chat sessions. Durable terminal metadata, typed evidence,
+approval/audit UX, review, and multi-agent handoff remain later slices.
 
 ## Goals
 
