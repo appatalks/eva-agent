@@ -302,6 +302,15 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
         task = _st.subagent_tasks.get(task_id)
         if not task:
             return
+
+    def sync_workspace(status, report=""):
+        if not task.get("coding_run_id") or _st.workspace_store is None:
+            return
+        try:
+            _st.workspace_store.update_agent_run(task_id, status, report)
+        except Exception as workspace_error:
+            print(f"[Workspace Agent] Status sync failed for {task_id}: {workspace_error}")
+
     try:
         dependency_context = _subagent_dependency_context(task_id) if task.get("depends_on") else ""
         from bridge.acp_client import ACPClient
@@ -310,9 +319,10 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
             if not template or not template.alive:
                 raise RuntimeError("ACP not available")
             selected_model = model or template.model
+            assigned_cwd = str(task.get("_cwd") or template.cwd)
             client = ACPClient(
                 copilot_path=template.copilot_path,
-                cwd=template.cwd,
+                cwd=assigned_cwd,
                 model=selected_model,
                 mcp_config=copy.deepcopy(template.mcp_config),
                 reasoning_effort=template.reasoning_effort,
@@ -320,16 +330,19 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
         client.start()
         with _st.subagent_lock:
             task["model"] = client.model or "default"
+            task["status"] = "running"
+        sync_workspace("running")
         prompt_text = f"[Subagent task: {label}] {prompt}"
         if dependency_context:
             prompt_text += "\n\nUpstream agent outputs:\n" + dependency_context
 
         live_output = ""
         live_output_chars = 0
+        last_workspace_sync = 0.0
 
         def on_chunk(text):
             """Expose bounded, user-visible output while the ACP prompt runs."""
-            nonlocal live_output, live_output_chars
+            nonlocal live_output, live_output_chars, last_workspace_sync
             if not text:
                 return
             chunk = str(text)
@@ -342,6 +355,9 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 active_task["result"] = live_output
                 active_task["output_chars"] = live_output_chars
                 active_task["last_output_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            if time.monotonic() - last_workspace_sync >= 1.5:
+                last_workspace_sync = time.monotonic()
+                sync_workspace("running", live_output[-1200:])
 
         def on_event(event):
             """Expose coarse ACP lifecycle progress without retaining private reasoning."""
@@ -352,9 +368,11 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                     return
                 active_task["activity"] = label_text
                 active_task["last_activity_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            sync_workspace("running", label_text)
         try:
+            permission_mode = "workspace_write" if task.get("capability_policy") == "workspace_write" else "interactive"
             result_text = _subagent_result_text(client.prompt(
-                prompt_text, timeout=180, on_chunk=on_chunk, on_event=on_event,
+                prompt_text, timeout=180, on_chunk=on_chunk, permission_mode=permission_mode, on_event=on_event,
             ))
             while True:
                 with _st.subagent_lock:
@@ -375,10 +393,11 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 live_output = ""
                 live_output_chars = 0
                 result_text = _subagent_result_text(client.prompt(
-                    prompt_text, timeout=180, on_chunk=on_chunk, on_event=on_event,
+                    prompt_text, timeout=180, on_chunk=on_chunk, permission_mode=permission_mode, on_event=on_event,
                 ))
         finally:
             client.stop()
+        sync_workspace("done", result_text)
         try:
             _push_notification(f"Subagent done: {label}", result_text[:300], channel="chat")
         except Exception as notify_error:
@@ -393,6 +412,7 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
             task["status"] = "error"
             task["result"] = str(e)[:500]
             task["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        sync_workspace("error", str(e))
         try:
             _push_notification(f"Subagent failed: {label}", str(e)[:300], channel="chat")
         except Exception as notify_error:

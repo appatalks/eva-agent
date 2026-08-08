@@ -41,6 +41,12 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 - TTS: OpenAI (default), browser, user-authorized Local Voices, and Amazon Polly (standard/neural/generative)
 - LCARS and Eva themes (7 Eva variants)
 - Standalone Electron AppImage with bundled bridge
+- Durable coding workspaces with automatic Eva-ready Git project provisioning,
+  isolated worktrees, workspace-confined ACP agents, and durable run records
+- Real Electron PTY terminal with xterm rendering, bounded replay, resize/search,
+  lower-half Workspace Monitor docking, and process-session cancellation
+- Main-window Workspace Monitor, unified generated/workspace Assets library,
+  and searchable Skills library/editor with source/status organization
 - Full behavioral eval harness with mock and live modes
 
 ## Architecture
@@ -217,15 +223,21 @@ core/
                              [[EVA_LOOK]], [[EVA_FILE]]
     agents.js              Agent Operations scorecard, task detail, steering,
                            keyed card updates, and memory topology canvas
+    assets.js              Main Assets library: generated artifacts plus
+                 changed files from retained coding worktrees
     dialogs.js             Promise-based in-app text prompt for Electron
     dalle3.js              Image generation via gpt-image-1 (dalle3Send)
     idb-store.js           IndexedDB storage backend (sessions + blobs)
-    sessions.js            Session persistence and management
+    sessions.js            Session persistence, legacy-visible restoration,
+                 terminal/xterm renderer and dock navigation
     voice.js               Wake-word "Eva" via Web Speech API
     camera.js              Webcam capture for [[EVA_LOOK]] vision
     browser-agent.js       Frontend integration for browser agent runs
     pandora.js             Pandora box / Easter egg system
-    skills.js              Skill import UI (paste/URL/GitHub/file upload)
+    skills.js              Full-view Skills library/editor: search, status/source
+                 filters, sort, import, edit, enable/disable, delete
+    workspaces.js          Workspace Monitor, coding-run creation, progress
+                 narration, terminal/chat handoff, lifecycle actions
     external.js            External data fetching at page load
 
 tools/
@@ -248,6 +260,8 @@ tools/
                            Signal messaging via signal-cli
     telemetry.py           Structured event logging (latency, routing decisions)
     utils.py               URL validation, LM Studio validation, config persistence
+    workspaces.py          SQLite workspace domain: projects, checkouts, coding
+                 runs, agent runs, worktrees, assets, safe cleanup
   web_search_mcp.py        MCP server: DuckDuckGo + Google fallback (no API key)
   sqlite_memory.py         SQLite memory backend (SqliteMemory class)
   kusto_mcp.py             MCP server for Azure Data Explorer (10 tools)
@@ -263,11 +277,20 @@ tools/
   test_eva.py              Live bridge integration suite
   test_latency.py          Latency benchmarks
   test_skills_e2e.py       Skill import end-to-end tests
+  test_terminal_broker.js  PTY confinement, replay, process-session cleanup
+  test_terminal_e2e.js     Packaged terminal, Sessions, and Skills UI workflow
+  test_workspace_electron_e2e.js
+                           Packaged Workspace/Assets/terminal workflow
+  test_workspaces.py       Git worktree and symlink-confinement lifecycle tests
+  test_workspaces_e2e.py   Workspace bridge, agent dispatch, Assets HTTP lifecycle
   eval/                    Behavioral eval harness
 
 standalone/
-  main.js                  Electron shell: port allocation, bridge spawn, health polling
-  preload.js               Context bridge (exposes evaStandalone API to renderer)
+  main.js                  Electron shell, bridge spawn, workspace-only capability,
+                           project picker, opaque IPC projections, asset opening
+  preload.js               Narrow allowlisted renderer IPC surface
+  terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
+  workspace-projection.js  Redacts known project/worktree paths from reports
   package.json             Electron + electron-builder config (v5.5.5)
 ```
 
@@ -276,6 +299,17 @@ standalone/
 ### Browser-side (no install needed)
 - Barlow Condensed font (loaded from Google Fonts CDN)
 - AWS SDK v2.1304.0 (bundled, for Polly TTS)
+
+### Electron terminal runtime
+
+| Package | Purpose |
+|---|---|
+| `node-pty` | Native PTY creation and streaming |
+| `@xterm/xterm` | Terminal rendering |
+| `@xterm/addon-fit` | Measured container/grid fitting |
+| `@xterm/addon-search` | Scrollback search |
+| `@xterm/addon-web-links` | Safe terminal link detection |
+| `playwright-core` (dev) | Attach to packaged Electron through CDP for E2E tests |
 
 ### Server-side (for ACP Bridge)
 | Dependency | Required for | Install |
@@ -452,6 +486,21 @@ Options:
 |---|---|---|
 | `/v1/files/write` | POST | Write artifact to ARTIFACTS_DIR |
 | `/v1/files/<name>` | GET | Serve artifact (download or auto-open with `?open=1`) |
+
+**Coding Workspaces (Standalone capability required):**
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/workspaces/eva-ready` | POST | Create/register the managed Eva Ready Workspace |
+| `/v1/workspaces/projects` | GET/POST | List or register Git projects |
+| `/v1/workspaces/runs` | GET/POST | List runs or create worktree + dispatch agent |
+| `/v1/workspaces/runs/<id>` | GET | Read one run and latest AgentRun |
+| `/v1/workspaces/runs/<id>/dispatch` | POST | Recover/dispatch active run |
+| `/v1/workspaces/runs/<id>/archive` | POST | Archive run and retain checkout |
+| `/v1/workspaces/runs/<id>/discard` | POST | Explicit safe cleanup |
+| `/v1/workspaces/checkouts/<id>/status` | GET | Revalidate checkout and dirty state |
+| `/v1/workspaces/assets` | GET | List changed workspace files |
+| `/v1/workspaces/assets/resolve` | POST | Resolve one contained relative file for Electron main |
 
 **Background:**
 
@@ -1087,6 +1136,259 @@ The incremental path to fuller graph retrieval is:
 Keeping this projection read-only means the dashboard can ship independently of
 that indexing work and cannot corrupt existing memory.
 
+## Coding Workspaces and Terminal
+
+Coding workspaces are an experimental Eva Standalone feature enabled with
+`EVA_WORKSPACE_TERMINAL_V1=1`, the Electron argument
+`--eva-workspace-terminal-v1`, or:
+
+```bash
+cd standalone
+npm run start:workspace
+```
+
+The workspace system is a local control plane layered on the existing bridge
+and Agent Operations implementation. The renderer never receives arbitrary
+Node process access or absolute workspace paths. The Python bridge owns durable
+records and Git operations; Electron main owns path-bearing responses, project
+selection, PTYs, and system file opening; preload exposes an allowlisted API of
+opaque IDs and display metadata.
+
+### Shipped architecture
+
+```text
+Renderer (opaque IDs only)
+    |
+    | workspaceList*, workspaceCreateRun, workspaceRunAction,
+    | workspaceOpenAsset, terminal*
+    v
+Electron main
+    |-- main-process-only EVA_WORKSPACE_CAPABILITY
+    |-- filesystem picker and system file opener
+    |-- TerminalBroker (node-pty + approved-root registry)
+    |-- renderer-safe DTO and report redaction
+    |
+    | authenticated loopback HTTP
+    v
+Python bridge / tools/bridge/workspaces.py
+    |-- workspaces.sqlite3
+    |-- argument-array Git operations
+    |-- managed runtime root and Eva Ready Workspace
+    |-- CodingRun / AgentRun lifecycle and workspace Assets
+    v
+Git source repository -> isolated eva/run-<id> worktree
+                              |
+                              +-> dedicated ACPClient(cwd=worktree)
+```
+
+### Durable records and filesystem layout
+
+The database is `${EVA_CONFIG_DIR}/workspaces.sqlite3`. Managed worktrees live
+under `${EVA_CONFIG_DIR}/worktrees/`, and the automatically provisioned project
+lives at `${EVA_CONFIG_DIR}/projects/eva-ready/`.
+
+| Record | Current responsibility |
+|---|---|
+| `projects` | Canonical Git root and display metadata. |
+| `checkouts` | Source checkout or managed worktree, branch, base revision, lifecycle, dirty count, owner references. |
+| `coding_runs` | Objective, project/checkout link, linked chat ID, model policy, run state, final disposition. |
+| `agent_runs` | Durable agent identity, conversation key, checkout, capability policy, status, bounded report, parent link. |
+| `terminal_sessions` | Reserved durable terminal metadata/checkpoint schema; live PTYs are currently Electron-owned. |
+| `run_attachments` | Reserved typed run evidence schema. |
+| `approvals` | Reserved append-only run/agent/terminal decision schema. |
+
+New records use UUIDs. Existing `sess_*` conversation IDs remain external
+links and are not migrated into a new ID format.
+
+### Project bootstrap and run creation
+
+At startup, Electron calls `POST /v1/workspaces/eva-ready`. The bridge creates
+and registers **Eva Ready Workspace**, including an initial README and a local
+Git identity. This allows a coding run without a repository picker. The picker
+remains available for a user-owned Git repository; non-Git folders are
+rejected.
+
+`POST /v1/workspaces/runs`:
+
+1. Validates the project UUID, objective, base ref, chat ID, and model policy.
+2. Resolves the base commit with argument-array Git; option-like refs are
+   rejected.
+3. Creates branch `eva/run-<short-id>` and a worktree below the managed runtime
+   root, never inside the source working tree.
+4. Persists `Checkout` and `CodingRun` records.
+5. Reserves a workspace subagent slot, persists an `AgentRun`, and starts a
+   dedicated ACP client with the worktree as its real `cwd`.
+
+If agent capacity is full, the worktree/run remain durable and the response
+contains a dispatch error. Standalone retries incomplete active runs on the
+next startup. Tests may set `EVA_WORKSPACE_AGENT_AUTODISPATCH=0`; production
+defaults to automatic dispatch.
+
+### Workspace agent execution
+
+Workspace agents reuse the observable subagent registry, so the same task is
+visible in Agent Operations with `coding_run_id`, `checkout_id`, and
+`capability_policy`. Unlike generic subagents, the worker creates its
+`ACPClient` with the assigned worktree and uses prompt permission mode
+`workspace_write`.
+
+ACP `session/request_permission` requests are automatically allowed once only
+for `read`, `search`, `fetch`, and `think` tool kinds when the active workspace
+prompt offers an `allow_once` option. Execute, edit, delete, and unknown tool
+kinds require an explicit permission decision because ACP does not provide a
+path contract that can prove worktree confinement. Ordinary chats and generic
+subagents retain interactive permission handling; passive recall continues to
+reject tools. The automatic mode never accepts persistent `allow_always`
+authority.
+
+Live ACP chunks update the task and periodically persist a bounded report.
+Plan/tool events update activity. Completion persists the final report and
+marks the coding run `completed`; errors remain retryable. Known project and
+worktree path prefixes are replaced with `<workspace>` before report text
+crosses preload.
+
+### Workspace Monitor and progress narration
+
+`core/js/workspaces.js` implements the full main-window monitor:
+
+- run list with project, objective, agent state, branch, and dirty count;
+- selected run context, policy, linked session, terminal/chat actions, and
+  bounded final report;
+- activity history capped at 60 events;
+- observation polling every 10 seconds;
+- dispatch, state transition, bounded live report, completion, and failure
+  narration;
+- significant transition speech only when Auto Speak is enabled, with a
+  two-minute voice rate limit and Local Voices readiness check;
+- five-minute heartbeat summaries for active work.
+
+Polling is observation-only. List IPC does not grant terminal roots or start an
+agent. Terminal authority is resolved only after an explicit terminal-open
+action.
+
+### Electron terminal broker
+
+The terminal uses `node-pty`, `@xterm/xterm`, fit, search, and web-links addons.
+Preload exposes only:
+
+```text
+terminal-list | terminal-create | terminal-replay | terminal-write
+terminal-resize | terminal-close | terminal-close-root
+```
+
+`TerminalBroker` owns approved opaque roots, shell selection, a secret-stripped
+environment, PTY size, sequence/exit state, and a bounded 1 MiB UTF-8 replay
+tail. Input writes are capped at 64 KiB.
+
+Workspace roots are bridge-revalidated and re-registered on every terminal
+creation. Immediately before spawn, the broker rejects a root or intermediate
+component that became a symlink. The packaged app root alone may canonicalize
+through AppImage links. Unix PTY session identity is captured at creation so
+descendants can receive SIGTERM and bounded SIGKILL escalation even if the PTY
+parent exits first; Windows uses `taskkill` process-tree termination.
+
+Outside the monitor, Terminal is a horizontally resizable left surface with an
+expand control. Inside the monitor it is a vertically resizable lower dock
+(46% viewport height; 72% expanded). Opening Terminal from the run context or
+sidebar keeps Workspace Monitor visible. xterm rows are explicitly left
+aligned.
+
+### Lifecycle and cleanup
+
+Completed worktrees remain available for review. Archive retains the checkout.
+Discard is explicit and:
+
+1. Refreshes and verifies the run-to-checkout relationship.
+2. Refuses while an agent is starting, running, or steering.
+3. Terminates every PTY and descendant process for the checkout.
+4. Refuses dirty cleanup without explicit confirmation.
+5. Removes the Git worktree and generated run branch.
+6. Marks the run/checkout disposed and revokes terminal-root authority.
+
+If a worktree was removed outside Eva, cleanup prunes stale worktree metadata,
+verifies it is gone, removes the branch, and completes the durable disposition.
+Missing or replaced runtime/project/worktree components that are symlinks are
+rejected rather than followed.
+
+### Unified Assets
+
+`core/js/assets.js` is a main-window library combining generated files from
+`ARTIFACTS_DIR` and changed files from retained coding runs. Workspace files
+include committed and uncommitted differences relative to the checkout's
+recorded base revision.
+
+Renderer metadata contains source, run/checkout IDs, project/objective labels,
+relative path, size, modification time, and agent status, never an absolute
+path. Opening a workspace file is an Electron IPC operation: main requests
+capability-protected resolution of the run plus relative path, then calls
+`shell.openPath()`.
+
+Resolution rejects traversal, symlinked runtime/project/run components,
+intermediate and leaf symlinks, missing/non-regular files, and disposed runs.
+Terminal root registration applies an independent equivalent check.
+
+### Main-view navigation
+
+Durable collections and workflows use the main work surface; contextual tools
+dock; small configuration/identity actions use existing settings or overlays.
+
+| Destination | Current behavior |
+|---|---|
+| Eva / New Chat | Main conversation or voice view. |
+| Agents | Full Agent Operations view. |
+| Assets | Full generated/workspace Assets library. |
+| Skills | Full searchable library/editor with Active/Draft/Disabled and provenance-aware source filters, tags/tools search, and sorting. |
+| Workspaces | Full Workspace Monitor. |
+| Terminal | Lower dock in Workspace Monitor; resizable side surface elsewhere. |
+| Prompts / Models / Settings | Central Settings workspace. |
+| Sessions | Legacy drawer pending main-view migration; old snapshots restore visibly. |
+| Profile | Local identity overlay; planned move into Settings. |
+
+Skills moves, rather than clones, its importer/editor nodes, retaining
+paste/URL/GitHub/file import, Eva'rise preview, edit, enable/disable, delete,
+and auto-learned Draft behavior. Source filters normalize persisted provenance
+such as `github:owner/repo`, `file:name`, and `url:https://...` while preserving
+the complete value for display and search.
+
+### Workspace HTTP and IPC contracts
+
+Every `/v1/workspaces/*` endpoint requires normal private bridge authorization
+and the main-process-only `X-Eva-Workspace-Capability` header. The token is
+generated at startup, passed only to the bridge process environment, and never
+exposed in preload.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/workspaces/eva-ready` | POST | Idempotently create/register Eva Ready Workspace. |
+| `/v1/workspaces/projects` | GET/POST | List projects or register a picker-approved Git root. |
+| `/v1/workspaces/runs` | GET/POST | List runs or create a worktree and dispatch its agent. |
+| `/v1/workspaces/runs/<id>` | GET | Read one run with latest AgentRun. |
+| `/v1/workspaces/runs/<id>/dispatch` | POST | Idempotently dispatch/recover an active run. |
+| `/v1/workspaces/runs/<id>/archive` | POST | Archive while retaining checkout. |
+| `/v1/workspaces/runs/<id>/discard` | POST | Explicit safe cleanup. |
+| `/v1/workspaces/checkouts/<id>/status` | GET | Revalidate and summarize checkout. |
+| `/v1/workspaces/assets` | GET | List changed files from retained runs. |
+| `/v1/workspaces/assets/resolve` | POST | Resolve a run-relative regular file for main. |
+
+Electron preload exposes `workspaceListProjects`, `workspaceSelectProject`,
+`workspaceCreateRun`, `workspaceListRuns`, `workspaceRunAction`,
+`workspaceListAssets`, and `workspaceOpenAsset`. These return renderer-safe
+projections and do not accept absolute paths.
+
+### Current limitations
+
+- Linux AppImage is the proving ground; macOS and Windows require native
+  `node-pty` package validation in platform CI.
+- Live terminal metadata is not restored from `terminal_sessions` after an
+  Electron process restart; renderer refresh reconnect is implemented.
+- ACP is the first workspace runtime. A provider-neutral adapter interface is
+  the intended boundary for future Cline/Gemini/Codex/Goose integrations.
+- Multi-agent sibling worktrees, durable approval/audit UI, diff review, patch
+  export, explicit commit/merge, browser evidence, and Eva Field remain later
+  milestones.
+- Sessions is the next sidebar destination planned for full main-view
+  migration.
+
 ## Skills System
 
 Skills are reusable instruction sets that Eva matches to user requests via
@@ -1248,9 +1550,11 @@ Eight tabs in a modal overlay:
 | **Cron** | Cron task list with create/edit/delete, schedule expression, prompt, last/next run timestamps |
 | **MCP** | Azure MCP, GitHub MCP, Kusto MCP toggles with config fields. Apply/refresh buttons |
 
-Skills are managed in the dedicated **Skills** sidebar panel, which supports
-paste, URL, GitHub, and file import plus evarise preview, edit, enable/disable,
-and reimport.
+Skills are managed in a full main-window library/editor. It supports paste,
+URL, GitHub, and file import; Eva'rise preview; edit/reimport;
+enable/disable/delete; Active/Draft/Disabled filtering; normalized source
+categories with full provenance; tag/tool search; name/status/update sorting;
+and responsive organization controls.
 
 The sidebar profile picker keeps sessions, prompts, model choices, voice preferences, and other browser-local settings separate per user. API credentials, MCP configuration, and the selected memory backend remain shared installation settings. Sessions open fresh on launch and support persistent custom titles. Saved skills can be edited and reimported through the existing skill ID, preserving database history.
 
@@ -1287,14 +1591,19 @@ cd standalone
 npm install
 npm run dist
 ./dist/'Eva Standalone-5.5.5.AppImage'
+
+# Development/review launch with coding workspaces enabled
+npm run start:workspace
 ```
 
 **Electron lifecycle:**
 1. `getFreeLocalPort()`: OS-allocated free port
-2. `startBridge(port)`: Spawn `python3 tools/acp_bridge.py --bind 127.0.0.1 --port <port>`
-3. `waitForBridge(url, process, timeout)`: Poll `/health` every 500ms
-4. On `EADDRINUSE`: retry with new port (max 3 attempts)
-5. On bridge crash: show error dialog and quit
+2. Generate private bridge and workspace capability tokens.
+3. `startBridge(port)`: Spawn `python3 tools/acp_bridge.py --bind 127.0.0.1 --port <port>` with both tokens in the child environment.
+4. `waitForBridge(url, process, timeout)`: Poll `/health` every 500ms.
+5. When workspaces are enabled, create Eva Ready Workspace and recover active runs before creating the window.
+6. On `EADDRINUSE`: retry with a new port (max 3 attempts).
+7. On bridge crash: show an error dialog and quit.
 
 Host prerequisites: Node.js 24+, Python 3.12+, Copilot CLI authenticated (for cloud mode). LM Studio for local-only mode.
 
@@ -1318,10 +1627,44 @@ Current state (2026-06-15):
 | macOS standalone build | planned | Needs Apple Developer ID + notarization |
 | Windows standalone build | planned | Add `win` target to electron-builder |
 
+## Attribution and Design Inspiration
+
+Eva is independently implemented. This section records the projects and open
+standards whose ideas inform its design, so credit and architectural intent
+remain visible as the coding-workspace work evolves. Inclusion here does not
+mean Eva embeds their code, is affiliated with them, or currently supports
+their runtime.
+
+| Project or standard | What Eva is studying or adapting | Current status |
+|---|---|---|
+| [Traycer](https://github.com/traycerai/traycer) | Durable agent identity separate from PTY scrollback, terminal stream replay/backpressure, worktree ownership facts, typed evidence, and capability-based A2A handoffs. | Durable run identity, bounded PTY replay, worktree ownership, and stable monitor IDs are implemented; collaboration canvas and cross-device sync remain deferred. |
+| [OpenCode](https://github.com/anomalyco/opencode) | Explicit plan versus build modes, local coding-agent ergonomics, and subagent patterns. | Research candidate; evaluate a structured adapter surface before integration. |
+| [Cline](https://github.com/cline/cline) | Plan/Act UX, checkpoints, approval-first execution, SDK extensibility, agent teams, and worktree-based task boards. | Priority adapter research spike. |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | Structured headless event streams, checkpoints, trusted folders, sandbox concepts, MCP, and project context files. | Priority process-adapter research spike. |
+| [Goose](https://github.com/aaif-goose/goose) | Provider-neutral agent profiles, extension catalog, MCP integration, and embeddable API design. | Research candidate for later runtime and automation adapters. |
+| [OpenAI Codex CLI](https://github.com/openai/codex) | Local coding-agent and sandbox/protocol patterns. | Future optional adapter candidate; validate a documented control interface first. |
+| [OpenHands Agent Canvas](https://github.com/OpenHands/OpenHands) | Backend catalog, self-hosted agent control-center patterns, and automation UX. | Inspiration only; Eva remains framework-free and local-first. |
+| [Aider](https://github.com/Aider-AI/aider) | Repository-map context, test/lint feedback loops, diffs, and undo-oriented Git workflow. | Workflow inspiration; isolated worktrees and focused validation are implemented, while commits remain explicit future review actions. |
+| [SWE-agent](https://github.com/SWE-agent/SWE-agent) | Issue-to-patch trajectories and coding-agent evaluation methodology. | Evaluation reference, not a desktop runtime. |
+| [Model Context Protocol](https://modelcontextprotocol.io/specification/2025-06-18) | Tool/resource boundaries, capability negotiation, progress, cancellation, and user-consent principles. | Existing integration foundation; apply its consent model to workspace tools. |
+
+The implemented decision is **Eva control plane + explicit execution broker +
+replaceable runtime adapters**. Eva owns run/worktree identity, safety policy,
+monitoring, Assets, and review state rather than becoming a branded wrapper
+around one CLI. External runtimes are eligible for later adapters only when
+they provide a structured lifecycle or SDK, per-worktree `cwd`, interceptable
+permissions, cancellation, and resumable session semantics. TUI paint alone is
+not a supported agent-state protocol.
+
 ## Security
 
 - Bridge binds to `127.0.0.1` by default (localhost only)
 - ACP tool permissions are never globally bypassed. Standalone Eva requires an authenticated in-chat decision; hosted/file clients fail closed.
+- Workspace routes require a second random capability held only by Electron main; the ordinary renderer-visible bridge token is insufficient.
+- Workspace agent `workspace_write` prompts auto-select `allow_once` only for read/search/fetch/think; mutating and unknown tools remain interactive. Normal prompts remain interactive and passive recall remains deny-by-policy.
+- Renderer workspace DTOs contain opaque IDs and relative paths only. Known project/worktree paths are redacted from agent reports.
+- Managed worktree paths are revalidated under `EVA_CONFIG_DIR/worktrees` before status, Assets, terminal registration, and cleanup. Runtime-root, intermediate, leaf, and post-registration symlink swaps are rejected.
+- PTY roots are allowlisted; the renderer cannot provide a cwd/environment. PTY shutdown retains Unix session identity and escalates descendants to SIGKILL before root revocation.
 - Routine standing consent is limited to read, search, fetch, and think tool kinds. Execute, edit, move, delete, and unknown operations always require a fresh decision.
 - ACP client-terminal capability is disabled because the protocol does not reliably correlate `terminal/create` with a permission decision. Authorized execution uses Eva's browser/desktop agent confirmation paths instead.
 - MCP env vars (tokens) are redacted from `/v1/mcp` responses and persisted configs
@@ -1352,12 +1695,26 @@ Runs on every PR to `main`:
 | `tools/test_eva.py` | Yes | 64-check integration suite |
 | `tools/test_latency.py` | Yes | Production-shaped AIG latency probe with NDJSON TTFT/total timings, cold/warm repetitions, and optional thresholds |
 | `tools/test_latency_fake_server.py` | No | Fake HTTP-server coverage for fast, approval, and revision call paths |
-| `tools/test_skills_e2e.py` | Yes | Skill import end-to-end |
+| `tools/test_skills_e2e.py` | Starts local test bridge | Skill import/edit/injection/delete lifecycle with stubbed ACP/Kusto |
+| `tools/test_workspaces.py` | No | Workspace schema, worktree isolation/recovery, dirty cleanup, symlink confinement |
+| `tools/test_workspaces_e2e.py` | No live model | Real HTTP workspace/AgentRun/Assets lifecycle with deterministic worker |
+| `tools/test_terminal_broker.js` | No | PTY root confinement, replay, resize, descendant cancellation, root swaps |
+| `tools/test_workspace_projection.js` | No | Report path redaction |
+| `tools/test_terminal_e2e.js` | Starts packaged app | Terminal, reconnect, mobile layout, Sessions, Skills main view |
+| `tools/test_workspace_electron_e2e.js` | Starts packaged app | Workspaces, terminal dock, Assets, process cleanup, root revocation |
 | `tools/eval/run.py --mode mock` | No | Behavioral eval with synthetic responses |
 | `tools/eval/run.py --mode live` | Yes | Behavioral eval against live bridge |
 
 ```bash
 python3 tools/test_static.py                          # CI-safe
+python3 tools/test_skills_e2e.py                      # Skills HTTP lifecycle
+python3 tools/test_workspaces.py                      # Workspace/Git safety
+python3 tools/test_workspaces_e2e.py                  # Workspace HTTP + agent/Assets
+python3 tools/test_streaming.py                       # Streaming and ACP permission policy
+node tools/test_terminal_broker.js                    # PTY contract
+node tools/test_workspace_projection.js               # Report redaction
+node tools/test_terminal_e2e.js                       # Packaged terminal/session/Skills UI
+node tools/test_workspace_electron_e2e.js             # Packaged workspace/Assets UI
 python3 tools/test_latency_fake_server.py              # latency harness without a bridge
 python3 tools/test_latency.py --bridge http://localhost:8888 --mode both --repetitions 2
 python3 tools/test_eva.py --verbose                   # full integration
@@ -1383,13 +1740,17 @@ refusal, recall, routing, capability, injection_resistance. Mock mode reads
 - **Persistent storage** via `navigator.storage.persist()`
 - **Transactional switching:** the current session save finishes before the
   target IndexedDB record is read; successful loads restore chat/model state,
-  close Session Explorer, and exit Agent Operations
+  close Session Explorer, and exit Agent Operations/Workspace Monitor
+- **Legacy visible restore:** snapshots without `_htmlSnapshot` reconstruct a
+  safe text transcript from provider messages or `masterOutput`. An index entry
+  whose snapshot is unavailable renders an explicit notice instead of leaving
+  the welcome screen unchanged.
 - **Row activation:** delegated mouse and Enter/Space activation works from the
   title, timestamp, or empty row space; rename/pin/delete buttons remain isolated
-- **Sidebar coordination:** selecting any non-Agents sidebar destination closes
-  the full Agent Operations workspace first, so Sessions, Prompts, Models,
-  Skills, Assets, Terminal, Profile, Voice, Settings, and New Chat are always
-  immediately visible
+- **Sidebar coordination:** Agents, Assets, Skills, and Workspaces are primary
+  main views. Prompts/Models/Settings use the Settings workspace. Terminal is a
+  contextual dock in Workspace Monitor and a resizable side surface elsewhere.
+  Sessions remains a legacy drawer pending main-view migration.
 
 ## LCARS Theme
 

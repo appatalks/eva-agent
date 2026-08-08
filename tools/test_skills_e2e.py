@@ -7,7 +7,6 @@ ThreadingHTTPServer and request routing are exercised over real HTTP.
 
 Run: python3 tools/test_skills_e2e.py
 """
-import importlib.util
 import json
 import os
 import sys
@@ -17,11 +16,10 @@ import urllib.request
 import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BRIDGE = os.path.join(HERE, "acp_bridge.py")
-
-spec = importlib.util.spec_from_file_location("acp_bridge", BRIDGE)
-m = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(m)
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+from bridge import core as m
+from bridge import cognition as cognition
 
 # ── In-memory Kusto store ────────────────────────────────────────────────
 _STORE = {"Skills": []}  # table -> append-only list of row dicts
@@ -84,16 +82,25 @@ class FakeACP:
 
 
 # ── Wire the stubs ───────────────────────────────────────────────────────
-m.acp_client = FakeACP()
-m._bridge_bind_address = "127.0.0.1"
-m._kusto_token_cache = "faketoken"
-m._cognition_enabled = True
-m._active_kusto_cluster = "https://x.kusto.windows.net"
-m._active_kusto_db = "Eva"
+m._st.acp_client = FakeACP()
+m._st.bridge_bind_address = "127.0.0.1"
+m._st.memory_backend = "kusto"
+m._st.kusto_token_cache = "faketoken"
+m._st.cognition_enabled = True
+m._st.active_kusto_cluster = "https://x.kusto.windows.net"
+m._st.active_kusto_db = "Eva"
+m._resolve_memory_backend = lambda: "kusto"
+m._get_kusto_config = lambda: ("https://x.kusto.windows.net", "Eva")
 m._kusto_query_direct = fake_query
 m._kusto_ingest_direct = fake_ingest
 m._get_table_columns = fake_table_columns
 m._ensure_kusto_token = lambda: (True, "")
+cognition._resolve_memory_backend = lambda: "kusto"
+cognition._get_kusto_config = lambda: ("https://x.kusto.windows.net", "Eva")
+cognition._kusto_query_direct = fake_query
+cognition._get_table_columns = fake_table_columns
+cognition._embed_texts = lambda texts: {}
+cognition._st.kusto_metadata_cache.clear()
 
 PORT = 8899
 BASE = f"http://127.0.0.1:{PORT}"

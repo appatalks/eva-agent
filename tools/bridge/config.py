@@ -16,6 +16,11 @@ def env_truthy(name):
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
 
 
+def env_disabled(name):
+    """Return True only for an explicit false-style environment value."""
+    return os.environ.get(name, "").strip().lower() in ("0", "false", "no")
+
+
 def utc_now():
     """Current UTC datetime (timezone-aware)."""
     return datetime.datetime.now(datetime.timezone.utc)

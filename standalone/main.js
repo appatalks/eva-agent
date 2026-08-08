@@ -5,8 +5,10 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { fileURLToPath } = require('url');
+const { fileURLToPath, pathToFileURL } = require('url');
 const { buildContextMenuTemplate } = require('./context-menu');
+const { TerminalBroker } = require('./terminal-broker');
+const { redactKnownPaths } = require('./workspace-projection');
 
 if (process.platform === 'win32') {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -21,15 +23,338 @@ let localSpeechBaseUrl = '';
 let localSpeechToken = '';
 let localSpeechProfileId = '';
 let bridgeCapabilityToken = '';
+let workspaceCapabilityToken = '';
 let shuttingDown = false;
 let stoppingBridge = false;
 let mainWindow = null;
+let terminalBroker = null;
+let bridgeBaseUrl = '';
 
 const BRIDGE_READY_TIMEOUT_MS = 60000;
 const LOCAL_VOICES_READY_TIMEOUT_MS = 10000;
 const BRIDGE_PORT_RETRY_LIMIT = 2;
 const ADDRESS_IN_USE_PATTERN = /Address already in use|EADDRINUSE/i;
 const AUTH_STORE_KEYS = ['OPENAI_API_KEY', 'GITHUB_PAT', 'GOOGLE_GL_KEY', 'GOOGLE_VISION_KEY'];
+
+function workspaceTerminalEnabled() {
+  return process.env.EVA_WORKSPACE_TERMINAL_V1 === '1' || process.argv.includes('--eva-workspace-terminal-v1');
+}
+
+function getTerminalAssetUrls() {
+  if (!workspaceTerminalEnabled()) return {};
+  return {
+    xterm: pathToFileURL(require.resolve('@xterm/xterm')).href,
+    css: pathToFileURL(require.resolve('@xterm/xterm/css/xterm.css')).href,
+    fit: pathToFileURL(require.resolve('@xterm/addon-fit')).href,
+    search: pathToFileURL(require.resolve('@xterm/addon-search')).href,
+    webLinks: pathToFileURL(require.resolve('@xterm/addon-web-links')).href
+  };
+}
+
+function initializeTerminalBroker() {
+  if (!workspaceTerminalEnabled() || terminalBroker) return terminalBroker;
+  terminalBroker = new TerminalBroker({ pty: require('node-pty') });
+  terminalBroker.registerRoot('app-root', getAppRoot(), { allowSymlinks: true });
+  terminalBroker.on('data', function(payload) {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('terminal:data', payload);
+  });
+  terminalBroker.on('exit', function(payload) {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('terminal:exit', payload);
+  });
+  return terminalBroker;
+}
+
+function requireTerminalBroker(event) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  if (!terminalBroker) throw new Error('Workspace terminal is disabled.');
+  return terminalBroker;
+}
+
+function requireWorkspaceFeature(event) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  if (!workspaceTerminalEnabled()) throw new Error('Coding workspaces are disabled.');
+}
+
+function validWorkspaceId(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function requestWorkspaceBridge(pathname, method, payload) {
+  if (!bridgeBaseUrl || !bridgeCapabilityToken) return Promise.reject(new Error('Workspace bridge is unavailable.'));
+  const body = payload === undefined ? null : Buffer.from(JSON.stringify(payload), 'utf8');
+  return new Promise(function(resolve, reject) {
+    const request = http.request(bridgeBaseUrl + pathname, {
+      method: method,
+      headers: {
+        'Authorization': 'Bearer ' + bridgeCapabilityToken,
+        'X-Eva-Workspace-Capability': workspaceCapabilityToken,
+        'Content-Type': 'application/json',
+        'Content-Length': body ? String(body.length) : '0'
+      },
+      timeout: 30000
+    }, function(response) {
+      const chunks = [];
+      let byteLength = 0;
+      response.on('data', function(chunk) {
+        byteLength += chunk.length;
+        if (byteLength <= 2 * 1024 * 1024) chunks.push(chunk);
+      });
+      response.on('end', function() {
+        if (byteLength > 2 * 1024 * 1024) {
+          reject(new Error('Workspace bridge response was too large.'));
+          return;
+        }
+        let data;
+        try {
+          data = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        } catch (_) {
+          reject(new Error('Workspace bridge returned invalid JSON.'));
+          return;
+        }
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error((data.error && data.error.message) || 'Workspace bridge returned HTTP ' + response.statusCode));
+          return;
+        }
+        resolve(data);
+      });
+    });
+    request.setTimeout(30000, function() { request.destroy(new Error('Workspace bridge request timed out.')); });
+    request.on('error', reject);
+    if (body) request.write(body);
+    request.end();
+  });
+}
+
+function registerWorkspaceRoot(rootId, rootPath) {
+  if (!terminalBroker || !validWorkspaceId(rootId) || typeof rootPath !== 'string') return;
+  terminalBroker.registerRoot(rootId, rootPath);
+}
+
+async function ensureTerminalRoot(rootId) {
+  if (!terminalBroker || rootId === 'app-root') return;
+  if (!validWorkspaceId(rootId)) throw new Error('Invalid workspace checkout ID.');
+  const response = await requestWorkspaceBridge('/v1/workspaces/checkouts/' + encodeURIComponent(rootId) + '/status', 'GET');
+  const checkout = response.checkout;
+  if (!checkout || checkout.id !== rootId || checkout.lifecycle !== 'active' || checkout.kind !== 'worktree' || typeof checkout.path !== 'string') {
+    throw new Error('Workspace checkout is unavailable for a terminal.');
+  }
+  registerWorkspaceRoot(rootId, checkout.path);
+}
+
+async function ensureEvaReadyWorkspace() {
+  const response = await requestWorkspaceBridge('/v1/workspaces/eva-ready', 'POST');
+  const project = response.project;
+  if (!project || !validWorkspaceId(project.id) || typeof project.path !== 'string') {
+    throw new Error('Workspace bridge returned an invalid Eva-ready project.');
+  }
+  return workspaceProjectForRenderer(project);
+}
+
+async function dispatchPendingWorkspaceRuns() {
+  if (process.env.EVA_WORKSPACE_AGENT_AUTODISPATCH === '0') return;
+  const response = await requestWorkspaceBridge('/v1/workspaces/runs', 'GET');
+  const runs = Array.isArray(response.runs) ? response.runs : [];
+  for (const run of runs) {
+    if (run.status !== 'active') continue;
+    try {
+      await requestWorkspaceBridge('/v1/workspaces/runs/' + encodeURIComponent(run.id) + '/dispatch', 'POST');
+    } catch (error) {
+      console.error('Workspace agent dispatch failed for ' + run.id + ': ' + (error.message || error));
+    }
+  }
+}
+
+function workspaceCheckoutForRenderer(checkout) {
+  if (!checkout || typeof checkout !== 'object') return null;
+  return {
+    id: checkout.id,
+    projectId: checkout.project_id,
+    kind: checkout.kind,
+    branch: checkout.branch,
+    baseRevision: checkout.base_revision,
+    lifecycle: checkout.lifecycle,
+    dirtyFileCount: checkout.dirty_file_count,
+    ownerRefs: checkout.owner_refs
+  };
+}
+
+function workspaceProjectForRenderer(project) {
+  if (!project || typeof project !== 'object') return null;
+  return {
+    id: project.id,
+    name: project.name,
+    createdAt: project.created_at,
+    updatedAt: project.updated_at,
+    activeRunCount: project.active_run_count,
+    sourceCheckout: workspaceCheckoutForRenderer(project.source_checkout)
+  };
+}
+
+function workspaceRunForRenderer(run) {
+  if (!run || typeof run !== 'object') return null;
+  return {
+    id: run.id,
+    projectId: run.project_id,
+    project: run.project ? { id: run.project.id, name: run.project.name } : null,
+    checkout: workspaceCheckoutForRenderer(run.checkout),
+    objective: run.objective,
+    status: run.status,
+    primarySessionId: run.primary_session_id,
+    modelPolicy: run.model_policy,
+    finalDisposition: run.final_disposition,
+    createdAt: run.created_at,
+    updatedAt: run.updated_at,
+    archivedAt: run.archived_at,
+    agent: run.agent ? {
+      id: run.agent.id,
+      status: run.agent.status,
+      report: redactKnownPaths(run.agent.report, [
+        run.checkout && run.checkout.path,
+        run.project && run.project.path
+      ]),
+      capabilityPolicy: run.agent.capability_policy,
+      createdAt: run.agent.created_at,
+      updatedAt: run.agent.updated_at
+    } : null
+  };
+}
+
+async function workspaceListProjects(event) {
+  requireWorkspaceFeature(event);
+  const response = await requestWorkspaceBridge('/v1/workspaces/projects', 'GET');
+  const projects = Array.isArray(response.projects) ? response.projects : [];
+  return projects.map(workspaceProjectForRenderer).filter(Boolean);
+}
+
+async function workspaceSelectProject(event) {
+  requireWorkspaceFeature(event);
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose a Git project',
+    properties: ['openDirectory']
+  });
+  if (selection.canceled || !selection.filePaths[0]) return { canceled: true };
+  let response;
+  try {
+    response = await requestWorkspaceBridge('/v1/workspaces/projects', 'POST', {
+      path: selection.filePaths[0]
+    });
+  } catch (error) {
+    return { canceled: false, error: error.message || 'The selected directory is not a Git repository.' };
+  }
+  const project = response.project;
+  if (!project || !validWorkspaceId(project.id) || typeof project.path !== 'string') {
+    throw new Error('Workspace bridge returned an invalid project record.');
+  }
+  return { canceled: false, project: workspaceProjectForRenderer(project) };
+}
+
+async function workspaceCreateRun(event, request) {
+  requireWorkspaceFeature(event);
+  const input = request && typeof request === 'object' ? request : {};
+  if (!validWorkspaceId(input.projectId)) throw new Error('Invalid project ID.');
+  const response = await requestWorkspaceBridge('/v1/workspaces/runs', 'POST', {
+    project_id: input.projectId,
+    objective: typeof input.objective === 'string' ? input.objective : '',
+    primary_session_id: typeof input.primarySessionId === 'string' ? input.primarySessionId : '',
+    base_ref: typeof input.baseRef === 'string' ? input.baseRef : 'HEAD',
+    model_policy: typeof input.modelPolicy === 'string' ? input.modelPolicy : ''
+  });
+  const run = response.run;
+  if (!run || !run.checkout || !validWorkspaceId(run.checkout.id) || typeof run.checkout.path !== 'string') {
+    throw new Error('Workspace bridge returned an invalid coding run.');
+  }
+  const projected = workspaceRunForRenderer(run);
+  projected.dispatchError = typeof response.dispatch_error === 'string' ? response.dispatch_error : '';
+  return projected;
+}
+
+async function workspaceListRuns(event, projectId) {
+  requireWorkspaceFeature(event);
+  const suffix = projectId ? '?project_id=' + encodeURIComponent(projectId) : '';
+  const response = await requestWorkspaceBridge('/v1/workspaces/runs' + suffix, 'GET');
+  const runs = Array.isArray(response.runs) ? response.runs : [];
+  return runs.map(workspaceRunForRenderer).filter(Boolean);
+}
+
+async function workspaceCheckoutStatus(event, checkoutId) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(checkoutId)) throw new Error('Invalid workspace checkout ID.');
+  const response = await requestWorkspaceBridge(
+    '/v1/workspaces/checkouts/' + encodeURIComponent(checkoutId) + '/status', 'GET'
+  );
+  return workspaceCheckoutForRenderer(response.checkout);
+}
+
+async function workspaceListAssets(event) {
+  requireWorkspaceFeature(event);
+  const response = await requestWorkspaceBridge('/v1/workspaces/assets', 'GET');
+  const assets = Array.isArray(response.assets) ? response.assets : [];
+  return assets.map(function(asset) {
+    return {
+      id: asset.id,
+      source: 'workspace',
+      runId: asset.run_id,
+      checkoutId: asset.checkout_id,
+      projectName: asset.project_name,
+      objective: asset.objective,
+      name: asset.name,
+      relativePath: asset.relative_path,
+      size: asset.size,
+      modified: asset.modified,
+      agentStatus: asset.agent_status
+    };
+  });
+}
+
+async function workspaceOpenAsset(event, runId, relativePath) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(runId) || typeof relativePath !== 'string') throw new Error('Invalid workspace asset.');
+  const response = await requestWorkspaceBridge('/v1/workspaces/assets/resolve', 'POST', {
+    run_id: runId,
+    relative_path: relativePath
+  });
+  const pathValue = response.path;
+  if (typeof pathValue !== 'string' || !path.isAbsolute(pathValue)) throw new Error('Workspace asset could not be resolved.');
+  const openError = await shell.openPath(pathValue);
+  if (openError) throw new Error(openError);
+  return { opened: true };
+}
+
+async function workspaceRunAction(event, runId, action, options) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(runId) || (action !== 'archive' && action !== 'discard')) throw new Error('Invalid workspace action.');
+  if (action === 'discard' && terminalBroker) {
+    const requestedCheckoutId = options && options.checkoutId;
+    if (!validWorkspaceId(requestedCheckoutId)) throw new Error('Invalid workspace checkout ID.');
+    const current = await requestWorkspaceBridge('/v1/workspaces/runs/' + encodeURIComponent(runId), 'GET');
+    const checkoutId = current.run && current.run.checkout && current.run.checkout.id;
+    if (!validWorkspaceId(checkoutId) || checkoutId !== requestedCheckoutId) {
+      throw new Error('Workspace checkout no longer matches this run.');
+    }
+    const agentStatus = current.run && current.run.agent && current.run.agent.status;
+    if (['starting', 'running', 'steering'].includes(agentStatus)) {
+      throw new Error('The workspace agent is still running. Wait for completion before discard.');
+    }
+    await terminalBroker.terminateByRoot(requestedCheckoutId);
+    if (terminalBroker.list().some(function(session) { return session.rootId === requestedCheckoutId; })) {
+      throw new Error('Workspace terminal did not terminate; discard was cancelled.');
+    }
+  }
+  const response = await requestWorkspaceBridge('/v1/workspaces/runs/' + encodeURIComponent(runId) + '/' + action, 'POST', {
+    confirm_dirty: !!(options && options.confirmDirty)
+  });
+  if (action === 'discard' && terminalBroker && response.run && response.run.status === 'discarded') {
+    const checkoutId = response.run.checkout && response.run.checkout.id;
+    if (validWorkspaceId(checkoutId)) {
+      await terminalBroker.terminateByRoot(checkoutId);
+      if (terminalBroker.list().some(function(session) { return session.rootId === checkoutId; })) {
+        throw new Error('Workspace terminal did not terminate after discard.');
+      }
+      terminalBroker.unregisterRoot(checkoutId);
+    }
+  }
+  return workspaceRunForRenderer(response.run);
+}
 
 function loadEncryptedAuth() {
   if (!safeStorage.isEncryptionAvailable()) return {};
@@ -476,7 +801,7 @@ function waitForBridgeExit(childProcess, timeoutMs) {
   });
 }
 
-function startBridge(port, bridgeToken) {
+function startBridge(port, bridgeToken, workspaceToken) {
   const appRoot = getAppRoot();
   const bridgePath = path.join(appRoot, 'tools', 'acp_bridge.py');
   const python = getPythonInvocation();
@@ -486,6 +811,7 @@ function startBridge(port, bridgeToken) {
   const env = Object.assign({}, process.env, {
     EVA_ACP_PORT: String(port),
     EVA_BRIDGE_TOKEN: bridgeToken,
+    EVA_WORKSPACE_CAPABILITY: workspaceToken,
     KUSTO_DATABASE_LOCKED: '1',
     PYTHONUNBUFFERED: '1'
   });
@@ -815,9 +1141,43 @@ ipcMain.handle('auth-save', function(event, values) {
 ipcMain.on('bridge-capability-token', function(event) {
   event.returnValue = isTrustedEvaRenderer(event) ? bridgeCapabilityToken : '';
 });
+ipcMain.handle('terminal-list', function(event) {
+  return requireTerminalBroker(event).list();
+});
+ipcMain.handle('terminal-create', async function(event, request) {
+  const broker = requireTerminalBroker(event);
+  const rootId = request && request.rootId;
+  await ensureTerminalRoot(rootId);
+  return broker.create(request);
+});
+ipcMain.handle('terminal-replay', function(event, id) {
+  return requireTerminalBroker(event).replay(id);
+});
+ipcMain.handle('terminal-write', function(event, id, data) {
+  return requireTerminalBroker(event).write(id, data);
+});
+ipcMain.handle('terminal-resize', function(event, id, cols, rows) {
+  return requireTerminalBroker(event).resize(id, cols, rows);
+});
+ipcMain.handle('terminal-close', function(event, id) {
+  return requireTerminalBroker(event).close(id);
+});
+ipcMain.handle('terminal-close-root', function(event, rootId) {
+  if (!validWorkspaceId(rootId)) throw new Error('Invalid workspace checkout ID.');
+  return requireTerminalBroker(event).terminateByRoot(rootId).then(function(closed) { return { closed: closed }; });
+});
+ipcMain.handle('workspace-list-projects', workspaceListProjects);
+ipcMain.handle('workspace-select-project', workspaceSelectProject);
+ipcMain.handle('workspace-create-run', workspaceCreateRun);
+ipcMain.handle('workspace-list-runs', workspaceListRuns);
+ipcMain.handle('workspace-checkout-status', workspaceCheckoutStatus);
+ipcMain.handle('workspace-list-assets', workspaceListAssets);
+ipcMain.handle('workspace-open-asset', workspaceOpenAsset);
+ipcMain.handle('workspace-run-action', workspaceRunAction);
 
 function createWindow(acpBaseUrl) {
   const appRoot = getAppRoot();
+  const terminalAssets = getTerminalAssetUrls();
 
   // Grant microphone access for Web Speech API (webkitSpeechRecognition).
   // Only allow media permissions for local file:// pages.
@@ -851,7 +1211,13 @@ function createWindow(acpBaseUrl) {
       allowRunningInsecureContent: false,
       additionalArguments: [
         '--eva-acp-base-url=' + acpBaseUrl,
-        '--eva-version=' + app.getVersion()
+        '--eva-version=' + app.getVersion(),
+        '--eva-workspace-terminal-v1=' + (terminalBroker ? '1' : '0'),
+        '--eva-xterm-url=' + (terminalAssets.xterm || ''),
+        '--eva-xterm-css-url=' + (terminalAssets.css || ''),
+        '--eva-xterm-fit-url=' + (terminalAssets.fit || ''),
+        '--eva-xterm-search-url=' + (terminalAssets.search || ''),
+        '--eva-xterm-web-links-url=' + (terminalAssets.webLinks || '')
       ]
     }
   });
@@ -904,13 +1270,20 @@ function createWindow(acpBaseUrl) {
 
 async function boot() {
   bridgeCapabilityToken = crypto.randomBytes(32).toString('hex');
+  workspaceCapabilityToken = crypto.randomBytes(32).toString('hex');
+  initializeTerminalBroker();
   for (let attempt = 0; attempt <= BRIDGE_PORT_RETRY_LIMIT; attempt += 1) {
     const port = await getFreeLocalPort();
     const acpBaseUrl = 'http://127.0.0.1:' + port;
-    const child = startBridge(port, bridgeCapabilityToken);
+    const child = startBridge(port, bridgeCapabilityToken, workspaceCapabilityToken);
     try {
       await waitForBridge(acpBaseUrl, child, BRIDGE_READY_TIMEOUT_MS);
       readyBridgeProcess = child;
+      bridgeBaseUrl = acpBaseUrl;
+      if (workspaceTerminalEnabled()) {
+        await ensureEvaReadyWorkspace();
+        await dispatchPendingWorkspaceRuns();
+      }
       child.evaAwaitingReady = false;
       if (typeof child.evaClearStderrBuffer === 'function') child.evaClearStderrBuffer();
       createWindow(acpBaseUrl);
@@ -953,17 +1326,22 @@ if (!hasSingleInstanceLock) {
     });
   });
 
-  app.on('before-quit', stopBridge);
+  app.on('before-quit', function() {
+    if (terminalBroker) terminalBroker.closeAll();
+    stopBridge();
+  });
   app.on('window-all-closed', function() {
     app.quit();
   });
 }
 
 process.on('SIGINT', function() {
+  if (terminalBroker) terminalBroker.closeAll();
   stopBridge();
   app.quit();
 });
 process.on('SIGTERM', function() {
+  if (terminalBroker) terminalBroker.closeAll();
   stopBridge();
   app.quit();
 });

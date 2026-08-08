@@ -6,6 +6,7 @@
   "private": true,
   "scripts": {
     "start": "electron .",
+    "start:workspace": "electron . --eva-workspace-terminal-v1",
     "dist": "electron-builder --linux AppImage",
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win nsis",
@@ -17,6 +18,7 @@
   "devDependencies": {
     "electron": "^39.8.10",
     "electron-builder": "^26.15.3",
+    "playwright-core": "^1.62.1",
     "tmp": "^0.2.7"
   },
   "_comment": "Electron files stay in standalone/. electron-builder copies the parent web UI and bridge with extraResources into resources/app.",
@@ -26,7 +28,13 @@
     "files": [
       "package.json",
       "main.js",
-      "preload.js"
+      "preload.js",
+      "context-menu.js",
+      "workspace-projection.js",
+      "terminal-broker.js"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**"
     ],
     "extraResources": [
       {
@@ -115,5 +123,12 @@
     "nsis": {
       "include": "installer.nsh"
     }
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0"
   }
 }

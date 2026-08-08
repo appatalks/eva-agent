@@ -61,10 +61,11 @@ supported on Windows.
 | **Persistent memory** | Kusto/ADX or local SQLite: conversations, emotion tracking, semantic recall |
 | **User profiles** | Switch local profiles with separate sessions, prompts, model choices, and UI preferences |
 | **Settings workspace** | Full-view grouped navigation for models, accounts, goals, background jobs, schedules, tools, memory, and learning controls |
-| **Self-improving skills** | Auto-extracts reusable skills from successful tasks, stored as drafts |
+| **Self-improving skills** | Full searchable skills library and editor with source/status filters, tags, tools, imports, and reusable capability drafts |
 | **Cron scheduler** | Standard cron expressions, recurring prompts, morning briefings, alerts |
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |
 | **Agent operations** | Live subagent output and sanitized activity updates, browser/desktop runs, steering, and animated memory topology |
+| **Coding workspaces (experimental)** | Eva Standalone can register local Git projects, create isolated durable worktrees, open real PTY terminals, and monitor coding runs in the main workspace; worktree discard is explicit and terminates attached terminal processes first |
 | **Multi-provider** | Eva AIG via direct OpenAI API, GitHub Copilot ACP, or LM Studio; direct Gemini and provider routes remain available in the browser UI |
 | **Prompt budgets** | Bounded provider payloads with pinned instructions, recent turns, rolling summaries, and privacy-safe estimates |
 | **Reasoning controls** | Model-specific effort levels for OpenAI, GitHub Models, and Copilot CLI ACP |
