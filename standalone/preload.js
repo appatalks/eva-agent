@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   workspaceSelectProject: function() { return ipcRenderer.invoke('workspace-select-project'); },
   workspaceCreateRun: function(request) { return ipcRenderer.invoke('workspace-create-run', request); },
   workspaceListRuns: function(projectId) { return ipcRenderer.invoke('workspace-list-runs', projectId); },
+  workspaceCheckoutStatus: function(checkoutId) { return ipcRenderer.invoke('workspace-checkout-status', checkoutId); },
   workspaceListAssets: function() { return ipcRenderer.invoke('workspace-list-assets'); },
   workspaceOpenAsset: function(runId, relativePath) { return ipcRenderer.invoke('workspace-open-asset', runId, relativePath); },
   workspaceRunAction: function(runId, action, options) { return ipcRenderer.invoke('workspace-run-action', runId, action, options); },

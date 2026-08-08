@@ -466,9 +466,7 @@ def _dispatch_workspace_run(run):
             existing_agent["id"], "error", "Agent process ended before the coding run completed."
         )
     checkout = run.get("checkout") or {}
-    checkout_path = checkout.get("path", "")
-    if checkout.get("lifecycle") != "active" or not checkout_path or not os.path.isdir(checkout_path):
-        raise WorkspaceError("Coding run checkout is unavailable for agent dispatch.")
+    checkout_path = _workspace_store().validated_checkout_path(checkout.get("id"))
     task_id = "sub-" + uuid.uuid4().hex[:8]
     objective = str(run.get("objective") or "").strip()
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()

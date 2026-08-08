@@ -297,14 +297,7 @@ class WorkspaceStore:
         query += " ORDER BY updated_at DESC"
         with self.lock:
             run_rows = self.connection.execute(query, parameters).fetchall()
-        runs = []
-        for row in run_rows:
-            run = self.get_run(row["id"])
-            if run["checkout"]["lifecycle"] == "active" and Path(run["checkout"]["path"]).is_dir():
-                self.checkout_status(run["checkout"]["id"])
-                run = self.get_run(row["id"])
-            runs.append(run)
-        return runs
+        return [self.get_run(row["id"]) for row in run_rows]
 
     def list_workspace_assets(self):
         assets = []
@@ -439,6 +432,15 @@ class WorkspaceStore:
             "agent": self._agent_payload(agent_row) if agent_row else None,
         }
 
+    def validated_checkout_path(self, checkout_id):
+        with self.lock:
+            checkout_row = self.connection.execute(
+                "SELECT * FROM checkouts WHERE id = ?", (checkout_id,)
+            ).fetchone()
+        if not checkout_row:
+            raise WorkspaceError("Unknown checkout.")
+        return str(self._validated_managed_checkout(self._checkout_payload(checkout_row)))
+
     def create_agent_run(self, agent_id, coding_run_id, checkout_id, conversation_key, capability_policy="workspace_write"):
         now = _utc_now()
         with self.lock, self.connection:
@@ -474,7 +476,9 @@ class WorkspaceStore:
             )
             if status == "done":
                 self.connection.execute(
-                    "UPDATE coding_runs SET status = 'completed', final_disposition = 'agent_completed', updated_at = ? WHERE id = ?",
+                    """UPDATE coding_runs
+                       SET status = 'completed', final_disposition = 'agent_completed', updated_at = ?
+                       WHERE id = ? AND status = 'active'""",
                     (now, row["coding_run_id"]),
                 )
             else:
@@ -514,9 +518,20 @@ class WorkspaceStore:
     def archive_run(self, run_id):
         now = _utc_now()
         with self.lock, self.connection:
-            existing = self.connection.execute("SELECT id FROM coding_runs WHERE id = ?", (run_id,)).fetchone()
+            existing = self.connection.execute(
+                """SELECT coding_runs.id, agent_runs.status AS agent_status
+                   FROM coding_runs
+                   LEFT JOIN agent_runs ON agent_runs.id = (
+                       SELECT id FROM agent_runs WHERE coding_run_id = coding_runs.id
+                       ORDER BY created_at DESC LIMIT 1
+                   )
+                   WHERE coding_runs.id = ?""",
+                (run_id,),
+            ).fetchone()
             if not existing:
                 raise WorkspaceError("Unknown coding run.")
+            if existing["agent_status"] in {"starting", "running", "steering"}:
+                raise WorkspaceError("The workspace agent is still running. Wait for completion before archive.")
             self.connection.execute(
                 "UPDATE coding_runs SET status = 'archived', archived_at = ?, updated_at = ? WHERE id = ?",
                 (now, now, run_id),

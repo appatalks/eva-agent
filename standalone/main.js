@@ -70,6 +70,11 @@ function requireTerminalBroker(event) {
   return terminalBroker;
 }
 
+function requireWorkspaceFeature(event) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  if (!workspaceTerminalEnabled()) throw new Error('Coding workspaces are disabled.');
+}
+
 function validWorkspaceId(value) {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -215,14 +220,14 @@ function workspaceRunForRenderer(run) {
 }
 
 async function workspaceListProjects(event) {
-  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  requireWorkspaceFeature(event);
   const response = await requestWorkspaceBridge('/v1/workspaces/projects', 'GET');
   const projects = Array.isArray(response.projects) ? response.projects : [];
   return projects.map(workspaceProjectForRenderer).filter(Boolean);
 }
 
 async function workspaceSelectProject(event) {
-  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  requireWorkspaceFeature(event);
   const selection = await dialog.showOpenDialog(mainWindow, {
     title: 'Choose a Git project',
     properties: ['openDirectory']
@@ -244,7 +249,7 @@ async function workspaceSelectProject(event) {
 }
 
 async function workspaceCreateRun(event, request) {
-  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  requireWorkspaceFeature(event);
   const input = request && typeof request === 'object' ? request : {};
   if (!validWorkspaceId(input.projectId)) throw new Error('Invalid project ID.');
   const response = await requestWorkspaceBridge('/v1/workspaces/runs', 'POST', {
@@ -264,15 +269,24 @@ async function workspaceCreateRun(event, request) {
 }
 
 async function workspaceListRuns(event, projectId) {
-  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  requireWorkspaceFeature(event);
   const suffix = projectId ? '?project_id=' + encodeURIComponent(projectId) : '';
   const response = await requestWorkspaceBridge('/v1/workspaces/runs' + suffix, 'GET');
   const runs = Array.isArray(response.runs) ? response.runs : [];
   return runs.map(workspaceRunForRenderer).filter(Boolean);
 }
 
+async function workspaceCheckoutStatus(event, checkoutId) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(checkoutId)) throw new Error('Invalid workspace checkout ID.');
+  const response = await requestWorkspaceBridge(
+    '/v1/workspaces/checkouts/' + encodeURIComponent(checkoutId) + '/status', 'GET'
+  );
+  return workspaceCheckoutForRenderer(response.checkout);
+}
+
 async function workspaceListAssets(event) {
-  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  requireWorkspaceFeature(event);
   const response = await requestWorkspaceBridge('/v1/workspaces/assets', 'GET');
   const assets = Array.isArray(response.assets) ? response.assets : [];
   return assets.map(function(asset) {
@@ -293,7 +307,7 @@ async function workspaceListAssets(event) {
 }
 
 async function workspaceOpenAsset(event, runId, relativePath) {
-  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  requireWorkspaceFeature(event);
   if (!validWorkspaceId(runId) || typeof relativePath !== 'string') throw new Error('Invalid workspace asset.');
   const response = await requestWorkspaceBridge('/v1/workspaces/assets/resolve', 'POST', {
     run_id: runId,
@@ -307,7 +321,7 @@ async function workspaceOpenAsset(event, runId, relativePath) {
 }
 
 async function workspaceRunAction(event, runId, action, options) {
-  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  requireWorkspaceFeature(event);
   if (!validWorkspaceId(runId) || (action !== 'archive' && action !== 'discard')) throw new Error('Invalid workspace action.');
   if (action === 'discard' && terminalBroker) {
     const requestedCheckoutId = options && options.checkoutId;
@@ -316,6 +330,10 @@ async function workspaceRunAction(event, runId, action, options) {
     const checkoutId = current.run && current.run.checkout && current.run.checkout.id;
     if (!validWorkspaceId(checkoutId) || checkoutId !== requestedCheckoutId) {
       throw new Error('Workspace checkout no longer matches this run.');
+    }
+    const agentStatus = current.run && current.run.agent && current.run.agent.status;
+    if (['starting', 'running', 'steering'].includes(agentStatus)) {
+      throw new Error('The workspace agent is still running. Wait for completion before discard.');
     }
     await terminalBroker.terminateByRoot(requestedCheckoutId);
     if (terminalBroker.list().some(function(session) { return session.rootId === requestedCheckoutId; })) {
@@ -1152,6 +1170,7 @@ ipcMain.handle('workspace-list-projects', workspaceListProjects);
 ipcMain.handle('workspace-select-project', workspaceSelectProject);
 ipcMain.handle('workspace-create-run', workspaceCreateRun);
 ipcMain.handle('workspace-list-runs', workspaceListRuns);
+ipcMain.handle('workspace-checkout-status', workspaceCheckoutStatus);
 ipcMain.handle('workspace-list-assets', workspaceListAssets);
 ipcMain.handle('workspace-open-asset', workspaceOpenAsset);
 ipcMain.handle('workspace-run-action', workspaceRunAction);
@@ -1261,8 +1280,10 @@ async function boot() {
       await waitForBridge(acpBaseUrl, child, BRIDGE_READY_TIMEOUT_MS);
       readyBridgeProcess = child;
       bridgeBaseUrl = acpBaseUrl;
-      await ensureEvaReadyWorkspace();
-      await dispatchPendingWorkspaceRuns();
+      if (workspaceTerminalEnabled()) {
+        await ensureEvaReadyWorkspace();
+        await dispatchPendingWorkspaceRuns();
+      }
       child.evaAwaitingReady = false;
       if (typeof child.evaClearStderrBuffer === 'function') child.evaClearStderrBuffer();
       createWindow(acpBaseUrl);

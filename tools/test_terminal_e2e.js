@@ -75,6 +75,40 @@ async function openTerminal(page) {
   await page.locator('.workspace-terminal-status').filter({ hasText: 'CONNECTED' }).waitFor();
 }
 
+async function verifyDisabledWorkspaceLaunch() {
+  const configDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'eva-disabled-workspace-'));
+  const port = await reservePort();
+  const environment = Object.assign({}, process.env, { EVA_CONFIG_DIR: configDirectory });
+  delete environment.EVA_WORKSPACE_TERMINAL_V1;
+  const disabledChild = spawn(electronPath, ['--remote-debugging-port=' + port], {
+    env: environment,
+    stdio: ['ignore', 'ignore', 'ignore']
+  });
+  let disabledBrowser = null;
+  try {
+    const attached = await waitForPage('http://127.0.0.1:' + port);
+    disabledBrowser = attached.browser;
+    const result = await attached.page.evaluate(async function() {
+      try {
+        await window.evaStandalone.workspaceListProjects();
+        return { enabled: window.evaStandalone.workspaceTerminalV1, rejected: false };
+      } catch (error) {
+        return {
+          enabled: window.evaStandalone.workspaceTerminalV1,
+          rejected: /disabled/i.test(String(error && error.message || error))
+        };
+      }
+    });
+    assert.deepStrictEqual(result, { enabled: false, rejected: true });
+  } finally {
+    if (disabledBrowser) await disabledBrowser.close();
+    await stopProcess(disabledChild);
+    assert.strictEqual(fs.existsSync(path.join(configDirectory, 'projects', 'eva-ready')), false,
+      'Disabled workspace startup provisioned Eva Ready Workspace');
+    fs.rmSync(configDirectory, { recursive: true, force: true });
+  }
+}
+
 async function run() {
   let browser = null;
   let child = null;
@@ -82,6 +116,7 @@ async function run() {
   try {
     let endpoint = configuredEndpoint;
     if (!endpoint) {
+      await verifyDisabledWorkspaceLaunch();
       const port = await reservePort();
       temporaryConfig = fs.mkdtempSync(path.join(os.tmpdir(), 'eva-terminal-electron-'));
       child = spawn(electronPath, ['--eva-workspace-terminal-v1', '--remote-debugging-port=' + port], {

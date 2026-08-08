@@ -100,6 +100,18 @@ def main():
         project = payload["project"]
         assert project["path"] == str(repository.resolve())
 
+        swapped_run = bridge._st.workspace_store.create_run(project["id"], "Reject swapped dispatch root")
+        swapped_path = Path(swapped_run["checkout"]["path"])
+        shutil.rmtree(swapped_path)
+        swapped_path.symlink_to(repository, target_is_directory=True)
+        try:
+            bridge._dispatch_workspace_run(swapped_run)
+            raise AssertionError("dispatch should reject a symlink-swapped checkout")
+        except bridge.WorkspaceError:
+            pass
+        swapped_path.unlink()
+        assert bridge._st.workspace_store.discard_run(swapped_run["id"])["status"] == "discarded"
+
         status, payload = request(base_url, "POST", "/v1/workspaces/runs", {
             "project_id": project["id"],
             "objective": "Prove workspace endpoints",
@@ -134,7 +146,9 @@ def main():
         assert status == 200 and len(linked) == 1 and linked[0]["status"] == "done", overview
 
         status, payload = request(base_url, "GET", "/v1/workspaces/runs?project_id=" + project["id"])
-        assert status == 200 and len(payload["runs"]) == 1, payload
+        listed_runs = {listed["id"]: listed for listed in payload.get("runs", [])}
+        assert status == 200 and listed_runs[run["id"]]["status"] == "completed", payload
+        assert listed_runs[swapped_run["id"]]["status"] == "discarded", payload
 
         (Path(checkout["path"]) / "dirty.txt").write_text("needs confirmation\n", encoding="utf-8")
         status, payload = request(base_url, "GET", "/v1/workspaces/checkouts/" + checkout["id"] + "/status")

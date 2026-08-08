@@ -1233,10 +1233,13 @@ visible in Agent Operations with `coding_run_id`, `checkout_id`, and
 `workspace_write`.
 
 ACP `session/request_permission` requests are automatically allowed once only
-when the active workspace prompt offers an `allow_once` option. Ordinary chats
-and generic subagents retain interactive permission handling; passive recall
-continues to reject tools. The automatic mode never accepts persistent
-`allow_always` authority.
+for `read`, `search`, `fetch`, and `think` tool kinds when the active workspace
+prompt offers an `allow_once` option. Execute, edit, delete, and unknown tool
+kinds require an explicit permission decision because ACP does not provide a
+path contract that can prove worktree confinement. Ordinary chats and generic
+subagents retain interactive permission handling; passive recall continues to
+reject tools. The automatic mode never accepts persistent `allow_always`
+authority.
 
 Live ACP chunks update the task and periodically persist a bounded report.
 Plan/tool events update activity. Completion persists the final report and
@@ -1658,7 +1661,7 @@ not a supported agent-state protocol.
 - Bridge binds to `127.0.0.1` by default (localhost only)
 - ACP tool permissions are never globally bypassed. Standalone Eva requires an authenticated in-chat decision; hosted/file clients fail closed.
 - Workspace routes require a second random capability held only by Electron main; the ordinary renderer-visible bridge token is insufficient.
-- Workspace agent `workspace_write` prompts may select only `allow_once`; normal prompts remain interactive and passive recall remains deny-by-policy.
+- Workspace agent `workspace_write` prompts auto-select `allow_once` only for read/search/fetch/think; mutating and unknown tools remain interactive. Normal prompts remain interactive and passive recall remains deny-by-policy.
 - Renderer workspace DTOs contain opaque IDs and relative paths only. Known project/worktree paths are redacted from agent reports.
 - Managed worktree paths are revalidated under `EVA_CONFIG_DIR/worktrees` before status, Assets, terminal registration, and cleanup. Runtime-root, intermediate, leaf, and post-registration symlink swaps are rejected.
 - PTY roots are allowlisted; the renderer cannot provide a cwd/environment. PTY shutdown retains Unix session identity and escalates descendants to SIGKILL before root revocation.

@@ -140,6 +140,22 @@ async function verifyTermination() {
 
   setProcessListings([
     '4242 1 4242 4242\n4244 4242 4242 4242\n',
+    '4244 1 4242 4242\n',
+    '4244 1 4242 4242\n',
+    '',
+    ''
+  ]);
+  broker.create({ rootId: 'project-test', cols: 80, rows: 24 });
+  fakePty.processes[fakePty.processes.length - 1].emitExit(0, 0);
+  const exitedSignalStart = groupSignals.length;
+  await broker.terminateByRoot('project-test');
+  assert.ok(groupSignals.slice(exitedSignalStart).some(function(signal) {
+    return signal[0] === 4244 && signal[1] === 'SIGTERM';
+  }), 'exited PTY descendant was not terminated');
+  assert.deepStrictEqual(broker.list(), []);
+
+  setProcessListings([
+    '4242 1 4242 4242\n4244 4242 4242 4242\n',
     '4244 1 4242 4242\n'
   ]);
   broker.create({ rootId: 'project-test', cols: 80, rows: 24 });

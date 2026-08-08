@@ -51,6 +51,8 @@ def main():
         restored_run = restored.get_run(run["id"])
         assert restored_run["checkout"]["path"] == str(checkout_path)
         assert restored.list_projects()[0]["id"] == project["id"]
+        with mock.patch.object(restored, "checkout_status", side_effect=AssertionError("list_runs must be metadata-only")):
+            assert restored.list_runs(project["id"])[0]["id"] == run["id"]
 
         (checkout_path / "dirty.txt").write_text("must not disappear\n", encoding="utf-8")
         status = restored.checkout_status(checkout["id"])
@@ -94,6 +96,24 @@ def main():
         ready_run = restored.create_run(ready_project["id"], "Run in Eva ready workspace")
         assert Path(ready_run["checkout"]["path"]).is_dir()
         assert restored.discard_run(ready_run["id"])["status"] == "discarded"
+
+        lifecycle_run = restored.create_run(project["id"], "Protect archive lifecycle")
+        lifecycle_agent_id = "11111111-1111-4111-8111-111111111111"
+        restored.create_agent_run(
+            lifecycle_agent_id, lifecycle_run["id"], lifecycle_run["checkout"]["id"], "lifecycle-test"
+        )
+        restored.update_agent_run(lifecycle_agent_id, "running")
+        try:
+            restored.archive_run(lifecycle_run["id"])
+            raise AssertionError("running workspace agent should block archive")
+        except WorkspaceError as error:
+            assert "running" in str(error).lower()
+        restored.update_agent_run(lifecycle_agent_id, "done")
+        archived = restored.archive_run(lifecycle_run["id"])
+        assert archived["status"] == "archived"
+        restored.update_agent_run(lifecycle_agent_id, "done")
+        assert restored.get_run(lifecycle_run["id"])["status"] == "archived"
+        assert restored.discard_run(lifecycle_run["id"])["status"] == "discarded"
 
         symlink_run = restored.create_run(project["id"], "Reject workspace symlink escapes")
         symlink_checkout = Path(symlink_run["checkout"]["path"])

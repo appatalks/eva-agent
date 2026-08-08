@@ -240,7 +240,8 @@ var EvaWorkspaces = (function() {
     if (run.primarySessionId && typeof loadSession === 'function') {
       actions.appendChild(actionButton('Chat', 'Open this run\'s primary chat', function() { loadSession(run.primarySessionId); }));
     }
-    if (run.status === 'active') {
+    var agentActive = run.agent && ['starting', 'running', 'steering'].indexOf(run.agent.status) !== -1;
+    if ((run.status === 'active' || run.status === 'completed') && !agentActive) {
       actions.appendChild(actionButton('Archive', 'Keep this run and hide it from active work', function() { applyRunAction(run, 'archive'); }));
       actions.appendChild(actionButton('Discard', 'Review removal of this managed worktree', function() {
         state.pendingDiscardRunId = run.id;
@@ -447,13 +448,17 @@ var EvaWorkspaces = (function() {
     try {
       state.projects = await api().workspaceListProjects();
       var runs = await api().workspaceListRuns();
+      var selected = runs.find(function(run) { return run.id === state.selectedRunId; });
+      if (selected && selected.checkout && selected.checkout.lifecycle === 'active' && typeof api().workspaceCheckoutStatus === 'function') {
+        selected.checkout = await api().workspaceCheckoutStatus(selected.checkout.id);
+      }
       var terminals = await api().terminalList();
       var signature = monitorSignature(runs, terminals);
       var changed = signature !== state.monitorSignature;
-      narrateRunChanges(runs);
       state.runs = runs;
       state.lastTerminals = terminals;
       state.lastCheckedAt = Date.now();
+      narrateRunChanges(state.runs);
       if (changed) {
         state.monitorSignature = signature;
         addMonitorActivity(monitorSummary(), 'change', true);
@@ -605,8 +610,11 @@ var EvaWorkspaces = (function() {
       if (action === 'discard') {
         var currentRuns = await api().workspaceListRuns(run.projectId);
         actionRun = currentRuns.find(function(item) { return item.id === run.id; }) || null;
-        if (!actionRun || !actionRun.checkout || actionRun.status !== 'active') {
+        if (!actionRun || !actionRun.checkout || ['active', 'completed'].indexOf(actionRun.status) === -1) {
           throw new Error('This coding run is no longer available for discard.');
+        }
+        if (actionRun.agent && ['starting', 'running', 'steering'].indexOf(actionRun.agent.status) !== -1) {
+          throw new Error('The workspace agent is still running. Wait for completion before discard.');
         }
         if (typeof api().terminalCloseRoot === 'function') {
           await api().terminalCloseRoot(actionRun.checkout.id);

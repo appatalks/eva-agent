@@ -235,7 +235,10 @@ class TerminalBroker extends EventEmitter {
   terminate(id) {
     const session = this.requireSession(id);
     if (session.termination) return session.termination.promise;
-    if (session.exited) {
+    const exitedScopePids = session.exited && this.platform !== 'win32'
+      ? this._terminationPids(session.child && session.child.pid, session.scope)
+      : [];
+    if (session.exited && exitedScopePids.length === 0) {
       this.sessions.delete(id);
       return Promise.resolve({ id: id, closed: true });
     }
