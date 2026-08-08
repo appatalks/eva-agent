@@ -606,9 +606,15 @@ class WorkspaceStore:
 
     def _git_status_output(self, cwd, arguments):
         try:
+            requested_cwd = os.path.abspath(os.fspath(cwd))
+            normalized_cwd = os.path.realpath(requested_cwd)
+        except (TypeError, ValueError, OSError):
+            raise WorkspaceError("The Git working directory is invalid.")
+        if normalized_cwd != requested_cwd or not os.path.isdir(normalized_cwd):
+            raise WorkspaceError("The Git working directory is unavailable or contains a symbolic link.")
+        try:
             completed = subprocess.run(
-                ["git", *arguments],
-                cwd=str(cwd),
+                ["git", "-C", normalized_cwd, *arguments],
                 env=self._git_environment(),
                 text=True,
                 encoding="utf-8",

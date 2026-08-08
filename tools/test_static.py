@@ -1191,7 +1191,7 @@ def test_coding_workspace_contract():
     list_projects_handler = standalone_main.split("async function workspaceListProjects", 1)[1].split("async function workspaceSelectProject", 1)[0]
     list_runs_handler = standalone_main.split("async function workspaceListRuns", 1)[1].split("async function workspaceRunAction", 1)[0]
     report("coding_workspace_sqlite_schema", all(value in workspaces for value in ("CREATE TABLE projects", "CREATE TABLE checkouts", "CREATE TABLE coding_runs", "CREATE TABLE agent_runs", "CREATE TABLE approvals")))
-    report("coding_workspace_git_arrays", "[\"git\", *arguments]" in workspaces and "shell=" not in workspaces and "reference.startswith(\"-\")" in workspaces)
+    report("coding_workspace_git_arrays", "[\"git\", \"-C\", normalized_cwd, *arguments]" in workspaces and "cwd=" not in workspaces and "shell=" not in workspaces and "reference.startswith(\"-\")" in workspaces)
     report("coding_workspace_canonical_paths", "resolve(strict=True)" in workspaces and "_is_within(checkout_path, self.runtime_root)" in workspaces)
     report("coding_workspace_dirty_confirmation", "Confirm dirty cleanup" in workspaces and "confirm_dirty" in workspaces)
     report("coding_workspace_missing_worktree_recovery", '"worktree", "prune"' in workspaces and "_worktree_registered" in workspaces)

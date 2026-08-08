@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -155,6 +156,30 @@ def main():
         component_store.runtime_root.unlink()
         runtime_backup.rename(component_store.runtime_root)
         assert component_store.discard_run(runtime_run["id"])["status"] == "discarded"
+
+        git_cwd_link = sandbox / "git-cwd-link"
+        git_cwd_link.symlink_to(repository, target_is_directory=True)
+        git_cwd_parent_link = sandbox / "git-cwd-parent-link"
+        git_cwd_parent_link.symlink_to(sandbox, target_is_directory=True)
+        with mock.patch("bridge.workspaces.subprocess.run") as git_run:
+            for invalid_cwd in (
+                git_cwd_link,
+                git_cwd_parent_link / repository.name,
+                sandbox / "missing-git-cwd",
+            ):
+                try:
+                    component_store._git_status_output(invalid_cwd, ["status", "--short"])
+                    raise AssertionError("unsafe Git working directory should be rejected")
+                except WorkspaceError:
+                    pass
+            git_run.assert_not_called()
+
+            git_run.return_value = subprocess.CompletedProcess([], 0, stdout="clean\n", stderr="")
+            code, output = component_store._git_status_output(repository, ["status", "--short"])
+            assert (code, output) == (0, "clean\n")
+            command = git_run.call_args.args[0]
+            assert command == ["git", "-C", str(repository.resolve()), "status", "--short"]
+            assert "cwd" not in git_run.call_args.kwargs
         component_store.close()
 
         print("workspace lifecycle tests: PASS")
