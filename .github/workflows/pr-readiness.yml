@@ -50,13 +50,55 @@ jobs:
       # The workflow runs with the unprivileged pull_request token and checks
       # out only the base SHA. PR code is captured as untrusted text, never
       # executed here.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.prepare.outputs.base_sha }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
+
+      - name: Wait for required PR checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          mkdir -p readiness
+          required_checks='["static-checks","python-tests","Secret-Scanning-Check","Analyze (actions)","Analyze (javascript)","Analyze (python)","CodeQL"]'
+          sleep 15
+          for attempt in $(seq 1 60); do
+            if ! gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json statusCheckRollup > readiness/pr-checks.json; then
+              echo "::notice::Unable to read PR checks on attempt $attempt; retrying."
+              sleep 10
+              continue
+            fi
+            pending="$(jq --argjson required "$required_checks" '[
+              $required[] as $name |
+              ([.statusCheckRollup[]? | select(.name == $name)] | first) as $check |
+              select($check == null or $check.status != "COMPLETED") |
+              {name: $name, status: ($check.status // "MISSING"), conclusion: ($check.conclusion // "")}
+            ]' readiness/pr-checks.json)"
+            if [[ "$pending" == "[]" ]]; then
+              jq '.statusCheckRollup' readiness/pr-checks.json > readiness/checks.json
+              failed="$(jq --argjson required "$required_checks" '[
+                $required[] as $name |
+                ([.statusCheckRollup[]? | select(.name == $name)] | first) as $check |
+                select($check.conclusion != "SUCCESS") |
+                {name: $name, conclusion: $check.conclusion}
+              ]' readiness/pr-checks.json)"
+              if [[ "$failed" == "[]" ]]; then
+                exit 0
+              fi
+              echo "::error::Required PR checks did not succeed: $failed"
+              exit 1
+            fi
+            echo "::notice::Waiting for required PR checks: $pending"
+            sleep 10
+          done
+          echo "::error::Timed out waiting for required PR checks."
+          cat readiness/pr-checks.json
+          exit 1
 
       - name: Collect PR readiness evidence
         env:
@@ -136,7 +178,7 @@ jobs:
               ;;
           esac
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: pr-readiness-${{ needs.prepare.outputs.pr_number }}

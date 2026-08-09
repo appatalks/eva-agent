@@ -141,14 +141,17 @@ def test_pr_automation_workflows():
     except OSError as error:
         report("pr_automation_workflows_exist", False, str(error))
         return
-    report("pr_automation_readiness_base_only", "pull_request:" in readiness and "pull_request_target:" not in readiness and "workflow_dispatch:" in readiness and "base_sha" in readiness and "gh pr diff" in readiness)
+    report("pr_automation_readiness_base_only", "pull_request:" in readiness and "pull_request_target:" not in readiness and "workflow_dispatch:" in readiness and "base_sha" in readiness and "gh pr diff" in readiness and "Wait for required PR checks" in readiness)
     report("pr_automation_terra_reviewer", "timeout 240 copilot --agent reviewer" in readiness and "--disable-builtin-mcps" in readiness and "--no-auto-update" not in readiness and "--mode plan" not in readiness and "--yolo" not in readiness and os.path.isfile(".github/agents/reviewer.agent.md"))
     report("pr_automation_verdict_gate", "name: PR Readiness / Terra verdict" in readiness and "Gate Terra verdict" in readiness and "REQUEST_CHANGES" in readiness and "NEEDS_MAINTAINER" in readiness and "if: always()" in readiness)
+    report("pr_automation_waits_for_required_checks", "required_checks=" in readiness and "static-checks" in readiness and "CodeQL" in readiness and "Timed out waiting for required PR checks" in readiness and "Required PR checks did not succeed" in readiness and "Unable to read PR checks" in readiness)
     report("pr_automation_autofix_is_opt_in", "workflow_dispatch:" in autofix and "autofix-requested" in autofix and "Fork PRs are review-only" in autofix and "expected_head_sha" in autofix and "dry_run:" in autofix and "if: inputs.dry_run == false" in autofix)
     report("pr_automation_autofix_scoped", "--agent reviewer" in autofix and "--agent eva" in autofix and "terra-review.md" in autofix and "--deny-tool='shell(git push)'" in autofix and "Autofix touched a protected path" in autofix)
     report("pr_automation_preserves_review_threads", "resolveReviewThread" not in autofix and "Review threads remain open" in autofix)
     report("pr_automation_dry_run_does_not_write", "Report dry run" in autofix and "No files, labels, or branches were changed" in autofix and "if: inputs.dry_run == false" in autofix)
-    report("secret_scan_checks_pr_updates", "synchronize" in secret_scan and "ready_for_review" in secret_scan)
+    report("secret_scan_checks_pr_updates", "synchronize" in secret_scan and "ready_for_review" in secret_scan and "security-events: read" in secret_scan and "github.token" in secret_scan and "APP_TOKEN" not in secret_scan)
+    workflow_files = [readiness, autofix, secret_scan, open(".github/workflows/eva-ci.yml").read(), open(".github/workflows/pa11y_accessibility_testing.yml").read(), open(".github/workflows/release.yml").read()]
+    report("workflows_use_node24_actions", all("actions/checkout@v4" not in workflow and "actions/setup-node@v4" not in workflow and "actions/upload-artifact@v4" not in workflow and "actions/download-artifact@v4" not in workflow for workflow in workflow_files))
 
 
 def test_no_hardcoded_keys():
@@ -887,10 +890,11 @@ def test_signal_and_github_mcp_contract():
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync('core/js/options.js', 'utf8');
-const match = source.match(/(function isAffirmativeSignalSendRequest\(text\) \{[\s\S]*?\n\})\n\nfunction canAuthorizeSignalDelivery/);
-if (!match) process.exit(2);
+const start = source.indexOf('function isAffirmativeSignalSendRequest(text) {');
+const end = source.indexOf('\nfunction canAuthorizeSignalDelivery', start);
+if (start < 0 || end < 0) process.exit(2);
 const sandbox = {};
-vm.runInNewContext(match[1], sandbox);
+vm.runInNewContext(source.slice(start, end), sandbox);
 const matrix = JSON.parse(fs.readFileSync(0, 'utf8'));
 process.stdout.write(JSON.stringify(matrix.map(([text]) => sandbox.isAffirmativeSignalSendRequest(text))));
 '''

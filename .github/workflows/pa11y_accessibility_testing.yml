@@ -8,15 +8,15 @@ permissions:
 
 jobs:
   accessibility:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20' # Use the appropriate Node.js version for your project
+          node-version: "24"
 
       - name: Install pa11x Accessibility checker
         run: |

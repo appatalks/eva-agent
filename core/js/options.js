@@ -398,20 +398,60 @@ function installBridgeCapabilityFetch() {
 installBridgeCapabilityFetch();
 
 function isAffirmativeSignalSendRequest(text) {
+  function stripQuotedText(value) {
+    var parts = [];
+    var index = 0;
+    var quoteEnd = '';
+    while (index < value.length) {
+      var character = value.charAt(index);
+      if (quoteEnd) {
+        if (character === quoteEnd) quoteEnd = '';
+        index += 1;
+        continue;
+      }
+      if (character === '"') quoteEnd = '"';
+      else if (character === '“') quoteEnd = '”';
+      else parts.push(character);
+      index += 1;
+    }
+    return parts.join('');
+  }
+
+  function stripClauseFiller(clause) {
+    var value = clause.replace(/^\s+/, '');
+    var prefixes = ['very good', 'okay', 'great', 'then', 'sure', 'now', 'but', 'and', 'ok'];
+    for (var index = 0; index < prefixes.length; index++) {
+      var prefix = prefixes[index];
+      if (value === prefix || value.indexOf(prefix + ' ') === 0 || value.indexOf(prefix + ',') === 0) {
+        return value.slice(prefix.length).replace(/^[\s,]+/, '');
+      }
+    }
+    return value;
+  }
+
+  function hasRevocation(clause) {
+    var normalized = clause.toLowerCase().replace(/’/g, "'").replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+    if (normalized.indexOf('never mind') >= 0 || normalized.split(' ').indexOf('cancel') >= 0) return true;
+    var words = normalized.replace(/don't/g, 'dont').split(' ');
+    if (words.indexOf('dont') >= 0 || (words.indexOf('do') >= 0 && words.indexOf('not') >= 0)) return true;
+    var stopIndex = words.indexOf('stop');
+    if (stopIndex < 0) return false;
+    var nextIndex = stopIndex + 1;
+    while (['that', 'this', 'the'].indexOf(words[nextIndex]) >= 0) nextIndex += 1;
+    return ['send', 'message', 'signal'].indexOf(words[nextIndex]) >= 0;
+  }
+
   var value = String(text || '').toLowerCase();
   // Quoted text may describe a request without making one. Keep the original
   // input for payload extraction, but never authorize delivery from a quote.
-  var comparable = value.replace(/"[^"]*"|“[^”]*”/g, ' ');
+  var comparable = stripQuotedText(value);
   if (!/\bsignal\b/.test(comparable)) return false;
   var clauses = comparable.split(/(?:[.;]|\bthen\b|\band\b)/);
   var authorized = false;
   for (var clauseIndex = 0; clauseIndex < clauses.length; clauseIndex++) {
-    var rawClause = clauses[clauseIndex];
-    var clause = rawClause.trim();
+    var clause = stripClauseFiller(clauses[clauseIndex]);
     if (!clause) continue;
-    clause = clause.replace(/^(?:now|then|and|but|okay|ok|sure|great|very good)\s*,?\s*/i, '');
     var address = '(?:(?:hey\\s+)?eva[,.]?\\s*)?';
-    var revocation = /(?:^|,|\bbut\b)\s*(?:actually\s+|please\s+)?(?:don't|dont|don’t|i\s+(?:don't|dont|don’t)\s+want\s+you\s+to|never mind|cancel(?:\s+(?:that|this|the)?\s*(?:request|message|signal)?)?|(?:do not|don't|dont|don’t)\s+(?:send|text|message|notify|signal)|stop\s+(?:that|this|the)?\s*(?:send|message|signal))/;
     if (/^signal\s+me\s+(?:is|was|means)\b/.test(clause)) continue;
     var requestPrefix = '(?:(?:please\\s+)?(?:can you|could you|would you|will you)\\s+(?:please\\s+)?|please\\s+|i want you to\\s+|i need you to\\s+)?';
     var command = '(?:send|text|message|notify|ping)';
@@ -420,7 +460,7 @@ function isAffirmativeSignalSendRequest(text) {
       new RegExp(prefix + 'use\\s+signal\\s+(?:to\\s+)?(?:send|text|message|notify|ping|say|tell)\\b').test(clause) ||
       new RegExp(prefix + command + '\\b[\\s\\S]{0,100}\\b(?:on|via|through|with)\\s+signal\\b').test(clause) ||
       new RegExp(prefix + command + '\\s+(?:me\\s+)?(?:a\\s+)?signal\\b').test(clause);
-    if ((authorized || commandMatches) && revocation.test(clause)) return false;
+    if ((authorized || commandMatches) && hasRevocation(clause)) return false;
     if (commandMatches) authorized = true;
   }
   return authorized;
