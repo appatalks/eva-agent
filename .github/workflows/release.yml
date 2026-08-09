@@ -1,0 +1,55 @@
+name: Release Eva Standalone
+
+on:
+  push:
+    tags:
+      - "v.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: AppImage
+            os: ubuntu-latest
+            command: npm --prefix standalone run dist
+            artifact: Eva Standalone-*.AppImage
+          - name: Windows installer
+            os: windows-latest
+            command: npm --prefix standalone run dist:win
+            artifact: Eva Standalone Setup *.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: standalone/package-lock.json
+      - run: npm ci --prefix standalone
+      - run: ${{ matrix.command }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            standalone/dist/${{ matrix.artifact }}
+            !standalone/dist/*.__uninstaller.exe
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*

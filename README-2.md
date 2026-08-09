@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current release:** Eva 5.5.6. This document describes the matching browser UI,
+> **Current release:** Eva 5.5.7. This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -291,7 +291,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.5.6)
+  package.json             Electron + electron-builder config (v5.5.7)
 ```
 
 ## Dependencies
@@ -1614,7 +1614,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.5.6.AppImage'
+./dist/'Eva Standalone-5.5.7.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace
