@@ -804,7 +804,10 @@ def test_signal_and_github_mcp_contract():
         report("signal_intent_phrase_matrix", False, "bridge predicate missing")
     else:
         namespace = {"re": re}
-        exec(compile(ast.Module(body=[predicate], type_ignores=[]), "signal_predicate", "exec"), namespace)
+        signal_predicate_nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in {
+            "_strip_quoted_signal_text", "_strip_signal_clause_filler", "_has_signal_revocation", "_is_affirmative_signal_request"
+        }]
+        exec(compile(ast.Module(body=signal_predicate_nodes, type_ignores=[]), "signal_predicate", "exec"), namespace)
         classifier = namespace["_is_affirmative_signal_request"]
         phrase_matrix = {
             'Send me the report by email': False,

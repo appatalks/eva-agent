@@ -120,25 +120,63 @@ def _openai_chat_payload(model, messages, reasoning_effort="", max_completion_to
     return payload
 
 
+def _strip_quoted_signal_text(value):
+    """Remove quoted spans with a bounded forward scan."""
+    parts = []
+    index = 0
+    quote_end = ""
+    while index < len(value):
+        character = value[index]
+        if quote_end:
+            if character == quote_end:
+                quote_end = ""
+            index += 1
+            continue
+        if character == '"':
+            quote_end = '"'
+        elif character == "“":
+            quote_end = "”"
+        else:
+            parts.append(character)
+        index += 1
+    return "".join(parts)
+
+
+def _strip_signal_clause_filler(clause):
+    value = clause.lstrip()
+    for prefix in ("very good", "okay", "great", "then", "sure", "now", "but", "and", "ok"):
+        if value == prefix or value.startswith(prefix + " ") or value.startswith(prefix + ","):
+            return value[len(prefix):].lstrip(" ,")
+    return value
+
+
+def _has_signal_revocation(clause):
+    normalized = " ".join(clause.lower().replace("’", "'").replace(",", " ").split())
+    if "never mind" in normalized or "cancel" in normalized.split():
+        return True
+    words = normalized.replace("don't", "dont").split()
+    if "dont" in words or ("do" in words and "not" in words):
+        return True
+    if "stop" not in words:
+        return False
+    following = words[words.index("stop") + 1:]
+    while following and following[0] in {"that", "this", "the"}:
+        following.pop(0)
+    return bool(following and following[0] in {"send", "message", "signal"})
+
+
 def _is_affirmative_signal_request(text):
     value = str(text or "").lower()
-    comparable = re.sub(r'"[^"]*"|“[^”]*”', " ", value)
+    comparable = _strip_quoted_signal_text(value)
     if not re.search(r"\bsignal\b", comparable):
         return False
     clauses = re.split(r"(?:[.;]|\bthen\b|\band\b)", comparable)
     authorized = False
     for raw_clause in clauses:
-        clause = raw_clause.strip()
+        clause = _strip_signal_clause_filler(raw_clause)
         if not clause:
             continue
-        clause = re.sub(r"^(?:now|then|and|but|okay|ok|sure|great|very good)\s*,?\s*", "", clause)
         address = r"(?:(?:hey\s+)?eva[,.]?\s*)?"
-        revocation = re.compile(
-            r"(?:^|,|\bbut\b)\s*(?:actually\s+|please\s+)?"
-            r"(?:don't|dont|don’t|i\s+(?:don't|dont|don’t)\s+want\s+you\s+to|never mind|cancel(?:\s+(?:that|this|the)?\s*(?:request|message|signal)?)?|"
-            r"(?:do not|don't|dont|don’t)\s+(?:send|text|message|notify|signal)|"
-            r"stop\s+(?:that|this|the)?\s*(?:send|message|signal))"
-        )
         if re.search(r"^signal\s+me\s+(?:is|was|means)\b", clause):
             continue
         request_prefix = r"(?:(?:please\s+)?(?:can you|could you|would you|will you)\s+(?:please\s+)?|please\s+|i want you to\s+|i need you to\s+)?"
@@ -150,7 +188,7 @@ def _is_affirmative_signal_request(text):
             or re.search(prefix + command + r"\b[\s\S]{0,100}\b(?:on|via|through|with)\s+signal\b", clause)
             or re.search(prefix + command + r"\s+(?:me\s+)?(?:a\s+)?signal\b", clause)
         )
-        if (authorized or command_matches) and revocation.search(clause):
+        if (authorized or command_matches) and _has_signal_revocation(clause):
             return False
         if command_matches:
             authorized = True

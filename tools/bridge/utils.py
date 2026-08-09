@@ -536,9 +536,11 @@ def _needs_acp_preflight(msg_lower, request_type):
     }:
         return True
 
-    explanatory_question = bool(re.match(
-        r"\s*(?:what|how|why|explain|describe|tell\s+me\s+about)\b", message
-    ))
+    question_start = message.lstrip()
+    explanatory_question = (
+        question_start in {"what", "how", "why", "explain", "describe"}
+        or question_start.startswith(("what ", "how ", "why ", "explain ", "describe ", "tell me about "))
+    )
     operation = r"(?:search|find|list|check|review|open|create|update|close|comment|manage|run|trigger|configure|connect|deploy|query|enable|disable|start|stop|merge|delete|push|scale|restart|apply|get|describe)"
     github_operation = bool(re.search(rf"\bgithub\b[^.!?]{{0,100}}\b{operation}\b|\b{operation}\b[^.!?]{{0,100}}\bgithub\b", message))
     platform_operation = bool(
