@@ -39,11 +39,25 @@ function _activeSessionId() {
   return localStorage.getItem(SESSION_ACTIVE_KEY) || null;
 }
 
+function _newSessionId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+    return 'sess_' + globalThis.crypto.randomUUID();
+  }
+  if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
+    var bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    return 'sess_' + Array.prototype.map.call(bytes, function(byte) {
+      return byte.toString(16).padStart(2, '0');
+    }).join('');
+  }
+  throw new Error('Secure session identifiers require Web Crypto support.');
+}
+
 function ensureActiveSessionId() {
   var id = _activeSessionId();
   if (id) return id;
 
-  id = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
+  id = _newSessionId();
   localStorage.setItem(SESSION_ACTIVE_KEY, id);
   return id;
 }
@@ -179,7 +193,7 @@ function saveCurrentSession() {
 
   if (!id) {
     // First save — create a new session
-    id = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
+    id = _newSessionId();
     localStorage.setItem(SESSION_ACTIVE_KEY, id);
     index.unshift({ id: id, title: _sessionTitle(snapshot), created: Date.now(), updated: Date.now() });
   } else {

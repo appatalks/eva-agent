@@ -798,6 +798,7 @@ def test_signal_and_github_mcp_contract():
     with open("core/style.css") as f:
         style_css = f.read()
     report("signal_repeat_session_boundaries", sessions_js.count("clearLastDeliveredSignal") >= 2 and "function clearMessages()" in options_js and "clearLastDeliveredSignal();" in options_js)
+    report("session_ids_use_secure_randomness", "function _newSessionId" in sessions_js and "crypto.randomUUID" in sessions_js and "crypto.getRandomValues" in sessions_js and "Math.random" not in sessions_js)
     report("signal_repeat_provider_context", all("signalRequest:" in source and "signalContext:" in source and "captureSignalDeliveryContext" in source for source in (aig_js, copilot_js, gpt_core_js, google_js, lm_studio_js)))
     report("signal_repeat_stale_context_fails_closed", "signalContextValid = !signalContext || isSignalDeliveryContextValid" in options_js and "Signal repeat expired after the conversation changed" in options_js)
     report("signal_explicit_channel_rule", "var clauses = comparable.split" in options_js and "var authorized = false;" in options_js and "for raw_clause in clauses" in bridge_core and "authorized = False" in bridge_core)
