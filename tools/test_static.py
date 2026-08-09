@@ -132,6 +132,23 @@ def test_config_example_clean():
     report("config_example_clean", True)
 
 
+def test_pr_automation_workflows():
+    """PR review and autofix workflows retain their trust boundaries."""
+    try:
+        readiness = open(".github/workflows/pr-readiness.yml").read()
+        autofix = open(".github/workflows/copilot-autofix.yml").read()
+        secret_scan = open(".github/workflows/secret-scanning-check.yml").read()
+    except OSError as error:
+        report("pr_automation_workflows_exist", False, str(error))
+        return
+    report("pr_automation_readiness_base_only", "pull_request_target:" in readiness and "workflow_dispatch:" in readiness and "base_sha" in readiness and "gh pr diff" in readiness)
+    report("pr_automation_terra_reviewer", "--agent reviewer" in readiness and "--disable-builtin-mcps" in readiness and "--no-auto-update" not in readiness and "--mode plan" not in readiness and "--yolo" not in readiness and os.path.isfile(".github/agents/reviewer.agent.md"))
+    report("pr_automation_autofix_is_opt_in", "workflow_dispatch:" in autofix and "autofix-requested" in autofix and "Fork PRs are review-only" in autofix and "expected_head_sha" in autofix)
+    report("pr_automation_autofix_scoped", "--agent reviewer" in autofix and "--agent eva" in autofix and "terra-review.md" in autofix and "--deny-tool='shell(git push)'" in autofix and "Autofix touched a protected path" in autofix)
+    report("pr_automation_preserves_review_threads", "resolveReviewThread" not in autofix and "Review threads remain open" in autofix)
+    report("secret_scan_checks_pr_updates", "synchronize" in secret_scan and "ready_for_review" in secret_scan)
+
+
 def test_no_hardcoded_keys():
     """No API keys/tokens hardcoded in source files."""
     patterns = [
@@ -1930,6 +1947,7 @@ def main():
     sections = [
         ("File Integrity", [test_required_files, test_no_secrets_committed]),
         ("Config Safety", [test_config_example_clean, test_no_hardcoded_keys]),
+        ("PR Automation", [test_pr_automation_workflows]),
         ("Python Integrity", [test_python_syntax, test_artifact_filename_validation, test_bridge_health_contract]),
         ("Local Speech Contract", [test_local_speech_contract, test_local_speech_http_contract]),
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
