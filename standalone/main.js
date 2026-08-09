@@ -534,6 +534,9 @@ function getLocalSpeechInvocation(pythonPath) {
 const DEFAULT_LOCAL_VOICE_PROFILE = 'bundled:eva-english';
 const LOCAL_SPEECH_ACK_CACHE_VERSION = 'v1';
 const MAX_LOCAL_SPEECH_ACK_CACHE_ENTRIES = 96;
+const LOCAL_SPEECH_ACK_TIMEOUT_MS = 20000;
+const acknowledgementSynthesisJobs = new Map();
+const acknowledgementSynthesisQueue = { running: false, urgent: [], background: [] };
 const BUNDLED_LOCAL_VOICE_PROFILES = [
   { id: 'bundled:eva-english', label: 'Eva English', language: 'en', file: 'eva_voice_profile-english.wav' },
   { id: 'bundled:eva-korean', label: 'Eva Korean', language: 'ko', file: 'eva_voice_profile-korean.wav' },
@@ -719,7 +722,7 @@ function writeAcknowledgementCache(cachePath, audio) {
   } catch (_) {}
 }
 
-async function synthesizeLocalSpeech(payload, cacheAcknowledgement) {
+async function synthesizeLocalSpeech(payload, cacheAcknowledgement, timeoutMs) {
   payload = typeof payload === 'string' ? { input: payload } : (payload || {});
   const value = String(payload.input || '').trim();
   const maxLength = cacheAcknowledgement ? 160 : 12000;
@@ -739,9 +742,54 @@ async function synthesizeLocalSpeech(payload, cacheAcknowledgement) {
     input: value,
     language: language,
     reference: profile.reference
-  }), 'application/json');
+  }), 'application/json', timeoutMs);
   if (cachePath) writeAcknowledgementCache(cachePath, audio);
   return { audio: audio, cached: false };
+}
+
+function queueAcknowledgementSynthesis(payload, urgent) {
+  payload = typeof payload === 'string' ? { input: payload } : (payload || {});
+  const value = String(payload.input || '').trim();
+  const requestedLanguage = normalizeLocalSpeechLanguage(payload.language, true);
+  const language = requestedLanguage === 'auto' ? detectLocalSpeechLanguage(value) : requestedLanguage;
+  const languageMode = normalizeLocalSpeechLanguage(payload.languageMode, true);
+  const profile = resolveLocalVoiceForSynthesis(
+    String(payload.profileId || DEFAULT_LOCAL_VOICE_PROFILE),
+    language,
+    languageMode === 'auto'
+  );
+  const cachePath = acknowledgementCachePath(profile, value);
+  const cached = readAcknowledgementCache(cachePath);
+  if (cached) return Promise.resolve({ audio: cached, cached: true });
+  if (acknowledgementSynthesisJobs.has(cachePath)) return acknowledgementSynthesisJobs.get(cachePath);
+
+  let resolveJob;
+  let rejectJob;
+  const promise = new Promise(function(resolve, reject) {
+    resolveJob = resolve;
+    rejectJob = reject;
+  });
+  acknowledgementSynthesisJobs.set(cachePath, promise);
+  const job = function() {
+    return synthesizeLocalSpeech(payload, true, LOCAL_SPEECH_ACK_TIMEOUT_MS).then(resolveJob, rejectJob).finally(function() {
+      acknowledgementSynthesisJobs.delete(cachePath);
+    });
+  };
+  if (urgent) acknowledgementSynthesisQueue.urgent.push(job);
+  else acknowledgementSynthesisQueue.background.push(job);
+  runAcknowledgementSynthesisQueue();
+  return promise;
+}
+
+function runAcknowledgementSynthesisQueue() {
+  if (acknowledgementSynthesisQueue.running) return;
+  const job = acknowledgementSynthesisQueue.urgent.shift() || acknowledgementSynthesisQueue.background.shift();
+  if (!job) return;
+  acknowledgementSynthesisQueue.running = true;
+  job().finally(function() {
+    acknowledgementSynthesisQueue.running = false;
+    runAcknowledgementSynthesisQueue();
+  });
 }
 
 function getFreeLocalPort() {
@@ -1183,7 +1231,7 @@ ipcMain.handle('local-speech-synthesize', async function(event, request) {
 });
 ipcMain.handle('local-speech-acknowledgement', async function(event, request) {
   if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
-  const result = await synthesizeLocalSpeech(request, true);
+  const result = await queueAcknowledgementSynthesis(request, true);
   return new Uint8Array(result.audio);
 });
 ipcMain.handle('local-speech-warm-acknowledgements', async function(event, request) {
@@ -1196,12 +1244,12 @@ ipcMain.handle('local-speech-warm-acknowledgements', async function(event, reque
   let generated = 0;
   let reused = 0;
   for (const phrase of uniquePhrases) {
-    const result = await synthesizeLocalSpeech({
+    const result = await queueAcknowledgementSynthesis({
       input: phrase,
       language: payload.language,
       languageMode: payload.languageMode,
       profileId: payload.profileId
-    }, true);
+    }, false);
     if (result.cached) reused += 1;
     else generated += 1;
   }

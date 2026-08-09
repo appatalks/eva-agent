@@ -3309,6 +3309,7 @@ function openVoiceView() {
   } catch (e) {}
   _vvSyncConvoControls();
   _vvSetStatus('idle');
+  _vvPrepareAcknowledgements();
 
   var closeBtn = document.getElementById('voiceViewClose');
   if (closeBtn) closeBtn.onclick = closeVoiceView;
@@ -4831,20 +4832,34 @@ function _vvStopAck() {
 }
 
 function _vvWarmAcknowledgements() {
-  if (!window.evaStandalone || typeof window.evaStandalone.localSpeechWarmAcknowledgements !== 'function') return;
+  if (!window.evaStandalone || typeof window.evaStandalone.localSpeechWarmAcknowledgements !== 'function') return Promise.resolve();
   var language = _vvAcknowledgementLanguage();
   var profileId = getLocalVoicesProfile();
   var cacheKey = profileId + '|' + language;
-  if (_vv._ackWarmKey === cacheKey) return;
+  if (_vv._ackWarmCompleteKey === cacheKey) return Promise.resolve();
+  if (_vv._ackWarmKey === cacheKey && _vv._ackWarmPromise) return _vv._ackWarmPromise;
   _vv._ackWarmKey = cacheKey;
-  window.evaStandalone.localSpeechWarmAcknowledgements({
+  _vv._ackWarmPromise = window.evaStandalone.localSpeechWarmAcknowledgements({
     phrases: _VV_ACK_PHRASES[language],
     language: language,
     languageMode: language,
     profileId: profileId
+  }).then(function(result) {
+    if (_vv._ackWarmKey === cacheKey) _vv._ackWarmCompleteKey = cacheKey;
+    return result;
   }).catch(function() {
     if (_vv._ackWarmKey === cacheKey) _vv._ackWarmKey = '';
+  }).finally(function() {
+    if (_vv._ackWarmKey === cacheKey) _vv._ackWarmPromise = null;
   });
+  return _vv._ackWarmPromise;
+}
+
+function _vvPrepareAcknowledgements() {
+  if (!window.evaStandalone || typeof window.evaStandalone.localVoicesStart !== 'function') return;
+  window.evaStandalone.localVoicesStart('', '').then(function() {
+    _vvWarmAcknowledgements();
+  }).catch(function() {});
 }
 
 function _vvSpeakAck() {
@@ -4852,13 +4867,16 @@ function _vvSpeakAck() {
   _vvStopAck();
   var runId = _vv._ackRunId;
   var language = _vvAcknowledgementLanguage();
-  var phrases = _VV_ACK_PHRASES[language] || _VV_ACK_PHRASES.en;
+  var profileId = getLocalVoicesProfile();
+  var cacheKey = profileId + '|' + language;
+  var availablePhrases = _VV_ACK_PHRASES[language] || _VV_ACK_PHRASES.en;
+  var phrases = _vv._ackWarmCompleteKey === cacheKey ? availablePhrases : [availablePhrases[0]];
   var phrase = phrases[Math.floor(Math.random() * phrases.length)];
   window.evaStandalone.localSpeechAcknowledgement({
     input: phrase,
     language: language,
     languageMode: language,
-    profileId: getLocalVoicesProfile()
+    profileId: profileId
   }).then(function(bytes) {
     if (runId !== _vv._ackRunId || !_vv.open || _vv.phase !== 'thinking') return;
     var audio = new Audio();

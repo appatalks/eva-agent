@@ -289,6 +289,8 @@ def test_local_speech_contract():
     report("local_speech_acknowledgement_cache", "local-speech-acknowledgement" in standalone and "acknowledgementCachePath" in standalone and "MAX_LOCAL_SPEECH_ACK_CACHE_ENTRIES" in standalone)
     report("local_speech_acknowledgement_profile_key", "profile.profileId" in standalone and "crypto.createHash('sha256')" in standalone)
     report("local_speech_acknowledgement_renderer", "function _vvWarmAcknowledgements" in options and "localSpeechAcknowledgement" in options and "localSpeechWarmAcknowledgements" in options)
+    report("local_speech_acknowledgement_priority", "queueAcknowledgementSynthesis" in standalone and "acknowledgementSynthesisQueue.urgent" in standalone and "LOCAL_SPEECH_ACK_TIMEOUT_MS = 20000" in standalone)
+    report("local_speech_acknowledgement_prewarm", "function _vvPrepareAcknowledgements" in options and "_vvPrepareAcknowledgements();" in options and "_ackWarmCompleteKey" in options)
     report("local_speech_recorder_exclusive", "if (_vv._capture) return;" in options and "_vv._capture === capture" in options)
     report("local_speech_capture_generation", "capture.generation !== _vv.listenGeneration" in options and "capture.chunks" in options)
     report("local_speech_recorder_finalizes_before_rearm", "var ownsCapture = _vv._capture === capture;" in options and "if (ownsCapture && _vv.open && _vv.whisperMode" in options)
