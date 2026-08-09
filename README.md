@@ -56,7 +56,7 @@ supported on Windows.
 | **Camera vision** | Webcam presence sensing, face-detection auto-wake, on-demand "look" with gpt-4o |
 | **Browser agent** | Playwright-based DOM control, persistent Chrome login, hybrid vision fallback |
 | **Desktop agent** | PyAutoGUI mouse/keyboard control, optional AT-SPI via computer-use-linux MCP |
-| **Voice interface** | Full-screen voice orb, wake/barge-in, TTS (OpenAI, Polly, Local Voices, browser) |
+| **Voice interface** | Full-screen voice orb, wake/barge-in, TTS (OpenAI, Polly, Local Voices, browser), and persisted microphone/speaker selection with system-default fallback |
 | **Signal messaging** | Send-only text notifications via signal-cli, keyword-triggered or on-demand |
 | **Persistent memory** | Kusto/ADX or local SQLite: conversations, emotion tracking, semantic recall |
 | **User profiles** | Switch local profiles with separate sessions, prompts, model choices, and UI preferences |

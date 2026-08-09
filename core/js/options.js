@@ -2209,6 +2209,115 @@ function applyStandaloneSurface() {
   applyStandaloneSimplifications();
 }
 
+function getPreferredAudioInputDeviceId() {
+  try { return localStorage.getItem('audio_input_device_id') || ''; } catch (e) { return ''; }
+}
+
+function getPreferredAudioOutputDeviceId() {
+  try { return localStorage.getItem('audio_output_device_id') || ''; } catch (e) { return ''; }
+}
+
+function _audioDeviceStatus(message) {
+  var status = document.getElementById('audioDeviceStatus');
+  if (status) status.textContent = message || '';
+}
+
+function _addAudioDeviceOptions(select, devices, selectedId, fallbackName) {
+  if (!select) return;
+  select.textContent = '';
+  var defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.textContent = 'System default';
+  select.appendChild(defaultOption);
+  devices.forEach(function(device, index) {
+    var option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = device.label || fallbackName + ' ' + (index + 1);
+    select.appendChild(option);
+  });
+  select.value = Array.from(select.options).some(function(option) { return option.value === selectedId; }) ? selectedId : '';
+}
+
+function refreshAudioDevicePreferences(requestPermission) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+    _audioDeviceStatus('Audio device selection is unavailable in this browser.');
+    return Promise.resolve();
+  }
+  var permission = requestPermission && navigator.mediaDevices.getUserMedia
+    ? navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+      stream.getTracks().forEach(function(track) { track.stop(); });
+    })
+    : Promise.resolve();
+  return permission.then(function() {
+    return navigator.mediaDevices.enumerateDevices();
+  }).then(function(devices) {
+    var input = document.getElementById('audioInputDevice');
+    var output = document.getElementById('audioOutputDevice');
+    _addAudioDeviceOptions(input, devices.filter(function(device) { return device.kind === 'audioinput'; }), getPreferredAudioInputDeviceId(), 'Microphone');
+    _addAudioDeviceOptions(output, devices.filter(function(device) { return device.kind === 'audiooutput'; }), getPreferredAudioOutputDeviceId(), 'Speakers');
+    _audioDeviceStatus('');
+  }).catch(function(error) {
+    _audioDeviceStatus('Unable to list audio devices: ' + (error && error.message ? error.message : 'permission was denied.'));
+  });
+}
+
+function applyPreferredAudioOutputDevice() {
+  var deviceId = getPreferredAudioOutputDeviceId();
+  var audio = document.getElementById('audioPlayback');
+  var tasks = [];
+  if (audio && typeof audio.setSinkId === 'function') tasks.push(audio.setSinkId(deviceId));
+  if (_vv.audioCtx && typeof _vv.audioCtx.setSinkId === 'function') tasks.push(_vv.audioCtx.setSinkId(deviceId));
+  if (!tasks.length) {
+    if (deviceId) _audioDeviceStatus('This browser uses the system default speaker.');
+    return Promise.resolve();
+  }
+  return Promise.all(tasks).then(function() {
+    _audioDeviceStatus('');
+  }).catch(function(error) {
+    _audioDeviceStatus('Unable to use the selected speakers: ' + (error && error.message ? error.message : 'device unavailable.'));
+  });
+}
+
+function getPreferredMicrophoneConstraints() {
+  var inputId = getPreferredAudioInputDeviceId();
+  var audio = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  if (inputId) audio.deviceId = { exact: inputId };
+  return { audio: audio };
+}
+
+function initAudioDevicePreferences() {
+  var input = document.getElementById('audioInputDevice');
+  var output = document.getElementById('audioOutputDevice');
+  var refresh = document.getElementById('refreshAudioDevicesButton');
+  if (input && !input._audioDeviceBound) {
+    input._audioDeviceBound = true;
+    input.addEventListener('change', function() {
+      localStorage.setItem('audio_input_device_id', input.value);
+      if (_vv.open && (_vv.recognition || _vv.whisperMode)) {
+        _vvStopListening();
+        _vvStartListening();
+      }
+    });
+  }
+  if (output && !output._audioDeviceBound) {
+    output._audioDeviceBound = true;
+    output.addEventListener('change', function() {
+      localStorage.setItem('audio_output_device_id', output.value);
+      applyPreferredAudioOutputDevice();
+    });
+  }
+  if (refresh && !refresh._audioDeviceBound) {
+    refresh._audioDeviceBound = true;
+    refresh.addEventListener('click', function() { refreshAudioDevicePreferences(true); });
+  }
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener && !navigator.mediaDevices._evaAudioDeviceBound) {
+    navigator.mediaDevices._evaAudioDeviceBound = true;
+    navigator.mediaDevices.addEventListener('devicechange', function() { refreshAudioDevicePreferences(false); });
+  }
+  refreshAudioDevicePreferences(false);
+  applyPreferredAudioOutputDevice();
+}
+
 function initAudioPreferences() {
   var engine = document.getElementById('selEngine');
   var voice = document.getElementById('selVoice');
@@ -2253,6 +2362,8 @@ function initAudioPreferences() {
       if (_vv.endpoint) _vv.endpoint.setDelay(_vv.endpointDelayMs);
     });
   }
+
+  initAudioDevicePreferences();
 }
 
 function getSavedMCPConfig() {
@@ -3868,11 +3979,18 @@ function _vvStartMicAnalyser() {
   // Echo cancellation is what makes barge-in possible: it removes Eva's own TTS
   // output (played through the speakers) from the mic signal, so the energy the
   // barge monitor sees while she speaks is mostly the user, not Eva.
-  var constraints = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
-  return navigator.mediaDevices.getUserMedia(constraints).then(function(stream) {
+  var preferredInputId = getPreferredAudioInputDeviceId();
+  return navigator.mediaDevices.getUserMedia(getPreferredMicrophoneConstraints()).catch(function(error) {
+    if (!preferredInputId || !/NotFoundError|OverconstrainedError/.test(error && error.name)) throw error;
+    localStorage.removeItem('audio_input_device_id');
+    _audioDeviceStatus('Selected microphone is unavailable; using the system default.');
+    refreshAudioDevicePreferences(false);
+    return navigator.mediaDevices.getUserMedia(getPreferredMicrophoneConstraints());
+  }).then(function(stream) {
     _vv.micStream = stream;
     if (!_vv.audioCtx) _vv.audioCtx = new AudioCtx();
     if (_vv.audioCtx.state === 'suspended') _vv.audioCtx.resume();
+    applyPreferredAudioOutputDevice();
     var source = _vv.audioCtx.createMediaStreamSource(stream);
     _vv.analyser = _vv.audioCtx.createAnalyser();
     _vv.analyser.fftSize = 256;
@@ -3907,6 +4025,7 @@ function _vvConnectTTSAnalyser() {
 
   if (!_vv.audioCtx) _vv.audioCtx = new AudioCtx();
   if (_vv.audioCtx.state === 'suspended') _vv.audioCtx.resume();
+  applyPreferredAudioOutputDevice();
   var ctx = _vv.audioCtx;
 
   try {
@@ -4067,6 +4186,14 @@ function _vvToggleListening() {
 function _vvStartListening() {
   if (window.evaStandalone && window.evaStandalone.isStandalone) {
     _vvStartWhisperListening('local');
+    return;
+  }
+
+  // Browser SpeechRecognition always follows the operating system default
+  // microphone. A selected device therefore needs the MediaRecorder path,
+  // which carries getUserMedia's deviceId constraint through to Whisper.
+  if (getPreferredAudioInputDeviceId()) {
+    _vvStartWhisperListening('openai');
     return;
   }
 
