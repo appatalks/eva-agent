@@ -1,7 +1,7 @@
 name: PR Readiness Review
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
     inputs:
@@ -45,8 +45,9 @@ jobs:
     if: needs.prepare.outputs.is_draft == 'false'
     runs-on: ubuntu-latest
     steps:
-      # The workflow is sourced from the base branch and checks out only the
-      # base SHA. PR code is captured as untrusted text, never executed here.
+      # The workflow runs with the unprivileged pull_request token and checks
+      # out only the base SHA. PR code is captured as untrusted text, never
+      # executed here.
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.base_sha }}
