@@ -156,25 +156,33 @@ class MCPServer:
 
     def _negotiate_protocol(self):
         """Probe modern MCP first and preserve legacy servers through fallback."""
-        discover = self._send(self._modern_request("server/discover", {}), timeout=_MCP_DISCOVERY_TIMEOUT_SECONDS)
+        discover = self._modern_discover()
         if self._is_modern_discover_result(discover):
-            supported = discover.get("supportedVersions") or []
-            if _MCP_MODERN_PROTOCOL_VERSION not in supported:
-                raise RuntimeError(
-                    f"MCP server '{self.name}' does not support {_MCP_MODERN_PROTOCOL_VERSION}."
-                )
-            self.protocol_era = "modern"
-            self.protocol_version = _MCP_MODERN_PROTOCOL_VERSION
-            self.server_info = discover.get("serverInfo") or {}
-            return
+            supported = self._supported_versions(discover)
+            if _MCP_MODERN_PROTOCOL_VERSION in supported:
+                self._select_modern_protocol(discover)
+                return
+            if _MCP_LEGACY_PROTOCOL_VERSION in supported:
+                self._initialize_legacy()
+                return
+            self._raise_unsupported_protocol(supported)
 
-        if self._is_modern_protocol_error(discover):
-            error = discover.get("error") or {}
-            supported = ((error.get("data") or {}).get("supported") or [])
-            detail = ", ".join(str(version) for version in supported) or "no compatible versions"
-            raise RuntimeError(f"MCP server '{self.name}' rejected Eva's modern protocol ({detail}).")
+        if self._is_unsupported_protocol_error(discover):
+            supported = self._supported_versions(discover.get("error") or {})
+            if _MCP_LEGACY_PROTOCOL_VERSION in supported:
+                self._initialize_legacy()
+                return
+            self._raise_unsupported_protocol(supported)
 
-        # Older servers do not recognize server/discover before initialize.
+        # An unrecognized response may be from an initialization-era server.
+        self._initialize_legacy()
+
+    def _modern_discover(self):
+        return self._send(
+            self._modern_request("server/discover", {}), timeout=_MCP_DISCOVERY_TIMEOUT_SECONDS
+        )
+
+    def _initialize_legacy(self):
         init = self._send({
             "jsonrpc": "2.0",
             "id": self._next_id(),
@@ -185,20 +193,50 @@ class MCPServer:
                 "clientInfo": dict(_MCP_CLIENT_INFO),
             },
         }, timeout=15)
+        if self._is_unsupported_protocol_error(init):
+            supported = self._supported_versions((init or {}).get("error") or {})
+            if _MCP_MODERN_PROTOCOL_VERSION in supported:
+                retry = self._modern_discover()
+                if self._is_modern_discover_result(retry) and _MCP_MODERN_PROTOCOL_VERSION in self._supported_versions(retry):
+                    self._select_modern_protocol(retry)
+                    return
+            self._raise_unsupported_protocol(supported)
         if not init or "error" in init:
             raise RuntimeError(f"MCP server '{self.name}' did not complete legacy initialization.")
         self.server_info = init.get("serverInfo") or {}
         self._write({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-    @staticmethod
-    def _is_modern_discover_result(result):
-        return isinstance(result, dict) and isinstance(result.get("supportedVersions"), list)
+    def _select_modern_protocol(self, discover):
+        self.protocol_era = "modern"
+        self.protocol_version = _MCP_MODERN_PROTOCOL_VERSION
+        metadata = discover.get("_meta") if isinstance(discover, dict) else None
+        server_info = metadata.get("io.modelcontextprotocol/serverInfo") if isinstance(metadata, dict) else None
+        self.server_info = server_info if isinstance(server_info, dict) else {}
+
+    def _raise_unsupported_protocol(self, supported):
+        detail = ", ".join(str(version) for version in supported) or "no compatible versions"
+        raise RuntimeError(f"MCP server '{self.name}' rejected Eva's modern protocol ({detail}).")
 
     @staticmethod
-    def _is_modern_protocol_error(result):
+    def _supported_versions(value):
+        source = value.get("supportedVersions") if isinstance(value, dict) else None
+        if source is None and isinstance(value, dict):
+            source = (value.get("data") or {}).get("supported")
+        return [version for version in source if isinstance(version, str)] if isinstance(source, list) else []
+
+    @staticmethod
+    def _is_modern_discover_result(result):
+        return (
+            isinstance(result, dict)
+            and result.get("resultType") == "complete"
+            and isinstance(result.get("supportedVersions"), list)
+        )
+
+    @staticmethod
+    def _is_unsupported_protocol_error(result):
         if not isinstance(result, dict) or not isinstance(result.get("error"), dict):
             return False
-        return result["error"].get("code") in {-32020, -32021, -32022}
+        return result["error"].get("code") == -32022
 
     def _modern_request(self, method, params):
         request_params = dict(params or {})

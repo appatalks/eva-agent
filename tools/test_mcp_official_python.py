@@ -29,6 +29,7 @@ def main():
         server.start()
         assert server.protocol_era == "modern"
         assert server.protocol_version == "2026-07-28"
+        assert server.server_info == {"name": "eva-official-python-fixture", "version": "2.0.0"}
         assert any(tool.get("name") == "official_echo" for tool in server.tools)
         assert server.call_tool("official_echo", {"value": "ok"}) == {"text": "official:ok"}
     finally:

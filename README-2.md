@@ -609,9 +609,11 @@ class MCPServer:
   2. Modern servers use stateless `tools/list` / `tools/call` requests with
     required `resultType` handling. Tool discovery validates every page, follows
     bounded pagination, and retains valid TTL/cache hints without polling.
-  3. A recognized modern protocol rejection fails clearly. Other unrecognized
-    probe errors or timeouts use the specification's dual-era fallback to the
-    existing `2024-11-05` `initialize` / `notifications/initialized` lifecycle.
+  3. A valid discovery response selects `2026-07-28` or falls back to
+    `2024-11-05` when the server advertises that legacy version. An incompatible
+    modern-only server fails clearly. Other unrecognized probe errors or timeouts
+    use the specification's dual-era fallback; if a delayed modern probe causes
+    legacy initialization to return modern `-32022`, Eva retries discovery once.
   4. `call_tool(name, arguments, timeout)`: Send `tools/call` JSON-RPC and
     parse content responses. Interactive `input_required` responses are surfaced
     as unavailable until Eva's approval continuation support is implemented.
