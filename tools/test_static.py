@@ -249,6 +249,8 @@ def test_local_speech_contract():
     """Local speech remains token-protected, bounded, and free of bundled voices."""
     with open("tools/local_voices_bridge.py") as f:
         bridge = f.read()
+    with open("tools/bridge/core.py") as f:
+        core_bridge = f.read()
     with open("standalone/main.js") as f:
         standalone = f.read()
     with open("core/js/options.js") as f:
@@ -283,6 +285,7 @@ def test_local_speech_contract():
     report("local_speech_playback_settings_snapshot", "var languageMode = getLocalVoicesLanguage();" in options and "var profileId = getLocalVoicesProfile();" in options and "languageMode: languageMode" in options and "profileId: profileId" in options)
     report("local_speech_explicit_custom_profile", "profile.language === null" in standalone and "!automatic && profile" in standalone)
     report("local_speech_stt_language_header", "X-Eva-Speech-Language" in standalone and "normalize_speech_language" in bridge)
+    report("local_speech_live_multilingual_warmup", "local-speech-warm-translation" in standalone and "X-Eva-Live-Translation" in standalone and "def warm(self, multilingual" in bridge and "function _vvUseMultilingualTranslationStt" in options)
     report("local_speech_no_removed_profile_fallback", "localVoicesProfileEl.value || 'eva'" not in options and "localStorage.setItem('local_voices_profile', 'bundled:eva-english')" in options)
     report("local_speech_no_renderer_url", "fetch(bridgeUrl + '/v1/speech'" not in options)
     report("local_speech_incremental_tts", 'function _ttsSpeakLocalChunked' in options and 'synth(chunkIndex + 1)' in options)
@@ -291,16 +294,17 @@ def test_local_speech_contract():
     report("local_speech_acknowledgement_renderer", "function _vvWarmAcknowledgements" in options and "localSpeechAcknowledgement" in options and "localSpeechWarmAcknowledgements" in options)
     report("local_speech_acknowledgement_priority", "queueAcknowledgementSynthesis" in standalone and "acknowledgementSynthesisQueue.urgent" in standalone and "LOCAL_SPEECH_ACK_TIMEOUT_MS = 20000" in standalone)
     report("local_speech_acknowledgement_prewarm", "function _vvPrepareAcknowledgements" in options and "_vvPrepareAcknowledgements();" in options and "_ackWarmCompleteKey" in options)
-    report("live_translation_controls", 'id="vvLiveTranslationToggle"' in open("index.html").read() and 'id="liveTranslationTarget"' in open("index.html").read() and "vv-live-controls" in open("core/themes/eva.css").read())
-    report("live_translation_fast_route", "function _vvTranslateLiveTranscript" in options and "internal: true" in options and "no_tools: true" in options and "_vvSpeakBrowser(translated" in options and "_VV_LIVE_TRANSLATION_TIMEOUT_MS = 12000" in options)
-    report("live_translation_persisted_target", "function getLiveTranslationTarget" in options and "live_translation_target" in options and "function _vvSetLiveTranslation" in options)
+    report("live_translation_controls", 'id="liveTranslationTarget"' in open("index.html").read() and 'id="liveTranslationModel"' in open("index.html").read() and 'id="vvLiveTranslationToggle"' not in open("index.html").read())
+    report("live_translation_fast_route", "function _vvTranslateLiveTranscript" in options and "'/v1/translate'" in options and "_vvSpeakBrowser(translated" in options and "_VV_LIVE_TRANSLATION_TIMEOUT_MS = 12000" in options)
+    report("live_translation_dedicated_bridge", "def _translate(self):" in core_bridge and 'elif parsed_path == "/v1/translate":' in core_bridge and "translation_mode = bool(data.get(\"translation_mode\"))" in core_bridge)
+    report("live_translation_persisted_target", "function getLiveTranslationTarget" in options and "function getLiveTranslationModel" in options and "live_translation_target" in options and "live_translation_model" in options and "function _vvSetLiveTranslation" in options)
     report("local_speech_recorder_exclusive", "if (_vv._capture) return;" in options and "_vv._capture === capture" in options)
     report("local_speech_capture_generation", "capture.generation !== _vv.listenGeneration" in options and "capture.chunks" in options)
     report("local_speech_recorder_finalizes_before_rearm", "var ownsCapture = _vv._capture === capture;" in options and "if (ownsCapture && _vv.open && _vv.whisperMode" in options)
     report("local_speech_400_recovers", "if (/HTTP 400/.test(message))" in options and "if (_vv.phase === 'speaking')" in options and "if (_vv.phase === 'awake')" in options and "_vvEnterAwake(_vv.convoMode ? _vv.convoTimeoutMs : 10000)" in options)
     report("local_speech_energy_barge", "_vv.whisperProvider !== 'local'" in options and "_vv._bargeEnergyFrames >= 4" in options)
     report("local_speech_voice_threshold", "var threshold = 12;" in options)
-    report("local_speech_auto_defaults_english", 'model_language = "ko" if language == "ko" else "en"' in bridge)
+    report("local_speech_auto_defaults_english", 'model_language = "ko" if multilingual or language == "ko" else "en"' in bridge)
     report("local_speech_wake_alias", "function _vvWakeWordMatch" in options and "(eva|ava)" in options)
     report("local_speech_direct_dispatch", "if (_vv.whisperProvider === 'local')" in options and "_vvHandleTranscript(data.text.trim())" in options and "_vvQueueTranscript(data.text.trim(), _vv.whisperProvider)" in options)
     report("local_speech_installer", '--voice-deps' in installer and 'install_local_speech' in installer)
@@ -384,7 +388,10 @@ def test_local_speech_http_contract():
         def health(self):
             return {"available": True, "loaded": False, "vad": "silero"}
 
-        def transcribe(self, audio, suffix, language="auto"):
+        def warm(self, multilingual=False):
+            return {"ready": True, "model": "small" if multilingual else "small.en"}
+
+        def transcribe(self, audio, suffix, language="auto", multilingual=False):
             if suffix != ".webm" or audio != b"voice":
                 raise ValueError("unexpected test audio")
             return {"text": "Eva test", "language": "ko" if language == "ko" else "en"}
@@ -430,6 +437,11 @@ def test_local_speech_http_contract():
             {"Authorization": "Bearer test-token", "Content-Type": "video/webm;codecs=opus"},
         )
         report("local_speech_http_transcribes_video_webm", status == 200 and json.loads(body) == {"text": "Eva test", "language": "en"})
+        status, _headers, body = request(
+            "POST", "/v1/audio/transcriptions/warm", None,
+            {"Authorization": "Bearer test-token", "X-Eva-Live-Translation": "1"},
+        )
+        report("local_speech_http_warms_multilingual", status == 200 and json.loads(body) == {"ready": True, "model": "small"})
         status, _headers, _body = request(
             "POST", "/v1/audio/transcriptions", b"voice",
             {"Authorization": "Bearer test-token", "Content-Type": "text/plain"},

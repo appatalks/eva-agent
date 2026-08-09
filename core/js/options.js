@@ -338,6 +338,11 @@ function getLiveTranslationTarget() {
   return ['en', 'ko', 'es', 'uk'].indexOf(language) >= 0 ? language : 'en';
 }
 
+function getLiveTranslationModel() {
+  var model = (localStorage.getItem('live_translation_model') || 'openai:gpt-4.1-nano').trim();
+  return ['openai:gpt-4.1-nano', 'aig', 'lmstudio'].indexOf(model) >= 0 ? model : 'openai:gpt-4.1-nano';
+}
+
 function getSafeBridgeBaseUrl() {
   var fallback = 'http://localhost:8888';
   var raw = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : fallback;
@@ -2329,6 +2334,7 @@ function initAudioPreferences() {
   var autoSpeak = document.getElementById('autoSpeak');
   var endpointDelay = document.getElementById('voiceEndpointDelay');
   var liveTranslationTarget = document.getElementById('liveTranslationTarget');
+  var liveTranslationModel = document.getElementById('liveTranslationModel');
 
   if (engine) {
     var savedEngine = localStorage.getItem('tts_engine');
@@ -2374,6 +2380,13 @@ function initAudioPreferences() {
     liveTranslationTarget.addEventListener('change', function() {
       localStorage.setItem('live_translation_target', liveTranslationTarget.value);
       _vvSyncLiveTranslationControls();
+    });
+  }
+
+  if (liveTranslationModel) {
+    liveTranslationModel.value = getLiveTranslationModel();
+    liveTranslationModel.addEventListener('change', function() {
+      localStorage.setItem('live_translation_model', liveTranslationModel.value);
     });
   }
 
@@ -4528,7 +4541,7 @@ function _vvWhisperTranscribe(blob) {
   var request;
   if (_vv.whisperProvider === 'local') {
     request = blob.arrayBuffer().then(function(audio) {
-      return window.evaStandalone.localSpeechTranscribe(audio, blob.type || 'audio/webm;codecs=opus', getLocalVoicesLanguage());
+      return window.evaStandalone.localSpeechTranscribe(audio, blob.type || 'audio/webm;codecs=opus', getLocalVoicesLanguage(), _vv.liveTranslation && _vvUseMultilingualTranslationStt());
     });
   } else {
     var apiKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : null;
@@ -4654,32 +4667,22 @@ var _VV_TRANSLATION_TARGETS = {
 var _VV_LIVE_TRANSLATION_TIMEOUT_MS = 12000;
 
 function _vvSyncLiveTranslationControls() {
-  var toggle = document.getElementById('vvLiveTranslationToggle');
-  var target = document.getElementById('vvLiveTranslationTarget');
-  var selectedTarget = getLiveTranslationTarget();
-  if (toggle) {
-    toggle.checked = !!_vv.liveTranslation;
-    if (!toggle._vvBound) {
-      toggle._vvBound = true;
-      toggle.addEventListener('change', function() { _vvSetLiveTranslation(toggle.checked, false); });
-    }
-  }
-  if (target) {
-    target.value = selectedTarget;
-    if (!target._vvBound) {
-      target._vvBound = true;
-      target.addEventListener('change', function() {
-        localStorage.setItem('live_translation_target', target.value);
-        var settingsTarget = document.getElementById('liveTranslationTarget');
-        if (settingsTarget) settingsTarget.value = target.value;
-        if (_vv.liveTranslation) _vvSpeakLiveStatus('Translation output: ' + _vvTranslationTarget().label + '.');
-      });
-    }
-  }
+  var settingsTarget = document.getElementById('liveTranslationTarget');
+  if (settingsTarget) settingsTarget.value = getLiveTranslationTarget();
 }
 
 function _vvTranslationTarget() {
   return _VV_TRANSLATION_TARGETS[getLiveTranslationTarget()] || _VV_TRANSLATION_TARGETS.en;
+}
+
+function _vvUseMultilingualTranslationStt() {
+  var configuredLanguage = getLocalVoicesLanguage();
+  if (configuredLanguage === 'ko') return true;
+  if (configuredLanguage === 'en') return false;
+  // In automatic mode, the translated-to language is the best available hint
+  // about the source language. English-to-Korean is common and can use the
+  // faster English model; other travel translation defaults to multilingual.
+  return getLiveTranslationTarget() !== 'ko';
 }
 
 function _vvSpeakBrowser(text, locale) {
@@ -4735,6 +4738,9 @@ function _vvSetLiveTranslation(enabled, silent) {
   _vv.liveTranslation = true;
   _vvSyncLiveTranslationControls();
   if (!silent) _vvSpeakLiveStatus('Live translation on. Speaking ' + _vvTranslationTarget().label + '.');
+  if (window.evaStandalone && typeof window.evaStandalone.localSpeechWarmTranslation === 'function') {
+    window.evaStandalone.localSpeechWarmTranslation(_vvUseMultilingualTranslationStt()).catch(function() {});
+  }
   _vvStartWhisperListening(window.evaStandalone && window.evaStandalone.isStandalone ? 'local' : 'openai');
 }
 
@@ -4758,19 +4764,14 @@ function _vvTranslateLiveTranscript(transcript) {
   var controller = typeof AbortController === 'undefined' ? null : new AbortController();
   var timeout = controller ? setTimeout(function() { controller.abort(); }, _VV_LIVE_TRANSLATION_TIMEOUT_MS) : null;
   _vv.liveTranslationAbort = controller;
-  var prompt = 'Translate the spoken text into ' + target.label + '. Return only the natural translation, with no preface, quotation marks, notes, or explanation.\n\nSpoken text: ' + source;
   var bridgeUrl = typeof getACPBridgeUrl === 'function' ? getACPBridgeUrl() : 'http://localhost:8888';
-  fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/aig/chat', {
+  fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/translate', {
     method: 'POST',
     headers: getBridgeCapabilityHeaders(),
     body: JSON.stringify({
-      messages: [{ role: 'system', content: 'You are a real-time interpreter. Return only the translation.' }, { role: 'user', content: prompt }],
-      user_message: prompt,
-      internal: true,
-      no_tools: true,
-      model: (document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna',
-      max_completion_tokens: 120,
-      acp_reasoning_effort: '',
+      input: source,
+      target_language: target.label,
+      model: getLiveTranslationModel() === 'aig' ? ((document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna') : getLiveTranslationModel(),
       lmstudio_base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
       lmstudio_model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
       github_pat: typeof getAuthKey === 'function' ? getAuthKey('GITHUB_PAT') : '',

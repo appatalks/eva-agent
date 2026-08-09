@@ -1255,14 +1255,19 @@ ipcMain.handle('local-speech-warm-acknowledgements', async function(event, reque
   }
   return { generated: generated, reused: reused };
 });
-ipcMain.handle('local-speech-transcribe', async function(event, audio, contentType, language) {
+ipcMain.handle('local-speech-transcribe', async function(event, audio, contentType, language, liveTranslation) {
   if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
   const bytes = Buffer.from(audio || []);
   if (!bytes.length || bytes.length > 16 * 1024 * 1024) throw new Error('Invalid audio input.');
   const requestedLanguage = normalizeLocalSpeechLanguage(language, true);
-  return requestLocalSpeech('/v1/audio/transcriptions', 'POST', bytes, String(contentType || ''), 180000, {
-    'X-Eva-Speech-Language': requestedLanguage
-  });
+  const headers = { 'X-Eva-Speech-Language': requestedLanguage };
+  if (liveTranslation) headers['X-Eva-Live-Translation'] = '1';
+  return requestLocalSpeech('/v1/audio/transcriptions', 'POST', bytes, String(contentType || ''), 180000, headers);
+});
+ipcMain.handle('local-speech-warm-translation', async function(event, multilingual) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  const headers = multilingual ? { 'X-Eva-Live-Translation': '1' } : {};
+  return requestLocalSpeech('/v1/audio/transcriptions/warm', 'POST', null, 'application/json', 180000, headers);
 });
 ipcMain.handle('auth-load', function(event) {
   return isTrustedEvaRenderer(event) ? loadEncryptedAuth() : {};

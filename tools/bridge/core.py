@@ -1084,6 +1084,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._protected_memory_write("artifact")
         elif parsed_path == "/v1/aig/chat":
             self._aig_chat()
+        elif parsed_path == "/v1/translate":
+            self._translate()
         elif parsed_path == "/v1/telemetry":
             self._telemetry_ingest()
         elif parsed_path == "/v1/cron":
@@ -3623,23 +3625,63 @@ class BridgeHandler(BaseHTTPRequestHandler):
             }
         })
 
-    def _aig_chat(self):
-        """AIG orchestrator — intelligently routes to the best model for each task."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
-            self._json_response(400, {"error": {"message": "Empty request body"}})
+    def _translate(self):
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
             return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        text = data.get("input")
+        target_language = data.get("target_language")
+        model = data.get("model")
+        if not isinstance(text, str) or not text.strip() or len(text) > 1600:
+            self._json_response(400, {"error": {"message": "Translation input must be 1 to 1600 characters"}})
+            return
+        if not isinstance(target_language, str) or target_language not in {"English", "Korean", "Spanish", "Ukrainian"}:
+            self._json_response(400, {"error": {"message": "Unsupported translation target language"}})
+            return
+        if not isinstance(model, str) or not model.strip() or len(model) > 120:
+            self._json_response(400, {"error": {"message": "Translation model is required"}})
+            return
+        prompt = "Translate the spoken text into " + target_language + ". Return only the natural translation."
+        self._aig_chat({
+            "messages": [
+                {"role": "system", "content": "You are a real-time interpreter. Return only the translation."},
+                {"role": "user", "content": prompt + "\n\nSpoken text: " + text.strip()},
+            ],
+            "user_message": prompt + "\n\nSpoken text: " + text.strip(),
+            "internal": True,
+            "no_tools": True,
+            "translation_mode": True,
+            "model": model.strip(),
+            "max_completion_tokens": 64,
+            "acp_reasoning_effort": "",
+            "lmstudio_base_url": data.get("lmstudio_base_url", ""),
+            "lmstudio_model": data.get("lmstudio_model", ""),
+            "github_pat": data.get("github_pat", ""),
+            "openai_api_key": data.get("openai_api_key", ""),
+        })
 
-        body = self.rfile.read(content_length).decode("utf-8")
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            self._json_response(400, {"error": {"message": "Invalid JSON"}})
-            return
+    def _aig_chat(self, data=None):
+        """AIG orchestrator — intelligently routes to the best model for each task."""
+        if data is None:
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length == 0:
+                self._json_response(400, {"error": {"message": "Empty request body"}})
+                return
+            body = self.rfile.read(content_length).decode("utf-8")
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self._json_response(400, {"error": {"message": "Invalid JSON"}})
+                return
 
         messages = data.get("messages", [])
         user_message = data.get("user_message", "")
-        internal = bool(data.get("internal"))
+        translation_mode = bool(data.get("translation_mode"))
+        internal = bool(data.get("internal")) or translation_mode
         # Cognition draft/revise stages are internal but still want memory recall.
         # They pass the raw user turn so _build_memory_context runs on the real
         # message instead of the wrapped task prompt.
@@ -3648,7 +3690,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Tool-free mode: the cognition reviewer is a text-only judge. It already
         # has the draft and the user message, so it must NOT re-run web/Kusto/MCP
         # tools (that duplicated the draft's retrieval and doubled latency).
-        no_tools = bool(data.get("no_tools"))
+        no_tools = bool(data.get("no_tools")) or translation_mode
         conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
         requested_backend = data.get("model", "gpt-5.6-luna")
         try:
@@ -3897,7 +3939,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "Do not claim it was sent. The application executes the marker and reports the real result.\n\n"
             )
 
-        if no_tools:
+        if no_tools and not translation_mode:
             # Judge/review mode: prepend a hard directive so the reviewer model
             # evaluates only the provided text and does not call any MCP tools.
             eva_system = (
@@ -4187,7 +4229,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Note: _st.cognition_enabled is only set at startup when Kusto MCP + token
         # are confirmed, so ACP availability is guaranteed at that point.
         # The alive check is deferred to the actual ACP prompt call.
-        if responder_provider != "openai" and _st.cognition_enabled and _st.acp_client:
+        if responder_provider != "openai" and not translation_mode and _st.cognition_enabled and _st.acp_client:
             if model_for_response not in ("lmstudio",):
                 github_pat = ""
                 acp_response_model = model_for_response if model_for_response != "acp" else ""
@@ -4223,6 +4265,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             f"If 'Active responder model' is '{_runtime_model}', then your answer is "
             f"'{_runtime_model}' and nothing else. Do not second-guess this block.\n\n"
         )
+
+        if translation_mode:
+            eva_system = (
+                "You are a real-time interpreter. Translate the user's spoken text into the requested target language. "
+                "Return only the translation, with no preface, labels, quotation marks, notes, or explanation."
+            )
 
         if responder_provider == "openai" and not response_text:
             print(f"[AIG] Step 3: Generating response via OpenAI API ({model_for_response})...")
