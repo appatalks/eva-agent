@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   prepare:
+    name: PR Readiness / Prepare evidence
     runs-on: ubuntu-latest
     outputs:
       pr_number: ${{ steps.pr.outputs.pr_number }}
@@ -41,6 +42,7 @@ jobs:
           printf 'is_draft=%s\n' "$(jq -r '.draft' pr.json)" >> "$GITHUB_OUTPUT"
 
   review:
+    name: PR Readiness / Terra verdict
     needs: prepare
     if: needs.prepare.outputs.is_draft == 'false'
     runs-on: ubuntu-latest
@@ -113,7 +115,29 @@ jobs:
             -p "$(cat readiness/copilot-prompt.txt)" > readiness/copilot-review.md
           cat readiness/copilot-review.md >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Gate Terra verdict
+        run: |
+          set -euo pipefail
+          verdict="$(sed -nE 's/^VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES|NEEDS_MAINTAINER)[[:space:]]*$/\1/p' readiness/copilot-review.md | head -n 1)"
+          case "$verdict" in
+            APPROVE)
+              echo "Terra verdict: APPROVE"
+              ;;
+            NEEDS_MAINTAINER)
+              echo "::notice::Terra requires maintainer review."
+              ;;
+            REQUEST_CHANGES)
+              echo "::error::Terra requested changes."
+              exit 1
+              ;;
+            *)
+              echo "::error::Terra did not return a valid verdict."
+              exit 1
+              ;;
+          esac
+
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: pr-readiness-${{ needs.prepare.outputs.pr_number }}
           path: readiness/
