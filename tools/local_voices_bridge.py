@@ -152,15 +152,22 @@ class LocalTranscriptionService:
             "vad": "silero",
         }
 
-    def transcribe(self, audio: bytes, suffix: str, language: str = "auto") -> dict[str, str]:
+    def warm(self, multilingual: bool = False) -> dict[str, object]:
+        model_language = "ko" if multilingual else "en"
+        with self._lock:
+            model = self.model(model_language)
+        if model is None:
+            model_name, _, _ = self._settings(model_language)
+            raise RuntimeError(self._load_errors.get(model_name, "Local transcription backend is unavailable"))
+        return {"ready": True, "model": self._settings(model_language)[0]}
+
+    def transcribe(self, audio: bytes, suffix: str, language: str = "auto", multilingual: bool = False) -> dict[str, str]:
         if not audio:
             raise ValueError("audio input must not be empty")
         if len(audio) > MAX_AUDIO_BYTES:
             raise ValueError("audio input exceeds the maximum size")
         language = normalize_speech_language(language)
-        # Auto mode should start with the lightweight English model used by
-        # Eva's wake phrase. Korean remains explicitly available in Settings.
-        model_language = "ko" if language == "ko" else "en"
+        model_language = "ko" if multilingual or language == "ko" else "en"
 
         with self._lock:
             model = self.model(model_language)
@@ -239,6 +246,8 @@ class LocalVoicesRequestHandler(BaseHTTPRequestHandler):
             self._synthesize()
         elif path == "/v1/audio/transcriptions":
             self._transcribe()
+        elif path == "/v1/audio/transcriptions/warm":
+            self._warm_transcription()
         else:
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
@@ -286,7 +295,8 @@ class LocalVoicesRequestHandler(BaseHTTPRequestHandler):
                 "audio/mp4": ".m4a",
             }[content_type]
             language = normalize_speech_language(self.headers.get("X-Eva-Speech-Language", "auto"))
-            transcript = self.transcriber.transcribe(self.rfile.read(content_length), suffix, language=language)
+            multilingual = self.headers.get("X-Eva-Live-Translation", "") == "1"
+            transcript = self.transcriber.transcribe(self.rfile.read(content_length), suffix, language=language, multilingual=multilingual)
         except ValueError as error:
             self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
@@ -297,6 +307,13 @@ class LocalVoicesRequestHandler(BaseHTTPRequestHandler):
             self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "audio transcription failed"})
             return
         self._write_json(HTTPStatus.OK, transcript)
+
+    def _warm_transcription(self) -> None:
+        try:
+            multilingual = self.headers.get("X-Eva-Live-Translation", "") == "1"
+            self._write_json(HTTPStatus.OK, self.transcriber.warm(multilingual=multilingual))
+        except RuntimeError as error:
+            self._write_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(error)})
 
     def log_message(self, format: str, *args: object) -> None:
         return

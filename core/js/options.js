@@ -333,6 +333,22 @@ function getLocalVoicesLanguage() {
   return language === 'en' || language === 'ko' ? language : 'auto';
 }
 
+function getLiveTranslationTarget() {
+  var language = (localStorage.getItem('live_translation_target') || 'en').trim().toLowerCase();
+  return ['en', 'ko', 'es', 'uk'].indexOf(language) >= 0 ? language : 'en';
+}
+
+function getLiveTranslationModel() {
+  var model = (localStorage.getItem('live_translation_model') || 'aig').trim();
+  return ['openai:gpt-4.1-nano', 'aig', 'lmstudio'].indexOf(model) >= 0 ? model : 'aig';
+}
+
+function getResolvedLiveTranslationModel() {
+  var configured = getLiveTranslationModel();
+  var openaiKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : '';
+  return configured === 'openai:gpt-4.1-nano' && !openaiKey ? 'aig' : configured;
+}
+
 function getSafeBridgeBaseUrl() {
   var fallback = 'http://localhost:8888';
   var raw = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : fallback;
@@ -2209,11 +2225,122 @@ function applyStandaloneSurface() {
   applyStandaloneSimplifications();
 }
 
+function getPreferredAudioInputDeviceId() {
+  try { return localStorage.getItem('audio_input_device_id') || ''; } catch (e) { return ''; }
+}
+
+function getPreferredAudioOutputDeviceId() {
+  try { return localStorage.getItem('audio_output_device_id') || ''; } catch (e) { return ''; }
+}
+
+function _audioDeviceStatus(message) {
+  var status = document.getElementById('audioDeviceStatus');
+  if (status) status.textContent = message || '';
+}
+
+function _addAudioDeviceOptions(select, devices, selectedId, fallbackName) {
+  if (!select) return;
+  select.textContent = '';
+  var defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.textContent = 'System default';
+  select.appendChild(defaultOption);
+  devices.forEach(function(device, index) {
+    var option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = device.label || fallbackName + ' ' + (index + 1);
+    select.appendChild(option);
+  });
+  select.value = Array.from(select.options).some(function(option) { return option.value === selectedId; }) ? selectedId : '';
+}
+
+function refreshAudioDevicePreferences(requestPermission) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+    _audioDeviceStatus('Audio device selection is unavailable in this browser.');
+    return Promise.resolve();
+  }
+  var permission = requestPermission && navigator.mediaDevices.getUserMedia
+    ? navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+      stream.getTracks().forEach(function(track) { track.stop(); });
+    })
+    : Promise.resolve();
+  return permission.then(function() {
+    return navigator.mediaDevices.enumerateDevices();
+  }).then(function(devices) {
+    var input = document.getElementById('audioInputDevice');
+    var output = document.getElementById('audioOutputDevice');
+    _addAudioDeviceOptions(input, devices.filter(function(device) { return device.kind === 'audioinput'; }), getPreferredAudioInputDeviceId(), 'Microphone');
+    _addAudioDeviceOptions(output, devices.filter(function(device) { return device.kind === 'audiooutput'; }), getPreferredAudioOutputDeviceId(), 'Speakers');
+    _audioDeviceStatus('');
+  }).catch(function(error) {
+    _audioDeviceStatus('Unable to list audio devices: ' + (error && error.message ? error.message : 'permission was denied.'));
+  });
+}
+
+function applyPreferredAudioOutputDevice() {
+  var deviceId = getPreferredAudioOutputDeviceId();
+  var audio = document.getElementById('audioPlayback');
+  var tasks = [];
+  if (audio && typeof audio.setSinkId === 'function') tasks.push(audio.setSinkId(deviceId));
+  if (_vv.audioCtx && typeof _vv.audioCtx.setSinkId === 'function') tasks.push(_vv.audioCtx.setSinkId(deviceId));
+  if (!tasks.length) {
+    if (deviceId) _audioDeviceStatus('This browser uses the system default speaker.');
+    return Promise.resolve();
+  }
+  return Promise.all(tasks).then(function() {
+    _audioDeviceStatus('');
+  }).catch(function(error) {
+    _audioDeviceStatus('Unable to use the selected speakers: ' + (error && error.message ? error.message : 'device unavailable.'));
+  });
+}
+
+function getPreferredMicrophoneConstraints() {
+  var inputId = getPreferredAudioInputDeviceId();
+  var audio = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  if (inputId) audio.deviceId = { exact: inputId };
+  return { audio: audio };
+}
+
+function initAudioDevicePreferences() {
+  var input = document.getElementById('audioInputDevice');
+  var output = document.getElementById('audioOutputDevice');
+  var refresh = document.getElementById('refreshAudioDevicesButton');
+  if (input && !input._audioDeviceBound) {
+    input._audioDeviceBound = true;
+    input.addEventListener('change', function() {
+      localStorage.setItem('audio_input_device_id', input.value);
+      if (_vv.open && (_vv.recognition || _vv.whisperMode)) {
+        _vvStopListening();
+        _vvStartListening();
+      }
+    });
+  }
+  if (output && !output._audioDeviceBound) {
+    output._audioDeviceBound = true;
+    output.addEventListener('change', function() {
+      localStorage.setItem('audio_output_device_id', output.value);
+      applyPreferredAudioOutputDevice();
+    });
+  }
+  if (refresh && !refresh._audioDeviceBound) {
+    refresh._audioDeviceBound = true;
+    refresh.addEventListener('click', function() { refreshAudioDevicePreferences(true); });
+  }
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener && !navigator.mediaDevices._evaAudioDeviceBound) {
+    navigator.mediaDevices._evaAudioDeviceBound = true;
+    navigator.mediaDevices.addEventListener('devicechange', function() { refreshAudioDevicePreferences(false); });
+  }
+  refreshAudioDevicePreferences(false);
+  applyPreferredAudioOutputDevice();
+}
+
 function initAudioPreferences() {
   var engine = document.getElementById('selEngine');
   var voice = document.getElementById('selVoice');
   var autoSpeak = document.getElementById('autoSpeak');
   var endpointDelay = document.getElementById('voiceEndpointDelay');
+  var liveTranslationTarget = document.getElementById('liveTranslationTarget');
+  var liveTranslationModel = document.getElementById('liveTranslationModel');
 
   if (engine) {
     var savedEngine = localStorage.getItem('tts_engine');
@@ -2253,6 +2380,23 @@ function initAudioPreferences() {
       if (_vv.endpoint) _vv.endpoint.setDelay(_vv.endpointDelayMs);
     });
   }
+
+  if (liveTranslationTarget) {
+    liveTranslationTarget.value = getLiveTranslationTarget();
+    liveTranslationTarget.addEventListener('change', function() {
+      localStorage.setItem('live_translation_target', liveTranslationTarget.value);
+      _vvSyncLiveTranslationControls();
+    });
+  }
+
+  if (liveTranslationModel) {
+    liveTranslationModel.value = getLiveTranslationModel();
+    liveTranslationModel.addEventListener('change', function() {
+      localStorage.setItem('live_translation_model', liveTranslationModel.value);
+    });
+  }
+
+  initAudioDevicePreferences();
 }
 
 function getSavedMCPConfig() {
@@ -3155,6 +3299,9 @@ var _vv = {
   convoMode: true,        // stay in an active conversation after the wake word
   convoTimeoutMs: 30000,  // quiet period before dropping back to standby
   endpointDelayMs: 2200,
+  liveTranslation: false,
+  liveTranslationRun: 0,
+  liveTranslationAbort: null,
   endpoint: null,
   lastTranscript: '',
   lastEvaReply: '',
@@ -3197,7 +3344,9 @@ function openVoiceView() {
     }
   } catch (e) {}
   _vvSyncConvoControls();
+  _vvSyncLiveTranslationControls();
   _vvSetStatus('idle');
+  _vvPrepareAcknowledgements();
 
   var closeBtn = document.getElementById('voiceViewClose');
   if (closeBtn) closeBtn.onclick = closeVoiceView;
@@ -3219,6 +3368,7 @@ function openVoiceView() {
 }
 
 function closeVoiceView() {
+  _vvSetLiveTranslation(false, true);
   _vv.open = false;
   var el = document.getElementById('voiceView');
   if (el) {
@@ -3868,11 +4018,18 @@ function _vvStartMicAnalyser() {
   // Echo cancellation is what makes barge-in possible: it removes Eva's own TTS
   // output (played through the speakers) from the mic signal, so the energy the
   // barge monitor sees while she speaks is mostly the user, not Eva.
-  var constraints = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
-  return navigator.mediaDevices.getUserMedia(constraints).then(function(stream) {
+  var preferredInputId = getPreferredAudioInputDeviceId();
+  return navigator.mediaDevices.getUserMedia(getPreferredMicrophoneConstraints()).catch(function(error) {
+    if (!preferredInputId || !/NotFoundError|OverconstrainedError/.test(error && error.name)) throw error;
+    localStorage.removeItem('audio_input_device_id');
+    _audioDeviceStatus('Selected microphone is unavailable; using the system default.');
+    refreshAudioDevicePreferences(false);
+    return navigator.mediaDevices.getUserMedia(getPreferredMicrophoneConstraints());
+  }).then(function(stream) {
     _vv.micStream = stream;
     if (!_vv.audioCtx) _vv.audioCtx = new AudioCtx();
     if (_vv.audioCtx.state === 'suspended') _vv.audioCtx.resume();
+    applyPreferredAudioOutputDevice();
     var source = _vv.audioCtx.createMediaStreamSource(stream);
     _vv.analyser = _vv.audioCtx.createAnalyser();
     _vv.analyser.fftSize = 256;
@@ -3907,6 +4064,7 @@ function _vvConnectTTSAnalyser() {
 
   if (!_vv.audioCtx) _vv.audioCtx = new AudioCtx();
   if (_vv.audioCtx.state === 'suspended') _vv.audioCtx.resume();
+  applyPreferredAudioOutputDevice();
   var ctx = _vv.audioCtx;
 
   try {
@@ -4070,6 +4228,18 @@ function _vvStartListening() {
     return;
   }
 
+  // Browser SpeechRecognition always follows the operating system default
+  // microphone. A selected device therefore needs the MediaRecorder path,
+  // which carries getUserMedia's deviceId constraint through to Whisper.
+  if (getPreferredAudioInputDeviceId()) {
+    var whisperKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : '';
+    if (whisperKey) {
+      _vvStartWhisperListening('openai');
+      return;
+    }
+    _audioDeviceStatus('Selected microphone needs an OpenAI key outside Standalone; using the system-default microphone.');
+  }
+
   var SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRec) {
     _vvStartWhisperListening();
@@ -4194,6 +4364,7 @@ function _vvStopListening() {
   _vv._whisperInflight = false;
   _vv.audioChunks = [];
   _vv.speechDetected = false;
+  _vvStopAck();
   _vvStopMicAnalyser();
   _vvDisconnectTTSAnalyser();
   if (_vv.open) _vvSetStatus('idle');
@@ -4227,7 +4398,10 @@ function _vvStartWhisperListening(provider) {
       _vvSetStatus('error');
       return;
     }
-    window.evaStandalone.localVoicesStart('', '').then(beginRecording).catch(function(error) {
+    window.evaStandalone.localVoicesStart('', '').then(function() {
+      _vvWarmAcknowledgements();
+      beginRecording();
+    }).catch(function(error) {
       if (generation !== _vv.listenGeneration || !_vv.open || !_vv.whisperMode) return;
       console.warn('[VoiceView] Local transcription unavailable:', error && error.message ? error.message : error);
       _vvSetStatus('error');
@@ -4337,7 +4511,7 @@ function _vvWhisperMonitor(capture) {
   // A fixed high threshold can animate the waveform without ever qualifying
   // ordinary near-field speech for transcription, especially on laptop mics.
   var threshold = 12;
-  var silenceDelay = _vv.endpointDelayMs;
+  var silenceDelay = _vv.liveTranslation ? 650 : _vv.endpointDelayMs;
 
   // Use setInterval instead of requestAnimationFrame so that Electron does not
   // throttle the energy monitor to 0 fps when the window is unfocused.
@@ -4377,7 +4551,7 @@ function _vvWhisperTranscribe(blob) {
   var request;
   if (_vv.whisperProvider === 'local') {
     request = blob.arrayBuffer().then(function(audio) {
-      return window.evaStandalone.localSpeechTranscribe(audio, blob.type || 'audio/webm;codecs=opus', getLocalVoicesLanguage());
+      return window.evaStandalone.localSpeechTranscribe(audio, blob.type || 'audio/webm;codecs=opus', getLocalVoicesLanguage(), _vv.liveTranslation && _vvUseMultilingualTranslationStt());
     });
   } else {
     var apiKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : null;
@@ -4494,6 +4668,160 @@ function _vvSyncConvoControls() {
   }
 }
 
+var _VV_TRANSLATION_TARGETS = {
+  en: { label: 'English', locale: 'en-US' },
+  ko: { label: 'Korean', locale: 'ko-KR' },
+  es: { label: 'Spanish', locale: 'es-ES' },
+  uk: { label: 'Ukrainian', locale: 'uk-UA' }
+};
+var _VV_LIVE_TRANSLATION_TIMEOUT_MS = 12000;
+
+function _vvSyncLiveTranslationControls() {
+  var settingsTarget = document.getElementById('liveTranslationTarget');
+  if (settingsTarget) settingsTarget.value = getLiveTranslationTarget();
+}
+
+function _vvTranslationTarget() {
+  return _VV_TRANSLATION_TARGETS[getLiveTranslationTarget()] || _VV_TRANSLATION_TARGETS.en;
+}
+
+function _vvUseMultilingualTranslationStt() {
+  var configuredLanguage = getLocalVoicesLanguage();
+  if (configuredLanguage === 'ko') return true;
+  if (configuredLanguage === 'en') return false;
+  // In automatic mode, the translated-to language is the best available hint
+  // about the source language. English-to-Korean is common and can use the
+  // faster English model; other travel translation defaults to multilingual.
+  return getLiveTranslationTarget() !== 'ko';
+}
+
+function _vvSpeakBrowser(text, locale) {
+  if (!text || !window.speechSynthesis || typeof window.SpeechSynthesisUtterance === 'undefined') return;
+  try {
+    window.speechSynthesis.cancel();
+    var utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = locale || 'en-US';
+    var voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
+    var matchingVoice = voices.find(function(voice) { return voice.lang && voice.lang.toLowerCase().indexOf(utterance.lang.slice(0, 2).toLowerCase()) === 0; });
+    if (matchingVoice) utterance.voice = matchingVoice;
+    utterance.rate = 1.16;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+  } catch (_) {}
+}
+
+function _vvSpeakLiveStatus(text) {
+  _vvSpeakBrowser(text, 'en-US');
+}
+
+function _vvUpdateLiveTranslationHint() {
+  var hint = document.getElementById('vvHudTelemetry');
+  if (!hint) return;
+  if (_vv.liveTranslation) {
+    hint.textContent = 'live translation | listening | output: ' + _vvTranslationTarget().label;
+  } else {
+    hint.innerHTML = 'tap orb to listen &middot; say <em>Eva</em> to wake &middot; talk over her to redirect';
+  }
+}
+
+function _vvSetLiveTranslation(enabled, silent) {
+  enabled = !!enabled;
+  if (_vv.liveTranslation === enabled) {
+    _vvSyncLiveTranslationControls();
+    return;
+  }
+  _vv.liveTranslation = enabled;
+  _vv.liveTranslationRun += 1;
+  if (_vv.liveTranslationAbort) {
+    try { _vv.liveTranslationAbort.abort(); } catch (_) {}
+    _vv.liveTranslationAbort = null;
+  }
+  _vvSyncLiveTranslationControls();
+  _vvUpdateLiveTranslationHint();
+  if (!enabled) {
+    if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (_) {} }
+    if (!silent && _vv.open) _vvSpeakLiveStatus('Live translation off. Returning to Eva voice.');
+    if (!silent && _vv.open && (_vv.recognition || _vv.whisperMode)) {
+      _vvStopListening();
+      _vvStartListening();
+    }
+    return;
+  }
+  if (!_vv.open) return;
+  _vvStopListening();
+  _vv.liveTranslation = true;
+  _vvSyncLiveTranslationControls();
+  if (!silent) _vvSpeakLiveStatus('Live translation on. Speaking ' + _vvTranslationTarget().label + '.');
+  if (!silent && getLiveTranslationModel() !== getResolvedLiveTranslationModel()) {
+    var transcriptEl = document.getElementById('vvTranscript');
+    if (transcriptEl) transcriptEl.textContent = 'OpenAI key unavailable. Using Eva backend.';
+  }
+  if (window.evaStandalone && typeof window.evaStandalone.localSpeechWarmTranslation === 'function') {
+    window.evaStandalone.localSpeechWarmTranslation(_vvUseMultilingualTranslationStt()).catch(function() {});
+  }
+  _vvStartWhisperListening(window.evaStandalone && window.evaStandalone.isStandalone ? 'local' : 'openai');
+}
+
+function _vvTranslationCommand(transcript) {
+  var text = String(transcript || '').toLowerCase();
+  var stop = /\b(?:stop|end|disable|turn off|exit)\b[^.!?]{0,30}\b(?:live|real[ -]?time)?\s*(?:translation|translate)\b/.test(text);
+  var start = /\b(?:live|real[ -]?time)\s+(?:translation|translate)\b|\blisten\s+and\s+translate\b|\b(?:start|enable|turn on|switch to|begin)\b[^.!?]{0,30}\b(?:translation|translate)\b/.test(text);
+  if (stop) return false;
+  if (start) return true;
+  return null;
+}
+
+function _vvTranslateLiveTranscript(transcript) {
+  var source = String(transcript || '').trim();
+  if (!source || !_vv.liveTranslation) return;
+  var target = _vvTranslationTarget();
+  var runId = _vv.liveTranslationRun;
+  if (_vv.liveTranslationAbort) {
+    try { _vv.liveTranslationAbort.abort(); } catch (_) {}
+  }
+  var controller = typeof AbortController === 'undefined' ? null : new AbortController();
+  var timeout = controller ? setTimeout(function() { controller.abort(); }, _VV_LIVE_TRANSLATION_TIMEOUT_MS) : null;
+  _vv.liveTranslationAbort = controller;
+  var bridgeUrl = typeof getACPBridgeUrl === 'function' ? getACPBridgeUrl() : 'http://localhost:8888';
+  fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/translate', {
+    method: 'POST',
+    headers: getBridgeCapabilityHeaders(),
+    body: JSON.stringify({
+      input: source,
+      target_language: target.label,
+      model: getResolvedLiveTranslationModel() === 'aig' ? ((document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna') : getResolvedLiveTranslationModel(),
+      lmstudio_base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
+      lmstudio_model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
+      github_pat: typeof getAuthKey === 'function' ? getAuthKey('GITHUB_PAT') : '',
+      openai_api_key: typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : ''
+    }),
+    signal: controller ? controller.signal : undefined
+  }).then(function(response) {
+    if (response.ok) return response.json();
+    return response.json().catch(function() { return {}; }).then(function(data) {
+      var detail = data && data.error && data.error.message ? data.error.message : 'Translation request returned ' + response.status;
+      throw new Error(detail);
+    });
+  }).then(function(data) {
+    if (!_vv.liveTranslation || runId !== _vv.liveTranslationRun) return;
+    var translated = (((data.choices || [])[0] || {}).message || {}).content || '';
+    translated = String(translated).replace(/^\s*["“]|["”]\s*$/g, '').trim();
+    if (!translated) return;
+    var transcriptEl = document.getElementById('vvTranscript');
+    if (transcriptEl) transcriptEl.textContent = translated;
+    _vvSpeakBrowser(translated, target.locale);
+  }).catch(function(error) {
+    if (error && error.name === 'AbortError') return;
+    if (_vv.liveTranslation && runId === _vv.liveTranslationRun) {
+      var transcriptEl = document.getElementById('vvTranscript');
+      if (transcriptEl) transcriptEl.textContent = 'Translation unavailable: ' + String(error && error.message ? error.message : error).slice(0, 140);
+    }
+  }).finally(function() {
+    if (timeout) clearTimeout(timeout);
+    if (_vv.liveTranslationAbort === controller) _vv.liveTranslationAbort = null;
+  });
+}
+
 // Enter the 'awake' conversation window. While awake, the user can speak follow
 // ups without repeating the wake word. After timeoutMs of no speech we fall back
 // to 'listening' (standby), which requires saying "Eva" again.
@@ -4604,6 +4932,20 @@ function _vvWakeWordMatch(transcript) {
 }
 
 function _vvHandleTranscript(transcript) {
+  var translationCommand = _vvTranslationCommand(transcript);
+  var commandIsAuthorized = _vv.liveTranslation || _vv.phase === 'awake' || !!_vvWakeWordMatch(transcript);
+  if (translationCommand === true && commandIsAuthorized) {
+    _vvSetLiveTranslation(true, false);
+    return;
+  }
+  if (translationCommand === false && commandIsAuthorized) {
+    _vvSetLiveTranslation(false, false);
+    return;
+  }
+  if (_vv.liveTranslation) {
+    _vvTranslateLiveTranscript(transcript);
+    return;
+  }
   // A response is mid-flight: if stuck too long, recover instead of ignoring forever.
   if (_vv.phase === 'thinking') {
     // Allow up to 90s of thinking, then force recovery
@@ -4656,39 +4998,122 @@ function _vvHandleTranscript(transcript) {
   }
 }
 
-// Short, varied acknowledgment phrases spoken instantly when a voice command is
-// received, before the (slower) real reply is generated and synthesized.
-var _VV_ACK_PHRASES = [
-  'On it.', 'One moment.', 'Let me take a look.', 'Working on it.',
-  'Sure, give me a second.', 'Okay, looking into that.', 'Got it.', 'Right away.'
-];
+// Short, varied acknowledgements fill the gap before a full answer begins. The
+// standalone app renders and caches these clips using the active Local Voices
+// profile, avoiding browser SpeechSynthesis's generic computer voice.
+var _VV_ACK_PHRASES = {
+  en: [
+    'On it.', 'One moment.', 'Let me take a look.', 'Working on it.',
+    'Sure, give me a second.', 'Okay, looking into that.', 'Got it.', 'Right away.',
+    'I will check that now.', 'Let me investigate.', 'I am on it.', 'Give me a moment.',
+    'I will find out.', 'Checking now.', 'Let me see what I can do.', 'I will take care of that.',
+    'I am looking into it.', 'Let me pull that up.', 'I will get started.', 'I have it.',
+    'I will check the details.', 'Let me work through that.', 'I am taking a look.', 'I will handle it.'
+  ],
+  ko: [
+    '알겠습니다.', '잠시만요.', '확인해 볼게요.', '처리하고 있어요.',
+    '조금만 기다려 주세요.', '지금 확인하고 있어요.', '네, 알겠습니다.', '바로 할게요.',
+    '지금 살펴볼게요.', '조사해 볼게요.', '제가 확인할게요.', '잠깐만요.',
+    '알아볼게요.', '확인 중이에요.', '무엇을 할 수 있는지 볼게요.', '제가 처리할게요.',
+    '살펴보고 있어요.', '불러와 볼게요.', '시작할게요.', '확인했어요.',
+    '세부 사항을 확인할게요.', '차근차근 살펴볼게요.', '지금 보고 있어요.', '맡겨 주세요.'
+  ]
+};
 
-// Speak an instant local acknowledgment via the browser speech synth (offline,
-// near-zero latency) regardless of the configured reply TTS engine, so there is
-// immediate audible feedback while the cognition pipeline runs. The `_ackActive`
-// flag tells the voice-view speech monitor to ignore this filler so it does not
-// count as the real reply starting.
-function _vvSpeakAck() {
-  try {
-    if (typeof window.speechSynthesis === 'undefined' ||
-        typeof window.SpeechSynthesisUtterance === 'undefined') return;
-    var phrase = _VV_ACK_PHRASES[Math.floor(Math.random() * _VV_ACK_PHRASES.length)];
-    _vv._ackActive = true;
-    if (_vv._ackTimer) { clearTimeout(_vv._ackTimer); _vv._ackTimer = null; }
-    var u = new SpeechSynthesisUtterance(phrase);
-    u.lang = 'en-US';
-    u.rate = 1.05;
-    u.pitch = 1.0;
-    u.volume = 0.9;
-    u.onend = function () { _vv._ackActive = false; };
-    u.onerror = function () { _vv._ackActive = false; };
-    try { window.speechSynthesis.cancel(); } catch (_) {}
-    window.speechSynthesis.speak(u);
-    // Safety: clear the guard even if onend never fires (some engines drop it).
-    _vv._ackTimer = setTimeout(function () { _vv._ackActive = false; }, 4000);
-  } catch (e) {
-    _vv._ackActive = false;
+function _vvAcknowledgementLanguage() {
+  var configuredLanguage = getLocalVoicesLanguage();
+  if (configuredLanguage === 'ko') return 'ko';
+  if (configuredLanguage === 'en') return 'en';
+  return getLocalVoicesProfile() === 'bundled:eva-korean' ? 'ko' : 'en';
+}
+
+function _vvStopAck() {
+  _vv._ackRunId = (_vv._ackRunId || 0) + 1;
+  _vv._ackActive = false;
+  if (_vv._ackTimer) { clearTimeout(_vv._ackTimer); _vv._ackTimer = null; }
+  if (_vv._ackAudio) {
+    try { _vv._ackAudio.pause(); } catch (_) {}
+    _vv._ackAudio = null;
   }
+  if (_vv._ackUrl) {
+    try { URL.revokeObjectURL(_vv._ackUrl); } catch (_) {}
+    _vv._ackUrl = '';
+  }
+}
+
+function _vvWarmAcknowledgements() {
+  if (!window.evaStandalone || typeof window.evaStandalone.localSpeechWarmAcknowledgements !== 'function') return Promise.resolve();
+  var language = _vvAcknowledgementLanguage();
+  var profileId = getLocalVoicesProfile();
+  var cacheKey = profileId + '|' + language;
+  if (_vv._ackWarmCompleteKey === cacheKey) return Promise.resolve();
+  if (_vv._ackWarmKey === cacheKey && _vv._ackWarmPromise) return _vv._ackWarmPromise;
+  _vv._ackWarmKey = cacheKey;
+  _vv._ackWarmPromise = window.evaStandalone.localSpeechWarmAcknowledgements({
+    phrases: _VV_ACK_PHRASES[language],
+    language: language,
+    languageMode: language,
+    profileId: profileId
+  }).then(function(result) {
+    if (_vv._ackWarmKey === cacheKey) _vv._ackWarmCompleteKey = cacheKey;
+    return result;
+  }).catch(function() {
+    if (_vv._ackWarmKey === cacheKey) _vv._ackWarmKey = '';
+  }).finally(function() {
+    if (_vv._ackWarmKey === cacheKey) _vv._ackWarmPromise = null;
+  });
+  return _vv._ackWarmPromise;
+}
+
+function _vvPrepareAcknowledgements() {
+  if (!window.evaStandalone || typeof window.evaStandalone.localVoicesStart !== 'function') return;
+  window.evaStandalone.localVoicesStart('', '').then(function() {
+    _vvWarmAcknowledgements();
+  }).catch(function() {});
+}
+
+function _vvSpeakAck() {
+  if (!window.evaStandalone || typeof window.evaStandalone.localSpeechAcknowledgement !== 'function') return;
+  _vvStopAck();
+  var runId = _vv._ackRunId;
+  var language = _vvAcknowledgementLanguage();
+  var profileId = getLocalVoicesProfile();
+  var cacheKey = profileId + '|' + language;
+  var availablePhrases = _VV_ACK_PHRASES[language] || _VV_ACK_PHRASES.en;
+  var phrases = _vv._ackWarmCompleteKey === cacheKey ? availablePhrases : [availablePhrases[0]];
+  var phrase = phrases[Math.floor(Math.random() * phrases.length)];
+  window.evaStandalone.localSpeechAcknowledgement({
+    input: phrase,
+    language: language,
+    languageMode: language,
+    profileId: profileId
+  }).then(function(bytes) {
+    if (runId !== _vv._ackRunId || !_vv.open || _vv.phase !== 'thinking') return;
+    var audio = new Audio();
+    var url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+    _vv._ackAudio = audio;
+    _vv._ackUrl = url;
+    _vv._ackActive = true;
+    function finish() {
+      if (runId !== _vv._ackRunId) return;
+      _vv._ackActive = false;
+      _vv._ackAudio = null;
+      if (_vv._ackUrl === url) {
+        try { URL.revokeObjectURL(url); } catch (_) {}
+        _vv._ackUrl = '';
+      }
+    }
+    audio.onended = finish;
+    audio.onerror = finish;
+    audio.src = url;
+    var start = function() { audio.play().catch(finish); };
+    if (typeof audio.setSinkId === 'function') {
+      audio.setSinkId(getPreferredAudioOutputDeviceId()).then(start).catch(start);
+    } else {
+      start();
+    }
+    _vv._ackTimer = setTimeout(finish, 12000);
+  }).catch(function() {});
 }
 
 function _vvSendCommand(command, fromWakeWord) {
@@ -4772,6 +5197,7 @@ function _vvWatchForResponse() {
   function beginSpeaking() {
     if (finished || speaking || !_vv.open) return;
     speaking = true;
+    _vvStopAck();
     if (_vv.speakObserver) { _vv.speakObserver.disconnect(); _vv.speakObserver = null; }
     _vvDetachSpeakStartListeners();
     if (_vv._watchTimer) { clearTimeout(_vv._watchTimer); _vv._watchTimer = null; }

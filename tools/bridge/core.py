@@ -120,25 +120,63 @@ def _openai_chat_payload(model, messages, reasoning_effort="", max_completion_to
     return payload
 
 
+def _strip_quoted_signal_text(value):
+    """Remove quoted spans with a bounded forward scan."""
+    parts = []
+    index = 0
+    quote_end = ""
+    while index < len(value):
+        character = value[index]
+        if quote_end:
+            if character == quote_end:
+                quote_end = ""
+            index += 1
+            continue
+        if character == '"':
+            quote_end = '"'
+        elif character == "“":
+            quote_end = "”"
+        else:
+            parts.append(character)
+        index += 1
+    return "".join(parts)
+
+
+def _strip_signal_clause_filler(clause):
+    value = clause.lstrip()
+    for prefix in ("very good", "okay", "great", "then", "sure", "now", "but", "and", "ok"):
+        if value == prefix or value.startswith(prefix + " ") or value.startswith(prefix + ","):
+            return value[len(prefix):].lstrip(" ,")
+    return value
+
+
+def _has_signal_revocation(clause):
+    normalized = " ".join(clause.lower().replace("’", "'").replace(",", " ").split())
+    if "never mind" in normalized or "cancel" in normalized.split():
+        return True
+    words = normalized.replace("don't", "dont").split()
+    if "dont" in words or ("do" in words and "not" in words):
+        return True
+    if "stop" not in words:
+        return False
+    following = words[words.index("stop") + 1:]
+    while following and following[0] in {"that", "this", "the"}:
+        following.pop(0)
+    return bool(following and following[0] in {"send", "message", "signal"})
+
+
 def _is_affirmative_signal_request(text):
     value = str(text or "").lower()
-    comparable = re.sub(r'"[^"]*"|“[^”]*”', " ", value)
+    comparable = _strip_quoted_signal_text(value)
     if not re.search(r"\bsignal\b", comparable):
         return False
     clauses = re.split(r"(?:[.;]|\bthen\b|\band\b)", comparable)
     authorized = False
     for raw_clause in clauses:
-        clause = raw_clause.strip()
+        clause = _strip_signal_clause_filler(raw_clause)
         if not clause:
             continue
-        clause = re.sub(r"^(?:now|then|and|but|okay|ok|sure|great|very good)\s*,?\s*", "", clause)
         address = r"(?:(?:hey\s+)?eva[,.]?\s*)?"
-        revocation = re.compile(
-            r"(?:^|,|\bbut\b)\s*(?:actually\s+|please\s+)?"
-            r"(?:don't|dont|don’t|i\s+(?:don't|dont|don’t)\s+want\s+you\s+to|never mind|cancel(?:\s+(?:that|this|the)?\s*(?:request|message|signal)?)?|"
-            r"(?:do not|don't|dont|don’t)\s+(?:send|text|message|notify|signal)|"
-            r"stop\s+(?:that|this|the)?\s*(?:send|message|signal))"
-        )
         if re.search(r"^signal\s+me\s+(?:is|was|means)\b", clause):
             continue
         request_prefix = r"(?:(?:please\s+)?(?:can you|could you|would you|will you)\s+(?:please\s+)?|please\s+|i want you to\s+|i need you to\s+)?"
@@ -150,7 +188,7 @@ def _is_affirmative_signal_request(text):
             or re.search(prefix + command + r"\b[\s\S]{0,100}\b(?:on|via|through|with)\s+signal\b", clause)
             or re.search(prefix + command + r"\s+(?:me\s+)?(?:a\s+)?signal\b", clause)
         )
-        if (authorized or command_matches) and revocation.search(clause):
+        if (authorized or command_matches) and _has_signal_revocation(clause):
             return False
         if command_matches:
             authorized = True
@@ -1084,6 +1122,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._protected_memory_write("artifact")
         elif parsed_path == "/v1/aig/chat":
             self._aig_chat()
+        elif parsed_path == "/v1/translate":
+            self._translate()
         elif parsed_path == "/v1/telemetry":
             self._telemetry_ingest()
         elif parsed_path == "/v1/cron":
@@ -3623,23 +3663,63 @@ class BridgeHandler(BaseHTTPRequestHandler):
             }
         })
 
-    def _aig_chat(self):
-        """AIG orchestrator — intelligently routes to the best model for each task."""
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length == 0:
-            self._json_response(400, {"error": {"message": "Empty request body"}})
+    def _translate(self):
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
             return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object"}})
+            return
+        text = data.get("input")
+        target_language = data.get("target_language")
+        model = data.get("model")
+        if not isinstance(text, str) or not text.strip() or len(text) > 1600:
+            self._json_response(400, {"error": {"message": "Translation input must be 1 to 1600 characters"}})
+            return
+        if not isinstance(target_language, str) or target_language not in {"English", "Korean", "Spanish", "Ukrainian"}:
+            self._json_response(400, {"error": {"message": "Unsupported translation target language"}})
+            return
+        if not isinstance(model, str) or not model.strip() or len(model) > 120:
+            self._json_response(400, {"error": {"message": "Translation model is required"}})
+            return
+        prompt = "Translate the spoken text into " + target_language + ". Return only the natural translation."
+        self._aig_chat({
+            "messages": [
+                {"role": "system", "content": "You are a real-time interpreter. Return only the translation."},
+                {"role": "user", "content": prompt + "\n\nSpoken text: " + text.strip()},
+            ],
+            "user_message": prompt + "\n\nSpoken text: " + text.strip(),
+            "internal": True,
+            "no_tools": True,
+            "translation_mode": True,
+            "model": model.strip(),
+            "max_completion_tokens": 64,
+            "acp_reasoning_effort": "",
+            "lmstudio_base_url": data.get("lmstudio_base_url", ""),
+            "lmstudio_model": data.get("lmstudio_model", ""),
+            "github_pat": data.get("github_pat", ""),
+            "openai_api_key": data.get("openai_api_key", ""),
+        })
 
-        body = self.rfile.read(content_length).decode("utf-8")
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            self._json_response(400, {"error": {"message": "Invalid JSON"}})
-            return
+    def _aig_chat(self, data=None):
+        """AIG orchestrator — intelligently routes to the best model for each task."""
+        if data is None:
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length == 0:
+                self._json_response(400, {"error": {"message": "Empty request body"}})
+                return
+            body = self.rfile.read(content_length).decode("utf-8")
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self._json_response(400, {"error": {"message": "Invalid JSON"}})
+                return
 
         messages = data.get("messages", [])
         user_message = data.get("user_message", "")
-        internal = bool(data.get("internal"))
+        translation_mode = bool(data.get("translation_mode"))
+        internal = bool(data.get("internal")) or translation_mode
         # Cognition draft/revise stages are internal but still want memory recall.
         # They pass the raw user turn so _build_memory_context runs on the real
         # message instead of the wrapped task prompt.
@@ -3648,7 +3728,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Tool-free mode: the cognition reviewer is a text-only judge. It already
         # has the draft and the user message, so it must NOT re-run web/Kusto/MCP
         # tools (that duplicated the draft's retrieval and doubled latency).
-        no_tools = bool(data.get("no_tools"))
+        no_tools = bool(data.get("no_tools")) or translation_mode
         conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
         requested_backend = data.get("model", "gpt-5.6-luna")
         try:
@@ -3886,8 +3966,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "- Use the context below naturally as your own knowledge.\n\n"
         )
 
+        if translation_mode:
+            eva_system = (
+                "You are a real-time interpreter. Translate the user's spoken text into the requested target language. "
+                "Return only the translation, with no preface, labels, quotation marks, notes, or explanation."
+            )
+
         _is_signal_request = bool(os.environ.get("EVA_BRIDGE_TOKEN")) and _is_affirmative_signal_request(user_message)
-        if _is_signal_request and not no_tools:
+        if _is_signal_request and not no_tools and not translation_mode:
             eva_system += (
                 "SIGNAL SEND REQUEST:\n"
                 "Your final answer MUST include exactly one valid marker containing the message to deliver:\n"
@@ -3897,7 +3983,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "Do not claim it was sent. The application executes the marker and reports the real result.\n\n"
             )
 
-        if no_tools:
+        if no_tools and not translation_mode:
             # Judge/review mode: prepend a hard directive so the reviewer model
             # evaluates only the provided text and does not call any MCP tools.
             eva_system = (
@@ -3974,14 +4060,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             _camera_keywords = {'look', 'see', 'holding', 'camera', 'webcam', 'picture', 'photo', 'show me', 'what am i'}
             _is_signal_request = bool(os.environ.get("EVA_BRIDGE_TOKEN")) and _is_affirmative_signal_request(user_message)
             # Skip camera reminder when the user is asking for a Signal message
-            if any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request:
+            if not translation_mode and any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request:
                 lms_messages.append({"role": "system", "content": (
                     "REMINDER: You have webcam access. To look through the camera, "
                     "emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]. "
                     "Do NOT say you cannot see or access the camera."
                 )})
             # Signal messaging reminder for local models
-            if _is_signal_request:
+            if _is_signal_request and not translation_mode:
                 lms_messages.append({"role": "system", "content": (
                     "CRITICAL INSTRUCTION: You have Signal messaging capability. "
                     "When the user asks you to send a message, text, or notification, "
@@ -4030,7 +4116,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # and the model didn't emit the marker, append it so the frontend
             # triggers the capture automatically.
             # Skip when the user is asking for a Signal message.
-            if any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request and '[[EVA_LOOK]]' not in response_text:
+            if not translation_mode and any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request and '[[EVA_LOOK]]' not in response_text:
                 # Extract a question from the user message for the vision model
                 _look_q = user_message.strip()
                 response_text = response_text.rstrip()
@@ -4040,7 +4126,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # Signal dispatch happens only after the final response reaches the
             # renderer. Draft-stage execution here could duplicate sends when
             # cognition reviews or revises a response.
-            if "[[EVA_SIGNAL]]" in response_text:
+            if not translation_mode and "[[EVA_SIGNAL]]" in response_text:
                 # Strip spurious [[EVA_LOOK]] if the user asked for messaging,
                 # not camera.  The model sometimes emits both by mistake.
                 if not any(kw in user_message.lower() for kw in _camera_keywords):
@@ -4050,13 +4136,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # ACP or the model may produce blob:file:/// URLs or markdown download links
             # referencing sandbox files. These are not accessible in Electron, so we
             # extract the filename and emit the proper marker instead.
-            response_text = _re.sub(
-                r'\[(?:Download|Open)\s+([A-Za-z0-9._-]{1,128})\]\(blob:[^)]+\)'
-                r'(?:\s*\[(?:Download|Open)\s+[A-Za-z0-9._-]{1,128}\]\(blob:[^)]+\))*'
-                r'(?:\s*\([^)]*\))?',
-                lambda m: '\n[[EVA_FILE]] ' + m.group(1),
-                response_text
-            )
+            if not translation_mode:
+                response_text = _re.sub(
+                    r'\[(?:Download|Open)\s+([A-Za-z0-9._-]{1,128})\]\(blob:[^)]+\)'
+                    r'(?:\s*\[(?:Download|Open)\s+[A-Za-z0-9._-]{1,128}\]\(blob:[^)]+\))*'
+                    r'(?:\s*\([^)]*\))?',
+                    lambda m: '\n[[EVA_FILE]] ' + m.group(1),
+                    response_text
+                )
 
             if response_text and _st.cognition_enabled and not internal:
                 threading.Thread(target=_post_response_reflection,
@@ -4187,7 +4274,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Note: _st.cognition_enabled is only set at startup when Kusto MCP + token
         # are confirmed, so ACP availability is guaranteed at that point.
         # The alive check is deferred to the actual ACP prompt call.
-        if responder_provider != "openai" and _st.cognition_enabled and _st.acp_client:
+        if responder_provider != "openai" and not translation_mode and _st.cognition_enabled and _st.acp_client:
             if model_for_response not in ("lmstudio",):
                 github_pat = ""
                 acp_response_model = model_for_response if model_for_response != "acp" else ""

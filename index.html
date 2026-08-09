@@ -582,6 +582,39 @@
         <label for="autoSpeak">Auto Speak:</label>
         <input type="checkbox" id="autoSpeak">
 
+        <label for="liveTranslationTarget">Live translation output:</label>
+        <select id="liveTranslationTarget">
+          <option value="en">English</option>
+          <option value="ko">Korean</option>
+          <option value="es">Spanish</option>
+          <option value="uk">Ukrainian</option>
+        </select>
+        <label for="liveTranslationModel">Live translation model:</label>
+        <select id="liveTranslationModel">
+          <option value="aig">Use Eva backend</option>
+          <option value="openai:gpt-4.1-nano">GPT-4.1 Nano (fast, OpenAI key)</option>
+          <option value="lmstudio">LM Studio (configured model)</option>
+        </select>
+        <div class="auth-note" style="margin:4px 0 10px;font-size:11px;opacity:0.75">
+          Live Translation uses native browser speech for speed. Normal Voice View replies keep the selected voice profile.
+        </div>
+
+        <label for="audioInputDevice">Microphone:</label>
+        <select id="audioInputDevice">
+          <option value="">System default</option>
+        </select>
+        <label for="audioOutputDevice">Speakers:</label>
+        <select id="audioOutputDevice">
+          <option value="">System default</option>
+        </select>
+        <div class="background-actions" style="margin:6px 0 2px">
+          <button type="button" class="auth-toggle" id="refreshAudioDevicesButton">Refresh devices</button>
+        </div>
+        <div class="auth-note" id="audioDeviceStatus" aria-live="polite" style="margin:4px 0 10px"></div>
+        <div class="auth-note" style="margin:4px 0 10px;font-size:11px;opacity:0.75">
+          Voice View uses the selected microphone. Browser wake-word listening and browser TTS follow the system default device.
+        </div>
+
         <label for="localVoicesProfile">Voice model:</label>
         <select id="localVoicesProfile">
           <option value="bundled:eva-english">Eva English</option>
