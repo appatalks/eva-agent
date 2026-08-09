@@ -4232,8 +4232,12 @@ function _vvStartListening() {
   // microphone. A selected device therefore needs the MediaRecorder path,
   // which carries getUserMedia's deviceId constraint through to Whisper.
   if (getPreferredAudioInputDeviceId()) {
-    _vvStartWhisperListening('openai');
-    return;
+    var whisperKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : '';
+    if (whisperKey) {
+      _vvStartWhisperListening('openai');
+      return;
+    }
+    _audioDeviceStatus('Selected microphone needs an OpenAI key outside Standalone; using the system-default microphone.');
   }
 
   var SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -4737,6 +4741,10 @@ function _vvSetLiveTranslation(enabled, silent) {
   if (!enabled) {
     if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (_) {} }
     if (!silent && _vv.open) _vvSpeakLiveStatus('Live translation off. Returning to Eva voice.');
+    if (!silent && _vv.open && (_vv.recognition || _vv.whisperMode)) {
+      _vvStopListening();
+      _vvStartListening();
+    }
     return;
   }
   if (!_vv.open) return;

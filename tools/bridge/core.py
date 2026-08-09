@@ -3966,8 +3966,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "- Use the context below naturally as your own knowledge.\n\n"
         )
 
+        if translation_mode:
+            eva_system = (
+                "You are a real-time interpreter. Translate the user's spoken text into the requested target language. "
+                "Return only the translation, with no preface, labels, quotation marks, notes, or explanation."
+            )
+
         _is_signal_request = bool(os.environ.get("EVA_BRIDGE_TOKEN")) and _is_affirmative_signal_request(user_message)
-        if _is_signal_request and not no_tools:
+        if _is_signal_request and not no_tools and not translation_mode:
             eva_system += (
                 "SIGNAL SEND REQUEST:\n"
                 "Your final answer MUST include exactly one valid marker containing the message to deliver:\n"
@@ -4054,14 +4060,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             _camera_keywords = {'look', 'see', 'holding', 'camera', 'webcam', 'picture', 'photo', 'show me', 'what am i'}
             _is_signal_request = bool(os.environ.get("EVA_BRIDGE_TOKEN")) and _is_affirmative_signal_request(user_message)
             # Skip camera reminder when the user is asking for a Signal message
-            if any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request:
+            if not translation_mode and any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request:
                 lms_messages.append({"role": "system", "content": (
                     "REMINDER: You have webcam access. To look through the camera, "
                     "emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]. "
                     "Do NOT say you cannot see or access the camera."
                 )})
             # Signal messaging reminder for local models
-            if _is_signal_request:
+            if _is_signal_request and not translation_mode:
                 lms_messages.append({"role": "system", "content": (
                     "CRITICAL INSTRUCTION: You have Signal messaging capability. "
                     "When the user asks you to send a message, text, or notification, "
@@ -4110,7 +4116,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # and the model didn't emit the marker, append it so the frontend
             # triggers the capture automatically.
             # Skip when the user is asking for a Signal message.
-            if any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request and '[[EVA_LOOK]]' not in response_text:
+            if not translation_mode and any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request and '[[EVA_LOOK]]' not in response_text:
                 # Extract a question from the user message for the vision model
                 _look_q = user_message.strip()
                 response_text = response_text.rstrip()
@@ -4120,7 +4126,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # Signal dispatch happens only after the final response reaches the
             # renderer. Draft-stage execution here could duplicate sends when
             # cognition reviews or revises a response.
-            if "[[EVA_SIGNAL]]" in response_text:
+            if not translation_mode and "[[EVA_SIGNAL]]" in response_text:
                 # Strip spurious [[EVA_LOOK]] if the user asked for messaging,
                 # not camera.  The model sometimes emits both by mistake.
                 if not any(kw in user_message.lower() for kw in _camera_keywords):
@@ -4130,13 +4136,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # ACP or the model may produce blob:file:/// URLs or markdown download links
             # referencing sandbox files. These are not accessible in Electron, so we
             # extract the filename and emit the proper marker instead.
-            response_text = _re.sub(
-                r'\[(?:Download|Open)\s+([A-Za-z0-9._-]{1,128})\]\(blob:[^)]+\)'
-                r'(?:\s*\[(?:Download|Open)\s+[A-Za-z0-9._-]{1,128}\]\(blob:[^)]+\))*'
-                r'(?:\s*\([^)]*\))?',
-                lambda m: '\n[[EVA_FILE]] ' + m.group(1),
-                response_text
-            )
+            if not translation_mode:
+                response_text = _re.sub(
+                    r'\[(?:Download|Open)\s+([A-Za-z0-9._-]{1,128})\]\(blob:[^)]+\)'
+                    r'(?:\s*\[(?:Download|Open)\s+[A-Za-z0-9._-]{1,128}\]\(blob:[^)]+\))*'
+                    r'(?:\s*\([^)]*\))?',
+                    lambda m: '\n[[EVA_FILE]] ' + m.group(1),
+                    response_text
+                )
 
             if response_text and _st.cognition_enabled and not internal:
                 threading.Thread(target=_post_response_reflection,
@@ -4303,12 +4310,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             f"If 'Active responder model' is '{_runtime_model}', then your answer is "
             f"'{_runtime_model}' and nothing else. Do not second-guess this block.\n\n"
         )
-
-        if translation_mode:
-            eva_system = (
-                "You are a real-time interpreter. Translate the user's spoken text into the requested target language. "
-                "Return only the translation, with no preface, labels, quotation marks, notes, or explanation."
-            )
 
         if responder_provider == "openai" and not response_text:
             print(f"[AIG] Step 3: Generating response via OpenAI API ({model_for_response})...")

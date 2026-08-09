@@ -537,9 +537,14 @@ def _needs_acp_preflight(msg_lower, request_type):
         return True
 
     question_start = message.lstrip()
+    leading_word = ""
+    for character in question_start:
+        if not character.isalpha():
+            break
+        leading_word += character
     explanatory_question = (
-        question_start in {"what", "how", "why", "explain", "describe"}
-        or question_start.startswith(("what ", "how ", "why ", "explain ", "describe ", "tell me about "))
+        leading_word in {"what", "how", "why", "explain", "describe"}
+        or question_start.startswith("tell me about")
     )
     operation = r"(?:search|find|list|check|review|open|create|update|close|comment|manage|run|trigger|configure|connect|deploy|query|enable|disable|start|stop|merge|delete|push|scale|restart|apply|get|describe)"
     github_operation = bool(re.search(rf"\bgithub\b[^.!?]{{0,100}}\b{operation}\b|\b{operation}\b[^.!?]{{0,100}}\bgithub\b", message))
