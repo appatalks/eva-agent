@@ -1668,7 +1668,31 @@ their runtime.
 | [OpenHands Agent Canvas](https://github.com/OpenHands/OpenHands) | Backend catalog, self-hosted agent control-center patterns, and automation UX. | Inspiration only; Eva remains framework-free and local-first. |
 | [Aider](https://github.com/Aider-AI/aider) | Repository-map context, test/lint feedback loops, diffs, and undo-oriented Git workflow. | Workflow inspiration; isolated worktrees and focused validation are implemented, while commits remain explicit future review actions. |
 | [SWE-agent](https://github.com/SWE-agent/SWE-agent) | Issue-to-patch trajectories and coding-agent evaluation methodology. | Evaluation reference, not a desktop runtime. |
-| [Model Context Protocol](https://modelcontextprotocol.io/specification/2025-06-18) | Tool/resource boundaries, capability negotiation, progress, cancellation, and user-consent principles. | Existing integration foundation; apply its consent model to workspace tools. |
+| [Model Context Protocol](https://modelcontextprotocol.io/specification/2026-07-28) | Tool/resource boundaries, capability negotiation, cancellation, consent, and stateless modern stdio protocol design. | Eva supports legacy and modern local stdio tool servers; remote HTTP, OAuth, MRTR continuations, Tasks, Resources, Prompts, and Apps remain separate work. |
+
+### Runtime, Protocol, and Test Foundations
+
+The following projects and standards are direct implementation dependencies,
+interoperability targets, or runtime integrations. Eva retains ownership of its
+security policy, local persistence, UI, and orchestration; credit here does not
+mean it vendors upstream code or inherits an upstream trust boundary.
+
+| Project or standard | Role in Eva | Current status |
+|---|---|---|
+| [Agent Client Protocol](https://agentclientprotocol.com/overview/introduction) | Structured bridge between Eva and the GitHub Copilot CLI for sessions, streaming, tool events, permissions, and cancellation. | Active integration. ACP terminal requests remain disabled; Eva's Electron PTY broker owns interactive terminals. |
+| [GitHub Copilot CLI](https://github.com/github/copilot-cli) | Optional ACP runtime for Copilot-backed chat, AIG, and isolated workspace agents. | Active external runtime; users authenticate it locally with `copilot auth login`. |
+| [MCP C# SDK v2](https://github.com/modelcontextprotocol/csharp-sdk) | Protocol reference for stateless HTTP, multi-round-trip input, Tasks, and enterprise service-hosting patterns. | Architecture and future interoperability reference; not bundled or exercised by Eva's current local stdio CI fixtures. |
+| [MCP Python SDK v2](https://github.com/modelcontextprotocol/python-sdk) | Maintained reference implementation for native MCP `2026-07-28` stdio interoperability. | Test-only compatibility fixture; not an Eva runtime dependency. |
+| [MCP TypeScript SDK v2](https://github.com/modelcontextprotocol/typescript-sdk) | Independent Tier 1 reference implementation for native modern stdio interoperability. | Test-only compatibility fixture; installed in an isolated CI path, not bundled with Eva. |
+| [Electron](https://www.electronjs.org/) and [electron-builder](https://www.electron.build/) | Privileged main-process boundary, narrow preload IPC, AppImage packaging, and bundled local bridge lifecycle. | Shipped standalone foundation. |
+| [xterm.js](https://github.com/xtermjs/xterm.js) and [node-pty](https://github.com/microsoft/node-pty) | Terminal rendering, measured fitting/search/link addons, native PTY ownership, and process-session cleanup. | Shipped Electron terminal foundation; renderer never receives arbitrary process access. |
+| [Playwright](https://playwright.dev/) | Browser automation through CDP and packaged Electron end-to-end coverage. | Shipped browser-agent/test foundation; browser actions remain subject to Eva's approval and execution policy. |
+| [Git](https://git-scm.com/) | Canonical repository inspection, isolated worktrees, branch lifecycle, diffs, and cleanup. | Shipped workspace foundation; Eva uses argument arrays and preserves explicit review/commit decisions. |
+| [SQLite](https://www.sqlite.org/) | Local durable memory, workspace records, skills, and other bridge-owned state. | Shipped local persistence foundation; browser session display state remains separate. |
+| [LM Studio](https://lmstudio.ai/) | Local OpenAI-compatible inference and local MCP tool-calling retrieval. | Supported optional runtime; no cloud model credential is required for local-only operation. |
+| [Azure Data Explorer](https://azure.microsoft.com/products/data-explorer/) / Kusto | Optional cloud memory, analytics, and Kusto MCP data retrieval. | Supported configured integration; local SQLite remains the no-cloud alternative. |
+| [PyAutoGUI](https://pyautogui.readthedocs.io/) and [OpenCV](https://opencv.org/) | Optional desktop automation and local camera/presence sensing. | Optional integrations; capability and consent controls remain in Eva. |
+| [signal-cli](https://github.com/AsamK/signal-cli) | Optional linked-account Signal delivery. | Optional external integration; Eva reports delivery success or failure rather than assuming it. |
 
 The implemented decision is **Eva control plane + explicit execution broker +
 replaceable runtime adapters**. Eva owns run/worktree identity, safety policy,
