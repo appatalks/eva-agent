@@ -57,5 +57,7 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   localVoicesList: function() { return ipcRenderer.invoke('local-voices-list'); },
   localVoicesImport: function() { return ipcRenderer.invoke('local-voices-import'); },
   localSpeechSynthesize: function(request) { return ipcRenderer.invoke('local-speech-synthesize', request); },
+  localSpeechAcknowledgement: function(request) { return ipcRenderer.invoke('local-speech-acknowledgement', request); },
+  localSpeechWarmAcknowledgements: function(request) { return ipcRenderer.invoke('local-speech-warm-acknowledgements', request); },
   localSpeechTranscribe: function(audio, contentType, language) { return ipcRenderer.invoke('local-speech-transcribe', audio, contentType, language); }
 }));

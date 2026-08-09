@@ -4321,6 +4321,7 @@ function _vvStopListening() {
   _vv._whisperInflight = false;
   _vv.audioChunks = [];
   _vv.speechDetected = false;
+  _vvStopAck();
   _vvStopMicAnalyser();
   _vvDisconnectTTSAnalyser();
   if (_vv.open) _vvSetStatus('idle');
@@ -4354,7 +4355,10 @@ function _vvStartWhisperListening(provider) {
       _vvSetStatus('error');
       return;
     }
-    window.evaStandalone.localVoicesStart('', '').then(beginRecording).catch(function(error) {
+    window.evaStandalone.localVoicesStart('', '').then(function() {
+      _vvWarmAcknowledgements();
+      beginRecording();
+    }).catch(function(error) {
       if (generation !== _vv.listenGeneration || !_vv.open || !_vv.whisperMode) return;
       console.warn('[VoiceView] Local transcription unavailable:', error && error.message ? error.message : error);
       _vvSetStatus('error');
@@ -4783,39 +4787,105 @@ function _vvHandleTranscript(transcript) {
   }
 }
 
-// Short, varied acknowledgment phrases spoken instantly when a voice command is
-// received, before the (slower) real reply is generated and synthesized.
-var _VV_ACK_PHRASES = [
-  'On it.', 'One moment.', 'Let me take a look.', 'Working on it.',
-  'Sure, give me a second.', 'Okay, looking into that.', 'Got it.', 'Right away.'
-];
+// Short, varied acknowledgements fill the gap before a full answer begins. The
+// standalone app renders and caches these clips using the active Local Voices
+// profile, avoiding browser SpeechSynthesis's generic computer voice.
+var _VV_ACK_PHRASES = {
+  en: [
+    'On it.', 'One moment.', 'Let me take a look.', 'Working on it.',
+    'Sure, give me a second.', 'Okay, looking into that.', 'Got it.', 'Right away.',
+    'I will check that now.', 'Let me investigate.', 'I am on it.', 'Give me a moment.',
+    'I will find out.', 'Checking now.', 'Let me see what I can do.', 'I will take care of that.',
+    'I am looking into it.', 'Let me pull that up.', 'I will get started.', 'I have it.',
+    'I will check the details.', 'Let me work through that.', 'I am taking a look.', 'I will handle it.'
+  ],
+  ko: [
+    '알겠습니다.', '잠시만요.', '확인해 볼게요.', '처리하고 있어요.',
+    '조금만 기다려 주세요.', '지금 확인하고 있어요.', '네, 알겠습니다.', '바로 할게요.',
+    '지금 살펴볼게요.', '조사해 볼게요.', '제가 확인할게요.', '잠깐만요.',
+    '알아볼게요.', '확인 중이에요.', '무엇을 할 수 있는지 볼게요.', '제가 처리할게요.',
+    '살펴보고 있어요.', '불러와 볼게요.', '시작할게요.', '확인했어요.',
+    '세부 사항을 확인할게요.', '차근차근 살펴볼게요.', '지금 보고 있어요.', '맡겨 주세요.'
+  ]
+};
 
-// Speak an instant local acknowledgment via the browser speech synth (offline,
-// near-zero latency) regardless of the configured reply TTS engine, so there is
-// immediate audible feedback while the cognition pipeline runs. The `_ackActive`
-// flag tells the voice-view speech monitor to ignore this filler so it does not
-// count as the real reply starting.
-function _vvSpeakAck() {
-  try {
-    if (typeof window.speechSynthesis === 'undefined' ||
-        typeof window.SpeechSynthesisUtterance === 'undefined') return;
-    var phrase = _VV_ACK_PHRASES[Math.floor(Math.random() * _VV_ACK_PHRASES.length)];
-    _vv._ackActive = true;
-    if (_vv._ackTimer) { clearTimeout(_vv._ackTimer); _vv._ackTimer = null; }
-    var u = new SpeechSynthesisUtterance(phrase);
-    u.lang = 'en-US';
-    u.rate = 1.05;
-    u.pitch = 1.0;
-    u.volume = 0.9;
-    u.onend = function () { _vv._ackActive = false; };
-    u.onerror = function () { _vv._ackActive = false; };
-    try { window.speechSynthesis.cancel(); } catch (_) {}
-    window.speechSynthesis.speak(u);
-    // Safety: clear the guard even if onend never fires (some engines drop it).
-    _vv._ackTimer = setTimeout(function () { _vv._ackActive = false; }, 4000);
-  } catch (e) {
-    _vv._ackActive = false;
+function _vvAcknowledgementLanguage() {
+  var configuredLanguage = getLocalVoicesLanguage();
+  if (configuredLanguage === 'ko') return 'ko';
+  if (configuredLanguage === 'en') return 'en';
+  return getLocalVoicesProfile() === 'bundled:eva-korean' ? 'ko' : 'en';
+}
+
+function _vvStopAck() {
+  _vv._ackRunId = (_vv._ackRunId || 0) + 1;
+  _vv._ackActive = false;
+  if (_vv._ackTimer) { clearTimeout(_vv._ackTimer); _vv._ackTimer = null; }
+  if (_vv._ackAudio) {
+    try { _vv._ackAudio.pause(); } catch (_) {}
+    _vv._ackAudio = null;
   }
+  if (_vv._ackUrl) {
+    try { URL.revokeObjectURL(_vv._ackUrl); } catch (_) {}
+    _vv._ackUrl = '';
+  }
+}
+
+function _vvWarmAcknowledgements() {
+  if (!window.evaStandalone || typeof window.evaStandalone.localSpeechWarmAcknowledgements !== 'function') return;
+  var language = _vvAcknowledgementLanguage();
+  var profileId = getLocalVoicesProfile();
+  var cacheKey = profileId + '|' + language;
+  if (_vv._ackWarmKey === cacheKey) return;
+  _vv._ackWarmKey = cacheKey;
+  window.evaStandalone.localSpeechWarmAcknowledgements({
+    phrases: _VV_ACK_PHRASES[language],
+    language: language,
+    languageMode: language,
+    profileId: profileId
+  }).catch(function() {
+    if (_vv._ackWarmKey === cacheKey) _vv._ackWarmKey = '';
+  });
+}
+
+function _vvSpeakAck() {
+  if (!window.evaStandalone || typeof window.evaStandalone.localSpeechAcknowledgement !== 'function') return;
+  _vvStopAck();
+  var runId = _vv._ackRunId;
+  var language = _vvAcknowledgementLanguage();
+  var phrases = _VV_ACK_PHRASES[language] || _VV_ACK_PHRASES.en;
+  var phrase = phrases[Math.floor(Math.random() * phrases.length)];
+  window.evaStandalone.localSpeechAcknowledgement({
+    input: phrase,
+    language: language,
+    languageMode: language,
+    profileId: getLocalVoicesProfile()
+  }).then(function(bytes) {
+    if (runId !== _vv._ackRunId || !_vv.open || _vv.phase !== 'thinking') return;
+    var audio = new Audio();
+    var url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+    _vv._ackAudio = audio;
+    _vv._ackUrl = url;
+    _vv._ackActive = true;
+    function finish() {
+      if (runId !== _vv._ackRunId) return;
+      _vv._ackActive = false;
+      _vv._ackAudio = null;
+      if (_vv._ackUrl === url) {
+        try { URL.revokeObjectURL(url); } catch (_) {}
+        _vv._ackUrl = '';
+      }
+    }
+    audio.onended = finish;
+    audio.onerror = finish;
+    audio.src = url;
+    var start = function() { audio.play().catch(finish); };
+    if (typeof audio.setSinkId === 'function') {
+      audio.setSinkId(getPreferredAudioOutputDeviceId()).then(start).catch(start);
+    } else {
+      start();
+    }
+    _vv._ackTimer = setTimeout(finish, 12000);
+  }).catch(function() {});
 }
 
 function _vvSendCommand(command, fromWakeWord) {
@@ -4899,6 +4969,7 @@ function _vvWatchForResponse() {
   function beginSpeaking() {
     if (finished || speaking || !_vv.open) return;
     speaking = true;
+    _vvStopAck();
     if (_vv.speakObserver) { _vv.speakObserver.disconnect(); _vv.speakObserver = null; }
     _vvDetachSpeakStartListeners();
     if (_vv._watchTimer) { clearTimeout(_vv._watchTimer); _vv._watchTimer = null; }

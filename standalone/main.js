@@ -485,6 +485,10 @@ function getLocalVoicesDirectory() {
   return path.join(process.env.HOME || '', '.local', 'share', 'eva', 'local-voices', 'voices');
 }
 
+function getLocalSpeechAcknowledgementCacheDirectory() {
+  return path.join(path.dirname(getLocalVoicesDirectory()), 'acknowledgements');
+}
+
 function getWindowsRuntime() {
   if (process.platform !== 'win32') return null;
   const manifestPath = path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'Eva Standalone', 'runtime', 'runtime.json');
@@ -528,6 +532,8 @@ function getLocalSpeechInvocation(pythonPath) {
 }
 
 const DEFAULT_LOCAL_VOICE_PROFILE = 'bundled:eva-english';
+const LOCAL_SPEECH_ACK_CACHE_VERSION = 'v1';
+const MAX_LOCAL_SPEECH_ACK_CACHE_ENTRIES = 96;
 const BUNDLED_LOCAL_VOICE_PROFILES = [
   { id: 'bundled:eva-english', label: 'Eva English', language: 'en', file: 'eva_voice_profile-english.wav' },
   { id: 'bundled:eva-korean', label: 'Eva Korean', language: 'ko', file: 'eva_voice_profile-korean.wav' },
@@ -669,6 +675,73 @@ function resolveLocalVoiceForSynthesis(voiceId, language, automatic) {
   }
   if (!profile) throw new Error('No local voice profile is available for the requested speech language.');
   return { reference: resolveLocalVoiceReference(profile.id), language: profile.language, profileId: profile.id };
+}
+
+function acknowledgementCachePath(profile, text) {
+  const cacheKey = [LOCAL_SPEECH_ACK_CACHE_VERSION, profile.profileId, profile.language, text].join('\0');
+  const name = crypto.createHash('sha256').update(cacheKey, 'utf8').digest('hex') + '.wav';
+  return path.join(getLocalSpeechAcknowledgementCacheDirectory(), name);
+}
+
+function readAcknowledgementCache(cachePath) {
+  try {
+    const stat = fs.lstatSync(cachePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 44 || stat.size > 16 * 1024 * 1024) return null;
+    const audio = fs.readFileSync(cachePath);
+    try { fs.utimesSync(cachePath, new Date(), stat.mtime); } catch (_) {}
+    return audio;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeAcknowledgementCache(cachePath, audio) {
+  const directory = getLocalSpeechAcknowledgementCacheDirectory();
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(directory, 0o700); } catch (_) {}
+  const temporary = cachePath + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex') + '.tmp';
+  try {
+    fs.writeFileSync(temporary, audio, { mode: 0o600 });
+    if (fs.existsSync(cachePath)) return;
+    fs.renameSync(temporary, cachePath);
+    try { fs.chmodSync(cachePath, 0o600); } catch (_) {}
+  } finally {
+    try { fs.unlinkSync(temporary); } catch (_) {}
+  }
+  try {
+    const entries = fs.readdirSync(directory).filter(function(name) {
+      return /^[a-f0-9]{64}\.wav$/.test(name);
+    }).map(function(name) {
+      const filePath = path.join(directory, name);
+      return { path: filePath, mtime: fs.statSync(filePath).mtimeMs };
+    }).sort(function(left, right) { return right.mtime - left.mtime; });
+    entries.slice(MAX_LOCAL_SPEECH_ACK_CACHE_ENTRIES).forEach(function(entry) { fs.unlinkSync(entry.path); });
+  } catch (_) {}
+}
+
+async function synthesizeLocalSpeech(payload, cacheAcknowledgement) {
+  payload = typeof payload === 'string' ? { input: payload } : (payload || {});
+  const value = String(payload.input || '').trim();
+  const maxLength = cacheAcknowledgement ? 160 : 12000;
+  if (!value || value.length > maxLength) throw new Error('Invalid speech input.');
+  const requestedLanguage = normalizeLocalSpeechLanguage(payload.language, true);
+  const language = requestedLanguage === 'auto' ? detectLocalSpeechLanguage(value) : requestedLanguage;
+  const languageMode = normalizeLocalSpeechLanguage(payload.languageMode, true);
+  const profile = resolveLocalVoiceForSynthesis(
+    String(payload.profileId || DEFAULT_LOCAL_VOICE_PROFILE),
+    language,
+    languageMode === 'auto'
+  );
+  const cachePath = cacheAcknowledgement ? acknowledgementCachePath(profile, value) : '';
+  const cached = cachePath ? readAcknowledgementCache(cachePath) : null;
+  if (cached) return { audio: cached, cached: true };
+  const audio = await requestLocalSpeech('/v1/speech', 'POST', JSON.stringify({
+    input: value,
+    language: language,
+    reference: profile.reference
+  }), 'application/json');
+  if (cachePath) writeAcknowledgementCache(cachePath, audio);
+  return { audio: audio, cached: false };
 }
 
 function getFreeLocalPort() {
@@ -1105,23 +1178,34 @@ ipcMain.handle('local-voices-import', function(event) {
 });
 ipcMain.handle('local-speech-synthesize', async function(event, request) {
   if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
-  const payload = typeof request === 'string' ? { input: request } : (request || {});
-  const value = String(payload.input || '');
-  if (!value.trim() || value.length > 12000) throw new Error('Invalid speech input.');
-  const requestedLanguage = normalizeLocalSpeechLanguage(payload.language, true);
-  const language = requestedLanguage === 'auto' ? detectLocalSpeechLanguage(value) : requestedLanguage;
-  const languageMode = normalizeLocalSpeechLanguage(payload.languageMode, true);
-  const profile = resolveLocalVoiceForSynthesis(
-    String(payload.profileId || DEFAULT_LOCAL_VOICE_PROFILE),
-    language,
-    languageMode === 'auto'
-  );
-  const audio = await requestLocalSpeech('/v1/speech', 'POST', JSON.stringify({
-    input: value,
-    language: language,
-    reference: profile.reference
-  }), 'application/json');
-  return new Uint8Array(audio);
+  const result = await synthesizeLocalSpeech(request, false);
+  return new Uint8Array(result.audio);
+});
+ipcMain.handle('local-speech-acknowledgement', async function(event, request) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  const result = await synthesizeLocalSpeech(request, true);
+  return new Uint8Array(result.audio);
+});
+ipcMain.handle('local-speech-warm-acknowledgements', async function(event, request) {
+  if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
+  const payload = request || {};
+  const phrases = Array.isArray(payload.phrases) ? payload.phrases : [];
+  const uniquePhrases = Array.from(new Set(phrases.map(function(phrase) {
+    return typeof phrase === 'string' ? phrase.trim() : '';
+  }).filter(function(phrase) { return phrase && phrase.length <= 160; }))).slice(0, 32);
+  let generated = 0;
+  let reused = 0;
+  for (const phrase of uniquePhrases) {
+    const result = await synthesizeLocalSpeech({
+      input: phrase,
+      language: payload.language,
+      languageMode: payload.languageMode,
+      profileId: payload.profileId
+    }, true);
+    if (result.cached) reused += 1;
+    else generated += 1;
+  }
+  return { generated: generated, reused: reused };
 });
 ipcMain.handle('local-speech-transcribe', async function(event, audio, contentType, language) {
   if (!isTrustedEvaRenderer(event)) throw new Error('Unauthorized renderer.');
