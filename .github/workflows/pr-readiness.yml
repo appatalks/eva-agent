@@ -17,7 +17,7 @@ permissions:
   copilot-requests: write
 
 concurrency:
-  group: pr-readiness-${{ github.event.pull_request.number }}
+  group: pr-readiness-${{ inputs.pr_number || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:

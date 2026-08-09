@@ -11,6 +11,11 @@ on:
         description: Current PR head SHA, used to reject stale requests
         required: true
         type: string
+      dry_run:
+        description: Review evidence only; do not edit files, push, or change labels
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -98,7 +103,23 @@ jobs:
             -p "$(cat autofix/reviewer-prompt.txt)" > autofix/terra-review.md
           git diff --exit-code
 
+      - name: Report dry run
+        if: inputs.dry_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          {
+            printf '## Copilot autofix dry run\n\n'
+            printf 'The trusted-branch gate and Terra review completed. No files, labels, or branches were changed.\n\n'
+            cat autofix/terra-review.md
+          } > autofix/dry-run-comment.md
+          cat autofix/dry-run-comment.md >> "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file autofix/dry-run-comment.md
+
       - name: Apply a scoped Terra autofix
+        if: inputs.dry_run == false
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -126,6 +147,7 @@ jobs:
             -p "$(cat autofix/copilot-prompt.txt)" > autofix/copilot-fix.md
 
       - name: Enforce scope and validate
+        if: inputs.dry_run == false
         run: |
           set -euo pipefail
           git diff --check
@@ -140,6 +162,7 @@ jobs:
           python tools/test_static.py
 
       - name: Commit, push, and request maintainer review
+        if: inputs.dry_run == false
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
