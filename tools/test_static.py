@@ -795,9 +795,12 @@ def test_signal_and_github_mcp_contract():
     report("signal_repeat_marker_precedence", "var forceSignalRepeat = !!(signalContext && signalContext.repeat);" in options_js and "if (forceSignalRepeat) return '';" in options_js)
     with open("core/js/sessions.js") as f:
         sessions_js = f.read()
+    with open("core/js/learning.js") as f:
+        learning_js = f.read()
     with open("core/style.css") as f:
         style_css = f.read()
     report("signal_repeat_session_boundaries", sessions_js.count("clearLastDeliveredSignal") >= 2 and "function clearMessages()" in options_js and "clearLastDeliveredSignal();" in options_js)
+    report("session_ids_use_secure_randomness", "function _newSessionId" in sessions_js and "crypto.randomUUID" in sessions_js and "crypto.getRandomValues" in sessions_js and "Math.random" not in sessions_js and "ensureActiveSessionId" in learning_js and "'sess_' + Date.now" not in learning_js)
     report("signal_repeat_provider_context", all("signalRequest:" in source and "signalContext:" in source and "captureSignalDeliveryContext" in source for source in (aig_js, copilot_js, gpt_core_js, google_js, lm_studio_js)))
     report("signal_repeat_stale_context_fails_closed", "signalContextValid = !signalContext || isSignalDeliveryContextValid" in options_js and "Signal repeat expired after the conversation changed" in options_js)
     report("signal_explicit_channel_rule", "var clauses = comparable.split" in options_js and "var authorized = false;" in options_js and "for raw_clause in clauses" in bridge_core and "authorized = False" in bridge_core)

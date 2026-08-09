@@ -18,9 +18,8 @@
     try {
       var active = localStorage.getItem('eva_active_session');
       if (active) return active.slice(0, 120);
-      var id = 'sess_' + Date.now().toString(36);
-      localStorage.setItem('eva_active_session', id);
-      return id;
+      if (typeof ensureActiveSessionId === 'function') return ensureActiveSessionId().slice(0, 120);
+      return 'browser-session';
     } catch (error) {
       return 'browser-session';
     }
