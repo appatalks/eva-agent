@@ -19,6 +19,13 @@ from bridge.utils import _safe_child_environment
 
 _ARTIFACTS_DIR = os.path.expanduser("~/.config/eva-standalone/artifacts")
 _TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_MCP_MODERN_PROTOCOL_VERSION = "2026-07-28"
+_MCP_LEGACY_PROTOCOL_VERSION = "2024-11-05"
+_MCP_DISCOVERY_TIMEOUT_SECONDS = 3
+_MCP_TOOL_LIST_PAGE_MAX = 32
+_MCP_CLIENT_INFO = {"name": "eva-local-mcp", "version": "1.0.0"}
+# Eva consumes tools; it does not yet offer elicitation, subscriptions, or extensions.
+_MCP_CLIENT_CAPABILITIES = {}
 
 _MCP_ENV_KEYS = {
     "playwright": set(),
@@ -91,6 +98,11 @@ class MCPServer:
         self._pending = {}        # id -> {"event": Event, "result": ...}
         self._reader = None
         self.alive = False
+        self.protocol_era = "legacy"
+        self.protocol_version = _MCP_LEGACY_PROTOCOL_VERSION
+        self.server_info = {}
+        self.tool_cache_ttl_ms = 0
+        self.tool_cache_scope = ""
 
     def start(self):
         """Spawn the MCP server process and initialize."""
@@ -116,47 +128,24 @@ class MCPServer:
         # stderr drain
         threading.Thread(target=self._stderr_loop, daemon=True).start()
 
-        # MCP initialize handshake
-        init = self._send({
-            "jsonrpc": "2.0",
-            "id": self._next_id(),
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "eva-local-mcp", "version": "1.0.0"},
-            },
-        }, timeout=15)
-        if init and "error" not in init:
-            # Send initialized notification
-            self._write({"jsonrpc": "2.0", "method": "notifications/initialized"})
-
-        # Discover tools
-        tools_resp = self._send({
-            "jsonrpc": "2.0",
-            "id": self._next_id(),
-            "method": "tools/list",
-            "params": {},
-        }, timeout=10)
-        if tools_resp and "tools" in tools_resp:
-            self.tools = tools_resp["tools"]
-        elif tools_resp and "result" in tools_resp and "tools" in tools_resp["result"]:
-            self.tools = tools_resp["result"]["tools"]
-        print(f"[LocalMCP] {self.name}: {len(self.tools)} tools discovered")
+        try:
+            self._negotiate_protocol()
+            self.tools = self._discover_tools()
+            print(f"[LocalMCP] {self.name}: {len(self.tools)} tools discovered ({self.protocol_era})")
+        except Exception:
+            self.stop()
+            raise
 
     def call_tool(self, tool_name, arguments, timeout=60):
         """Call an MCP tool and return the result text."""
-        resp = self._send({
-            "jsonrpc": "2.0",
-            "id": self._next_id(),
-            "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments or {}},
-        }, timeout=timeout)
+        resp = self._send_request("tools/call", {"name": tool_name, "arguments": arguments or {}}, timeout=timeout)
         if not resp:
             return {"error": "no response"}
         if "error" in resp:
             return {"error": resp["error"]}
-        result = resp.get("result", resp)
+        result = self._complete_result(resp, "tools/call")
+        if isinstance(result, dict) and result.get("_mcp_error"):
+            return {"error": result["_mcp_error"]}
         # MCP tools return content as an array of {type, text} blocks
         if isinstance(result, dict) and "content" in result:
             parts = result["content"]
@@ -165,15 +154,138 @@ class MCPServer:
             return {"text": str(parts)}
         return {"text": json.dumps(result)}
 
+    def _negotiate_protocol(self):
+        """Probe modern MCP first and preserve legacy servers through fallback."""
+        discover = self._send(self._modern_request("server/discover", {}), timeout=_MCP_DISCOVERY_TIMEOUT_SECONDS)
+        if self._is_modern_discover_result(discover):
+            supported = discover.get("supportedVersions") or []
+            if _MCP_MODERN_PROTOCOL_VERSION not in supported:
+                raise RuntimeError(
+                    f"MCP server '{self.name}' does not support {_MCP_MODERN_PROTOCOL_VERSION}."
+                )
+            self.protocol_era = "modern"
+            self.protocol_version = _MCP_MODERN_PROTOCOL_VERSION
+            self.server_info = discover.get("serverInfo") or {}
+            return
+
+        if self._is_modern_protocol_error(discover):
+            error = discover.get("error") or {}
+            supported = ((error.get("data") or {}).get("supported") or [])
+            detail = ", ".join(str(version) for version in supported) or "no compatible versions"
+            raise RuntimeError(f"MCP server '{self.name}' rejected Eva's modern protocol ({detail}).")
+
+        # Older servers do not recognize server/discover before initialize.
+        init = self._send({
+            "jsonrpc": "2.0",
+            "id": self._next_id(),
+            "method": "initialize",
+            "params": {
+                "protocolVersion": _MCP_LEGACY_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": dict(_MCP_CLIENT_INFO),
+            },
+        }, timeout=15)
+        if not init or "error" in init:
+            raise RuntimeError(f"MCP server '{self.name}' did not complete legacy initialization.")
+        self.server_info = init.get("serverInfo") or {}
+        self._write({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    @staticmethod
+    def _is_modern_discover_result(result):
+        return isinstance(result, dict) and isinstance(result.get("supportedVersions"), list)
+
+    @staticmethod
+    def _is_modern_protocol_error(result):
+        if not isinstance(result, dict) or not isinstance(result.get("error"), dict):
+            return False
+        return result["error"].get("code") in {-32020, -32021, -32022}
+
+    def _modern_request(self, method, params):
+        request_params = dict(params or {})
+        request_params["_meta"] = {
+            "io.modelcontextprotocol/protocolVersion": _MCP_MODERN_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientInfo": dict(_MCP_CLIENT_INFO),
+            "io.modelcontextprotocol/clientCapabilities": dict(_MCP_CLIENT_CAPABILITIES),
+        }
+        return {
+            "jsonrpc": "2.0",
+            "id": self._next_id(),
+            "method": method,
+            "params": request_params,
+        }
+
+    def _send_request(self, method, params, timeout):
+        if self.protocol_era == "modern":
+            return self._send(self._modern_request(method, params), timeout=timeout)
+        return self._send({
+            "jsonrpc": "2.0",
+            "id": self._next_id(),
+            "method": method,
+            "params": params or {},
+        }, timeout=timeout)
+
+    def _discover_tools(self):
+        tools = []
+        cursor = None
+        seen_cursors = set()
+        for _ in range(_MCP_TOOL_LIST_PAGE_MAX):
+            params = {"cursor": cursor} if cursor else {}
+            tools_resp = self._send_request("tools/list", params, timeout=10)
+            if not tools_resp or "error" in tools_resp:
+                if self.protocol_era == "modern":
+                    raise RuntimeError(f"MCP server '{self.name}' rejected tools/list.")
+                return tools
+            result = self._complete_result(tools_resp, "tools/list")
+            if not isinstance(result, dict) or result.get("_mcp_error"):
+                if self.protocol_era == "modern":
+                    raise RuntimeError(f"MCP server '{self.name}' returned an invalid tools/list result.")
+                return tools
+            page_tools = result.get("tools")
+            if self.protocol_era != "modern":
+                if isinstance(page_tools, list):
+                    tools.extend(page_tools)
+                return tools
+            if not isinstance(page_tools, list) or any(not isinstance(tool, dict) for tool in page_tools):
+                raise RuntimeError(f"MCP server '{self.name}' returned an invalid tools/list page.")
+            tools.extend(page_tools)
+            ttl_ms = result.get("ttlMs")
+            self.tool_cache_ttl_ms = min(ttl_ms, 24 * 60 * 60 * 1000) \
+                if isinstance(ttl_ms, int) and not isinstance(ttl_ms, bool) and ttl_ms >= 0 else 0
+            cache_scope = result.get("cacheScope")
+            self.tool_cache_scope = cache_scope if cache_scope in {"public", "private"} else ""
+            cursor = result.get("nextCursor")
+            if cursor is None:
+                return tools
+            if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+                raise RuntimeError(f"MCP server '{self.name}' returned an invalid tools/list cursor.")
+            seen_cursors.add(cursor)
+        raise RuntimeError(f"MCP server '{self.name}' exceeded the tools/list page limit.")
+
+    def _complete_result(self, response, method):
+        if not response or "error" in response:
+            return response
+        result = response.get("result", response)
+        if self.protocol_era != "modern":
+            return result
+        if not isinstance(result, dict):
+            return {"_mcp_error": f"Modern MCP server returned an invalid {method} result."}
+        if result.get("resultType") == "complete":
+            return result
+        if result.get("resultType") == "input_required":
+            return {"_mcp_error": f"MCP {method} requires interactive input, which is not enabled for this server."}
+        return {"_mcp_error": f"Modern MCP server returned an unsupported {method} result type."}
+
     def stop(self):
         self.alive = False
         if self.process:
             try:
-                self.process.terminate()
-                self.process.wait(timeout=5)
-            except Exception:
+                if self.process.poll() is None:
+                    self.process.terminate()
+                    self.process.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError):
                 try:
                     self.process.kill()
+                    self.process.wait(timeout=5)
                 except Exception:
                     pass
 

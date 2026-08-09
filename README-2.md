@@ -597,14 +597,36 @@ class MCPServer:
     process: subprocess.Popen    # running subprocess
     tools: list[dict]            # discovered via tools/list
     alive: bool                  # health state
+    protocol_era: str            # modern (2026-07-28) or legacy
+    protocol_version: str        # selected protocol version
+    tool_cache_ttl_ms: int       # modern tool-list freshness hint
+    tool_cache_scope: str        # modern public/private cache hint
 ```
 
 **Lifecycle:**
-1. `start()`: Spawn process, send `initialize` handshake (protocol 2024-11-05), send `notifications/initialized`, discover tools via `tools/list`
-2. `call_tool(name, arguments, timeout)`: Send `tools/call` JSON-RPC, parse content response
-3. `stop()`: Terminate process
+  1. `start()`: Spawn the process and probe `server/discover` with the MCP
+    `2026-07-28` per-request `_meta` fields.
+  2. Modern servers use stateless `tools/list` / `tools/call` requests with
+    required `resultType` handling. Tool discovery validates every page, follows
+    bounded pagination, and retains valid TTL/cache hints without polling.
+  3. A recognized modern protocol rejection fails clearly. Other unrecognized
+    probe errors or timeouts use the specification's dual-era fallback to the
+    existing `2024-11-05` `initialize` / `notifications/initialized` lifecycle.
+  4. `call_tool(name, arguments, timeout)`: Send `tools/call` JSON-RPC and
+    parse content responses. Interactive `input_required` responses are surfaced
+    as unavailable until Eva's approval continuation support is implemented.
+  5. `stop()`: Terminate the process; failed startup also reaps the child before
+    surfacing the error.
 
 **Threading:** Background reader thread per server matches JSON-RPC responses by ID. Stderr is logged to bridge debug log.
+
+  **Compatibility scope:** This local path is tested against the official MCP
+  Python SDK v2 and TypeScript SDK v2 in addition to a deterministic legacy
+  fixture. It remains an allowlisted local stdio subprocess transport. Streamable
+  HTTP, remote OAuth, multi-round-trip approval continuations, Tasks, Resources,
+  Prompts, Apps, Roots, and Sampling are intentionally separate follow-up work;
+  Roots and Sampling are deprecated in MCP `2026-07-28` and are not planned for
+  new Eva support.
 
 ### LocalMCPManager
 

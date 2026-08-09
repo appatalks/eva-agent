@@ -223,11 +223,16 @@ jobs:
           node-version: '24'
 
       - name: Install dependencies
-        run: pip install requests cryptography
+        run: |
+          pip install requests cryptography mcp==2.0.0
+          npm install --prefix /tmp/eva-mcp-typescript-v2 --no-save @modelcontextprotocol/server@2.0.0 zod@4.4.3
 
       - name: Run Python unit tests
         run: |
           python3 tools/test_static.py
+          python3 tools/test_local_mcp_modern.py
+          python3 tools/test_mcp_official_python.py
+          EVA_OFFICIAL_MCP_TYPESCRIPT_ROOT=/tmp/eva-mcp-typescript-v2 python3 tools/test_mcp_official_typescript.py
           python3 tools/test_openai_aig.py
           node tools/test_cognition_provider.js
           node tools/test_provider_token_budget.js
