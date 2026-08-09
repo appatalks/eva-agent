@@ -339,8 +339,14 @@ function getLiveTranslationTarget() {
 }
 
 function getLiveTranslationModel() {
-  var model = (localStorage.getItem('live_translation_model') || 'openai:gpt-4.1-nano').trim();
-  return ['openai:gpt-4.1-nano', 'aig', 'lmstudio'].indexOf(model) >= 0 ? model : 'openai:gpt-4.1-nano';
+  var model = (localStorage.getItem('live_translation_model') || 'aig').trim();
+  return ['openai:gpt-4.1-nano', 'aig', 'lmstudio'].indexOf(model) >= 0 ? model : 'aig';
+}
+
+function getResolvedLiveTranslationModel() {
+  var configured = getLiveTranslationModel();
+  var openaiKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : '';
+  return configured === 'openai:gpt-4.1-nano' && !openaiKey ? 'aig' : configured;
 }
 
 function getSafeBridgeBaseUrl() {
@@ -4738,6 +4744,10 @@ function _vvSetLiveTranslation(enabled, silent) {
   _vv.liveTranslation = true;
   _vvSyncLiveTranslationControls();
   if (!silent) _vvSpeakLiveStatus('Live translation on. Speaking ' + _vvTranslationTarget().label + '.');
+  if (!silent && getLiveTranslationModel() !== getResolvedLiveTranslationModel()) {
+    var transcriptEl = document.getElementById('vvTranscript');
+    if (transcriptEl) transcriptEl.textContent = 'OpenAI key unavailable. Using Eva backend.';
+  }
   if (window.evaStandalone && typeof window.evaStandalone.localSpeechWarmTranslation === 'function') {
     window.evaStandalone.localSpeechWarmTranslation(_vvUseMultilingualTranslationStt()).catch(function() {});
   }
@@ -4771,7 +4781,7 @@ function _vvTranslateLiveTranscript(transcript) {
     body: JSON.stringify({
       input: source,
       target_language: target.label,
-      model: getLiveTranslationModel() === 'aig' ? ((document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna') : getLiveTranslationModel(),
+      model: getResolvedLiveTranslationModel() === 'aig' ? ((document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna') : getResolvedLiveTranslationModel(),
       lmstudio_base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
       lmstudio_model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
       github_pat: typeof getAuthKey === 'function' ? getAuthKey('GITHUB_PAT') : '',
@@ -4779,8 +4789,11 @@ function _vvTranslateLiveTranscript(transcript) {
     }),
     signal: controller ? controller.signal : undefined
   }).then(function(response) {
-    if (!response.ok) throw new Error('Translation request returned ' + response.status);
-    return response.json();
+    if (response.ok) return response.json();
+    return response.json().catch(function() { return {}; }).then(function(data) {
+      var detail = data && data.error && data.error.message ? data.error.message : 'Translation request returned ' + response.status;
+      throw new Error(detail);
+    });
   }).then(function(data) {
     if (!_vv.liveTranslation || runId !== _vv.liveTranslationRun) return;
     var translated = (((data.choices || [])[0] || {}).message || {}).content || '';
@@ -4793,7 +4806,7 @@ function _vvTranslateLiveTranscript(transcript) {
     if (error && error.name === 'AbortError') return;
     if (_vv.liveTranslation && runId === _vv.liveTranslationRun) {
       var transcriptEl = document.getElementById('vvTranscript');
-      if (transcriptEl) transcriptEl.textContent = 'Translation unavailable.';
+      if (transcriptEl) transcriptEl.textContent = 'Translation unavailable: ' + String(error && error.message ? error.message : error).slice(0, 140);
     }
   }).finally(function() {
     if (timeout) clearTimeout(timeout);

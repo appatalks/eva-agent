@@ -297,7 +297,7 @@ def test_local_speech_contract():
     report("live_translation_controls", 'id="liveTranslationTarget"' in open("index.html").read() and 'id="liveTranslationModel"' in open("index.html").read() and 'id="vvLiveTranslationToggle"' not in open("index.html").read())
     report("live_translation_fast_route", "function _vvTranslateLiveTranscript" in options and "'/v1/translate'" in options and "_vvSpeakBrowser(translated" in options and "_VV_LIVE_TRANSLATION_TIMEOUT_MS = 12000" in options)
     report("live_translation_dedicated_bridge", "def _translate(self):" in core_bridge and 'elif parsed_path == "/v1/translate":' in core_bridge and "translation_mode = bool(data.get(\"translation_mode\"))" in core_bridge)
-    report("live_translation_persisted_target", "function getLiveTranslationTarget" in options and "function getLiveTranslationModel" in options and "live_translation_target" in options and "live_translation_model" in options and "function _vvSetLiveTranslation" in options)
+    report("live_translation_persisted_target", "function getLiveTranslationTarget" in options and "function getLiveTranslationModel" in options and "function getResolvedLiveTranslationModel" in options and "live_translation_target" in options and "live_translation_model" in options and "function _vvSetLiveTranslation" in options)
     report("local_speech_recorder_exclusive", "if (_vv._capture) return;" in options and "_vv._capture === capture" in options)
     report("local_speech_capture_generation", "capture.generation !== _vv.listenGeneration" in options and "capture.chunks" in options)
     report("local_speech_recorder_finalizes_before_rearm", "var ownsCapture = _vv._capture === capture;" in options and "if (ownsCapture && _vv.open && _vv.whisperMode" in options)
