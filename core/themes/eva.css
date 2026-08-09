@@ -1218,6 +1218,37 @@ body.theme-lcars .vv-vision-text { color: rgba(255,180,110,0.30); }
   cursor: pointer;
 }
 
+.vv-live-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 8px;
+  color: rgba(190,220,255,0.78);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+.vv-live-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
+.vv-live-toggle input[type="checkbox"] {
+  accent-color: #64d9ff;
+  cursor: pointer;
+}
+.vv-live-controls select {
+  min-width: 90px;
+  background: rgba(20,24,40,0.8);
+  color: rgba(220,238,255,0.92);
+  border: 1px solid rgba(110,190,255,0.35);
+  border-radius: 4px;
+  font: inherit;
+  padding: 1px 4px;
+}
+
 /* ── Voice-mode asset surface ─────────────────────────────── */
 .vv-assets {
   position: absolute;

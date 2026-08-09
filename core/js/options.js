@@ -333,6 +333,11 @@ function getLocalVoicesLanguage() {
   return language === 'en' || language === 'ko' ? language : 'auto';
 }
 
+function getLiveTranslationTarget() {
+  var language = (localStorage.getItem('live_translation_target') || 'en').trim().toLowerCase();
+  return ['en', 'ko', 'es', 'uk'].indexOf(language) >= 0 ? language : 'en';
+}
+
 function getSafeBridgeBaseUrl() {
   var fallback = 'http://localhost:8888';
   var raw = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : fallback;
@@ -2323,6 +2328,7 @@ function initAudioPreferences() {
   var voice = document.getElementById('selVoice');
   var autoSpeak = document.getElementById('autoSpeak');
   var endpointDelay = document.getElementById('voiceEndpointDelay');
+  var liveTranslationTarget = document.getElementById('liveTranslationTarget');
 
   if (engine) {
     var savedEngine = localStorage.getItem('tts_engine');
@@ -2360,6 +2366,14 @@ function initAudioPreferences() {
       _vv.endpointDelayMs = parseInt(endpointDelay.value, 10) || 2200;
       localStorage.setItem('voice_endpoint_delay_ms', String(_vv.endpointDelayMs));
       if (_vv.endpoint) _vv.endpoint.setDelay(_vv.endpointDelayMs);
+    });
+  }
+
+  if (liveTranslationTarget) {
+    liveTranslationTarget.value = getLiveTranslationTarget();
+    liveTranslationTarget.addEventListener('change', function() {
+      localStorage.setItem('live_translation_target', liveTranslationTarget.value);
+      _vvSyncLiveTranslationControls();
     });
   }
 
@@ -3266,6 +3280,9 @@ var _vv = {
   convoMode: true,        // stay in an active conversation after the wake word
   convoTimeoutMs: 30000,  // quiet period before dropping back to standby
   endpointDelayMs: 2200,
+  liveTranslation: false,
+  liveTranslationRun: 0,
+  liveTranslationAbort: null,
   endpoint: null,
   lastTranscript: '',
   lastEvaReply: '',
@@ -3308,6 +3325,7 @@ function openVoiceView() {
     }
   } catch (e) {}
   _vvSyncConvoControls();
+  _vvSyncLiveTranslationControls();
   _vvSetStatus('idle');
   _vvPrepareAcknowledgements();
 
@@ -3331,6 +3349,7 @@ function openVoiceView() {
 }
 
 function closeVoiceView() {
+  _vvSetLiveTranslation(false, true);
   _vv.open = false;
   var el = document.getElementById('voiceView');
   if (el) {
@@ -4469,7 +4488,7 @@ function _vvWhisperMonitor(capture) {
   // A fixed high threshold can animate the waveform without ever qualifying
   // ordinary near-field speech for transcription, especially on laptop mics.
   var threshold = 12;
-  var silenceDelay = _vv.endpointDelayMs;
+  var silenceDelay = _vv.liveTranslation ? 650 : _vv.endpointDelayMs;
 
   // Use setInterval instead of requestAnimationFrame so that Electron does not
   // throttle the energy monitor to 0 fps when the window is unfocused.
@@ -4626,6 +4645,158 @@ function _vvSyncConvoControls() {
   }
 }
 
+var _VV_TRANSLATION_TARGETS = {
+  en: { label: 'English', locale: 'en-US' },
+  ko: { label: 'Korean', locale: 'ko-KR' },
+  es: { label: 'Spanish', locale: 'es-ES' },
+  uk: { label: 'Ukrainian', locale: 'uk-UA' }
+};
+
+function _vvSyncLiveTranslationControls() {
+  var toggle = document.getElementById('vvLiveTranslationToggle');
+  var target = document.getElementById('vvLiveTranslationTarget');
+  var selectedTarget = getLiveTranslationTarget();
+  if (toggle) {
+    toggle.checked = !!_vv.liveTranslation;
+    if (!toggle._vvBound) {
+      toggle._vvBound = true;
+      toggle.addEventListener('change', function() { _vvSetLiveTranslation(toggle.checked, false); });
+    }
+  }
+  if (target) {
+    target.value = selectedTarget;
+    if (!target._vvBound) {
+      target._vvBound = true;
+      target.addEventListener('change', function() {
+        localStorage.setItem('live_translation_target', target.value);
+        var settingsTarget = document.getElementById('liveTranslationTarget');
+        if (settingsTarget) settingsTarget.value = target.value;
+        if (_vv.liveTranslation) _vvSpeakLiveStatus('Translation output: ' + _vvTranslationTarget().label + '.');
+      });
+    }
+  }
+}
+
+function _vvTranslationTarget() {
+  return _VV_TRANSLATION_TARGETS[getLiveTranslationTarget()] || _VV_TRANSLATION_TARGETS.en;
+}
+
+function _vvSpeakBrowser(text, locale) {
+  if (!text || !window.speechSynthesis || typeof window.SpeechSynthesisUtterance === 'undefined') return;
+  try {
+    window.speechSynthesis.cancel();
+    var utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = locale || 'en-US';
+    var voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
+    var matchingVoice = voices.find(function(voice) { return voice.lang && voice.lang.toLowerCase().indexOf(utterance.lang.slice(0, 2).toLowerCase()) === 0; });
+    if (matchingVoice) utterance.voice = matchingVoice;
+    utterance.rate = 1.16;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+  } catch (_) {}
+}
+
+function _vvSpeakLiveStatus(text) {
+  _vvSpeakBrowser(text, 'en-US');
+}
+
+function _vvUpdateLiveTranslationHint() {
+  var hint = document.getElementById('vvHudTelemetry');
+  if (!hint) return;
+  if (_vv.liveTranslation) {
+    hint.textContent = 'live translation | listening | output: ' + _vvTranslationTarget().label;
+  } else {
+    hint.innerHTML = 'tap orb to listen &middot; say <em>Eva</em> to wake &middot; talk over her to redirect';
+  }
+}
+
+function _vvSetLiveTranslation(enabled, silent) {
+  enabled = !!enabled;
+  if (_vv.liveTranslation === enabled) {
+    _vvSyncLiveTranslationControls();
+    return;
+  }
+  _vv.liveTranslation = enabled;
+  _vv.liveTranslationRun += 1;
+  if (_vv.liveTranslationAbort) {
+    try { _vv.liveTranslationAbort.abort(); } catch (_) {}
+    _vv.liveTranslationAbort = null;
+  }
+  _vvSyncLiveTranslationControls();
+  _vvUpdateLiveTranslationHint();
+  if (!enabled) {
+    if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (_) {} }
+    if (!silent && _vv.open) _vvSpeakLiveStatus('Live translation off. Returning to Eva voice.');
+    return;
+  }
+  if (!_vv.open) return;
+  _vvStopListening();
+  _vv.liveTranslation = true;
+  _vvSyncLiveTranslationControls();
+  if (!silent) _vvSpeakLiveStatus('Live translation on. Speaking ' + _vvTranslationTarget().label + '.');
+  _vvStartWhisperListening(window.evaStandalone && window.evaStandalone.isStandalone ? 'local' : 'openai');
+}
+
+function _vvTranslationCommand(transcript) {
+  var text = String(transcript || '').toLowerCase();
+  var stop = /\b(?:stop|end|disable|turn off|exit)\b[^.!?]{0,30}\b(?:live|real[ -]?time)?\s*(?:translation|translate)\b/.test(text);
+  var start = /\b(?:live|real[ -]?time)\s+(?:translation|translate)\b|\blisten\s+and\s+translate\b|\b(?:start|enable|turn on|switch to|begin)\b[^.!?]{0,30}\b(?:translation|translate)\b/.test(text);
+  if (stop) return false;
+  if (start) return true;
+  return null;
+}
+
+function _vvTranslateLiveTranscript(transcript) {
+  var source = String(transcript || '').trim();
+  if (!source || !_vv.liveTranslation) return;
+  var target = _vvTranslationTarget();
+  var runId = _vv.liveTranslationRun;
+  if (_vv.liveTranslationAbort) {
+    try { _vv.liveTranslationAbort.abort(); } catch (_) {}
+  }
+  var controller = typeof AbortController === 'undefined' ? null : new AbortController();
+  _vv.liveTranslationAbort = controller;
+  var prompt = 'Translate the spoken text into ' + target.label + '. Return only the natural translation, with no preface, quotation marks, notes, or explanation.\n\nSpoken text: ' + source;
+  var bridgeUrl = typeof getACPBridgeUrl === 'function' ? getACPBridgeUrl() : 'http://localhost:8888';
+  fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/aig/chat', {
+    method: 'POST',
+    headers: getBridgeCapabilityHeaders(),
+    body: JSON.stringify({
+      messages: [{ role: 'system', content: 'You are a real-time interpreter. Return only the translation.' }, { role: 'user', content: prompt }],
+      user_message: prompt,
+      internal: true,
+      no_tools: true,
+      model: (document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna',
+      max_completion_tokens: 120,
+      acp_reasoning_effort: '',
+      lmstudio_base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
+      lmstudio_model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
+      github_pat: typeof getAuthKey === 'function' ? getAuthKey('GITHUB_PAT') : '',
+      openai_api_key: typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : ''
+    }),
+    signal: controller ? controller.signal : undefined
+  }).then(function(response) {
+    if (!response.ok) throw new Error('Translation request returned ' + response.status);
+    return response.json();
+  }).then(function(data) {
+    if (!_vv.liveTranslation || runId !== _vv.liveTranslationRun) return;
+    var translated = (((data.choices || [])[0] || {}).message || {}).content || '';
+    translated = String(translated).replace(/^\s*["“]|["”]\s*$/g, '').trim();
+    if (!translated) return;
+    var transcriptEl = document.getElementById('vvTranscript');
+    if (transcriptEl) transcriptEl.textContent = translated;
+    _vvSpeakBrowser(translated, target.locale);
+  }).catch(function(error) {
+    if (error && error.name === 'AbortError') return;
+    if (_vv.liveTranslation && runId === _vv.liveTranslationRun) {
+      var transcriptEl = document.getElementById('vvTranscript');
+      if (transcriptEl) transcriptEl.textContent = 'Translation unavailable.';
+    }
+  }).finally(function() {
+    if (_vv.liveTranslationAbort === controller) _vv.liveTranslationAbort = null;
+  });
+}
+
 // Enter the 'awake' conversation window. While awake, the user can speak follow
 // ups without repeating the wake word. After timeoutMs of no speech we fall back
 // to 'listening' (standby), which requires saying "Eva" again.
@@ -4736,6 +4907,20 @@ function _vvWakeWordMatch(transcript) {
 }
 
 function _vvHandleTranscript(transcript) {
+  var translationCommand = _vvTranslationCommand(transcript);
+  var commandIsAuthorized = _vv.liveTranslation || _vv.phase === 'awake' || !!_vvWakeWordMatch(transcript);
+  if (translationCommand === true && commandIsAuthorized) {
+    _vvSetLiveTranslation(true, false);
+    return;
+  }
+  if (translationCommand === false && commandIsAuthorized) {
+    _vvSetLiveTranslation(false, false);
+    return;
+  }
+  if (_vv.liveTranslation) {
+    _vvTranslateLiveTranscript(transcript);
+    return;
+  }
   // A response is mid-flight: if stuck too long, recover instead of ignoring forever.
   if (_vv.phase === 'thinking') {
     // Allow up to 90s of thinking, then force recovery

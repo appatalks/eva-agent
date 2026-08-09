@@ -582,6 +582,17 @@
         <label for="autoSpeak">Auto Speak:</label>
         <input type="checkbox" id="autoSpeak">
 
+        <label for="liveTranslationTarget">Live translation output:</label>
+        <select id="liveTranslationTarget">
+          <option value="en">English</option>
+          <option value="ko">Korean</option>
+          <option value="es">Spanish</option>
+          <option value="uk">Ukrainian</option>
+        </select>
+        <div class="auth-note" style="margin:4px 0 10px;font-size:11px;opacity:0.75">
+          Live Translation uses native browser speech for speed. Normal Voice View replies keep the selected voice profile.
+        </div>
+
         <label for="audioInputDevice">Microphone:</label>
         <select id="audioInputDevice">
           <option value="">System default</option>
@@ -1468,6 +1479,17 @@
             <option value="300000">5m</option>
           </select>
         </label>
+      </div>
+      <div class="vv-live-controls">
+        <label class="vv-live-toggle" title="Translate each detected utterance and speak only the translation using the browser voice">
+          <input type="checkbox" id="vvLiveTranslationToggle"> Live translation
+        </label>
+        <select id="vvLiveTranslationTarget" aria-label="Live translation output language">
+          <option value="en">English</option>
+          <option value="ko">Korean</option>
+          <option value="es">Spanish</option>
+          <option value="uk">Ukrainian</option>
+        </select>
       </div>
     </div>
     <!-- Asset surface: images/media Eva shows while in voice mode -->
