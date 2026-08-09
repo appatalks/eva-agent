@@ -142,7 +142,7 @@ def test_pr_automation_workflows():
         report("pr_automation_workflows_exist", False, str(error))
         return
     report("pr_automation_readiness_base_only", "pull_request_target:" in readiness and "workflow_dispatch:" in readiness and "base_sha" in readiness and "gh pr diff" in readiness)
-    report("pr_automation_terra_reviewer", "--agent reviewer" in readiness and "--disable-builtin-mcps" in readiness and "--no-auto-update" not in readiness and "--mode plan" not in readiness and "--yolo" not in readiness and os.path.isfile(".github/agents/reviewer.agent.md"))
+    report("pr_automation_terra_reviewer", "timeout 240 copilot --agent reviewer" in readiness and "--disable-builtin-mcps" in readiness and "--no-auto-update" not in readiness and "--mode plan" not in readiness and "--yolo" not in readiness and os.path.isfile(".github/agents/reviewer.agent.md"))
     report("pr_automation_autofix_is_opt_in", "workflow_dispatch:" in autofix and "autofix-requested" in autofix and "Fork PRs are review-only" in autofix and "expected_head_sha" in autofix)
     report("pr_automation_autofix_scoped", "--agent reviewer" in autofix and "--agent eva" in autofix and "terra-review.md" in autofix and "--deny-tool='shell(git push)'" in autofix and "Autofix touched a protected path" in autofix)
     report("pr_automation_preserves_review_threads", "resolveReviewThread" not in autofix and "Review threads remain open" in autofix)

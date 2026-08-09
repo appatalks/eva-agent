@@ -107,7 +107,7 @@ jobs:
           Then list only concrete findings, required test gaps, and maintainer actions.
           EOF
           cat readiness/evidence.md readiness/diff.patch readiness/inline-comments.json readiness/reviews.json >> readiness/copilot-prompt.txt
-          copilot --agent reviewer \
+          timeout 240 copilot --agent reviewer \
             --no-ask-user --disable-builtin-mcps --silent \
             -p "$(cat readiness/copilot-prompt.txt)" > readiness/copilot-review.md
           cat readiness/copilot-review.md >> "$GITHUB_STEP_SUMMARY"

@@ -94,7 +94,7 @@ jobs:
           If no deterministic fix is safe, state NEEDS_MAINTAINER.
           EOF
           cat autofix/inline-comments.json autofix/codeql-alerts.json autofix/diff.patch >> autofix/reviewer-prompt.txt
-          copilot --agent reviewer --no-ask-user --disable-builtin-mcps --silent \
+          timeout 240 copilot --agent reviewer --no-ask-user --disable-builtin-mcps --silent \
             -p "$(cat autofix/reviewer-prompt.txt)" > autofix/terra-review.md
           git diff --exit-code
 
@@ -118,7 +118,7 @@ jobs:
           - If no safe deterministic fix exists, leave files unchanged and explain why.
           EOF
           cat autofix/terra-review.md autofix/inline-comments.json autofix/codeql-alerts.json autofix/diff.patch >> autofix/copilot-prompt.txt
-          copilot --agent eva \
+          timeout 600 copilot --agent eva \
             --no-ask-user --disable-builtin-mcps --silent \
             --allow-tool='write' --allow-tool='shell(git:*)' --allow-tool='shell(node:*)' \
             --allow-tool='shell(npm:*)' --allow-tool='shell(python:*)' \
