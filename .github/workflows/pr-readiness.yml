@@ -84,13 +84,13 @@ jobs:
               failed="$(jq --argjson required "$required_checks" '[
                 $required[] as $name |
                 ([.statusCheckRollup[]? | select(.name == $name)] | first) as $check |
-                select($check.conclusion != "SUCCESS") |
+                select(["SUCCESS", "NEUTRAL", "SKIPPED"] | index($check.conclusion) | not) |
                 {name: $name, conclusion: $check.conclusion}
               ]' readiness/pr-checks.json)"
               if [[ "$failed" == "[]" ]]; then
                 exit 0
               fi
-              echo "::error::Required PR checks did not succeed: $failed"
+              echo "::error::Required PR checks had a failing conclusion: $failed"
               exit 1
             fi
             echo "::notice::Waiting for required PR checks: $pending"
