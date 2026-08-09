@@ -292,7 +292,7 @@ def test_local_speech_contract():
     report("local_speech_acknowledgement_priority", "queueAcknowledgementSynthesis" in standalone and "acknowledgementSynthesisQueue.urgent" in standalone and "LOCAL_SPEECH_ACK_TIMEOUT_MS = 20000" in standalone)
     report("local_speech_acknowledgement_prewarm", "function _vvPrepareAcknowledgements" in options and "_vvPrepareAcknowledgements();" in options and "_ackWarmCompleteKey" in options)
     report("live_translation_controls", 'id="vvLiveTranslationToggle"' in open("index.html").read() and 'id="liveTranslationTarget"' in open("index.html").read() and "vv-live-controls" in open("core/themes/eva.css").read())
-    report("live_translation_fast_route", "function _vvTranslateLiveTranscript" in options and "internal: true" in options and "no_tools: true" in options and "_vvSpeakBrowser(translated" in options)
+    report("live_translation_fast_route", "function _vvTranslateLiveTranscript" in options and "internal: true" in options and "no_tools: true" in options and "_vvSpeakBrowser(translated" in options and "_VV_LIVE_TRANSLATION_TIMEOUT_MS = 12000" in options)
     report("live_translation_persisted_target", "function getLiveTranslationTarget" in options and "live_translation_target" in options and "function _vvSetLiveTranslation" in options)
     report("local_speech_recorder_exclusive", "if (_vv._capture) return;" in options and "_vv._capture === capture" in options)
     report("local_speech_capture_generation", "capture.generation !== _vv.listenGeneration" in options and "capture.chunks" in options)

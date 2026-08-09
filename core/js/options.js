@@ -4651,6 +4651,7 @@ var _VV_TRANSLATION_TARGETS = {
   es: { label: 'Spanish', locale: 'es-ES' },
   uk: { label: 'Ukrainian', locale: 'uk-UA' }
 };
+var _VV_LIVE_TRANSLATION_TIMEOUT_MS = 12000;
 
 function _vvSyncLiveTranslationControls() {
   var toggle = document.getElementById('vvLiveTranslationToggle');
@@ -4755,6 +4756,7 @@ function _vvTranslateLiveTranscript(transcript) {
     try { _vv.liveTranslationAbort.abort(); } catch (_) {}
   }
   var controller = typeof AbortController === 'undefined' ? null : new AbortController();
+  var timeout = controller ? setTimeout(function() { controller.abort(); }, _VV_LIVE_TRANSLATION_TIMEOUT_MS) : null;
   _vv.liveTranslationAbort = controller;
   var prompt = 'Translate the spoken text into ' + target.label + '. Return only the natural translation, with no preface, quotation marks, notes, or explanation.\n\nSpoken text: ' + source;
   var bridgeUrl = typeof getACPBridgeUrl === 'function' ? getACPBridgeUrl() : 'http://localhost:8888';
@@ -4793,6 +4795,7 @@ function _vvTranslateLiveTranscript(transcript) {
       if (transcriptEl) transcriptEl.textContent = 'Translation unavailable.';
     }
   }).finally(function() {
+    if (timeout) clearTimeout(timeout);
     if (_vv.liveTranslationAbort === controller) _vv.liveTranslationAbort = null;
   });
 }
