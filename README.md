@@ -1,3 +1,5 @@
+
+
 # Eva AI Assistant
 
 ![screenshot](core/img/Eva-splash.png)
@@ -30,7 +32,7 @@ cd standalone && npm install && npm run dist
 ./dist/'Eva Standalone-5.5.7.AppImage' --eva-workspace-terminal-v1
 ```
 
-Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).
+Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`npm install -g @github/copilot`, `copilot auth login`).
 
 ### Windows (experimental)
 
@@ -124,4 +126,3 @@ Import skills from text, URLs, GitHub repos, or files in Settings. Eva normalize
 - [README-2.md](README-2.md): architecture, MCP, ACP, browser-only setup, roadmap
 - [standalone/README.md](standalone/README.md): AppImage build and runtime
 - [Website](https://appatalks.github.io/eva-agent/): features, comparison, install guide
-
