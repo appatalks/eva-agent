@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 
@@ -15,6 +16,7 @@ if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
 from bridge.acp_client import ACPClient
+from bridge import state
 from bridge.core import BridgeHandler
 from bridge.telemetry import _telemetry_summarize
 
@@ -56,6 +58,28 @@ class _DisconnectingWFile:
 
     def write(self, value):
         raise BrokenPipeError("client closed")
+
+
+class _PromptACPClient:
+    alive = True
+
+    def prompt(self, _prompt, timeout, conversation_id, on_chunk=None, permission_mode="interactive"):
+        assert timeout == 180
+        assert conversation_id == "acp-session"
+        assert permission_mode == "interactive"
+        if on_chunk:
+            on_chunk("streamed ACP response")
+        return {"text": "ACP response", "stop_reason": "end_turn"}
+
+
+class _ImmediateThread:
+    def __init__(self, target=None, args=(), daemon=None, **_kwargs):
+        self.target = target
+        self.args = args
+        self.daemon = daemon
+
+    def start(self):
+        self.target(*self.args)
 
 
 def make_handler(wfile):
@@ -297,6 +321,47 @@ class StreamingContractTests(unittest.TestCase):
         self.assertEqual(result["text"], "alpha beta [[EVA_SIGNAL]][[/EVA_SIGNAL]]")
         self.assertEqual(result["stop_reason"], "end_turn")
         self.assertEqual(client.created_sessions, ["session-1"])
+
+    def test_acp_completion_reflects_once_for_streaming_and_json_responses(self):
+        @contextmanager
+        def acquire_client(*_args, **_kwargs):
+            yield _PromptACPClient(), "test"
+
+        original_client = state.acp_client
+        state.acp_client = _PromptACPClient()
+        try:
+            for stream_requested in (False, True):
+                with self.subTest(stream=stream_requested):
+                    handler = make_handler(_HandlerWFile())
+                    request = json.dumps({
+                        "messages": [{"role": "user", "content": "Draft the ACP release plan"}],
+                        "session_id": "acp-session",
+                        "stream": stream_requested,
+                    }).encode("utf-8")
+                    handler.headers = {"Content-Length": str(len(request))}
+                    handler.rfile = io.BytesIO(request)
+                    responses = []
+                    handler._json_response = lambda status, payload: responses.append((status, payload))
+
+                    with patch("bridge.core._acquire_acp_client", acquire_client), \
+                            patch("bridge.core._build_memory_context", return_value=""), \
+                            patch("bridge.core._mark_user_activity"), \
+                            patch("bridge.core._post_response_reflection") as reflect, \
+                            patch("bridge.core.threading.Thread", _ImmediateThread), \
+                            patch("bridge.core._telemetry_emit"):
+                        handler._chat_completions()
+
+                    reflect.assert_called_once_with(
+                        "Draft the ACP release plan", "ACP response", "copilot-acp", "acp-session"
+                    )
+                    if stream_requested:
+                        events = [json.loads(line) for line in handler.wfile.getvalue().decode().splitlines()]
+                        self.assertEqual(events[-1]["type"], "done")
+                    else:
+                        self.assertEqual(responses[0][0], 200)
+                        self.assertEqual(responses[0][1]["choices"][0]["message"]["content"], "ACP response")
+        finally:
+            state.acp_client = original_client
 
     def test_session_mismatch_cannot_deliver_to_prompt_callback(self):
         client = CallbackACPClient()

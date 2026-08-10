@@ -27,7 +27,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh            # install dependencies
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.5.7.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.5.8.AppImage' --eva-workspace-terminal-v1
 ```
 
 Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).
@@ -105,7 +105,7 @@ For Signal notifications, install [signal-cli](https://github.com/AsamK/signal-c
 
 ### Learning and consent
 
-Settings > Learning controls local feedback, routine outcomes, voice diagnostics, and optional standing consent for routine read/search tools. Records are bounded, expire according to the configured retention period, and can be revoked or deleted from the same panel. Feedback may add a short preference observation to reflection; inferred outcomes never overwrite explicit memory. Consequential or irreversible ACP actions require a fresh in-chat Allow once decision.
+Settings > Learning controls local feedback, routine outcomes, voice diagnostics, and optional standing consent for routine read/search tools. Records are bounded, expire according to the configured retention period, and can be revoked or deleted from the same panel. Explicit response feedback produces short, fixed adaptive guidance only for the originating chat session while its retained source signal remains active; deleting the signal or revoking feedback consent removes that guidance from future prompts. Inferred outcomes never alter adaptive guidance or explicit memory. Consequential or irreversible ACP actions require a fresh in-chat Allow once decision.
 
 ### Local Voices
 

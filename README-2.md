@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current release:** Eva 5.5.7. This document describes the matching browser UI,
+> **Current release:** Eva 5.5.8. This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -108,7 +108,12 @@ skips auto-switch logic during startup to avoid overriding the persisted choice.
 ### Request Flow
 
 **Direct models (OpenAI, Copilot PAT, Gemini):**
-Browser -> XHR/fetch -> Provider API -> JSON response -> `renderEvaResponse()`
+Browser -> `GET /v1/memory/context` with session ID -> Provider API -> JSON response ->
+`renderEvaResponse()` -> one `POST /v1/memory/reflect`
+
+The memory context is an ephemeral request view and does not mutate browser
+history. Gemini follows this same lifecycle, including a reflection request only
+after a successful final response.
 
 **ACP models (Copilot CLI):**
 1. Browser -> `POST /v1/chat/completions` -> ACP Bridge (HTTP)
@@ -116,6 +121,8 @@ Browser -> XHR/fetch -> Provider API -> JSON response -> `renderEvaResponse()`
 3. Copilot may request MCP tools; standalone Eva shows an in-chat Allow once/Reject decision unless revocable routine read/search consent applies
 4. Copilot streams `session/update` notifications with text chunks
 5. Bridge accumulates chunks and can forward them as flushed NDJSON events; the final event remains an OpenAI-compatible response
+6. Bridge owns the single post-response reflection for ACP; the browser renderer
+  does not submit a duplicate reflection request
 
 ### Streaming contract
 
@@ -291,7 +298,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.5.7)
+  package.json             Electron + electron-builder config (v5.5.8)
 ```
 
 ## Dependencies
@@ -717,14 +724,23 @@ output structure:
 | `[Skills]` | Always | Hardcoded capability catalog (13 built-in capabilities) |
 | `[Active MCP Servers]` | When servers running | Live server state + tool names |
 | `[Workflow: ...]` | Always | 6 workflow instruction sections |
-| `[User Profile]` | Always | Knowledge where Entity="User", Confidence >= 0.5 |
-| `[Morning Reflection]` | First msg of day | MemorySummaries (latest 3) |
-| `[Memory: Core Facts]` | Always | Knowledge where Confidence >= 0.6 (top 15) |
-| `[Active Goals]` | When present | Goals where Status="active" (top 10) |
-| `[Active Skill: ...]` | On semantic match | Skills matched by embedding similarity or keyword |
+| `[Core Identity Charter]` | Always | Operator-approved identity and design principles |
+| `[Adaptive Guidance]` | When active | Bounded effects from retained explicit feedback signals, scoped to the current session |
+| `[User Profile]` | Always | Knowledge where Entity="User", Confidence >= 0.5, framed as untrusted data |
+| `[Morning Reflection]` | First msg of day | MemorySummaries (latest 3), framed as untrusted data |
+| `[Memory: Core Facts]` | Always | Knowledge where Confidence >= 0.6 (top 15), framed as untrusted data |
+| `[Active Goals]` | When present | Goals where Status="active" (top 10), framed as untrusted data |
+| `[Active Skill: ...]` | On semantic match | User-managed workflow reference, marker-neutralized and bounded by core policy |
 | `[Init: First Conversation]` | Empty Knowledge | Introduction prompts |
 | `[Emotion State]` | Always | Latest EmotionState row |
-| `[Memory: Relevant]` | On keyword match | Lexical + semantic recall against user message |
+| `[Memory: Relevant]` | On keyword match | Lexical + semantic recall against user message, framed as untrusted data |
+
+All prompt-facing persisted memory, including conversation previews, emotion
+triggers, table samples, released protected values, and active-skill workflow
+text, is marker-neutralized. Ordinary memory is quoted as untrusted data;
+skills are reference data that cannot override core policy. The Core Identity
+Charter and fixed runtime policy are the only memory-adjacent prompt sections
+with instruction authority.
 
 **Skills manifest (always injected):**
 - data-retrieval, weather-news, web-search
@@ -742,7 +758,10 @@ Falls back to lexical keyword matching if embeddings are unavailable.
 
 ### Entity Extraction
 
-Post-response reflection extracts facts using strict regex patterns:
+Post-response reflection extracts facts using strict regex patterns. User-derived
+facts are framed as untrusted data when included in prompts; they cannot change
+Eva's Core Identity Charter. Claims about Eva's design or origins require an
+operator-approved identity workflow and are not automatically extracted.
 
 | Pattern | Relation | Confidence |
 |---|---|---|
@@ -1614,7 +1633,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.5.7.AppImage'
+./dist/'Eva Standalone-5.5.8.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace

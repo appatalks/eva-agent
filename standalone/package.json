@@ -1,6 +1,8 @@
 {
   "name": "eva-standalone",
-  "version": "5.5.7",
+  "version": "5.5.8",
+  "author": "@apptalks",
+  "desktopName": "Eva",
   "description": "Localhost Electron shell for Eva AI Assistant.",
   "main": "main.js",
   "private": true,
@@ -25,6 +27,7 @@
   "build": {
     "appId": "com.appatalks.eva-standalone",
     "productName": "Eva Standalone",
+    "icon": "../core/img/eva-icon.svg",
     "npmRebuild": false,
     "files": [
       "package.json",
@@ -90,7 +93,8 @@
       "target": [
         "AppImage"
       ],
-      "category": "Utility"
+      "category": "Utility",
+      "syncDesktopName": true
     },
     "mac": {
       "target": [

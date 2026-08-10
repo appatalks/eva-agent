@@ -56,23 +56,65 @@ function geminiSend() {
     const signalContext = (typeof captureSignalDeliveryContext === 'function')
         ? captureSignalDeliveryContext(sQuestion)
         : null;
-    const geminiPromptBudget = EvaPromptBudget.compactGeminiContents(
-        geminiMessages.concat([{ role: "user", parts: [{ text: sQuestion }] }]),
-        { budget: 10000, recentTurns: 6, pinnedIndexes: [0] }
-    );
+    const sessionId = (typeof ensureActiveSessionId === 'function')
+        ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
+    const geminiCandidates = geminiMessages.concat([{ role: "user", parts: [{ text: sQuestion }] }]);
+    let geminiMemoryContextPromise = Promise.resolve('');
+    try {
+        const bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
+        geminiMemoryContextPromise = fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/context?message=' + encodeURIComponent(sQuestion) + '&session_id=' + encodeURIComponent(sessionId), {
+            signal: AbortSignal.timeout(3000)
+        }).then(response => response.ok ? response.json() : { context: '' })
+            .then(data => (data.context && data.cognition_enabled) ? data.context : '')
+            .catch(() => '');
+    } catch (e) {}
 
-    getGoogleGlKey().then(GOOGLE_GL_KEY => {
+    Promise.all([getGoogleGlKey(), geminiMemoryContextPromise]).then(([GOOGLE_GL_KEY, geminiMemoryContext]) => {
         document.getElementById("txtMsg").innerHTML = "";
         document.getElementById("txtOutput").innerHTML += '<span class="user">You: </span>' + escapeHtml(sQuestion).replace(/\n/g, '<br>') + "<br>\n";
 
     const geminiUrl = `https://generativelanguage.googleapis.com/v1alpha/models/gemini-2.0-flash-thinking-exp:generateContent?key=${GOOGLE_GL_KEY}`;
+    const totalPromptBudget = 10000;
+    const minimumContentsBudget = 256;
+    const maxSystemTokens = totalPromptBudget - minimumContentsBudget;
+    const systemSeed = geminiCandidates[0] || { role: "user", parts: [{ text: "" }] };
+    const clipToTokens = function(value, maxTokens) {
+        const text = String(value || "");
+        const maxChars = Math.max(0, maxTokens * 4);
+        if (text.length <= maxChars) return text;
+        const marker = " ...[trimmed]";
+        return maxChars > marker.length ? text.slice(0, maxChars - marker.length) + marker : text.slice(0, maxChars);
+    };
+    const baseSystemText = clipToTokens(EvaPromptBudget.textOf(systemSeed), maxSystemTokens);
+    const separator = "\n\n";
+    const memoryAllowance = Math.max(
+        0,
+        maxSystemTokens - EvaPromptBudget.estimateTokens(baseSystemText) - EvaPromptBudget.estimateTokens(separator)
+    );
+    const memoryText = clipToTokens(geminiMemoryContext, memoryAllowance);
+    const systemText = clipToTokens(
+        memoryText ? memoryText + separator + baseSystemText : baseSystemText,
+        maxSystemTokens
+    );
+    const systemInstruction = {
+        role: systemSeed.role || "user",
+        parts: [{ text: systemText }]
+    };
+    const geminiRequestContents = geminiCandidates.slice(1);
+    const geminiPromptBudget = EvaPromptBudget.compactGeminiContents(
+        geminiRequestContents,
+        {
+            budget: totalPromptBudget - EvaPromptBudget.estimateTokens(systemText),
+            recentTurns: 6
+        }
+    );
 
 	const requestOptions = {
     	   method: "POST",
     	   headers: { "Content-Type": "application/json" },
     	   body: JSON.stringify({
                contents: geminiPromptBudget.messages,
-            systemInstruction: geminiPromptBudget.messages[0],
+				systemInstruction: systemInstruction,
         	generationConfig: {
             	    temperature: 0.7, 
             	    // maxOutputTokens: 1024, 
@@ -109,6 +151,22 @@ function geminiSend() {
                             signalRequest: sQuestion,
                             signalContext: signalContext
                         });
+                        if (mainResponse) {
+                            try {
+                                const bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
+                                fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/reflect', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        user_message: sQuestion.substring(0, 500),
+                                        assistant_message: mainResponse.substring(0, 500),
+                                        model: 'gemini-2.0-flash-thinking-exp',
+                                        session_id: sessionId
+                                    }),
+                                    signal: AbortSignal.timeout(5000)
+                                }).catch(() => {});
+                            } catch (e) {}
+                        }
                     })();
 
                     // Update conversation history: log both thoughts and non-thoughts

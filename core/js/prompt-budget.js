@@ -69,8 +69,9 @@
   function clipText(value, maxChars) {
     var text = String(value == null ? '' : value);
     if (text.length <= maxChars) return text;
-    if (maxChars <= 12) return text.slice(0, Math.max(0, maxChars));
-    return text.slice(0, maxChars - 12) + ' ...[trimmed]';
+    var marker = ' ...[trimmed]';
+    if (maxChars <= marker.length) return text.slice(0, Math.max(0, maxChars));
+    return text.slice(0, maxChars - marker.length) + marker;
   }
 
   function summarySections(messages, carriedSummary, maxChars) {
