@@ -105,7 +105,7 @@ For Signal notifications, install [signal-cli](https://github.com/AsamK/signal-c
 
 ### Learning and consent
 
-Settings > Learning controls local feedback, routine outcomes, voice diagnostics, and optional standing consent for routine read/search tools. Records are bounded, expire according to the configured retention period, and can be revoked or deleted from the same panel. Feedback may add a short preference observation to reflection; inferred outcomes never overwrite explicit memory. Consequential or irreversible ACP actions require a fresh in-chat Allow once decision.
+Settings > Learning controls local feedback, routine outcomes, voice diagnostics, and optional standing consent for routine read/search tools. Records are bounded, expire according to the configured retention period, and can be revoked or deleted from the same panel. Explicit response feedback produces short, fixed adaptive guidance only for the originating chat session while its retained source signal remains active; deleting the signal or revoking feedback consent removes that guidance from future prompts. Inferred outcomes never alter adaptive guidance or explicit memory. Consequential or irreversible ACP actions require a fresh in-chat Allow once decision.
 
 ### Local Voices
 

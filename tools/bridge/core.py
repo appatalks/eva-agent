@@ -404,6 +404,7 @@ from bridge.utils import (  # noqa: F401
 from bridge.learning import (  # noqa: F401
     create_signal as _create_learning_signal,
     delete_signals as _delete_learning_signals,
+    feedback_effect as _learning_feedback_effect,
     get_consent as _get_learning_consent,
     list_signals as _list_learning_signals,
     mark_applied as _mark_learning_applied,
@@ -1553,29 +1554,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _apply_learning_signal(self, signal):
         """Apply only explicit, bounded preference effects; inferred data never overwrites facts."""
-        if signal.get("source") != "explicit-user" or signal.get("kind") != "feedback":
-            return "recorded; inferred signals do not alter memory"
-        effect_by_status = {
-            "helpful": "retain response style",
-            "unhelpful": "avoid response pattern",
-            "misunderstood": "ask for clarification before proceeding",
-        }
-        effect = effect_by_status.get(signal.get("status"))
+        effect = _learning_feedback_effect(signal)
         if not effect:
-            return "recorded"
-        if not _st.cognition_enabled:
-            return "recorded; cognition disabled"
-        columns = ["Timestamp", "Trigger", "Observation", "ActionTaken", "Effectiveness"]
-        row = [{
-            "Timestamp": signal["timestamp"],
-            "Trigger": "explicit response feedback",
-            "Observation": "User marked a response as " + signal["status"],
-            "ActionTaken": effect,
-            "Effectiveness": 0.0,
-        }]
-        if _memory_ingest("Reflections", columns, row):
-            return effect
-        return "recorded; reflection store unavailable"
+            return "recorded; inferred signals do not alter adaptive guidance"
+        return effect
 
     def _kusto_context(self):
         cluster, db = _get_kusto_config()
@@ -3787,7 +3769,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # Cognition draft/revise stages opt in to recall via recall_query so
             # the cognitive layer (default ON) does not bypass persistent memory.
             if inject_memory and recall_query and _st.cognition_enabled:
-                memory_context = _build_memory_context(recall_query)
+                memory_context = _build_memory_context(recall_query, conversation_id)
                 if memory_context:
                     print(f"[AIG] Internal call: injected {len(memory_context)} chars of memory context (recall)")
                 else:
@@ -3796,7 +3778,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 memory_context = ""
                 print("[AIG] Internal call: skipping memory injection")
         else:
-            memory_context = _build_memory_context(user_message) if _st.cognition_enabled else ""
+            memory_context = _build_memory_context(user_message, conversation_id) if _st.cognition_enabled else ""
             if memory_context:
                 print(f"[AIG] Injected {len(memory_context)} chars of memory context")
         _memory_ms = round((time.perf_counter() - _memory_t0) * 1000.0, 1)
@@ -4728,10 +4710,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         user_message = params.get("message", [""])[0]
+        session_id = str((params.get("session_id") or [""])[0])[:120]
         if user_message:
             _mark_user_activity()
 
-        context = _build_memory_context(user_message)
+        context = _build_memory_context(user_message, session_id)
         self._json_response(200, {
             "context": context,
             "cognition_enabled": True
@@ -5062,7 +5045,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         direct_profile = _select_acp_tool_profile(last_user_msg, direct_request_type)
         direct_passive_recall = _is_passive_memory_recall(last_user_msg)
 
-        memory_context = _build_memory_context(last_user_msg)
+        memory_context = _build_memory_context(last_user_msg, conversation_id)
         if memory_context:
             prompt_text = memory_context + prompt_text
             print(f"[Cognition] Injected {len(memory_context)} chars of memory context")

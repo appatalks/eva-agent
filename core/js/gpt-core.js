@@ -125,8 +125,7 @@ async function trboSend() {
                   user_message: sQuestion.substring(0, 500),
                   assistant_message: s.content.substring(0, 500),
                   model: sModel,
-                  session_id: (typeof ensureActiveSessionId === 'function')
-                    ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')
+                  session_id: _gptSessionId
                 }),
                 signal: AbortSignal.timeout(5000)
               }).catch(function() {});
@@ -173,7 +172,9 @@ async function trboSend() {
     var _gptMemoryContext = '';
     try {
       var _bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
-      var _ctxResp = await fetch(_bridgeUrl.replace(/\/+$/, '') + '/v1/memory/context?message=' + encodeURIComponent(sQuestion), {
+      var _gptSessionId = (typeof ensureActiveSessionId === 'function')
+        ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
+      var _ctxResp = await fetch(_bridgeUrl.replace(/\/+$/, '') + '/v1/memory/context?message=' + encodeURIComponent(sQuestion) + '&session_id=' + encodeURIComponent(_gptSessionId), {
         signal: AbortSignal.timeout(3000)
       });
       if (_ctxResp.ok) {

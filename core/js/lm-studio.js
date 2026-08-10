@@ -59,7 +59,7 @@ function lmsSend() {
     var _lmsMemoryPromise = Promise.resolve('');
     var _lmsDataPromise = Promise.resolve('');
     try {
-      _lmsMemoryPromise = fetch(_bUrl + '/v1/memory/context?message=' + encodeURIComponent(sQuestion), {
+      _lmsMemoryPromise = fetch(_bUrl + '/v1/memory/context?message=' + encodeURIComponent(sQuestion) + '&session_id=' + encodeURIComponent(sessionId), {
         signal: AbortSignal.timeout(3000)
       }).then(function(r) { return r.ok ? r.json() : { context: '' }; })
         .then(function(d) { return (d.context && d.cognition_enabled) ? d.context : ''; })
@@ -199,8 +199,7 @@ function lmsSend() {
                               user_message: sQuestion.substring(0, 500),
                               assistant_message: candidate.substring(0, 500),
                               model: 'lm-studio',
-                              session_id: (typeof ensureActiveSessionId === 'function')
-                                ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')
+                              session_id: sessionId
                             }),
                             signal: AbortSignal.timeout(5000)
                           }).catch(function() {});

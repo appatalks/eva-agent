@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bridge import config, learning
+from bridge.core import BridgeHandler
 
 
 class LearningStoreTests(unittest.TestCase):
@@ -88,6 +89,46 @@ class LearningStoreTests(unittest.TestCase):
         self.assertEqual(applied["applied"]["status"], "applied")
         self.assertEqual(learning.delete_signals(signal_id=row["id"]), 1)
         self.assertEqual(learning.list_signals(), [])
+
+    def test_feedback_guidance_is_signal_linked_and_reversible(self):
+        row, _ = learning.create_signal(self.signal(status="misunderstood", value="misunderstood"))
+        effect = learning.feedback_effect(row)
+        self.assertEqual(effect, "The user recently marked a response as misunderstood; clarify intent before relying on assumptions.")
+        learning.mark_applied(row["id"], effect)
+        active = learning.list_active_guidance(session_id="session-1")
+        self.assertEqual(active[0]["signal_id"], row["id"])
+        self.assertEqual(active[0]["guidance"], effect)
+        self.assertEqual(learning.delete_signals(signal_id=row["id"]), 1)
+        self.assertEqual(learning.list_active_guidance(session_id="session-1"), [])
+
+    def test_feedback_guidance_is_hidden_when_consent_is_revoked(self):
+        row, _ = learning.create_signal(self.signal(status="helpful", value="helpful"))
+        learning.mark_applied(row["id"], learning.feedback_effect(row))
+        self.assertEqual(len(learning.list_active_guidance(session_id="session-1")), 1)
+        learning.update_consent({"explicit_feedback": False})
+        self.assertEqual(learning.list_active_guidance(session_id="session-1"), [])
+
+    def test_session_guidance_does_not_cross_into_another_session(self):
+        first, _ = learning.create_signal(self.signal(session_id="session-1", status="helpful", value="helpful"))
+        second, _ = learning.create_signal(self.signal(session_id="session-2", status="misunderstood", value="misunderstood"))
+        learning.mark_applied(first["id"], learning.feedback_effect(first))
+        learning.mark_applied(second["id"], learning.feedback_effect(second))
+        first_guidance = learning.list_active_guidance(session_id="session-1")
+        second_guidance = learning.list_active_guidance(session_id="session-2")
+        self.assertEqual([row["signal_id"] for row in first_guidance], [first["id"]])
+        self.assertEqual([row["signal_id"] for row in second_guidance], [second["id"]])
+
+    def test_feedback_rejects_user_and_global_scope(self):
+        for scope in ("user", "global"):
+            with self.assertRaisesRegex(ValueError, "feedback signals require session scope"):
+                learning.create_signal(self.signal(scope=scope, session_id=""))
+
+    def test_bridge_applies_bounded_feedback_without_reflection_write(self):
+        row, _ = learning.create_signal(self.signal(status="unhelpful", value="unhelpful"))
+        with patch("bridge.core._memory_ingest") as ingest:
+            effect = BridgeHandler._apply_learning_signal(None, row)
+        self.assertEqual(effect, learning.feedback_effect(row))
+        ingest.assert_not_called()
 
     def test_retention_is_server_controlled_and_expiry_is_purged(self):
         created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)

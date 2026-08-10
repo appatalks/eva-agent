@@ -38,6 +38,11 @@ DETAIL_BY_KIND = {
     "action-outcome": {"agent", "operation"},
     "voice-diagnostic": {"event", "provider", "reason", "chars", "fragments"},
 }
+FEEDBACK_EFFECTS = {
+    "helpful": "The user found a recent response helpful; retain its clarity and level of detail.",
+    "unhelpful": "The user found a recent response unhelpful; check relevance and completeness before answering.",
+    "misunderstood": "The user recently marked a response as misunderstood; clarify intent before relying on assumptions.",
+}
 
 _LOCK = threading.RLock()
 
@@ -195,6 +200,8 @@ def _validate_signal(data):
     session_id = str(data.get("session_id") or "")[:MAX_SESSION_ID]
     if data["scope"] == "session" and not session_id:
         raise ValueError("session scope requires session_id")
+    if data["kind"] == "feedback" and data["scope"] != "session":
+        raise ValueError("feedback signals require session scope")
     if data.get("value") is not None and not isinstance(data["value"], (str, int, float, bool)):
         raise ValueError("value must be a scalar")
     detail = sanitize_detail(data.get("detail"))
@@ -336,6 +343,48 @@ def mark_applied(signal_id, effect):
                 row["applied"] = {"status": "applied", "effect": effect}
         _write_unlocked(rows)
     return next((row for row in rows if row.get("id") == signal_id), None)
+
+
+def feedback_effect(signal):
+    """Return a fixed, safe guidance string for explicit response feedback only."""
+    if not isinstance(signal, dict):
+        return ""
+    if signal.get("source") != "explicit-user" or signal.get("kind") != "feedback":
+        return ""
+    return FEEDBACK_EFFECTS.get(signal.get("status"), "")
+
+
+def list_active_guidance(session_id=None, limit=3):
+    """Return active, generic guidance tied to retained explicit feedback signals."""
+    limit = max(1, min(int(limit or 3), len(FEEDBACK_EFFECTS)))
+    session_id = str(session_id or "")[:MAX_SESSION_ID]
+    if not get_consent().get("explicit_feedback", False):
+        return []
+    with _LOCK:
+        rows = _purge_unlocked(_read_unlocked())
+        _write_unlocked(rows)
+
+    guidance = []
+    seen = set()
+    for row in reversed(rows):
+        scope = row.get("scope")
+        if scope != "session" or not session_id or row.get("session_id") != session_id:
+            continue
+        effect = feedback_effect(row)
+        applied = row.get("applied") or {}
+        if not effect or applied.get("status") != "applied" or applied.get("effect") != effect:
+            continue
+        if effect in seen:
+            continue
+        seen.add(effect)
+        guidance.append({
+            "signal_id": row.get("id", ""),
+            "guidance": effect,
+            "expires_at": row.get("expires_at", ""),
+        })
+        if len(guidance) >= limit:
+            break
+    return guidance
 
 
 def reset_for_tests():

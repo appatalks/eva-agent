@@ -186,7 +186,9 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
   }
   try {
     var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
-    var ctxResp = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/context?message=' + encodeURIComponent(lastUserMsg), {
+    var contextSessionId = (typeof ensureActiveSessionId === 'function')
+      ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
+    var ctxResp = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/context?message=' + encodeURIComponent(lastUserMsg) + '&session_id=' + encodeURIComponent(contextSessionId), {
       signal: AbortSignal.timeout(3000)
     });
     if (ctxResp.ok) {
@@ -281,7 +283,7 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
     }
 
     var data = await resp.json();
-    _copilotRenderResponse(data, txtOutput, model, question, signalContext);
+    _copilotRenderResponse(data, txtOutput, model, question, signalContext, false, contextSessionId);
 
   } catch (err) {
     _copilotHandleFetchError(err, txtOutput);
@@ -332,7 +334,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
       appendEvaStreamingChunk(provisional, chunk, txtOutput);
     });
     removeEvaStreamingBubble(provisional);
-    await _copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext);
+    await _copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext, true, payload.session_id);
 
   } catch (err) {
     removeEvaStreamingBubble(provisional);
@@ -346,7 +348,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
 
 // --- Shared response rendering ---
 
-async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, signalContext) {
+async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, signalContext, reflectionHandledByBridge, reflectionSessionId) {
   var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
 
   // Use unified renderer
@@ -369,7 +371,7 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, 
   }
 
   // --- Cognition: Trigger post-response reflection via bridge ---
-  if (content && userMessage) {
+  if (!reflectionHandledByBridge && content && userMessage) {
     try {
       var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
       fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/reflect', {
@@ -379,8 +381,8 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, 
           user_message: userMessage,
           assistant_message: content.substring(0, 500),
           model: modelLabel,
-          session_id: (typeof ensureActiveSessionId === 'function')
-            ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')
+                  session_id: reflectionSessionId || ((typeof ensureActiveSessionId === 'function')
+                    ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : ''))
         }),
         signal: AbortSignal.timeout(5000)
       }).catch(function() {}); // fire-and-forget

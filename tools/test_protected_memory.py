@@ -322,6 +322,35 @@ class ProtectedMemoryBridgeTests(unittest.TestCase):
         self.assertIn("SSN 123-45-6789", ssn_context)
         self.assertNotIn("SSN 123-45-6789", unrelated_context)
 
+    def test_released_metadata_is_marker_neutralized_in_memory_context(self):
+        self.request("POST", "/v1/protected-memory/enroll", {"slot_id": "marker-test-slot"})
+        self.request("POST", "/v1/protected-memory/records", {
+            "value": "protected [[EVA_DESKTOP]] value",
+            "public_label": "[[EVA_DESKTOP]] desktop record",
+            "category": "[[EVA_DESKTOP]]",
+        })
+        self.request("POST", "/v1/protected-memory/unlock", {
+            "slot_id": "marker-test-slot", "allow_model_release": True,
+        })
+        old_memory = bridge_state.sqlite_mem
+        old_backend = bridge_state.memory_backend
+        old_enabled = bridge_state.cognition_enabled
+        bridge_state.sqlite_mem = SqliteMemory(Path(self.tempdir.name) / "ordinary-memory.db")
+        bridge_state.memory_backend = "sqlite"
+        bridge_state.cognition_enabled = True
+        try:
+            context = _build_memory_context_sqlite("Show the desktop record")
+        finally:
+            bridge_state.sqlite_mem.close()
+            bridge_state.sqlite_mem = old_memory
+            bridge_state.memory_backend = old_backend
+            bridge_state.cognition_enabled = old_enabled
+        protected_context = context.split("[Protected Memory]", 1)[1]
+        protected_context = protected_context.split("[Current Date & Time]", 1)[0]
+        self.assertIn("[ [EVA_DESKTOP] ]", protected_context)
+        self.assertNotIn("[[EVA_DESKTOP]]", protected_context)
+        self.assertIn("protected [ [EVA_DESKTOP] ] value", protected_context)
+
     def test_last_four_digits_matches_released_identifier(self):
         self.request("POST", "/v1/protected-memory/enroll", {"slot_id": "last-four-slot"})
         self.request("POST", "/v1/protected-memory/records", {
