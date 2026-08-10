@@ -147,7 +147,7 @@ def main():
         st, body = req("GET", "/v1/skills")
         check("list returns 200", st == 200)
         skills = body.get("skills", [])
-        check("list has 1 active skill", len(skills) == 1 and skills[0]["Status"] == "active")
+        check("list has 1 draft skill", len(skills) == 1 and skills[0]["Status"] == "draft")
 
         # 4. Disable via PATCH.
         st, body = req("PATCH", "/v1/skills/" + sid, {"status": "disabled"})

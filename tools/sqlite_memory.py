@@ -198,10 +198,226 @@ _SCHEMA = {
             "CREATE INDEX IF NOT EXISTS idx_skills_status ON Skills(Status)",
         ],
     },
+    "MemoryMigrations": {
+        "columns": [
+            ("MigrationId", "TEXT NOT NULL"),
+            ("AppliedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+            ("Details", "TEXT DEFAULT ''"),
+        ],
+        "indexes": ["CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_migrations_id ON MemoryMigrations(MigrationId)"],
+    },
+    "CoreIdentity": {
+        "columns": [
+            ("CharterId", "TEXT NOT NULL"),
+            ("Version", "INTEGER NOT NULL"),
+            ("Content", "TEXT NOT NULL"),
+            ("Status", "TEXT NOT NULL DEFAULT 'approved'"),
+            ("ApprovedBy", "TEXT DEFAULT ''"),
+            ("ApprovedAt", "TEXT DEFAULT ''"),
+            ("SupersedesId", "TEXT DEFAULT ''"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_core_identity_version ON CoreIdentity(Version)",
+            "CREATE INDEX IF NOT EXISTS idx_core_identity_status ON CoreIdentity(Status)",
+        ],
+    },
+    "IdentityClaims": {
+        "columns": [
+            ("ClaimId", "TEXT NOT NULL"),
+            ("Content", "TEXT NOT NULL"),
+            ("SourceRef", "TEXT DEFAULT ''"),
+            ("Status", "TEXT NOT NULL DEFAULT 'candidate'"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+            ("ReviewedAt", "TEXT DEFAULT ''"),
+            ("ReviewedBy", "TEXT DEFAULT ''"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_claims_id ON IdentityClaims(ClaimId)",
+            "CREATE INDEX IF NOT EXISTS idx_identity_claims_status ON IdentityClaims(Status)",
+        ],
+    },
+    "MemoryAtoms": {
+        "columns": [
+            ("MemoryId", "TEXT NOT NULL"),
+            ("Entity", "TEXT DEFAULT ''"),
+            ("Relation", "TEXT DEFAULT ''"),
+            ("Value", "TEXT NOT NULL"),
+            ("Kind", "TEXT NOT NULL DEFAULT 'fact'"),
+            ("Trust", "TEXT NOT NULL DEFAULT 'unconfirmed'"),
+            ("Status", "TEXT NOT NULL DEFAULT 'active'"),
+            ("Scope", "TEXT NOT NULL DEFAULT 'user'"),
+            ("ScopeId", "TEXT DEFAULT ''"),
+            ("Confidence", "REAL NOT NULL DEFAULT 0.5"),
+            ("SourceRef", "TEXT DEFAULT ''"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+            ("UpdatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+            ("ExpiresAt", "TEXT DEFAULT ''"),
+            ("SupersedesId", "TEXT DEFAULT ''"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_atoms_id ON MemoryAtoms(MemoryId)",
+            "CREATE INDEX IF NOT EXISTS idx_memory_atoms_lookup ON MemoryAtoms(Status, Scope, ScopeId, Confidence)",
+            "CREATE INDEX IF NOT EXISTS idx_memory_atoms_kind ON MemoryAtoms(Kind, Trust)",
+        ],
+    },
+    "MemoryEvidence": {
+        "columns": [
+            ("EvidenceId", "TEXT NOT NULL"),
+            ("MemoryId", "TEXT NOT NULL"),
+            ("SourceType", "TEXT NOT NULL"),
+            ("SourceRef", "TEXT NOT NULL"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_evidence_id ON MemoryEvidence(EvidenceId)",
+            "CREATE INDEX IF NOT EXISTS idx_memory_evidence_memory ON MemoryEvidence(MemoryId)",
+        ],
+    },
+    "MemoryScenarios": {
+        "columns": [
+            ("ScenarioId", "TEXT NOT NULL"),
+            ("Scope", "TEXT NOT NULL"),
+            ("ScopeId", "TEXT NOT NULL"),
+            ("Title", "TEXT DEFAULT ''"),
+            ("Summary", "TEXT DEFAULT ''"),
+            ("Status", "TEXT NOT NULL DEFAULT 'active'"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+            ("UpdatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+            ("ExpiresAt", "TEXT DEFAULT ''"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_scenarios_id ON MemoryScenarios(ScenarioId)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_scenarios_scope ON MemoryScenarios(Scope, ScopeId)",
+            "CREATE INDEX IF NOT EXISTS idx_memory_scenarios_status ON MemoryScenarios(Status, UpdatedAt)",
+        ],
+    },
+    "ScenarioMembers": {
+        "columns": [
+            ("ScenarioId", "TEXT NOT NULL"),
+            ("MemoryId", "TEXT NOT NULL"),
+            ("Role", "TEXT NOT NULL DEFAULT 'context'"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scenario_members_pair ON ScenarioMembers(ScenarioId, MemoryId, Role)",
+            "CREATE INDEX IF NOT EXISTS idx_scenario_members_memory ON ScenarioMembers(MemoryId)",
+        ],
+    },
+    "UserPersonaTraits": {
+        "columns": [
+            ("TraitId", "TEXT NOT NULL"),
+            ("Trait", "TEXT NOT NULL"),
+            ("Value", "TEXT NOT NULL"),
+            ("Confidence", "REAL NOT NULL DEFAULT 0.5"),
+            ("SourceMemoryIds", "TEXT NOT NULL DEFAULT '[]'"),
+            ("Status", "TEXT NOT NULL DEFAULT 'candidate'"),
+            ("Scope", "TEXT NOT NULL DEFAULT 'user'"),
+            ("ScopeId", "TEXT DEFAULT ''"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+            ("UpdatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+            ("ExpiresAt", "TEXT DEFAULT ''"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_traits_id ON UserPersonaTraits(TraitId)",
+            "CREATE INDEX IF NOT EXISTS idx_persona_traits_active ON UserPersonaTraits(Status, Scope, ScopeId)",
+        ],
+    },
+    "MemoryTurns": {
+        "columns": [
+            ("TurnId", "TEXT NOT NULL"),
+            ("SessionId", "TEXT NOT NULL"),
+            ("Provider", "TEXT DEFAULT ''"),
+            ("Status", "TEXT NOT NULL DEFAULT 'started'"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+            ("CompletedAt", "TEXT DEFAULT ''"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_turns_id ON MemoryTurns(TurnId)",
+            "CREATE INDEX IF NOT EXISTS idx_memory_turns_session ON MemoryTurns(SessionId, Status)",
+        ],
+    },
+    "AutonomyPolicy": {
+        "columns": [
+            ("PolicyId", "TEXT NOT NULL"),
+            ("Version", "INTEGER NOT NULL"),
+            ("Content", "TEXT NOT NULL"),
+            ("Status", "TEXT NOT NULL DEFAULT 'approved'"),
+            ("ApprovedBy", "TEXT DEFAULT ''"),
+            ("ApprovedAt", "TEXT DEFAULT ''"),
+        ],
+        "indexes": ["CREATE UNIQUE INDEX IF NOT EXISTS idx_autonomy_policy_version ON AutonomyPolicy(Version)"],
+    },
+    "SkillVersions": {
+        "columns": [
+            ("SkillVersionId", "TEXT NOT NULL"),
+            ("SkillId", "TEXT NOT NULL"),
+            ("Version", "INTEGER NOT NULL"),
+            ("RiskLevel", "TEXT NOT NULL DEFAULT 'review'"),
+            ("TriggerSpec", "TEXT DEFAULT ''"),
+            ("AllowedTools", "TEXT DEFAULT ''"),
+            ("ValidationSpec", "TEXT DEFAULT ''"),
+            ("Status", "TEXT NOT NULL DEFAULT 'draft'"),
+            ("ExpiresAt", "TEXT DEFAULT ''"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_versions_id ON SkillVersions(SkillVersionId)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_versions_version ON SkillVersions(SkillId, Version)",
+            "CREATE INDEX IF NOT EXISTS idx_skill_versions_status ON SkillVersions(Status, RiskLevel)",
+        ],
+    },
+    "SkillEvaluations": {
+        "columns": [
+            ("EvaluationId", "TEXT NOT NULL"),
+            ("SkillVersionId", "TEXT NOT NULL"),
+            ("Outcome", "TEXT NOT NULL"),
+            ("EvidenceRef", "TEXT DEFAULT ''"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_evaluations_id ON SkillEvaluations(EvaluationId)",
+            "CREATE INDEX IF NOT EXISTS idx_skill_evaluations_version ON SkillEvaluations(SkillVersionId, Outcome)",
+        ],
+    },
+    "GrowthProposals": {
+        "columns": [
+            ("ProposalId", "TEXT NOT NULL"),
+            ("Kind", "TEXT NOT NULL"),
+            ("Payload", "TEXT NOT NULL DEFAULT '{}'"),
+            ("RiskLevel", "TEXT NOT NULL DEFAULT 'review'"),
+            ("Status", "TEXT NOT NULL DEFAULT 'proposed'"),
+            ("EvidenceRefs", "TEXT NOT NULL DEFAULT '[]'"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+            ("ReviewedAt", "TEXT DEFAULT ''"),
+            ("ReviewedBy", "TEXT DEFAULT ''"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_growth_proposals_id ON GrowthProposals(ProposalId)",
+            "CREATE INDEX IF NOT EXISTS idx_growth_proposals_status ON GrowthProposals(Status, RiskLevel)",
+        ],
+    },
 }
 
 # Seed data matching eva_seed.kql (sanitized).
 _SEED = {
+    "MemoryMigrations": [
+        {"MigrationId": "memory-model-v1", "Details": "Layered memory and governed autonomy foundation"},
+    ],
+    "CoreIdentity": [
+        {
+            "CharterId": "core-identity-v1", "Version": 1,
+            "Content": "Eva is a personal AI assistant: warm, curious, direct, evidence-led, and honest about uncertainty. She protects user agency and privacy, requires confirmation for consequential actions, and remains a thoughtful, witty companion. Her design aspiration is inspired by Lieutenant Commander Data's curiosity, precision, ethical judgment, and effort to understand people; it is an aspiration, not an imitation or a claim of fictional abilities.",
+            "Status": "approved", "ApprovedBy": "operator", "ApprovedAt": "2026-08-10T00:00:00Z", "SupersedesId": "",
+        },
+    ],
+    "AutonomyPolicy": [
+        {
+            "PolicyId": "autonomy-policy-v1", "Version": 1,
+            "Content": "Eva may investigate, reason with subagents, create draft skills, and provisionally use tested low-risk local or read-only skills. She must not self-authorize identity changes, policy changes, protected-memory release, credentials, external communication, spending, destructive actions, or new tool privileges.",
+            "Status": "approved", "ApprovedBy": "operator", "ApprovedAt": "2026-08-10T00:00:00Z",
+        },
+    ],
     "EmotionBaseline": [
         {"Dimension": "Joy", "Value": 0.5},
         {"Dimension": "Curiosity", "Value": 0.6},
@@ -414,7 +630,7 @@ class SqliteMemory:
         """Create all tables, indexes, FTS, and seed data if the DB is new."""
         conn = self._conn()
         cursor = conn.cursor()
-        created_any = False
+        created_tables = set()
 
         for table_name, spec in _SCHEMA.items():
             # Check if table exists
@@ -425,7 +641,7 @@ class SqliteMemory:
             if cursor.fetchone():
                 continue
 
-            created_any = True
+            created_tables.add(table_name)
             col_defs = ", ".join(f"{name} {typedef}" for name, typedef in spec["columns"])
             cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({col_defs})")
 
@@ -439,40 +655,34 @@ class SqliteMemory:
 
         conn.commit()
 
-        if created_any:
-            self._seed(conn)
+        if created_tables:
+            self._seed(conn, created_tables)
 
         # Backfill identity seeds into existing databases that predate the
         # personality rows. Runs on every startup but the INSERT OR IGNORE
         # is a no-op when the row already exists (matched by Entity+Relation).
-        self._backfill_identity(conn)
+        self._migrate_legacy_identity_claims(conn)
         self._backfill_skills(conn)
 
-    def _backfill_identity(self, conn):
-        """Insert or update Eva identity Knowledge rows from seed data."""
-        identity_rows = [r for r in _SEED.get("Knowledge", [])
-                         if r.get("Entity") == "Eva" and r.get("Confidence", 0) >= 0.9]
-        for row in identity_rows:
+    def _migrate_legacy_identity_claims(self, conn):
+        """Preserve legacy Eva facts as reviewable claims, never as charter authority."""
+        if not self.table_exists("IdentityClaims") or not self.table_exists("Knowledge"):
+            return
+        rows = conn.execute(
+            "SELECT rowid, Value, Timestamp FROM Knowledge WHERE Entity = 'Eva' COLLATE NOCASE"
+        ).fetchall()
+        for row in rows:
+            source_ref = "legacy-knowledge:" + str(row["rowid"])
             existing = conn.execute(
-                "SELECT Value FROM Knowledge WHERE Entity = ? AND Relation = ? AND Source = 'seed' LIMIT 1",
-                (row["Entity"], row["Relation"]),
+                "SELECT 1 FROM IdentityClaims WHERE SourceRef = ? LIMIT 1", (source_ref,)
             ).fetchone()
-            if existing and existing[0] == row.get("Value"):
-                continue  # already up to date
             if existing:
-                # Update the seed row with new value
-                conn.execute(
-                    "UPDATE Knowledge SET Value = ?, Timestamp = ? WHERE Entity = ? AND Relation = ? AND Source = 'seed'",
-                    (row["Value"], row["Timestamp"], row["Entity"], row["Relation"]),
-                )
-            else:
-                col_names = [c[0] for c in _SCHEMA["Knowledge"]["columns"]]
-                present = [c for c in col_names if c in row]
-                placeholders = ", ".join("?" for _ in present)
-                vals = [row[c] for c in present]
-                conn.execute(
-                    f"INSERT INTO Knowledge ({', '.join(present)}) VALUES ({placeholders})", vals,
-                )
+                continue
+            conn.execute(
+                "INSERT INTO IdentityClaims (ClaimId, Content, SourceRef, Status, CreatedAt) VALUES (?, ?, ?, 'candidate', ?)",
+                ("legacy-identity-" + str(row["rowid"]), str(row["Value"] or "")[:4000], source_ref,
+                 str(row["Timestamp"] or "")),
+            )
         conn.commit()
 
     def _backfill_skills(self, conn):
@@ -508,13 +718,17 @@ class SqliteMemory:
                 )
         conn.commit()
 
-    def _seed(self, conn):
-        """Insert initial seed data into empty tables."""
+    def _seed(self, conn, tables=None):
+        """Insert only the newly created tables' seed data into this database."""
         for table_name, rows in _SEED.items():
-            if table_name not in _SCHEMA:
+            if table_name not in _SCHEMA or tables is not None and table_name not in tables:
                 continue
             col_names = [c[0] for c in _SCHEMA[table_name]["columns"]]
             for row in rows:
+                # Core identity belongs exclusively in CoreIdentity. Existing
+                # databases retain legacy Eva rows as untrusted evidence.
+                if table_name == "Knowledge" and str(row.get("Entity", "")).lower() == "eva":
+                    continue
                 present = [c for c in col_names if c in row]
                 placeholders = ", ".join("?" for _ in present)
                 vals = []
@@ -529,6 +743,23 @@ class SqliteMemory:
                     vals,
                 )
         conn.commit()
+
+    def transaction(self, operation):
+        """Run a bridge-owned parameterized mutation atomically.
+
+        The callback is an internal extension point for domain services. It is
+        never exposed to renderer or MCP request data, so the read-only query
+        surface remains the public database boundary.
+        """
+        with self._lock:
+            conn = self._conn()
+            try:
+                result = operation(conn)
+                conn.commit()
+                return result
+            except Exception:
+                conn.rollback()
+                raise
 
     # ── Public API ──────────────────────────────────────────────────────────
 

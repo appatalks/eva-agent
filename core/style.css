@@ -91,6 +91,7 @@ body.eva-standalone {
    and controls are never clipped by it. */
 body.eva-standalone .session-panel,
 body.eva-standalone .skills-panel,
+body.eva-standalone .memory-inspector-panel,
 body.eva-standalone .assets-panel,
 body.eva-standalone .workspace-panel,
 body.eva-standalone .terminal-panel {
@@ -834,6 +835,30 @@ body.skills-view-open .skills-panel {
 body.eva-standalone.skills-view-open .skills-panel { top: auto; height: 100%; }
 body.skills-view-open .skills-panel .session-panel-header { padding: 16px 22px 11px; border-bottom-color: rgba(74,222,199,0.18); }
 body.skills-view-open .skills-panel-body { padding: 0; overflow: hidden; }
+.memory-inspector-panel { display: none; }
+body.memory-view-open #idContainer > :not(#memoryInspectorPanel) { display: none !important; }
+body.memory-view-open #idContainer { max-width: none; width: 100%; }
+body.memory-view-open .eva-status-footer,
+body.memory-view-open .eva-disclaimer,
+body.memory-view-open .cog-badge { display: none !important; }
+body.memory-view-open #evaMemoryBtn { background: rgba(74,222,199,0.12); color: #c7fff7; }
+body.memory-view-open .memory-inspector-panel { display: flex; position: relative; inset: auto; width: 100%; max-width: none; height: 100%; transform: none; border: 0; border-radius: 0; flex-direction: column; background: #081211; }
+body.eva-standalone.memory-view-open .memory-inspector-panel { top: auto; height: 100%; }
+body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 16px 22px 11px; border-bottom-color: rgba(74,222,199,0.18); }
+.memory-inspector-toolbar { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
+.memory-inspector-toolbar .auth-note { margin: 0; }
+.memory-inspector-body { display: grid; grid-template-columns: minmax(220px, 0.72fr) minmax(360px, 1.5fr) minmax(220px, 0.72fr); min-height: 0; flex: 1; overflow: hidden; }
+.memory-inspector-section { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid rgba(74,222,199,0.14); background: rgba(9,24,22,0.76); }
+.memory-inspector-section:last-child { border-right: 0; }
+.memory-inspector-atoms { background: rgba(5,17,16,0.65); }
+.memory-inspector-list { display: grid; gap: 8px; padding: 10px; }
+.memory-inspector-card { display: grid; gap: 7px; min-width: 0; padding: 10px; border: 1px solid rgba(74,222,199,0.15); border-radius: 4px; background: rgba(12,27,25,0.82); }
+.memory-inspector-card strong { color: #e8fffb; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.memory-inspector-value { color: #abc6c1; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }
+.memory-inspector-meta,
+.memory-inspector-actions { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.memory-inspector-pill { max-width: 100%; padding: 2px 5px; border: 1px solid rgba(129,177,168,0.25); border-radius: 3px; color: #82a9a2; font: 9px monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-inspector-actions .background-inline-button { min-width: 64px; }
 .skills-view-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 150px 150px 160px auto; align-items: center; gap: 7px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
 .skills-view-toolbar input,
 .skills-view-toolbar select { min-width: 0; height: 32px; border: 1px solid rgba(74,222,199,0.18); border-radius: 3px; background: #0c1b19; color: #e5faf7; padding: 0 9px; font: 11px inherit; }
@@ -1182,6 +1207,9 @@ body.skills-view-open .skills-panel-body { padding: 0; overflow: hidden; }
   .skills-editor { overflow: visible; }
   .skills-library { border-right: 0; border-bottom: 1px solid rgba(74,222,199,0.14); }
   #skillsList { grid-template-columns: 1fr; }
+  .memory-inspector-body { grid-template-columns: 1fr; overflow: auto; }
+  .memory-inspector-section { overflow: visible; border-right: 0; border-bottom: 1px solid rgba(74,222,199,0.14); }
+  .memory-inspector-section:last-child { border-bottom: 0; }
   body .terminal-panel.terminal-panel-docked,
   body .terminal-panel.terminal-panel-docked.terminal-panel-expanded { left: 0; width: 100vw; height: 50vh !important; bottom: 0; }
 }
@@ -1673,11 +1701,19 @@ body.theme-lcars.lcars-collapsed #lcarsSidebar .lcars-chip > .speakSend {
 /* Ensure emoji/icon pseudo-elements are readable */
 body.theme-lcars.lcars-collapsed #sidebarSettingsBtn::before,
 body.theme-lcars.lcars-collapsed #sidebarClearBtn::before,
-body.theme-lcars.lcars-collapsed #lcarsChipPrint #printButton::before {
+body.theme-lcars.lcars-collapsed #lcarsChipPrint #printButton::before,
+body.theme-lcars.lcars-collapsed #lcarsMemoryBtn::before {
   /* icon-only in collapsed mode */
   width: 22px;
   height: 22px;
   margin: 0;
+}
+body.theme-lcars.lcars-collapsed #lcarsMemoryBtn::before {
+  content: 'M';
+  display: inline-grid;
+  place-items: center;
+  color: #0b0e14;
+  font: 700 14px "Barlow Condensed", sans-serif;
 }
 
 /* Hide original speak container in LCARS when moved to sidebar */
@@ -2676,6 +2712,11 @@ body.theme-lcars #lcarsSidebar .lcars-chip.sessions {
 }
 body.theme-lcars #lcarsSidebar .lcars-chip.agents {
   background: var(--ld-arctic-ice);
+  flex: 0 0 48px;
+  border-radius: 0;
+}
+body.theme-lcars #lcarsSidebar .lcars-chip.memory {
+  background: var(--ld-radioactive);
   flex: 0 0 48px;
   border-radius: 0;
 }

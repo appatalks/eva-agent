@@ -1,6 +1,40 @@
 # Eva Memory and Intelligence Improvement Plan
 
-Status: proposed implementation plan for `improve/eva-memory-intelligence`.
+Status: SQLite-first execution plan and implementation record.
+
+## Execution Status
+
+The initial trust, lifecycle, structured-memory, and governed-autonomy phases
+are implemented for the local SQLite backend:
+
+- The operator-approved Core Identity Charter and Autonomy Policy are stored
+  separately from recalled data. Legacy claims about Eva are migrated only as
+  reviewable `IdentityClaims` candidates.
+- `Knowledge` remains readable for compatibility and migrates once into
+  attributed, unconfirmed `MemoryAtoms`. New explicit user facts are captured
+  as source-linked, user-confirmed atoms; they are never promoted to identity
+  or behavior automatically.
+- Session scenarios, source-traceable persona traits, correction/supersession,
+  deletion, and a loopback Memory Inspector are available through the bridge.
+  The inspector can deliberately promote a confirmed preference atom into a
+  source-traceable persona trait; correcting or deleting that source atom
+  disables the derived trait before the next prompt.
+- Direct-provider reflection accepts opaque turn IDs. SQLite persists a
+  completed turn once even when the reflection request is retried.
+- Auto-learned skills persist as drafts. Extraction alone never counts as a
+  successful evaluation or activates a skill. A future trusted execution
+  evaluator may promote only a low-risk skill after bounded, verified outcomes;
+  protected memory, credentials, external messaging, spending, destructive
+  operations, new tool privileges, identity changes, and policy changes cannot
+  self-promote.
+- Kusto receives the same seed tables, structured mutation endpoints, and
+  approved charter/trait/scenario reads. Its append-only revision contract is
+  exercised through a deterministic local Kusto fixture. A live configured
+  Kusto deployment still requires a maintainer smoke test before rollout.
+
+New phase-specific tests are deliberately local under `tools/local-tests/` at
+the core maintainer's request. Existing repository tests continue to guard
+established behavior and are updated when a deliberate contract changes.
 
 ## Purpose
 

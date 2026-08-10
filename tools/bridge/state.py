@@ -103,7 +103,11 @@ local_mcp_manager = None    # LocalMCPManager instance (lazy)
 # Restore persisted mode preference (local vs cloud).
 _mode_pref_path = MODE_PREF_PATH
 try:
-    _saved_mode = open(_mode_pref_path).read().strip().lower() if os.path.isfile(_mode_pref_path) else ""
+    if os.path.isfile(_mode_pref_path):
+        with open(_mode_pref_path, encoding="utf-8") as handle:
+            _saved_mode = handle.read().strip().lower()
+    else:
+        _saved_mode = ""
 except OSError:
     _saved_mode = ""
 local_mode = (_saved_mode == "local")

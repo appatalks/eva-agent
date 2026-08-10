@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 // Import a skill from a variety of sources (paste, URL, GitHub, file upload),
 // have Eva normalize ("Eva'rise") it into her schema via the bridge, review the
-// draft, then save it to ADX. Saved skills are surfaced automatically at runtime
+// draft, then save it to Eva's memory. Drafts remain inactive until reviewed.
 // by semantic match in the bridge's memory-context injection.
 //
 // Bridge endpoints used:
@@ -142,7 +142,8 @@ async function saveSkill() {
     instructions: get('skillDraftInstructions'),
     tools: get('skillDraftTools'),
     tags: get('skillDraftTags'),
-    source: (_skillsState.draft && _skillsState.draft.source) || 'paste'
+    source: (_skillsState.draft && _skillsState.draft.source) || 'paste',
+    status: 'draft'
   };
   if (!skill.name) { _skillStatus('Give the skill a name.', true); return; }
   if (!skill.instructions) { _skillStatus('The skill needs instructions.', true); return; }
@@ -284,7 +285,7 @@ function renderSkillsList() {
     var status = String(_skillField(sk, 'Status', 'status') || 'active');
     var tools = String(_skillField(sk, 'Tools', 'tools') || '');
     var tags = String(_skillField(sk, 'Tags', 'tags') || '');
-    var enabled = status === 'active';
+    var enabled = status === 'active' || status === 'provisional';
 
     var row = document.createElement('article');
     row.className = 'skill-card' + (enabled ? '' : ' skill-card-disabled');
@@ -363,7 +364,7 @@ function _buildSkillsWorkspace() {
   toolbar.className = 'skills-view-toolbar';
   toolbar.innerHTML =
     '<input id="skillsSearch" type="search" placeholder="Search names, tags, tools, instructions" aria-label="Search skills">' +
-    '<select id="skillsStatusFilter" aria-label="Filter skills by status"><option value="all">All status</option><option value="active">Active</option><option value="draft">Draft</option><option value="disabled">Disabled</option></select>' +
+    '<select id="skillsStatusFilter" aria-label="Filter skills by status"><option value="all">All status</option><option value="active">Active</option><option value="provisional">Provisional</option><option value="draft">Draft</option><option value="disabled">Disabled</option></select>' +
     '<select id="skillsSourceFilter" aria-label="Filter skills by source"><option value="all">All sources</option><option value="paste">Paste</option><option value="url">URL</option><option value="github">GitHub</option><option value="file">File</option><option value="auto-learned">Auto-learned</option><option value="edited">Edited</option></select>' +
     '<select id="skillsSort" aria-label="Sort skills"><option value="updated">Recently updated</option><option value="name">Name</option><option value="status">Status</option></select>' +
     '<span id="skillsViewSummary">0 shown</span>';

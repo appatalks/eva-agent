@@ -42,9 +42,15 @@
     return artifact || (!explanatory && (github || platform));
   }
 
+  function createTurnId() {
+    if (root.crypto && typeof root.crypto.randomUUID === 'function') return 'turn-' + root.crypto.randomUUID();
+    return 'turn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 14);
+  }
+
   root.EvaRequestRouting = {
     classifyRequestType: classifyRequestType,
     needsAcpPreflight: needsAcpPreflight,
+    createTurnId: createTurnId,
     needsDataRetrieval: function (message) {
       return needsAcpPreflight(message, classifyRequestType(message));
     }

@@ -1367,26 +1367,9 @@ async function autoLearnSkill(messages, taskSummary) {
       body: JSON.stringify({ messages: messages || [], task_summary: taskSummary || '' })
     });
     var data = await resp.json();
-    if (resp.ok && data.draft) {
-      // Auto-create the skill as a draft
-      var draft = data.draft;
-      var createResp = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/skills', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          Name: draft.Name || 'Auto-learned skill',
-          Description: draft.Description || '',
-          Instructions: draft.Instructions || '',
-          Tools: draft.Tools || '',
-          Tags: (draft.Tags || '') + (draft.Tags ? ',auto-learned' : 'auto-learned'),
-          Source: 'auto-learned',
-          Status: 'draft'
-        })
-      });
-      if (createResp.ok) {
-        setStatus('info', 'Skill learned: ' + (draft.Name || 'untitled'));
-      }
-      return data.draft;
+    if (resp.ok && data.skill) {
+      setStatus('info', 'Skill draft learned: ' + (data.skill.Name || 'untitled'));
+      return data.skill;
     }
     return null;
   } catch (e) {

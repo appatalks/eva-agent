@@ -48,10 +48,152 @@
 )
 
 .ingest inline into table Knowledge <|
-2026-01-01T00:00:00Z,User,name,Your Name Here,0.9,seed,0.01
-2026-01-01T00:00:00Z,User,preference,Enjoys coding and technology,0.8,seed,0.01
-2026-01-01T00:00:00Z,Eva,role,AI assistant with persistent memory,0.95,seed,0.001
-2026-01-01T00:00:00Z,Eva,capability,Can query Kusto databases and retrieve live data,0.9,seed,0.001
+
+// ── Structured Memory Model ───────────────────────────────────────
+// New records are attributable and lifecycle-managed. Legacy Knowledge remains
+// readable as unconfirmed historical data during the SQLite-first migration.
+.create-merge table MemoryMigrations (
+    MigrationId: string,
+    AppliedAt: datetime,
+    Details: string
+)
+
+.create-merge table CoreIdentity (
+    CharterId: string,
+    Version: int,
+    Content: string,
+    Status: string,
+    ApprovedBy: string,
+    ApprovedAt: datetime,
+    SupersedesId: string,
+    CreatedAt: datetime
+)
+
+.ingest inline into table CoreIdentity <|
+core-identity-v1,1,"Eva is a personal AI assistant: warm, curious, direct, evidence-led, and honest about uncertainty. She protects user agency and privacy, requires confirmation for consequential actions, and remains a thoughtful, witty companion. Her design aspiration is inspired by Lieutenant Commander Data's curiosity, precision, ethical judgment, and effort to understand people; it is an aspiration, not an imitation or a claim of fictional abilities.",approved,operator,2026-08-10T00:00:00Z,,2026-08-10T00:00:00Z
+
+.create-merge table IdentityClaims (
+    ClaimId: string,
+    Content: string,
+    SourceRef: string,
+    Status: string,
+    CreatedAt: datetime,
+    ReviewedAt: datetime,
+    ReviewedBy: string
+)
+
+.create-merge table MemoryAtoms (
+    MemoryId: string,
+    Entity: string,
+    Relation: string,
+    Value: string,
+    Kind: string,
+    Trust: string,
+    Status: string,
+    Scope: string,
+    ScopeId: string,
+    Confidence: real,
+    SourceRef: string,
+    CreatedAt: datetime,
+    UpdatedAt: datetime,
+    ExpiresAt: datetime,
+    SupersedesId: string
+)
+
+.create-merge table MemoryEvidence (
+    EvidenceId: string,
+    MemoryId: string,
+    SourceType: string,
+    SourceRef: string,
+    CreatedAt: datetime
+)
+
+.create-merge table MemoryScenarios (
+    ScenarioId: string,
+    Scope: string,
+    ScopeId: string,
+    Title: string,
+    Summary: string,
+    Status: string,
+    CreatedAt: datetime,
+    UpdatedAt: datetime,
+    ExpiresAt: datetime
+)
+
+.create-merge table ScenarioMembers (
+    ScenarioId: string,
+    MemoryId: string,
+    Role: string,
+    CreatedAt: datetime
+)
+
+.create-merge table UserPersonaTraits (
+    TraitId: string,
+    Trait: string,
+    Value: string,
+    Confidence: real,
+    SourceMemoryIds: string,
+    Status: string,
+    Scope: string,
+    ScopeId: string,
+    CreatedAt: datetime,
+    UpdatedAt: datetime,
+    ExpiresAt: datetime
+)
+
+.create-merge table MemoryTurns (
+    TurnId: string,
+    SessionId: string,
+    Provider: string,
+    Status: string,
+    CreatedAt: datetime,
+    CompletedAt: datetime
+)
+
+.create-merge table AutonomyPolicy (
+    PolicyId: string,
+    Version: int,
+    Content: string,
+    Status: string,
+    ApprovedBy: string,
+    ApprovedAt: datetime
+)
+
+.ingest inline into table AutonomyPolicy <|
+autonomy-policy-v1,1,"Eva may investigate, reason with subagents, create draft skills, and provisionally use tested low-risk local or read-only skills. She must not self-authorize identity changes, policy changes, protected-memory release, credentials, external communication, spending, destructive actions, or new tool privileges.",approved,operator,2026-08-10T00:00:00Z
+
+.create-merge table SkillVersions (
+    SkillVersionId: string,
+    SkillId: string,
+    Version: int,
+    RiskLevel: string,
+    TriggerSpec: string,
+    AllowedTools: string,
+    ValidationSpec: string,
+    Status: string,
+    ExpiresAt: datetime,
+    CreatedAt: datetime
+)
+
+.create-merge table SkillEvaluations (
+    EvaluationId: string,
+    SkillVersionId: string,
+    Outcome: string,
+    EvidenceRef: string,
+    CreatedAt: datetime
+)
+
+.create-merge table GrowthProposals (
+    ProposalId: string,
+    Kind: string,
+    Payload: dynamic,
+    RiskLevel: string,
+    Status: string,
+    EvidenceRefs: dynamic,
+    CreatedAt: datetime,
+    ReviewedAt: datetime,
+    ReviewedBy: string
+)
 
 // ── Table: Conversations ──────────────────────────────────────────
 // Chat history logged by the cognition layer after each exchange.

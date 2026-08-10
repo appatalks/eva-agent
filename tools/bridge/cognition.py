@@ -17,6 +17,7 @@ from bridge.memory import (_memory_query, _memory_ingest, _memory_fts_search,
     _embed_texts, _cosine_similarity, _expand_query_terms,
     _set_openai_key_from)
 from bridge.learning import list_active_guidance as _list_active_learning_guidance
+from bridge.memory_model import KustoMemoryModel, _legacy_kind, _scenario_id
 from bridge.utils import _is_passive_memory_recall
 
 _ARTIFACTS_DIR = _cfg.ARTIFACTS_DIR
@@ -574,12 +575,42 @@ def _build_memory_context_sqlite(user_message, session_id=None):
     """SQLite equivalent of _build_memory_context. Same output structure, SQL queries."""
     # global statement removed — writes go to _st.*
     import datetime
+    from bridge.memory_model import MemoryModel
 
     mem = _get_sqlite_mem()
-    context_parts = [_CORE_IDENTITY_CHARTER]
+    memory_model = MemoryModel(mem)
+    memory_model.migrate_legacy_knowledge()
+    structured_view = memory_model.prompt_view(session_id, _CORE_IDENTITY_CHARTER)
+    charter = structured_view["charter"]
+    if not charter.startswith("[Core Identity Charter]"):
+        charter = "[Core Identity Charter]\n" + charter
+    context_parts = [charter]
     adaptive_guidance = _adaptive_guidance_block(session_id)
     if adaptive_guidance:
         context_parts.append(adaptive_guidance)
+
+    trait_lines = [
+        f"{item.get('Trait', '?')}: {item.get('Value', '?')}"
+        for item in structured_view["traits"]
+    ]
+    if trait_lines:
+        context_parts.append(_memory_prompt_data_block("Approved Persona Traits", trait_lines))
+
+    scenario = structured_view["scenario"]
+    if scenario:
+        scenario_lines = [
+            f"Scope: {scenario.get('Scope', '?')}",
+            f"Title: {scenario.get('Title', '') or 'Continuing conversation'}",
+        ]
+        if scenario.get("Summary"):
+            scenario_lines.append(f"Summary: {scenario.get('Summary')}")
+        context_parts.append(_memory_prompt_data_block("Active Scenario", scenario_lines))
+    scenario_atom_lines = [
+        f"{item.get('Entity', '?')} - {item.get('Relation', '?')}: {item.get('Value', '?')}"
+        for item in structured_view["scenario_atoms"]
+    ]
+    if scenario_atom_lines:
+        context_parts.append(_memory_prompt_data_block("Scenario Memory", scenario_atom_lines))
 
     protected_memory = _protected_memory_context(user_message)
     protected_metadata = protected_memory["metadata"]
@@ -744,7 +775,11 @@ def _build_memory_context_sqlite(user_message, session_id=None):
 
     # Skills (semantic match)
     if user_message.strip() and mem.table_exists("Skills"):
-        active_skills = mem.query("SELECT * FROM Skills WHERE Status = 'active'") or []
+        active_skills = mem.query(
+            "SELECT s.* FROM Skills s WHERE s.Status = 'active' OR (s.Status = 'provisional' AND EXISTS ("
+            "SELECT 1 FROM SkillVersions v WHERE v.SkillId = s.SkillId AND v.Status = 'provisional' "
+            "AND v.RiskLevel = 'low' AND (v.ExpiresAt = '' OR v.ExpiresAt > strftime('%Y-%m-%dT%H:%M:%SZ','now'))))"
+        ) or []
         if active_skills:
             chosen = []
             descs = [str(s.get("Description", "") or s.get("Name", "")).strip() for s in active_skills]
@@ -958,16 +993,30 @@ def _build_memory_context_sqlite(user_message, session_id=None):
 
 
 
-def _post_response_reflection_sqlite(user_message, assistant_response, model_name, conversation_id=None):
+def _post_response_reflection_sqlite(user_message, assistant_response, model_name, conversation_id=None, turn_id=None):
+    """Run a SQLite reflection and release this worker's connection afterwards."""
+    mem = _get_sqlite_mem()
+    try:
+        return _post_response_reflection_sqlite_impl(
+            mem, user_message, assistant_response, model_name, conversation_id, turn_id
+        )
+    finally:
+        mem.close()
+
+
+def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response, model_name, conversation_id=None, turn_id=None):
     """SQLite equivalent of _post_response_reflection. Same write pattern, SQL instead of KQL."""
     # global statement removed — writes go to _st.*
     if _st.protected_memory_model_release:
         return
     import datetime, uuid
+    from bridge.memory_model import MemoryModel
 
-    mem = _get_sqlite_mem()
     now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     session_id = str(conversation_id or uuid.uuid4())[:120]
+    memory_model = MemoryModel(mem)
+    if turn_id and not memory_model.register_turn(turn_id, session_id, model_name):
+        return
     source_id = f"{_st.cognition_launch_id or 'launch'}:{session_id}"
 
     # 1. Log conversation
@@ -980,7 +1029,8 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
          "Model": model_name, "Content": assistant_response[:_CONVO_CONTENT_CAP],
          "TokenEstimate": len(assistant_response.split()), "ImageGenerated": 0},
     ]
-    mem.ingest("Conversations", conv_columns, conv_rows)
+    if not mem.ingest("Conversations", conv_columns, conv_rows):
+        raise RuntimeError("conversation persistence failed")
     print(f"[Cognition/SQLite] Logged conversation ({len(user_message)} -> {len(assistant_response)} chars)")
 
     # 2. Extract explicit user facts
@@ -996,6 +1046,13 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
             })
         if rows and mem.ingest("Knowledge", know_columns, rows):
             print(f"[Cognition/SQLite] Explicit user facts: {len(rows)}")
+        source_ref = "conversation:" + session_id + ":" + str(turn_id or now)
+        for fact in explicit_user_facts:
+            memory_model.add_atom({
+                "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
+                "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
+                "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
+            }, [{"source_type": "conversation_turn", "source_ref": source_ref}])
 
     # 3. Candidate entities
     candidate_entities, rejected_entities = _extract_entity_candidates(user_message)
@@ -1131,6 +1188,9 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
         except Exception as e:
             print(f"[Cognition/SQLite] Summary error: {e}")
 
+    if turn_id:
+        memory_model.complete_turn(turn_id)
+
 
 
 def _build_memory_context(user_message, session_id=None):
@@ -1156,10 +1216,67 @@ def _build_memory_context(user_message, session_id=None):
     if not cluster or not db:
         return ""
 
-    context_parts = [_CORE_IDENTITY_CHARTER]
+    charter = _CORE_IDENTITY_CHARTER
+    if _get_table_columns(cluster, db, "CoreIdentity"):
+        charter_rows = _kusto_query_direct(
+            cluster, db,
+            "CoreIdentity | where Status =~ 'approved' | top 1 by Version desc | project Content",
+        ) or []
+        if charter_rows and charter_rows[0].get("Content"):
+            charter = "[Core Identity Charter]\n" + _neutralize_memory_text(charter_rows[0]["Content"])
+    context_parts = [charter]
     adaptive_guidance = _adaptive_guidance_block(session_id)
     if adaptive_guidance:
         context_parts.append(adaptive_guidance)
+
+    if _get_table_columns(cluster, db, "UserPersonaTraits"):
+        trait_rows = _kusto_query_direct(
+            cluster, db,
+            "UserPersonaTraits | summarize arg_max(UpdatedAt, *) by TraitId "
+            "| where Status =~ 'approved' and Scope =~ 'user' "
+            "| where isnull(ExpiresAt) or ExpiresAt > now() | order by UpdatedAt desc | take 8 "
+            "| project Trait, Value, Confidence, SourceMemoryIds",
+        ) or []
+        trait_lines = [f"{item.get('Trait', '?')}: {item.get('Value', '?')}" for item in trait_rows]
+        if trait_lines:
+            context_parts.append(_memory_prompt_data_block("Approved Persona Traits", trait_lines))
+
+    if session_id and _get_table_columns(cluster, db, "MemoryScenarios"):
+        try:
+            KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct).ensure_scenario(
+                "session", str(session_id)
+            )
+        except Exception:
+            pass
+        safe_session_id = str(session_id).replace("'", "''")[:120]
+        scenario_rows = _kusto_query_direct(
+            cluster, db,
+            "MemoryScenarios | where Scope =~ 'session' and ScopeId == '" + safe_session_id + "' "
+            "and Status =~ 'active' | top 1 by UpdatedAt | project Scope, Title, Summary",
+        ) or []
+        if scenario_rows:
+            scenario = scenario_rows[0]
+            scenario_lines = [
+                f"Scope: {scenario.get('Scope', '?')}",
+                f"Title: {scenario.get('Title', '') or 'Continuing conversation'}",
+            ]
+            if scenario.get("Summary"):
+                scenario_lines.append(f"Summary: {scenario.get('Summary')}")
+            context_parts.append(_memory_prompt_data_block("Active Scenario", scenario_lines))
+            scenario_id = _scenario_id("session", str(session_id))
+            scenario_atoms = _kusto_query_direct(
+                cluster, db,
+                "MemoryAtoms | summarize arg_max(UpdatedAt, *) by MemoryId "
+                "| where Status =~ 'active' and (isnull(ExpiresAt) or ExpiresAt > now()) "
+                "| join kind=inner (ScenarioMembers | where ScenarioId == '" + scenario_id + "') on MemoryId "
+                "| project Entity, Relation, Value | take 12",
+            ) or []
+            scenario_atom_lines = [
+                f"{item.get('Entity', '?')} - {item.get('Relation', '?')}: {item.get('Value', '?')}"
+                for item in scenario_atoms
+            ]
+            if scenario_atom_lines:
+                context_parts.append(_memory_prompt_data_block("Scenario Memory", scenario_atom_lines))
 
     protected_memory = _protected_memory_context(user_message)
     protected_metadata = protected_memory["metadata"]
@@ -1342,7 +1459,7 @@ def _build_memory_context(user_message, session_id=None):
     # best match(es) so Eva can actually perform the skill this turn.
     if user_message.strip() and _get_table_columns(cluster, db, "Skills"):
         active_skills = _cached_metadata_rows(
-            "skills", cluster, db, _SKILLS_LATEST_QUERY + " | where Status == 'active'") or []
+            "skills", cluster, db, _SKILLS_LATEST_QUERY + " | where Status in~ ('active', 'provisional')") or []
         if active_skills:
             chosen = []
             descs = [str(s.get("Description", "") or s.get("Name", "")).strip() for s in active_skills]
@@ -1604,7 +1721,7 @@ def _build_memory_context(user_message, session_id=None):
     return ""
 
 
-def _post_response_reflection(user_message, assistant_response, model_name, conversation_id=None):
+def _post_response_reflection_impl(user_message, assistant_response, model_name, conversation_id=None, turn_id=None):
     """Background: log conversation and trigger reflection after response."""
     # global statement removed — writes go to _st.*
     if not _st.cognition_enabled:
@@ -1614,7 +1731,7 @@ def _post_response_reflection(user_message, assistant_response, model_name, conv
 
     # Route to SQLite-specific implementation when that backend is active
     if _resolve_memory_backend() == "sqlite":
-        return _post_response_reflection_sqlite(user_message, assistant_response, model_name, conversation_id)
+        return _post_response_reflection_sqlite(user_message, assistant_response, model_name, conversation_id, turn_id)
 
     cluster, db = _get_kusto_config()
     if not cluster or not db:
@@ -1623,6 +1740,12 @@ def _post_response_reflection(user_message, assistant_response, model_name, conv
     import datetime, uuid
     now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     session_id = str(conversation_id or uuid.uuid4())[:120]
+    memory_model = None
+    if _get_table_columns(cluster, db, "MemoryAtoms"):
+        memory_model = KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct)
+    if turn_id and memory_model is not None and _get_table_columns(cluster, db, "MemoryTurns"):
+        if not memory_model.register_turn(turn_id, session_id, model_name):
+            return
     source_id = f"{_st.cognition_launch_id or 'launch'}:{session_id}"
 
     # 1. Log conversation
@@ -1635,7 +1758,8 @@ def _post_response_reflection(user_message, assistant_response, model_name, conv
          "Model": model_name, "Content": assistant_response[:_CONVO_CONTENT_CAP], "TokenEstimate": len(assistant_response.split()),
          "ImageGenerated": False}
     ]
-    _kusto_ingest_direct(cluster, db, "Conversations", conv_columns, conv_rows)
+    if not _kusto_ingest_direct(cluster, db, "Conversations", conv_columns, conv_rows):
+        raise RuntimeError("conversation persistence failed")
     print(f"[Cognition] Logged conversation ({len(user_message)} → {len(assistant_response)} chars)")
 
     # 2. Extract explicit user facts before generic candidate knowledge
@@ -1661,6 +1785,14 @@ def _post_response_reflection(user_message, assistant_response, model_name, conv
                     preview_value += "..."
                 preview.append(f"{row['Relation']}={preview_value}")
             print(f"[Cognition] Explicit user facts captured: {len(rows)} ({'; '.join(preview)})")
+        if memory_model is not None:
+            source_ref = "conversation:" + session_id + ":" + str(turn_id or now)
+            for fact in explicit_user_facts:
+                memory_model.add_atom({
+                    "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
+                    "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
+                    "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
+                }, [{"source_type": "conversation_turn", "source_ref": source_ref}])
 
     # 3. Extract candidate knowledge with validation/classification
     import re
@@ -1791,5 +1923,35 @@ def _post_response_reflection(user_message, assistant_response, model_name, conv
 
         # Trim buffer to prevent unbounded growth
         _st.session_conversation_buffer = _st.session_conversation_buffer[-10:]
+
+    if memory_model is not None and turn_id:
+        memory_model.complete_turn(turn_id)
+
+
+def _post_response_reflection(user_message, assistant_response, model_name, conversation_id=None, turn_id=None):
+    """Run reflection and make a registered turn retryable if persistence fails."""
+    try:
+        return _post_response_reflection_impl(
+            user_message, assistant_response, model_name, conversation_id, turn_id
+        )
+    except Exception as exc:
+        if turn_id:
+            try:
+                if _resolve_memory_backend() == "sqlite":
+                    mem = _get_sqlite_mem()
+                    try:
+                        from bridge.memory_model import MemoryModel
+                        MemoryModel(mem).fail_turn(turn_id)
+                    finally:
+                        mem.close()
+                else:
+                    cluster, db = _get_kusto_config()
+                    if cluster and db and _get_table_columns(cluster, db, "MemoryTurns"):
+                        from bridge.memory_model import KustoMemoryModel
+                        KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct).fail_turn(turn_id)
+            except Exception:
+                pass
+        print(f"[Cognition] Reflection persistence failed: {exc}")
+        return False
 
 
