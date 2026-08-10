@@ -29,7 +29,6 @@ jobs:
       pull-requests: read
     outputs:
       pr_number: ${{ steps.pr.outputs.pr_number }}
-      base_sha: ${{ steps.pr.outputs.base_sha }}
       is_draft: ${{ steps.pr.outputs.is_draft }}
       checks_ready: ${{ steps.checks.outputs.checks_ready }}
     steps:
@@ -42,22 +41,53 @@ jobs:
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
+
+          fetch_pr_metadata() {
+            local target="$1"
+            for attempt in 1 2 3; do
+              if gh api "repos/$GITHUB_REPOSITORY/pulls/$target" > pr.json; then
+                return 0
+              fi
+              echo "::notice::Unable to read PR metadata on attempt $attempt; retrying."
+              sleep 2
+            done
+            return 1
+          }
+
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > pr.json
+            if ! fetch_pr_metadata "$PR_NUMBER"; then
+              echo "::notice::Unable to read dispatched PR metadata; skipping readiness."
+              exit 0
+            fi
           else
-            gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" > open-prs.json
-            jq --arg sha "$RUN_HEAD_SHA" '[.[] | select(.head.sha == $sha)]' open-prs.json > matching-prs.json
+            for attempt in 1 2 3; do
+              if gh api --paginate "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --jq '.[]' > open-prs.ndjson; then
+                break
+              fi
+              echo "::notice::Unable to list open PRs on attempt $attempt; retrying."
+              if [[ "$attempt" == "3" ]]; then
+                echo "::notice::Unable to resolve the completed workflow to a PR; skipping readiness."
+                exit 0
+              fi
+              sleep 2
+            done
+            jq -s --arg sha "$RUN_HEAD_SHA" '[.[] | select(.head.sha == $sha)]' open-prs.ndjson > matching-prs.json
             matches="$(jq 'length' matching-prs.json)"
-            if [[ "$matches" != "1" ]]; then
+            if [[ "$matches" == "0" ]]; then
               echo "No current open PR matches completed workflow head $RUN_HEAD_SHA; skipping readiness."
-              printf 'checks_ready=false\n' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ "$matches" != "1" ]]; then
+              echo "::warning::Multiple open PRs match completed workflow head $RUN_HEAD_SHA; skipping ambiguous readiness."
               exit 0
             fi
             PR_NUMBER="$(jq -r '.[0].number' matching-prs.json)"
-            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > pr.json
+            if ! fetch_pr_metadata "$PR_NUMBER"; then
+              echo "::notice::Unable to read resolved PR metadata; skipping readiness."
+              exit 0
+            fi
           fi
           printf 'pr_number=%s\n' "$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          printf 'base_sha=%s\n' "$(jq -r '.base.sha' pr.json)" >> "$GITHUB_OUTPUT"
           printf 'is_draft=%s\n' "$(jq -r '.draft' pr.json)" >> "$GITHUB_OUTPUT"
 
       - name: Gate completed PR checks
@@ -71,9 +101,25 @@ jobs:
             printf 'checks_ready=false\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json statusCheckRollup > pr-checks.json
+
+          for attempt in 1 2 3; do
+            if gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json statusCheckRollup > pr-checks.json; then
+              break
+            fi
+            echo "::notice::Unable to read PR checks on attempt $attempt; retrying."
+            if [[ "$attempt" == "3" ]]; then
+              echo "::notice::Unable to read PR checks after retries; readiness will defer."
+              printf 'checks_ready=false\n' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 2
+          done
           required_checks='["static-checks","python-tests","Secret-Scanning-Check"]'
-          head_repo="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.repo.full_name // ""')"
+          if ! head_repo="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.repo.full_name // ""')"; then
+            echo "::notice::Unable to read PR source repository; readiness will defer."
+            printf 'checks_ready=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ "$head_repo" == "$GITHUB_REPOSITORY" ]]; then
             required_checks='["static-checks","python-tests","Secret-Scanning-Check","Analyze (actions)","Analyze (javascript)","Analyze (python)","CodeQL"]'
           fi
@@ -112,27 +158,12 @@ jobs:
       security-events: read
       copilot-requests: write
     steps:
-      # workflow_run evaluates the default-branch workflow. Only the trusted
-      # base SHA is checked out; PR content is collected as untrusted text and
-      # reviewed by a tool-restricted agent.
+      # workflow_run evaluates the trusted default-branch workflow SHA. PR
+      # content is collected as untrusted text and reviewed by a tool-restricted
+      # agent; no PR commit is checked out or executed here.
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.prepare.outputs.base_sha }}
           persist-credentials: false
-
-      - name: Fetch restricted readiness agent
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.sha }}
-          path: readiness-agent-source
-          persist-credentials: false
-
-      - name: Install restricted readiness agent
-        run: |
-          set -euo pipefail
-          cp readiness-agent-source/.github/agents/readiness-reviewer.agent.md \
-            .github/agents/readiness-reviewer.agent.md
-          rm -rf readiness-agent-source
 
       - uses: actions/setup-node@v7
         with:
