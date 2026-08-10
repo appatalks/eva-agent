@@ -39,6 +39,11 @@ assert.match(packed.summary, /Open task state:/, 'unresolved task state carries 
 assert.ok(packed.components.pinned.tokens > 0 && packed.components.recent.tokens > 0, 'component token estimates are present');
 assert.ok(packed.estimatedTokens <= 900, 'request view stays within the budget');
 
+const tight = budget.compactMessages([
+  { role: 'user', content: 'u'.repeat(2000) }
+], { budget: 256, recentTurns: 1 });
+assert.ok(tight.estimatedTokens <= 256, 'single-message clipping must honor the exact budget');
+
 const carried = budget.compactMessages([
   { role: 'system', content: 'PINNED SYSTEM' },
   { role: 'summary', content: '[Conversation Summary]\nEarlier conversation: old context' },

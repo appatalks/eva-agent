@@ -58,10 +58,7 @@ function geminiSend() {
         : null;
     const sessionId = (typeof ensureActiveSessionId === 'function')
         ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
-    const geminiPromptBudget = EvaPromptBudget.compactGeminiContents(
-        geminiMessages.concat([{ role: "user", parts: [{ text: sQuestion }] }]),
-        { budget: 10000, recentTurns: 6, pinnedIndexes: [0] }
-    );
+    const geminiCandidates = geminiMessages.concat([{ role: "user", parts: [{ text: sQuestion }] }]);
     let geminiMemoryContextPromise = Promise.resolve('');
     try {
         const bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
@@ -77,14 +74,40 @@ function geminiSend() {
         document.getElementById("txtOutput").innerHTML += '<span class="user">You: </span>' + escapeHtml(sQuestion).replace(/\n/g, '<br>') + "<br>\n";
 
     const geminiUrl = `https://generativelanguage.googleapis.com/v1alpha/models/gemini-2.0-flash-thinking-exp:generateContent?key=${GOOGLE_GL_KEY}`;
-    let systemInstruction = geminiPromptBudget.messages[0];
-    if (geminiMemoryContext && systemInstruction && Array.isArray(systemInstruction.parts)) {
-        const baseText = systemInstruction.parts.map(part => part.text || '').join("\n");
-        systemInstruction = {
-            role: systemInstruction.role || "user",
-            parts: [{ text: geminiMemoryContext + "\n\n" + baseText }]
-        };
-    }
+    const totalPromptBudget = 10000;
+    const minimumContentsBudget = 256;
+    const maxSystemTokens = totalPromptBudget - minimumContentsBudget;
+    const systemSeed = geminiCandidates[0] || { role: "user", parts: [{ text: "" }] };
+    const clipToTokens = function(value, maxTokens) {
+        const text = String(value || "");
+        const maxChars = Math.max(0, maxTokens * 4);
+        if (text.length <= maxChars) return text;
+        const marker = " ...[trimmed]";
+        return maxChars > marker.length ? text.slice(0, maxChars - marker.length) + marker : text.slice(0, maxChars);
+    };
+    const baseSystemText = clipToTokens(EvaPromptBudget.textOf(systemSeed), maxSystemTokens);
+    const separator = "\n\n";
+    const memoryAllowance = Math.max(
+        0,
+        maxSystemTokens - EvaPromptBudget.estimateTokens(baseSystemText) - EvaPromptBudget.estimateTokens(separator)
+    );
+    const memoryText = clipToTokens(geminiMemoryContext, memoryAllowance);
+    const systemText = clipToTokens(
+        memoryText ? memoryText + separator + baseSystemText : baseSystemText,
+        maxSystemTokens
+    );
+    const systemInstruction = {
+        role: systemSeed.role || "user",
+        parts: [{ text: systemText }]
+    };
+    const geminiRequestContents = geminiCandidates.slice(1);
+    const geminiPromptBudget = EvaPromptBudget.compactGeminiContents(
+        geminiRequestContents,
+        {
+            budget: totalPromptBudget - EvaPromptBudget.estimateTokens(systemText),
+            recentTurns: 6
+        }
+    );
 
 	const requestOptions = {
     	   method: "POST",

@@ -108,6 +108,8 @@ async function main() {
   assert.strictEqual(sessionCalls, 1);
   assert.strictEqual(completionStatus, 'warn');
   await testGeminiMemoryLifecycle();
+  await testGeminiMemoryLifecycle('abc', 'u'.repeat(2000));
+  await testGeminiMemoryLifecycle('s'.repeat(40000), 'u'.repeat(2000));
   await testOpenAITurnSessionRetention();
   await testGitHubModelsTurnSessionRetention();
   testAcpReflectionOwnership();
@@ -223,6 +225,7 @@ async function testGitHubModelsTurnSessionRetention() {
     JSON,
     Promise,
     console,
+    URL,
     encodeURIComponent,
     txtOutput,
     lastResponse: '',
@@ -288,15 +291,21 @@ async function testGitHubModelsTurnSessionRetention() {
   assert.strictEqual(sessionCalls, 1);
 }
 
-async function testGeminiMemoryLifecycle() {
+async function testGeminiMemoryLifecycle(configuredSystemPrompt, userPrompt) {
   const storage = new Map();
-  const txtMsg = { innerHTML: 'remember this project', focus() {} };
+  const requestText = userPrompt || 'remember this project';
+  const txtMsg = { innerHTML: requestText, focus() {} };
   const txtOutput = { innerHTML: '', innerText: '', scrollTop: 0, scrollHeight: 0 };
   let contextUrl = '';
   let geminiPayload = null;
   let reflectionPayload = null;
   let resolveReflection;
   const reflectionCaptured = new Promise((resolve) => { resolveReflection = resolve; });
+  const budgetSandbox = { window: {} };
+  vm.runInNewContext(fs.readFileSync('core/js/prompt-budget.js', 'utf8'), budgetSandbox, {
+    filename: 'core/js/prompt-budget.js',
+  });
+  const geminiBudget = budgetSandbox.window.EvaPromptBudget;
   const context = {
     AbortSignal,
     JSON,
@@ -317,10 +326,8 @@ async function testGeminiMemoryLifecycle() {
         return null;
       },
     },
-    EvaPromptBudget: {
-      compactGeminiContents(messages) { return { messages }; },
-    },
-    getSystemPrompt() { return 'Eva Gemini prompt'; },
+    EvaPromptBudget: geminiBudget,
+    getSystemPrompt() { return configuredSystemPrompt || 'Eva Gemini prompt'; },
     getACPBridgeUrl() { return 'http://localhost:8888'; },
     ensureActiveSessionId() { return 'gemini-session'; },
     escapeHtml(value) { return String(value); },
@@ -328,9 +335,9 @@ async function testGeminiMemoryLifecycle() {
     fetch(url, options) {
       if (url.includes('/v1/memory/context')) {
         contextUrl = url;
-        return Promise.resolve({ ok: true, json: async () => ({ context: '[Core Memory]', cognition_enabled: true }) });
+        return Promise.resolve({ ok: true, json: async () => ({ context: '[Core Memory] ' + 'm'.repeat(40000), cognition_enabled: true }) });
       }
-      if (url.includes('generativelanguage.googleapis.com')) {
+      if (new URL(url).hostname === 'generativelanguage.googleapis.com') {
         geminiPayload = JSON.parse(options.body);
         return Promise.resolve({
           ok: true,
@@ -355,9 +362,18 @@ async function testGeminiMemoryLifecycle() {
   await reflectionCaptured;
 
   assert.ok(contextUrl.includes('session_id=gemini-session'));
-  assert.ok(geminiPayload.systemInstruction.parts[0].text.startsWith('[Core Memory]'));
+  if (!configuredSystemPrompt) {
+    assert.ok(geminiPayload.systemInstruction.parts[0].text.startsWith('[Core Memory]'));
+  } else if (configuredSystemPrompt.length <= 1000) {
+    const seedOccurrences = geminiPayload.systemInstruction.parts[0].text.split(configuredSystemPrompt).length - 1;
+    assert.strictEqual(seedOccurrences, 1, 'configured Gemini system seed must remain exactly once under memory pressure');
+  }
+  const aggregateTokens = geminiBudget.estimateTokens(geminiPayload.systemInstruction.parts[0].text) +
+    geminiPayload.contents.reduce((total, message) => total + geminiBudget.estimateTokens(geminiBudget.textOf(message)), 0);
+  assert.ok(aggregateTokens <= 10000, 'Gemini contents and system instruction must share the request budget');
+  assert.ok(!geminiPayload.contents.some((message) => geminiBudget.textOf(message) === geminiBudget.textOf(geminiPayload.systemInstruction)), 'Gemini system instruction must not be duplicated in contents');
   assert.strictEqual(reflectionPayload.session_id, 'gemini-session');
-  assert.strictEqual(reflectionPayload.user_message, 'remember this project');
+  assert.strictEqual(reflectionPayload.user_message, requestText.substring(0, 500));
   assert.strictEqual(reflectionPayload.assistant_message, 'Gemini memory response');
 }
 
