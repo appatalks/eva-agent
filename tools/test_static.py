@@ -136,15 +136,17 @@ def test_pr_automation_workflows():
     """PR review and autofix workflows retain their trust boundaries."""
     try:
         readiness = open(".github/workflows/pr-readiness.yml").read()
+        readiness_agent = open(".github/agents/readiness-reviewer.agent.md").read()
         autofix = open(".github/workflows/copilot-autofix.yml").read()
         secret_scan = open(".github/workflows/secret-scanning-check.yml").read()
     except OSError as error:
         report("pr_automation_workflows_exist", False, str(error))
         return
-    report("pr_automation_readiness_base_only", "pull_request:" in readiness and "pull_request_target:" not in readiness and "workflow_dispatch:" in readiness and "base_sha" in readiness and "gh pr diff" in readiness and "Wait for required PR checks" in readiness)
-    report("pr_automation_terra_reviewer", "timeout 240 copilot --agent reviewer" in readiness and "--disable-builtin-mcps" in readiness and "--no-auto-update" not in readiness and "--mode plan" not in readiness and "--yolo" not in readiness and os.path.isfile(".github/agents/reviewer.agent.md"))
+    report("pr_automation_readiness_base_only", "workflow_run:" in readiness and 'workflows: ["Eva CI", "Secret Scanning Status Check", "CodeQL"]' in readiness and "pull_request:" not in readiness and "pull_request_target:" not in readiness and "workflow_dispatch:" in readiness and "base_sha" in readiness and "gh pr diff" in readiness and "workflow_run.head_sha" in readiness and "persist-credentials: false" in readiness)
+    report("pr_automation_terra_reviewer", "timeout 240 copilot --agent readiness-reviewer" in readiness and "--available-tools='read,search'" in readiness and "--disable-builtin-mcps" in readiness and "--no-auto-update" not in readiness and "--mode plan" not in readiness and "--yolo" not in readiness and os.path.isfile(".github/agents/readiness-reviewer.agent.md"))
+    report("pr_automation_readiness_reviewer_restricted", "tools: [read, search]" in readiness_agent and "agents: []" in readiness_agent and "disable-model-invocation: true" in readiness_agent and "Do not execute commands" in readiness_agent and "access the network" in readiness_agent)
     report("pr_automation_verdict_gate", "name: PR Readiness / Terra verdict" in readiness and "Gate Terra verdict" in readiness and "REQUEST_CHANGES" in readiness and "NEEDS_MAINTAINER" in readiness and "if: always()" in readiness)
-    report("pr_automation_waits_for_required_checks", "required_checks=" in readiness and "static-checks" in readiness and "CodeQL" in readiness and "Timed out waiting for required PR checks" in readiness and '"NEUTRAL", "SKIPPED"' in readiness and "Required PR checks had a failing conclusion" in readiness and "Unable to read PR checks" in readiness)
+    report("pr_automation_waits_for_required_checks", "Gate completed PR checks" in readiness and "checks_ready" in readiness and 'required_checks=' in readiness and '"static-checks","python-tests","Secret-Scanning-Check"' in readiness and 'head_repo" == "$GITHUB_REPOSITORY' in readiness and '"Analyze (actions)"' in readiness and '"Analyze (javascript)"' in readiness and '"Analyze (python)"' in readiness and '"CodeQL"' in readiness and "workflow completion will re-evaluate readiness" in readiness and '"NEUTRAL", "SKIPPED"' in readiness and "Prerequisite checks failed" in readiness and "for attempt" not in readiness and "Timed out waiting for required PR checks" not in readiness and "sleep 10" not in readiness)
     report("pr_automation_autofix_is_opt_in", "workflow_dispatch:" in autofix and "autofix-requested" in autofix and "Fork PRs are review-only" in autofix and "expected_head_sha" in autofix and "dry_run:" in autofix and "if: inputs.dry_run == false" in autofix)
     report("pr_automation_autofix_scoped", "--agent reviewer" in autofix and "--agent eva" in autofix and "terra-review.md" in autofix and "--deny-tool='shell(git push)'" in autofix and "Autofix touched a protected path" in autofix)
     report("pr_automation_preserves_review_threads", "resolveReviewThread" not in autofix and "Review threads remain open" in autofix)
