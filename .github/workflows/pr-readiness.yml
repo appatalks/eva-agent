@@ -10,15 +10,15 @@ on:
         description: PR number to review without executing PR code
         required: true
         type: string
+      head_sha:
+        description: Current PR head SHA; rejects stale manual dispatches
+        required: true
+        type: string
 
 permissions:
   contents: read
   pull-requests: read
   security-events: read
-
-concurrency:
-  group: pr-readiness-${{ inputs.pr_number || github.event.workflow_run.head_sha }}
-  cancel-in-progress: true
 
 jobs:
   prepare:
@@ -29,7 +29,9 @@ jobs:
       pull-requests: read
     outputs:
       pr_number: ${{ steps.pr.outputs.pr_number }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
       is_draft: ${{ steps.pr.outputs.is_draft }}
+      metadata_ready: ${{ steps.pr.outputs.metadata_ready }}
       checks_ready: ${{ steps.checks.outputs.checks_ready }}
     steps:
       - name: Resolve trusted PR metadata
@@ -38,6 +40,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.head_sha }}
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
@@ -57,6 +60,15 @@ jobs:
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             if ! fetch_pr_metadata "$PR_NUMBER"; then
               echo "::notice::Unable to read dispatched PR metadata; skipping readiness."
+              exit 0
+            fi
+            actual_head_sha="$(jq -r '.head.sha' pr.json)"
+            if [[ "$actual_head_sha" != "$EXPECTED_HEAD_SHA" ]]; then
+              echo "::error::The dispatched head SHA is stale; expected $EXPECTED_HEAD_SHA but found $actual_head_sha."
+              printf 'pr_number=%s\n' "$PR_NUMBER" >> "$GITHUB_OUTPUT"
+              printf 'head_sha=%s\n' "$actual_head_sha" >> "$GITHUB_OUTPUT"
+              printf 'is_draft=%s\n' "$(jq -r '.draft' pr.json)" >> "$GITHUB_OUTPUT"
+              printf 'metadata_ready=false\n' >> "$GITHUB_OUTPUT"
               exit 0
             fi
           else
@@ -82,21 +94,39 @@ jobs:
               exit 0
             fi
             PR_NUMBER="$(jq -r '.[0].number' matching-prs.json)"
+            printf 'pr_number=%s\n' "$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            printf 'head_sha=%s\n' "$RUN_HEAD_SHA" >> "$GITHUB_OUTPUT"
             if ! fetch_pr_metadata "$PR_NUMBER"; then
               echo "::notice::Unable to read resolved PR metadata; skipping readiness."
+              printf 'metadata_ready=false\n' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            fetched_head_sha="$(jq -r '.head.sha' pr.json)"
+            if [[ "$fetched_head_sha" != "$RUN_HEAD_SHA" ]]; then
+              echo "::error::PR head changed while resolving readiness; expected $RUN_HEAD_SHA but found $fetched_head_sha."
+              printf 'head_sha=%s\n' "$fetched_head_sha" >> "$GITHUB_OUTPUT"
+              printf 'is_draft=%s\n' "$(jq -r '.draft' pr.json)" >> "$GITHUB_OUTPUT"
+              printf 'metadata_ready=false\n' >> "$GITHUB_OUTPUT"
               exit 0
             fi
           fi
           printf 'pr_number=%s\n' "$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          printf 'head_sha=%s\n' "$(jq -r '.head.sha' pr.json)" >> "$GITHUB_OUTPUT"
           printf 'is_draft=%s\n' "$(jq -r '.draft' pr.json)" >> "$GITHUB_OUTPUT"
+          printf 'metadata_ready=true\n' >> "$GITHUB_OUTPUT"
 
       - name: Gate completed PR checks
         id: checks
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          METADATA_READY: ${{ steps.pr.outputs.metadata_ready }}
         run: |
           set -euo pipefail
+          if [[ "$METADATA_READY" != "true" ]]; then
+            printf 'checks_ready=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ -z "$PR_NUMBER" ]]; then
             printf 'checks_ready=false\n' >> "$GITHUB_OUTPUT"
             exit 0
@@ -147,27 +177,77 @@ jobs:
           fi
           printf 'checks_ready=true\n' >> "$GITHUB_OUTPUT"
 
+  publish_metadata_failure:
+    name: PR Readiness / Metadata error
+    needs: prepare
+    if: needs.prepare.outputs.head_sha != '' && needs.prepare.outputs.metadata_ready != 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: pr-readiness-review-${{ needs.prepare.outputs.head_sha }}
+      cancel-in-progress: true
+    permissions:
+      statuses: write
+    steps:
+      - name: Publish trusted metadata failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+        run: |
+          current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+          if [[ "$current_head" != "$HEAD_SHA" ]]; then
+            echo "::notice::PR head advanced to $current_head; skipping stale readiness status for $HEAD_SHA."
+            exit 0
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state='error' \
+            -f context='PR Readiness / Terra verdict' \
+            -f description='Unable to resolve trusted PR metadata' \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
   review:
     name: PR Readiness / Terra verdict
     needs: prepare
     if: needs.prepare.outputs.is_draft == 'false' && needs.prepare.outputs.checks_ready == 'true'
     runs-on: ubuntu-latest
+    concurrency:
+      group: pr-readiness-review-${{ needs.prepare.outputs.head_sha }}
+      cancel-in-progress: true
     permissions:
       contents: read
       pull-requests: read
       security-events: read
       copilot-requests: write
+      statuses: write
     steps:
       # workflow_run evaluates the trusted default-branch workflow SHA. PR
       # content is collected as untrusted text and reviewed by a tool-restricted
       # agent; no PR commit is checked out or executed here.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+
+      - name: Publish readiness in progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+        run: |
+          current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+          if [[ "$current_head" != "$HEAD_SHA" ]]; then
+            echo "::notice::PR head advanced to $current_head; skipping stale readiness status for $HEAD_SHA."
+            exit 0
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state='pending' \
+            -f context='PR Readiness / Terra verdict' \
+            -f description='Readiness review in progress' \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
       - name: Collect PR readiness evidence
         env:
@@ -192,6 +272,40 @@ jobs:
             jq '[.[] | {number, rule: .rule.id, severity: .rule.security_severity_level, path: .most_recent_instance.location.path, line: .most_recent_instance.location.start_line}]' readiness/codeql-alerts.json
             printf '```\n'
           } > readiness/evidence.md
+
+      - name: Scan PR diff for credential material
+        id: credential_scan
+        continue-on-error: true
+        run: |
+          python3 tools/scan_pr_diff_secrets.py readiness/diff.patch \
+            --text-path readiness/pr.json \
+            --text-path readiness/inline-comments.json \
+            --text-path readiness/reviews.json \
+            --text-path readiness/evidence.md \
+            --json-output readiness/credential-scan.json
+
+      - name: Publish credential scan failure
+        if: steps.credential_scan.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+        run: |
+          current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+          if [[ "$current_head" != "$HEAD_SHA" ]]; then
+            echo "::notice::PR head advanced to $current_head; skipping stale readiness status for $HEAD_SHA."
+            exit 0
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state='failure' \
+            -f context='PR Readiness / Terra verdict' \
+            -f description='Credential material detected in PR diff' \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          rm -f readiness/diff.patch readiness/copilot-prompt.txt readiness/copilot-review.md
+
+      - name: Stop on credential findings
+        if: steps.credential_scan.outcome == 'failure'
+        run: exit 1
 
       - name: Install Copilot CLI
         run: npm install --global @github/copilot@1.0.79-9
@@ -224,32 +338,87 @@ jobs:
           timeout 240 copilot --agent readiness-reviewer \
             --available-tools='read,search' --no-ask-user --disable-builtin-mcps --silent \
             -p "$(cat readiness/copilot-prompt.txt)" > readiness/copilot-review.md
-          cat readiness/copilot-review.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Gate Terra verdict
+        id: verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
         run: |
           set -euo pipefail
+          publish_status() {
+            local current_head
+            current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+            if [[ "$current_head" != "$HEAD_SHA" ]]; then
+              echo "::notice::PR head advanced to $current_head; skipping stale readiness status for $HEAD_SHA."
+              return 0
+            fi
+            gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+              -f state="$1" \
+              -f context='PR Readiness / Terra verdict' \
+              -f description="$2" \
+              -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          }
           verdict="$(sed -nE 's/^VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES|NEEDS_MAINTAINER)[[:space:]]*$/\1/p' readiness/copilot-review.md | head -n 1)"
           case "$verdict" in
             APPROVE)
+              publish_status success 'Terra approved PR readiness'
+              printf 'status_published=true\n' >> "$GITHUB_OUTPUT"
               echo "Terra verdict: APPROVE"
+              printf '### Terra readiness\n\nVerdict: APPROVE\n' >> "$GITHUB_STEP_SUMMARY"
               ;;
             NEEDS_MAINTAINER)
+              publish_status pending 'Terra requires maintainer review'
+              printf 'status_published=true\n' >> "$GITHUB_OUTPUT"
               echo "::notice::Terra requires maintainer review."
+              printf '### Terra readiness\n\nVerdict: NEEDS_MAINTAINER\n' >> "$GITHUB_STEP_SUMMARY"
               ;;
             REQUEST_CHANGES)
+              publish_status failure 'Terra requested changes'
+              printf 'status_published=true\n' >> "$GITHUB_OUTPUT"
               echo "::error::Terra requested changes."
+              printf '### Terra readiness\n\nVerdict: REQUEST_CHANGES\n' >> "$GITHUB_STEP_SUMMARY"
               exit 1
               ;;
             *)
+              publish_status error 'Terra returned an invalid verdict'
+              printf 'status_published=true\n' >> "$GITHUB_OUTPUT"
               echo "::error::Terra did not return a valid verdict."
+              printf '### Terra readiness\n\nVerdict: INVALID\n' >> "$GITHUB_STEP_SUMMARY"
               exit 1
               ;;
           esac
 
+      - name: Publish unexpected readiness failure
+        if: failure() && steps.credential_scan.outcome != 'failure' && steps.verdict.outputs.status_published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+        run: |
+          current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
+          if [[ "$current_head" != "$HEAD_SHA" ]]; then
+            echo "::notice::PR head advanced to $current_head; skipping stale readiness status for $HEAD_SHA."
+            exit 0
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state='error' \
+            -f context='PR Readiness / Terra verdict' \
+            -f description='Readiness workflow execution failed' \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: always() && steps.credential_scan.outcome != 'failure'
         with:
           name: pr-readiness-${{ needs.prepare.outputs.pr_number }}
-          path: readiness/
+          path: readiness/credential-scan.json
+          retention-days: 14
+
+      - name: Upload credential scan finding
+        uses: actions/upload-artifact@v7
+        if: always() && steps.credential_scan.outcome == 'failure'
+        with:
+          name: pr-readiness-credential-scan-${{ needs.prepare.outputs.pr_number }}
+          path: readiness/credential-scan.json
           retention-days: 14
