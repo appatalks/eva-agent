@@ -120,6 +120,20 @@ jobs:
           ref: ${{ needs.prepare.outputs.base_sha }}
           persist-credentials: false
 
+      - name: Fetch restricted readiness agent
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: readiness-agent-source
+          persist-credentials: false
+
+      - name: Install restricted readiness agent
+        run: |
+          set -euo pipefail
+          cp readiness-agent-source/.github/agents/readiness-reviewer.agent.md \
+            .github/agents/readiness-reviewer.agent.md
+          rm -rf readiness-agent-source
+
       - uses: actions/setup-node@v7
         with:
           node-version: 24
