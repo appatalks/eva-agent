@@ -262,7 +262,24 @@ jobs:
             --json number,title,headRefName,headRefOid,isCrossRepository,isDraft,author,labels,statusCheckRollup \
             > readiness/pr.json
           gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" > readiness/diff.patch
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments?per_page=100" > readiness/inline-comments.json
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments?per_page=100" \
+            > readiness/all-inline-comments.json
+          owner="${GITHUB_REPOSITORY%%/*}"
+          repository="${GITHUB_REPOSITORY#*/}"
+          gh api graphql \
+            -f query='query($owner:String!,$repository:String!,$number:Int!){repository(owner:$owner,name:$repository){pullRequest(number:$number){reviewThreads(first:100){pageInfo{hasNextPage}nodes{isResolved comments(first:50){pageInfo{hasNextPage}nodes{databaseId body path line author{login}}}}}}}}' \
+            -f owner="$owner" -f repository="$repository" -F number="$PR_NUMBER" \
+            > readiness/review-threads.json
+          if [[ "$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' readiness/review-threads.json)" != "false" ]]; then
+            echo "::error::More than 100 review threads exist; refusing incomplete readiness evidence."
+            exit 1
+          fi
+          if [[ "$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false and .comments.pageInfo.hasNextPage == true)] | length' readiness/review-threads.json)" != "0" ]]; then
+            echo "::error::An unresolved review thread has more than 50 comments; refusing incomplete readiness evidence."
+            exit 1
+          fi
+          jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | .comments.nodes[]]' \
+            readiness/review-threads.json > readiness/inline-comments.json
           gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100" > readiness/reviews.json
           gh api "repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&ref=refs/pull/$PR_NUMBER/head&per_page=100" \
             > readiness/codeql-alerts.json || printf '[]\n' > readiness/codeql-alerts.json
@@ -270,6 +287,8 @@ jobs:
             printf '# PR readiness evidence\n\n'
             printf '## Checks\n\n```json\n'
             jq '.statusCheckRollup' readiness/pr.json
+            printf '```\n\n## Unresolved review comments\n\n```json\n'
+            jq '[.[] | {author: .author.login, path, line, body}]' readiness/inline-comments.json
             printf '```\n\n## Open CodeQL alerts for this PR ref\n\n```json\n'
             jq '[.[] | {number, rule: .rule.id, severity: .rule.security_severity_level, path: .most_recent_instance.location.path, line: .most_recent_instance.location.start_line}]' readiness/codeql-alerts.json
             printf '```\n'
@@ -281,7 +300,7 @@ jobs:
         run: |
           python3 tools/scan_pr_diff_secrets.py readiness/diff.patch \
             --text-path readiness/pr.json \
-            --text-path readiness/inline-comments.json \
+            --text-path readiness/all-inline-comments.json \
             --text-path readiness/reviews.json \
             --text-path readiness/evidence.md \
             --json-output readiness/credential-scan.json
