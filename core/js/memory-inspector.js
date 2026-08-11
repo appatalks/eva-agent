@@ -199,6 +199,12 @@
       panel.setAttribute('aria-hidden', 'true');
       return;
     }
+    if (typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
+    if (typeof closeVoiceView === 'function') closeVoiceView();
+    if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();
+    if (window.EvaSkills && typeof window.EvaSkills.close === 'function') window.EvaSkills.close();
+    if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
+    if (typeof closeSidePanels === 'function') closeSidePanels('memoryInspectorPanel');
     document.body.classList.add('memory-view-open');
     panel.setAttribute('aria-hidden', 'false');
     load();

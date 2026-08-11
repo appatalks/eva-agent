@@ -325,10 +325,20 @@ class MemoryModel:
 
         return self.memory.transaction(write)
 
-    def fail_turn(self, turn_id):
-        self.memory.transaction(lambda conn: conn.execute(
-            "UPDATE MemoryTurns SET Status = 'failed', CompletedAt = ? WHERE TurnId = ? AND Status = 'started'", (_now(), str(turn_id))
-        ))
+    def fail_turn(self, turn_id, session_id="", provider=""):
+        now = _now()
+
+        def write(conn):
+            row = conn.execute("SELECT TurnId FROM MemoryTurns WHERE TurnId = ?", (str(turn_id),)).fetchone()
+            if row:
+                conn.execute("UPDATE MemoryTurns SET Status = 'failed', CompletedAt = ? WHERE TurnId = ? AND Status = 'started'", (now, str(turn_id)))
+            else:
+                conn.execute(
+                    "INSERT INTO MemoryTurns (TurnId, SessionId, Provider, Status, CreatedAt, CompletedAt) VALUES (?, ?, ?, 'failed', ?, ?)",
+                    (str(turn_id), _clip(session_id, 160), _clip(provider, 80), now, now),
+                )
+
+        self.memory.transaction(write)
 
     def complete_turn(self, turn_id):
         now = _now()
@@ -446,6 +456,7 @@ class KustoMemoryModel:
     _TRAIT_COLUMNS = ["TraitId", "Trait", "Value", "Confidence", "SourceMemoryIds", "Status", "Scope", "ScopeId", "CreatedAt", "UpdatedAt", "ExpiresAt"]
     _SCENARIO_COLUMNS = ["ScenarioId", "Scope", "ScopeId", "Title", "Summary", "Status", "CreatedAt", "UpdatedAt", "ExpiresAt"]
     _PROPOSAL_COLUMNS = ["ProposalId", "Kind", "Payload", "RiskLevel", "Status", "EvidenceRefs", "CreatedAt", "ReviewedAt", "ReviewedBy"]
+    _SKILL_COLUMNS = ["SkillId", "Name", "Description", "Instructions", "Tools", "Tags", "Source", "Status", "CreatedAt", "UpdatedAt"]
 
     def __init__(self, cluster, database, query, ingest):
         self.cluster = cluster
@@ -637,7 +648,7 @@ class KustoMemoryModel:
             raise ValueError("turn_id and session_id are required")
         with _KUSTO_TURN_LOCK:
             existing = self._latest("MemoryTurns", "TurnId", turn_id, "CreatedAt")
-            if existing and existing.get("Status") != "failed":
+            if existing:
                 return False
             row = dict(existing or {})
             row.update({"TurnId": turn_id, "SessionId": session_id, "Provider": _clip(provider, 80), "Status": "started", "CreatedAt": _revision_now(), "CompletedAt": ""})
@@ -655,7 +666,7 @@ class KustoMemoryModel:
             self._write("MemoryTurns", ["TurnId", "SessionId", "Provider", "Status", "CreatedAt", "CompletedAt"], row)
             return True
 
-    def fail_turn(self, turn_id):
+    def fail_turn(self, turn_id, session_id="", provider=""):
         with _KUSTO_TURN_LOCK:
             row = self._latest("MemoryTurns", "TurnId", turn_id, "CreatedAt")
             if row and row.get("Status") == "started":
@@ -663,6 +674,12 @@ class KustoMemoryModel:
                 row["CreatedAt"] = _revision_now()
                 row["CompletedAt"] = row["CreatedAt"]
                 self._write("MemoryTurns", ["TurnId", "SessionId", "Provider", "Status", "CreatedAt", "CompletedAt"], row)
+            elif row is None:
+                now = _revision_now()
+                self._write("MemoryTurns", ["TurnId", "SessionId", "Provider", "Status", "CreatedAt", "CompletedAt"], {
+                    "TurnId": _clip(turn_id, 120), "SessionId": _clip(session_id, 160), "Provider": _clip(provider, 80),
+                    "Status": "failed", "CreatedAt": now, "CompletedAt": now,
+                })
 
     def register_skill_version(self, skill_id, tools, validation_spec=""):
         rows = self._read("SkillVersions | where SkillId == " + self._quote(skill_id) + " | top 1 by Version desc")
@@ -699,6 +716,12 @@ class KustoMemoryModel:
         row["CreatedAt"] = _revision_now()
         row["ExpiresAt"] = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30)).isoformat(timespec="seconds").replace("+00:00", "Z")
         self._write("SkillVersions", ["SkillVersionId", "SkillId", "Version", "RiskLevel", "TriggerSpec", "AllowedTools", "ValidationSpec", "Status", "ExpiresAt", "CreatedAt"], row)
+        skill = self._latest("Skills", "SkillId", row["SkillId"])
+        if skill is None:
+            return False
+        skill["Status"] = "provisional"
+        skill["UpdatedAt"] = _revision_now()
+        self._write("Skills", self._SKILL_COLUMNS, skill)
         return True
 
     def create_growth_proposal(self, kind, payload, risk_level, evidence_refs=None):

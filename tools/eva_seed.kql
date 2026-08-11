@@ -47,8 +47,6 @@
     Decay: real
 )
 
-.ingest inline into table Knowledge <|
-
 // ── Structured Memory Model ───────────────────────────────────────
 // New records are attributable and lifecycle-managed. Legacy Knowledge remains
 // readable as unconfirmed historical data during the SQLite-first migration.

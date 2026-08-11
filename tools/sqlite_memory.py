@@ -605,7 +605,7 @@ class SqliteMemory:
         if db_path is None:
             db_path = os.environ.get("EVA_MEMORY_DB", os.path.expanduser("~/.eva/memory.db"))
         self._db_path = os.path.expanduser(db_path)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._local = threading.local()
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
         self._init_db()
@@ -753,6 +753,8 @@ class SqliteMemory:
         """
         with self._lock:
             conn = self._conn()
+            if getattr(self._local, "atomic_depth", 0):
+                return operation(conn)
             try:
                 result = operation(conn)
                 conn.commit()
@@ -760,6 +762,30 @@ class SqliteMemory:
             except Exception:
                 conn.rollback()
                 raise
+
+    def atomic(self, operation):
+        """Run nested bridge writes as one SQLite transaction.
+
+        Calls to ``ingest()`` and ``transaction()`` inside the callback share
+        the same connection and defer their commit until the outer operation
+        completes. This is used for a reflected turn so a retry never sees a
+        partially persisted conversation.
+        """
+        with self._lock:
+            conn = self._conn()
+            outermost = not getattr(self._local, "atomic_depth", 0)
+            self._local.atomic_depth = getattr(self._local, "atomic_depth", 0) + 1
+            try:
+                result = operation()
+                if outermost:
+                    conn.commit()
+                return result
+            except Exception:
+                if outermost:
+                    conn.rollback()
+                raise
+            finally:
+                self._local.atomic_depth -= 1
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -857,9 +883,12 @@ class SqliteMemory:
                         else:
                             vals.append(v)
                     conn.execute(insert_sql, vals)
-                conn.commit()
+                if not getattr(self._local, "atomic_depth", 0):
+                    conn.commit()
                 return True
             except Exception as e:
+                if getattr(self._local, "atomic_depth", 0):
+                    raise
                 print(f"[SQLite] Ingest error ({table}): {e}")
                 return False
 

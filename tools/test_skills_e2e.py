@@ -22,9 +22,10 @@ from bridge import core as m
 from bridge import cognition as cognition
 
 # ── In-memory Kusto store ────────────────────────────────────────────────
-_STORE = {"Skills": []}  # table -> append-only list of row dicts
+_STORE = {"Skills": [], "SkillVersions": []}  # table -> append-only list of row dicts
 _TABLE_COLS = {
     "Skills": list(m._SKILL_COLUMNS),
+    "SkillVersions": ["SkillVersionId", "SkillId", "Version", "RiskLevel", "TriggerSpec", "AllowedTools", "ValidationSpec", "Status", "ExpiresAt", "CreatedAt"],
     "Goals": list(m._GOAL_COLUMNS),
 }
 
@@ -40,6 +41,14 @@ def _latest_by(rows, key, time_col):
 
 def fake_query(cluster, db, query, is_mgmt=False):
     """Tiny KQL-ish interpreter, only for the Skills queries the handlers emit."""
+    if "GovernedStatus" in query:
+        rows = _latest_by(_STORE["Skills"], "SkillId", "UpdatedAt")
+        return [row for row in rows if row.get("Status") == "active"]
+    if "SkillVersions" in query:
+        rows = _latest_by(_STORE["SkillVersions"], "SkillId", "CreatedAt")
+        import re as _re
+        mid = _re.search(r"SkillId == '([^']+)'", query)
+        return [row for row in rows if not mid or row.get("SkillId") == mid.group(1)]
     if "Skills" not in query:
         return []
     rows = _latest_by(_STORE["Skills"], "SkillId", "UpdatedAt")

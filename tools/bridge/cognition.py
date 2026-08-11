@@ -778,6 +778,7 @@ def _build_memory_context_sqlite(user_message, session_id=None):
         active_skills = mem.query(
             "SELECT s.* FROM Skills s WHERE s.Status = 'active' OR (s.Status = 'provisional' AND EXISTS ("
             "SELECT 1 FROM SkillVersions v WHERE v.SkillId = s.SkillId AND v.Status = 'provisional' "
+            "AND v.Version = (SELECT MAX(v2.Version) FROM SkillVersions v2 WHERE v2.SkillId = s.SkillId) "
             "AND v.RiskLevel = 'low' AND (v.ExpiresAt = '' OR v.ExpiresAt > strftime('%Y-%m-%dT%H:%M:%SZ','now'))))"
         ) or []
         if active_skills:
@@ -997,9 +998,9 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
     """Run a SQLite reflection and release this worker's connection afterwards."""
     mem = _get_sqlite_mem()
     try:
-        return _post_response_reflection_sqlite_impl(
+        return mem.atomic(lambda: _post_response_reflection_sqlite_impl(
             mem, user_message, assistant_response, model_name, conversation_id, turn_id
-        )
+        ))
     finally:
         mem.close()
 
@@ -1044,7 +1045,9 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
                 "Value": fact["Value"][:200], "Confidence": fact["Confidence"],
                 "Source": source_id, "Decay": 0.005,
             })
-        if rows and mem.ingest("Knowledge", know_columns, rows):
+        if rows:
+            if not mem.ingest("Knowledge", know_columns, rows):
+                raise RuntimeError("explicit fact persistence failed")
             print(f"[Cognition/SQLite] Explicit user facts: {len(rows)}")
         source_ref = "conversation:" + session_id + ":" + str(turn_id or now)
         for fact in explicit_user_facts:
@@ -1079,7 +1082,8 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
             if promotion:
                 print(f"[Cognition/SQLite] Promoted candidate: {entity} ({promotion['reason']})")
         if know_rows:
-            mem.ingest("Knowledge", know_columns, know_rows)
+            if not mem.ingest("Knowledge", know_columns, know_rows):
+                raise RuntimeError("candidate knowledge persistence failed")
             print(f"[Cognition/SQLite] Candidates: {len(know_rows)}")
 
     # 4. Heuristics tracking
@@ -1091,7 +1095,8 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
             heur_rows.append({"Entity": entity, "Category": rel, "LastSeen": now,
                        "Frequency": 1, "Sentiment": 0.0, "Tags": "[]",
                        "Context": val})
-        mem.ingest("HeuristicsIndex", heur_columns, heur_rows)
+        if not mem.ingest("HeuristicsIndex", heur_columns, heur_rows):
+            raise RuntimeError("heuristics persistence failed")
 
     # 5. Emotion state (inline sentiment, matching Kusto path)
     try:
@@ -1104,7 +1109,7 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
         curiosity = min(1.0, 0.6 + 0.1 * ("?" in user_message))
         trigger_text = user_message[:100] if len(user_message) > 100 else user_message
         emo_columns = ["Timestamp", "Joy", "Curiosity", "Concern", "Excitement", "Calm", "Empathy", "Trigger", "DecayRate"]
-        mem.ingest("EmotionState", emo_columns, [
+        if not mem.ingest("EmotionState", emo_columns, [
             {"Timestamp": now, "Joy": round(joy, 3),
              "Curiosity": round(curiosity, 3),
              "Concern": round(concern, 3),
@@ -1113,10 +1118,11 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
              "Empathy": 0.6,
              "Trigger": trigger_text,
              "DecayRate": 0.1}
-        ])
+        ]):
+            raise RuntimeError("emotion persistence failed")
         print(f"[Cognition/SQLite] Updated emotion state: Joy={joy:.2f} Curiosity={curiosity:.2f} Concern={concern:.2f}")
     except Exception as e:
-        print(f"[Cognition/SQLite] Emotion analysis skipped: {e}")
+        raise RuntimeError("emotion analysis or persistence failed") from e
 
     # 6. Auto-reflection (every 5 exchanges or on significant interactions)
     _st.session_exchange_count += 1
@@ -1147,16 +1153,17 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
                 f"User asked about: {user_message[:80]}."
             )
             refl_columns = ["Timestamp", "Trigger", "Observation", "ActionTaken", "Effectiveness"]
-            mem.ingest("Reflections", refl_columns, [{
+            if not mem.ingest("Reflections", refl_columns, [{
                 "Timestamp": now,
                 "Trigger": user_message[:100],
                 "Observation": reflection_text,
                 "ActionTaken": "",
                 "Effectiveness": 0.0,
-            }])
+            }]):
+                raise RuntimeError("reflection persistence failed")
             print(f"[Cognition/SQLite] Auto-reflection #{_st.session_exchange_count}: {reflection_text[:100]}")
         except Exception as e:
-            print(f"[Cognition/SQLite] Reflection error: {e}")
+            raise RuntimeError("reflection synthesis or persistence failed") from e
 
     # 7. Auto-summary (every 10 exchanges)
     if _st.session_exchange_count % 10 == 0 and len(_st.session_conversation_buffer) >= 5:
@@ -1178,15 +1185,16 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
                 f"{len(summary_exchanges)} exchanges total."
             )
             summ_columns = ["Period", "Summary", "Timestamp"]
-            mem.ingest("MemorySummaries", summ_columns, [{
+            if not mem.ingest("MemorySummaries", summ_columns, [{
                 "Period": period,
                 "Summary": summary_text[:500],
                 "Timestamp": now,
-            }])
+            }]):
+                raise RuntimeError("summary persistence failed")
             print(f"[Cognition/SQLite] Auto-summary: {summary_text[:100]}")
             _st.session_conversation_buffer = _st.session_conversation_buffer[-10:]
         except Exception as e:
-            print(f"[Cognition/SQLite] Summary error: {e}")
+            raise RuntimeError("summary synthesis or persistence failed") from e
 
     if turn_id:
         memory_model.complete_turn(turn_id)
@@ -1459,7 +1467,16 @@ def _build_memory_context(user_message, session_id=None):
     # best match(es) so Eva can actually perform the skill this turn.
     if user_message.strip() and _get_table_columns(cluster, db, "Skills"):
         active_skills = _cached_metadata_rows(
-            "skills", cluster, db, _SKILLS_LATEST_QUERY + " | where Status in~ ('active', 'provisional')") or []
+            "skills", cluster, db,
+            _SKILLS_LATEST_QUERY
+            + " | join kind=leftouter ("
+            + "SkillVersions | summarize arg_max(Version, *) by SkillId "
+            + "| project SkillId, GovernedStatus=Status, GovernedRisk=RiskLevel, GovernedExpires=ExpiresAt"
+            + ") on SkillId"
+            + " | where Status =~ 'active' or (Status =~ 'provisional' and GovernedStatus =~ 'provisional' "
+            + "and GovernedRisk =~ 'low' and (isnull(GovernedExpires) or GovernedExpires > now()))"
+            + " | project SkillId, Name, Description, Instructions, Tools, Tags, Source, Status, CreatedAt, UpdatedAt"
+        ) or []
         if active_skills:
             chosen = []
             descs = [str(s.get("Description", "") or s.get("Name", "")).strip() for s in active_skills]
@@ -1777,7 +1794,9 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
                 "Source": source_id,
                 "Decay": 0.005,
             })
-        if rows and _kusto_ingest_direct(cluster, db, "Knowledge", know_columns, rows):
+        if rows:
+            if not _kusto_ingest_direct(cluster, db, "Knowledge", know_columns, rows):
+                raise RuntimeError("explicit fact persistence failed")
             preview = []
             for row in rows[:5]:
                 preview_value = row["Value"][:40]
@@ -1830,7 +1849,8 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
             if promotion:
                 print(f"[Cognition] Promoted candidate: {entity} ({promotion['reason']})")
 
-        _kusto_ingest_direct(cluster, db, "Knowledge", know_columns, know_rows)
+        if not _kusto_ingest_direct(cluster, db, "Knowledge", know_columns, know_rows):
+            raise RuntimeError("candidate knowledge persistence failed")
         print(f"[Cognition] Stored {len(know_rows)} validated knowledge entities: {extracted_entities}")
 
     # 3. Update heuristics index
@@ -1839,7 +1859,8 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
         relation, _, value = _classify_entity_candidate(entity, user_message)
         heur_rows = [{"Entity": entity, "Category": relation, "LastSeen": now,
                       "Frequency": 1, "Sentiment": 0.0, "Tags": "[]", "Context": value}]
-        _kusto_ingest_direct(cluster, db, "HeuristicsIndex", heur_columns, heur_rows)
+        if not _kusto_ingest_direct(cluster, db, "HeuristicsIndex", heur_columns, heur_rows):
+            raise RuntimeError("heuristics persistence failed")
 
     # 4. Compute simple emotion vector from response
     # Basic sentiment: count positive/negative indicators
@@ -1857,7 +1878,8 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
     emo_rows = [{"Timestamp": now, "Joy": round(joy, 3), "Curiosity": round(curiosity, 3),
                  "Concern": round(concern, 3), "Excitement": round(0.4, 3), "Calm": round(0.9, 3),
                  "Empathy": round(0.6, 3), "Trigger": trigger_text, "DecayRate": 0.1}]
-    _kusto_ingest_direct(cluster, db, "EmotionState", emo_columns, emo_rows)
+    if not _kusto_ingest_direct(cluster, db, "EmotionState", emo_columns, emo_rows):
+        raise RuntimeError("emotion persistence failed")
     print(f"[Cognition] Updated emotion state: Joy={joy:.2f} Curiosity={curiosity:.2f} Concern={concern:.2f}")
 
     # 5. Auto-reflection — write a Reflection every 5 exchanges or on significant interactions
@@ -1891,7 +1913,8 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
 
         ref_columns = ["Timestamp", "Trigger", "Observation", "ActionTaken", "Effectiveness"]
         ref_rows = [{"Timestamp": now, "Trigger": user_message[:100], "Observation": reflection_text, "ActionTaken": "", "Effectiveness": 0.0}]
-        _kusto_ingest_direct(cluster, db, "Reflections", ref_columns, ref_rows)
+        if not _kusto_ingest_direct(cluster, db, "Reflections", ref_columns, ref_rows):
+            raise RuntimeError("reflection persistence failed")
         print(f"[Cognition] Auto-reflection #{_st.session_exchange_count}: {reflection_text[:100]}")
 
     # 6. Auto-summarize — write a MemorySummary every 10 exchanges
@@ -1918,7 +1941,8 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
 
         sum_columns = ["Period", "Summary", "Timestamp"]
         sum_rows = [{"Period": period, "Summary": summary_text[:500], "Timestamp": now}]
-        _kusto_ingest_direct(cluster, db, "MemorySummaries", sum_columns, sum_rows)
+        if not _kusto_ingest_direct(cluster, db, "MemorySummaries", sum_columns, sum_rows):
+            raise RuntimeError("summary persistence failed")
         print(f"[Cognition] Auto-summary: {summary_text[:100]}")
 
         # Trim buffer to prevent unbounded growth
@@ -1941,14 +1965,14 @@ def _post_response_reflection(user_message, assistant_response, model_name, conv
                     mem = _get_sqlite_mem()
                     try:
                         from bridge.memory_model import MemoryModel
-                        MemoryModel(mem).fail_turn(turn_id)
+                        MemoryModel(mem).fail_turn(turn_id, conversation_id or "", model_name)
                     finally:
                         mem.close()
                 else:
                     cluster, db = _get_kusto_config()
                     if cluster and db and _get_table_columns(cluster, db, "MemoryTurns"):
                         from bridge.memory_model import KustoMemoryModel
-                        KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct).fail_turn(turn_id)
+                        KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct).fail_turn(turn_id, conversation_id or "", model_name)
             except Exception:
                 pass
         print(f"[Cognition] Reflection persistence failed: {exc}")

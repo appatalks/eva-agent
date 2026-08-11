@@ -2222,6 +2222,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not ok:
             return
         cluster, db = handle if backend == "kusto" else (None, None)
+        if backend == "kusto" and not _get_table_columns(cluster, db, "SkillVersions"):
+            self._json_response(409, {"error": {"message": "SkillVersions is unavailable; apply the current Kusto seed before creating governed skills"}})
+            return
         data, error = self._read_json_body()
         if error:
             self._json_response(400, {"error": {"message": error}})
@@ -2249,6 +2252,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         version = None
         if backend == "sqlite":
             version = MemoryModel(handle).register_skill_version(row["SkillId"], row["Tools"], "Two successful bounded evaluations are required for provisional use.")
+        else:
+            version = KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct).register_skill_version(
+                row["SkillId"], row["Tools"], "Two successful bounded evaluations are required for provisional use."
+            )
         self._json_response(201, {"skill": row, "version": version})
 
     def _skills_patch(self, raw_skill_id):
@@ -3104,6 +3111,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if not ok:
                 return
             cluster, db = handle if backend == "kusto" else (None, None)
+            if backend == "kusto" and not _get_table_columns(cluster, db, "SkillVersions"):
+                self._json_response(409, {"error": {"message": "SkillVersions is unavailable; apply the current Kusto seed before auto-learning governed skills"}})
+                return
             now = self._goal_now()
             row = {
                 "SkillId": "sk-" + uuid.uuid4().hex[:12],
@@ -4814,7 +4824,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         cluster, db, ok = self._kusto_context()
         if not ok:
             return None
-        required = {"MemoryAtoms", "MemoryEvidence", "MemoryScenarios", "ScenarioMembers", "UserPersonaTraits", "MemoryTurns", "GrowthProposals"}
+        required = {"IdentityClaims", "MemoryAtoms", "MemoryEvidence", "MemoryScenarios", "ScenarioMembers", "UserPersonaTraits", "MemoryTurns", "GrowthProposals"}
         missing = sorted(table for table in required if not _get_table_columns(cluster, db, table))
         if missing:
             self._json_response(409, {"error": {"message": "structured memory tables are unavailable; apply the current Kusto seed", "missing_tables": missing}})

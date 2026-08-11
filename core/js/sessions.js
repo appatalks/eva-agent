@@ -532,12 +532,16 @@ function toggleSessionPanel() {
   if (!visible) setSessionPanelTab(_sessionPanelTab());
 }
 
-var EVA_SIDE_PANEL_IDS = ['sessionPanel', 'skillsPanel', 'assetsPanel', 'workspacePanel', 'terminalPanel', 'profilePanel'];
-var EVA_SIDE_PANEL_TRIGGER_IDS = ['evaChatsBtn', 'sidebarSessionsBtn', 'evaSkillsBtn', 'evaAssetsBtn', 'evaWorkspacesBtn', 'evaTerminalBtn', 'evaUserBtn'];
+var EVA_SIDE_PANEL_IDS = ['sessionPanel', 'skillsPanel', 'memoryInspectorPanel', 'assetsPanel', 'workspacePanel', 'terminalPanel', 'profilePanel'];
+var EVA_SIDE_PANEL_TRIGGER_IDS = ['evaChatsBtn', 'sidebarSessionsBtn', 'evaSkillsBtn', 'evaMemoryBtn', 'lcarsMemoryBtn', 'evaAssetsBtn', 'evaWorkspacesBtn', 'evaTerminalBtn', 'evaUserBtn'];
 
 function closeSidePanels(exceptId) {
   EVA_SIDE_PANEL_IDS.forEach(function(id) {
     if (id === exceptId) return;
+    if (id === 'memoryInspectorPanel' && window.EvaMemoryInspector && typeof window.EvaMemoryInspector.close === 'function') {
+      window.EvaMemoryInspector.close();
+      return;
+    }
     var panel = document.getElementById(id);
     if (panel) panel.setAttribute('aria-hidden', 'true');
   });

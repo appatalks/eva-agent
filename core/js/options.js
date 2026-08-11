@@ -3350,6 +3350,7 @@ function openVoiceView() {
   var el = document.getElementById('voiceView');
   if (!el) return;
   if (typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
+  if (window.EvaMemoryInspector && typeof window.EvaMemoryInspector.close === 'function') window.EvaMemoryInspector.close();
   _vv.open = true;
   el.classList.add('open');
   el.setAttribute('aria-hidden', 'false');
