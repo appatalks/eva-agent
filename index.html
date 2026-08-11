@@ -35,6 +35,7 @@
   <script src="core/js/assets.js?v=5.5.9"></script>
   <script src="core/js/workspaces.js?v=5.5.9"></script>
   <script src="core/js/agents.js?v=5.5.9"></script>
+  <script src="core/js/harness-control.js?v=5.5.9"></script>
   <script src="core/js/voice.js"></script>
   <script src="core/js/aws-sdk-2.1304.0.min.js"></script>
   <script>
@@ -118,6 +119,20 @@
       <button class="eva-view-all" type="button" onclick="toggleSessionPanel()">View all</button>
     </div>
     <div class="eva-sidebar-footer">
+      <div class="eva-sidebar-voice" role="group" aria-label="Eva voice controls">
+        <button id="evaSidebarMicButton" class="eva-sidebar-voice-shell" type="button" title="Start Eva voice control" aria-label="Start Eva voice control" onclick="toggleCompactVoiceController()">
+          <span class="eva-sidebar-voice-shell-frame" aria-hidden="true"></span>
+          <span class="eva-sidebar-voice-shell-core" aria-hidden="true"></span>
+          <span class="eva-sidebar-voice-shell-scan" aria-hidden="true"></span>
+        </button>
+        <div class="eva-sidebar-voice-copy">
+          <span class="eva-sidebar-voice-label">EVA VOICE</span>
+          <span id="evaSidebarVoiceStatus" class="eva-sidebar-voice-status" aria-live="polite">STANDBY</span>
+        </div>
+        <button id="evaSidebarVoiceViewButton" class="eva-sidebar-voice-expand" type="button" title="Open Eva Voice" aria-label="Open Eva Voice" onclick="toggleVoiceView()">
+          <span aria-hidden="true">&#x2197;</span>
+        </button>
+      </div>
       <button class="eva-sidebar-user" id="evaUserBtn" type="button" title="Switch user profile">
         <span class="eva-user-icon">&#x1F464;</span>
         <span class="eva-user-name" id="evaActiveProfileName">appatalks</span>
@@ -1213,7 +1228,7 @@
         </div>
         <p class="auth-note" style="margin-bottom:6px">Recent metadata: kind / status / permission basis / applied effect</p>
         <div id="learningRecentSignals" class="learning-signal-list" aria-live="polite">No retained signal metadata.</div>
-        <p class="auth-note">Sensitive or consequential actions always require fresh confirmation. Routine tool consent applies only to read, search, fetch, and think operations.</p>
+        <p class="auth-note">Routine consent applies to read, search, fetch, and think operations. Only explicitly allowlisted inspection commands can run without confirmation; interpreters, opaque execute, edit, and delete remain confirmation-gated.</p>
       </div>
 
       <!-- MCP Tab -->

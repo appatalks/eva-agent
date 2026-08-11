@@ -185,6 +185,44 @@ async function main() {
     await page.locator('#workspaceImportGitHubBtn').click();
     await page.locator('#evaTextPrompt[aria-hidden="false"]').waitFor({ state: 'visible' });
     await page.locator('#evaTextPromptCancel').click();
+    await page.locator('#evaTextPrompt[aria-hidden="true"]').waitFor({ state: 'hidden' });
+    assert.strictEqual(await page.locator('#workspaceAddProjectWorkbenchBtn').isEnabled(), true, 'Import workspace stayed disabled after cancelling GitHub import');
+    assert.strictEqual(await page.locator('#workspaceImportGitHubBtn').isEnabled(), true, 'Import GitHub stayed disabled after cancelling its prompt');
+    const voicePromptValue = await page.evaluate(async function() {
+      const pending = window.evaTextPrompt('GitHub repository URL', '', { maxLength: 2048 });
+      window.evaTextPromptConsumeVoice('https colon slash slash github dot com slash example slash packaged-test');
+      return pending;
+    });
+    assert.strictEqual(voicePromptValue, 'https://github.com/example/packaged-test', 'Voice did not resolve the native GitHub URL prompt');
+    assert.strictEqual(await page.locator('#evaTextPrompt').getAttribute('aria-hidden'), 'true', 'Voice left the GitHub URL prompt open');
+    const correctedVoicePromptValue = await page.evaluate(async function() {
+      const pending = window.evaTextPrompt('Correct GitHub repository URL', 'https://github.com/example/wrong-repo', { maxLength: 2048 });
+      if (!window.evaTextPromptConsumeVoice('you misspelled it')) throw new Error('Correction guidance was not handled');
+      if (!window.evaTextPromptIsOpen()) throw new Error('Correction guidance submitted as the URL');
+      window.evaTextPromptConsumeVoice("it's packaged dash repo");
+      return pending;
+    });
+    assert.strictEqual(correctedVoicePromptValue, 'https://github.com/example/packaged-repo', 'Voice did not correct the repository segment');
+    const nativeFieldValue = await page.evaluate(async function() {
+      const pending = window.evaTextPrompt('GitHub repository URL', '', { maxLength: 2048 });
+      const output = document.createElement('div');
+      await window.renderEvaResponse('[[EVA_HARNESS]]{"action":"set_field","field":"github_repository_url","value":"https://github.com/example/native-field","submit":true}[[/EVA_HARNESS]]', output);
+      if (!window.evaTextPromptIsOpen()) throw new Error('Model output submitted a native field');
+      const direct = window.EvaHarness.execute({ action: 'set_field', field: 'github_repository_url', value: 'https://github.com/example/native-field', submit: true });
+      return { value: await pending, text: output.textContent, direct: direct };
+    });
+    assert.strictEqual(nativeFieldValue.value, 'https://github.com/example/native-field', 'Harness field control did not submit the GitHub URL');
+    assert.strictEqual(nativeFieldValue.direct.ok, true, 'Direct native field control failed');
+    assert.match(nativeFieldValue.text, /requires direct user interaction/);
+    const spelledRepositoryValue = await page.evaluate(async function() {
+      const pending = window.evaTextPrompt('Correct GitHub repository URL', 'https://github.com/appatalks/wrong-name', { maxLength: 2048 });
+      window.evaTextPromptConsumeVoice('my repository name is spelled A P P A T A L K S');
+      return pending;
+    });
+    assert.strictEqual(spelledRepositoryValue, 'https://github.com/appatalks/APPATALKS', 'Conversational spelling polluted the GitHub owner');
+    const workspaceDescription = await page.evaluate(function() { return window.EvaWorkspaces.describe(); });
+    assert.match(workspaceDescription, /I can access \d+ coding workspaces?:/);
+    assert.match(workspaceDescription, /project/);
     const sourceCheckout = await page.evaluate(async function() {
       const projects = await window.evaStandalone.workspaceListProjects();
       return projects.find(function(project) { return project.name === 'project'; }).sourceCheckout;
@@ -230,7 +268,7 @@ async function main() {
     assert.strictEqual(await mcpToggle.isChecked(), false, 'Restoring an old MCP digest silently restored approval');
     assert.strictEqual(await objectiveInput.inputValue(), 'E2E workspace run', 'MCP revocation refresh cleared the coding objective');
     page.once('dialog', function(dialog) { return dialog.accept(); });
-    await mcpToggle.check();
+    await mcpToggle.click();
     await page.waitForFunction(async function() {
       const projects = await window.evaStandalone.workspaceListProjects();
       return projects.some(function(project) {

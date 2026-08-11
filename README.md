@@ -57,6 +57,7 @@ supported on Windows.
 | **Browser agent** | Playwright-based DOM control, persistent Chrome login, hybrid vision fallback |
 | **Desktop agent** | PyAutoGUI mouse/keyboard control, optional AT-SPI via computer-use-linux MCP |
 | **Voice interface** | Full-screen voice orb, wake/barge-in, profile TTS for normal replies, fast native-speech Live Translation, persisted microphone/speaker selection, and cached Local Voices acknowledgement clips in Standalone |
+| **Native harness control** | Allowlisted in-app API for direct navigation, refresh, chat, and voice controls; Eva uses native controls for her own surfaces before browser or desktop automation |
 | **Signal messaging** | Send-only text notifications via signal-cli, keyword-triggered or on-demand |
 | **Persistent memory** | Kusto/ADX or local SQLite: conversations, emotion tracking, semantic recall |
 | **User profiles** | Switch local profiles with separate sessions, prompts, model choices, and UI preferences |
@@ -105,7 +106,7 @@ For Signal notifications, install [signal-cli](https://github.com/AsamK/signal-c
 
 ### Learning and consent
 
-Settings > Learning controls local feedback, routine outcomes, voice diagnostics, and optional standing consent for routine read/search tools. Records are bounded, expire according to the configured retention period, and can be revoked or deleted from the same panel. Explicit response feedback produces short, fixed adaptive guidance only for the originating chat session while its retained source signal remains active; deleting the signal or revoking feedback consent removes that guidance from future prompts. Inferred outcomes never alter adaptive guidance or explicit memory. Consequential or irreversible ACP actions require a fresh in-chat Allow once decision.
+Settings > Learning controls local feedback, routine outcomes, voice diagnostics, and optional standing consent for routine read/search tools. Records are bounded, expire according to the configured retention period, and can be revoked or deleted from the same panel. Explicit response feedback produces short, fixed adaptive guidance only for the originating chat session while its retained source signal remains active; deleting the signal or revoking feedback consent removes that guidance from future prompts. Inferred outcomes never alter adaptive guidance or explicit memory. Read/search/fetch/think and a narrow allowlist of inspection commands proceed autonomously. Interpreters, opaque execute requests, writes, remote mutations, edit, and delete require a fresh in-chat Allow once decision. Eva controls active native forms through typed field schemas rather than screen automation.
 
 ### Local Voices
 

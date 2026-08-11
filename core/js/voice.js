@@ -91,6 +91,11 @@ function stopVoiceListener() {
 
 /** Process a transcript chunk */
 function _handleVoiceTranscript(transcript) {
+  if (typeof evaTextPromptConsumeVoice === 'function' && evaTextPromptConsumeVoice(transcript)) {
+    _voiceAwake = false;
+    _setMicStatus('listening');
+    return;
+  }
   var lower = transcript.toLowerCase();
 
   // Check for wake word "eva" anywhere in the phrase
@@ -141,6 +146,11 @@ var _voiceAwakeTimer = null;
 function _sendVoiceCommand(command) {
   _setMicStatus('sending');
 
+  if (_runVoiceNavigationCommand(command)) {
+    setTimeout(function() { _setMicStatus('listening'); }, 500);
+    return;
+  }
+
   var txtMsg = document.getElementById('txtMsg');
   if (txtMsg) {
     txtMsg.textContent = command;
@@ -157,36 +167,67 @@ function _sendVoiceCommand(command) {
   }, 1000);
 }
 
+function _runVoiceNavigationCommand(command) {
+  var phrase = String(command || '').trim().toLowerCase();
+  if (!phrase) return false;
+  if (/^(?:new|start) (?:a )?(?:chat|conversation)$/.test(phrase)) {
+    if (window.EvaHarness) EvaHarness.execute({ action: 'new_chat' });
+    return true;
+  }
+  if (!window.EvaHarness || typeof EvaHarness.resolveNavigationRequest !== 'function') return false;
+  var route = EvaHarness.resolveNavigationRequest(phrase);
+  if (!route) return false;
+  if (typeof evaTextPromptCancel === 'function') evaTextPromptCancel();
+  var pendingResult = route.action && route.action !== 'navigate'
+    ? EvaHarness.execute(route)
+    : EvaHarness.navigate(route.target);
+  Promise.resolve(pendingResult).then(function(navigationResult) {
+    if (!navigationResult.ok) {
+      if (typeof setStatus === 'function') setStatus('error', navigationResult.message || 'Voice navigation failed.');
+      return;
+    }
+    var reply = route.action === 'describe_workspaces' || route.action === 'import_github'
+      ? navigationResult.message
+      : route.target === 'workspaces'
+      ? 'I opened Workspaces. I can review imported projects and their files, Git status and diffs, active coding runs, generated assets, and workspace-scoped MCP configuration. I can inspect read-only workspace commands autonomously. Changes, deletions, external actions, and unclassified commands still require your approval.'
+      : 'Opening ' + route.label + '.';
+    if (typeof setStatus === 'function') setStatus('info', navigationResult.message || 'Opened ' + route.label + '.');
+    if (typeof speakText === 'function') speakText(reply);
+  }).catch(function(error) {
+    if (typeof setStatus === 'function') setStatus('error', error && error.message ? error.message : 'Voice navigation failed.');
+  });
+  return true;
+}
+
 /** Update mic button visual state */
 function _setMicStatus(status) {
-  var btn = document.getElementById('micButton');
-  if (!btn) return;
+  var buttons = [document.getElementById('micButton'), document.getElementById('evaSidebarMicButton')].filter(Boolean);
+  var compact = document.querySelector('.eva-sidebar-voice');
+  var compactStatus = document.getElementById('evaSidebarVoiceStatus');
+  if (compact) compact.dataset.state = status;
+  if (compactStatus) compactStatus.textContent = status === 'off' ? 'VOICE' : status.toUpperCase();
 
   // Remove all states
-  btn.classList.remove('pulsate', 'mic-listening', 'mic-awake', 'mic-sending', 'mic-denied');
+  buttons.forEach(function(btn) { btn.classList.remove('pulsate', 'mic-listening', 'mic-awake', 'mic-sending', 'mic-denied'); });
 
   switch (status) {
     case 'listening':
-      btn.classList.add('mic-listening');
-      btn.title = 'Listening for "Eva"... (click to stop)';
+      buttons.forEach(function(btn) { btn.classList.add('mic-listening'); btn.title = 'Listening for "Eva"... (click to stop)'; });
       break;
     case 'awake':
-      btn.classList.add('mic-awake', 'pulsate');
-      btn.title = 'Eva is listening — speak your command';
+      buttons.forEach(function(btn) { btn.classList.add('mic-awake', 'pulsate'); btn.title = 'Eva is listening — speak your command'; });
       break;
     case 'sending':
-      btn.classList.add('mic-sending');
-      btn.title = 'Processing...';
+      buttons.forEach(function(btn) { btn.classList.add('mic-sending'); btn.title = 'Processing...'; });
       break;
     case 'denied':
-      btn.classList.add('mic-denied');
-      btn.title = 'Microphone access denied';
+      buttons.forEach(function(btn) { btn.classList.add('mic-denied'); btn.title = 'Microphone access denied'; });
       break;
     case 'unsupported':
-      btn.title = 'Speech recognition not supported';
+      buttons.forEach(function(btn) { btn.title = 'Speech recognition not supported'; });
       break;
     default:
-      btn.title = 'Click to start voice listener';
+      buttons.forEach(function(btn) { btn.title = 'Click to start voice listener'; });
       break;
   }
 }

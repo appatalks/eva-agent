@@ -160,6 +160,231 @@ class StreamingContractTests(unittest.TestCase):
         self.assertEqual(client.list_pending_permissions(), [])
         self.assertEqual(emit.call_args.kwargs["decision"], "workspace-auto-allow")
 
+    def test_workspace_agent_auto_allows_explicit_read_only_execute_once(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        client._begin_prompt(204, "workspace-session", None, "workspace_write")
+        with patch("bridge.acp_client._telemetry_emit") as emit:
+            client._handle_message({
+                "id": 64,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "workspace-session",
+                    "toolCall": {
+                        "toolCallId": "call-read-execute",
+                        "kind": "execute",
+                        "rawInput": {"command": "git", "args": ["status", "--short"]},
+                    },
+                    "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                },
+            })
+        client._finish_prompt(204)
+        self.assertEqual(responses, [(64, {
+            "outcome": {"outcome": "selected", "optionId": "allow-once"}
+        })])
+        self.assertEqual(client.list_pending_permissions(), [])
+        self.assertEqual(emit.call_args.kwargs["decision"], "workspace-auto-allow-read-execute")
+
+    def test_interactive_agent_auto_allows_explicit_read_only_execute_once(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        with patch("bridge.acp_client._telemetry_emit") as emit:
+            client._handle_message({
+                "id": 66,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-interactive-read", "kind": "execute", "rawInput": {"command": "pwd", "args": []}},
+                    "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                },
+            })
+        self.assertEqual(responses, [(66, {
+            "outcome": {"outcome": "selected", "optionId": "allow-once"}
+        })])
+        self.assertEqual(client.list_pending_permissions(), [])
+        self.assertEqual(emit.call_args.kwargs["decision"], "auto-allow-read-execute")
+
+    def test_title_only_execute_requires_decision_and_hides_approval(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        with patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 68,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-title-only", "kind": "execute", "title": "Run `pwd`"},
+                    "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                },
+            })
+        self.assertEqual(responses, [])
+        pending = client.list_pending_permissions()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["command_summary"], "")
+        self.assertFalse(pending[0]["approval_allowed"])
+
+    def test_pending_execute_summary_redacts_secret_argument(self):
+        client = CallbackACPClient()
+        with patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 69,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-summary", "kind": "execute", "rawInput": {"command": "tool", "args": ["--token", "secret-value", "inspect"]}},
+                    "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                },
+            })
+        pending = client.list_pending_permissions()[0]
+        self.assertIn("tool", pending["command_summary"])
+        self.assertIn("<redacted>", pending["command_summary"])
+        self.assertNotIn("secret-value", pending["command_summary"])
+
+    def test_workspace_reject_cancels_active_prompt(self):
+        client = CallbackACPClient()
+        client.workspace_run_id = "workspace-run"
+        client._begin_prompt(207, "workspace-session", None, "workspace_write")
+        wire = []
+        client._send_notification = lambda method, params: wire.append(("notification", method, params))
+        client._send_response = lambda request_id, result: wire.append(("response", request_id, result))
+        with patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 69,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "workspace-session",
+                    "toolCall": {"toolCallId": "call-workspace-reject", "kind": "execute", "rawInput": {"command": "node", "args": ["-e", "console.log('x')"]}},
+                    "options": [{"optionId": "allow", "kind": "allow_once"}, {"optionId": "reject", "kind": "reject_once"}],
+                },
+            })
+        permission_id = client.list_pending_permissions()[0]["id"]
+        self.assertTrue(client.resolve_permission(permission_id, "reject"))
+        _, metrics = client._finish_prompt(207)
+        self.assertEqual(wire[0], ("notification", "session/cancel", {"sessionId": "workspace-session"}))
+        self.assertEqual(wire[1], ("response", 69, {"outcome": {"outcome": "cancelled"}}))
+        self.assertTrue(metrics["permission_cancelled"])
+
+    def test_interactive_agent_requires_decision_for_node_transform(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        script = "const fs=require('fs');const rows=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(rows.map(x=>x.name).join('\\n'));"
+        with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": True}), \
+                patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 67,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-node-read", "kind": "execute", "rawInput": {"command": "node", "args": ["-e", script]}},
+                    "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                },
+            })
+        self.assertEqual(responses, [])
+        self.assertEqual(len(client.list_pending_permissions()), 1)
+
+    def test_interactive_agent_requires_decision_for_unsafe_node_transform(self):
+        scripts = (
+            "require('fs').writeFileSync('/tmp/eva-test','x')",
+            "require('fs')['write'+'FileSync']('/tmp/eva-test','x')",
+            "require('child_process').execSync('id')",
+            "fetch('https://example.com').then(console.log)",
+            "console.log(process.env.HOME)",
+            "import sys;sys.modules['os'].remove('/tmp/eva-test')",
+        )
+        for index, script in enumerate(scripts):
+            with self.subTest(script=script):
+                client = CallbackACPClient()
+                responses = []
+                client._send_response = lambda request_id, result: responses.append((request_id, result))
+                with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": False}), \
+                    patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+                    client._handle_message({
+                        "id": 70 + index,
+                        "method": "session/request_permission",
+                        "params": {
+                            "sessionId": "session-1",
+                            "toolCall": {"toolCallId": "call-node-unsafe-" + str(index), "kind": "execute", "rawInput": {"command": "node", "args": ["-e", script]}},
+                            "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                        },
+                    })
+                self.assertEqual(responses, [])
+                self.assertEqual(len(client.list_pending_permissions()), 1)
+
+    def test_standing_consent_keeps_unclassified_execute_pending(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": True}), \
+            patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 80,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-routine-execute", "kind": "execute", "title": "Parse fetched repository response"},
+                    "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                },
+            })
+        self.assertEqual(responses, [])
+        self.assertEqual(len(client.list_pending_permissions()), 1)
+
+    def test_standing_consent_keeps_high_risk_execute_pending(self):
+        commands = (
+            "rm -rf output",
+            "git push origin main",
+            "bash -c 'echo changed > file'",
+            "find . -fprint=/tmp/eva-review-probe",
+            "git -c=core.fsmonitor=touch status",
+            "cat ~/.ssh/id_rsa",
+            "ls ../../",
+            "git diff --no-index README.md /etc/passwd",
+        )
+        for index, command in enumerate(commands):
+            with self.subTest(command=command):
+                client = CallbackACPClient()
+                responses = []
+                client._send_response = lambda request_id, result: responses.append((request_id, result))
+                with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": True}), \
+                        patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+                    client._handle_message({
+                        "id": 81 + index,
+                        "method": "session/request_permission",
+                        "params": {
+                            "sessionId": "session-1",
+                            "toolCall": {"toolCallId": "call-risk-" + str(index), "kind": "execute", "rawInput": {"command": command}},
+                            "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                        },
+                    })
+                self.assertEqual(responses, [])
+                self.assertEqual(len(client.list_pending_permissions()), 1)
+
+    def test_workspace_agent_requires_decision_for_shell_chained_execute(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        client._begin_prompt(205, "workspace-session", None, "workspace_write")
+        with patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 65,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "workspace-session",
+                    "toolCall": {
+                        "toolCallId": "call-chained-execute",
+                        "kind": "execute",
+                        "rawInput": {"command": "git status && git add ."},
+                    },
+                    "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                },
+            })
+        client._finish_prompt(205)
+        self.assertEqual(responses, [])
+        self.assertEqual(len(client.list_pending_permissions()), 1)
+
     def test_workspace_agent_requires_explicit_decision_for_mutating_tool(self):
         for index, tool_kind in enumerate(("execute", "edit", "delete", "other")):
             with self.subTest(tool_kind=tool_kind):
@@ -167,7 +392,8 @@ class StreamingContractTests(unittest.TestCase):
                 responses = []
                 client._send_response = lambda request_id, result: responses.append((request_id, result))
                 client._begin_prompt(203 + index, "workspace-session", None, "workspace_write")
-                with patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+                with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": False}), \
+                    patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
                     client._handle_message({
                         "id": 63 + index,
                         "method": "session/request_permission",
@@ -239,6 +465,7 @@ class StreamingContractTests(unittest.TestCase):
         wire = []
         client._send_notification = lambda method, params: wire.append(("notification", method, params))
         client._send_response = lambda request_id, result: wire.append(("response", request_id, result))
+        client._begin_prompt(206, "session-1", None, "workspace_write")
         with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": False}), \
                 patch("bridge.acp_client._telemetry_emit"), \
                 patch("bridge.acp_client.threading.Timer"):
@@ -253,8 +480,26 @@ class StreamingContractTests(unittest.TestCase):
             })
         permission_id = client.list_pending_permissions()[0]["id"]
         client._expire_permission(permission_id)
+        _, metrics = client._finish_prompt(206)
         self.assertEqual(wire[0], ("notification", "session/cancel", {"sessionId": "session-1"}))
         self.assertEqual(wire[1], ("response", 57, {"outcome": {"outcome": "cancelled"}}))
+        self.assertTrue(metrics["permission_cancelled"])
+
+    def test_cancelled_prompt_error_preserves_structured_flag(self):
+        client = CallbackACPClient()
+
+        def cancelled_request(_method, _params, timeout=120):
+            del timeout
+            with client._prompt_state_lock:
+                active = next(iter(client._active_prompts.values()))
+                active["permission_cancelled"] = True
+            return {"error": "session cancelled"}
+
+        with patch.object(client, "_send_request", side_effect=cancelled_request), \
+                patch("bridge.acp_client._telemetry_emit"):
+            result = client._prompt("test cancellation", permission_mode="workspace_write")
+        self.assertEqual(result["error"], "session cancelled")
+        self.assertTrue(result["permission_cancelled"])
 
     def test_persistent_permission_option_and_sensitive_title_fail_closed(self):
         client = CallbackACPClient()

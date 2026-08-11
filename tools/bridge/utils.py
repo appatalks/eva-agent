@@ -318,6 +318,18 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
         except Exception as workspace_error:
             print(f"[Workspace Agent] Status sync failed for {task_id}: {workspace_error}")
 
+    def cancel_workspace_run():
+        report = "Workspace run cancelled because a required execution permission was not approved."
+        with _st.subagent_lock:
+            task["status"] = "cancelled"
+            task["result"] = report
+            task["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        sync_workspace("cancelled", report)
+        try:
+            _push_notification(f"Workspace agent cancelled: {label}", report, channel="chat")
+        except Exception as notify_error:
+            print(f"[Subagent] Cancellation notification failed for {task_id}: {notify_error}")
+
     try:
         dependency_context = _subagent_dependency_context(task_id) if task.get("depends_on") else ""
         from bridge.acp_client import ACPClient
@@ -335,6 +347,10 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 reasoning_effort=template.reasoning_effort,
             )
         client.start()
+        if task.get("coding_run_id"):
+            client.workspace_run_id = task["coding_run_id"]
+            with _st.subagent_lock:
+                _st.workspace_acp_clients[task_id] = client
         with _st.subagent_lock:
             task["model"] = client.model or "default"
             task["status"] = "running"
@@ -378,9 +394,14 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
             sync_workspace("running", label_text)
         try:
             permission_mode = "workspace_write" if task.get("capability_policy") == "workspace_write" else "interactive"
-            result_text = _subagent_result_text(client.prompt(
+            prompt_result = client.prompt(
                 prompt_text, timeout=180, on_chunk=on_chunk, permission_mode=permission_mode, on_event=on_event,
-            ))
+            )
+            permission_cancelled = isinstance(prompt_result, dict) and prompt_result.get("permission_cancelled")
+            if task.get("coding_run_id") and permission_cancelled:
+                cancel_workspace_run()
+                return
+            result_text = _subagent_result_text(prompt_result)
             while True:
                 with _st.subagent_lock:
                     task["result"] = result_text[-4000:]
@@ -399,11 +420,18 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 )
                 live_output = ""
                 live_output_chars = 0
-                result_text = _subagent_result_text(client.prompt(
+                prompt_result = client.prompt(
                     prompt_text, timeout=180, on_chunk=on_chunk, permission_mode=permission_mode, on_event=on_event,
-                ))
+                )
+                permission_cancelled = isinstance(prompt_result, dict) and prompt_result.get("permission_cancelled")
+                if task.get("coding_run_id") and permission_cancelled:
+                    cancel_workspace_run()
+                    return
+                result_text = _subagent_result_text(prompt_result)
         finally:
             client.stop()
+            with _st.subagent_lock:
+                _st.workspace_acp_clients.pop(task_id, None)
         sync_workspace("done", result_text)
         try:
             _push_notification(f"Subagent done: {label}", result_text[:300], channel="chat")

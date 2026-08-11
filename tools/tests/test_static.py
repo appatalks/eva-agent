@@ -72,6 +72,7 @@ def test_required_files():
         "core/js/assets.js",
         "core/js/dialogs.js",
         "core/js/workspaces.js",
+        "core/js/harness-control.js",
         "tools/acp_bridge.py",
         "tools/bridge/workspaces.py",
         "tools/kusto_mcp.py",
@@ -333,7 +334,7 @@ def test_local_speech_contract():
     report("voice_view_restores_listener_after_translation", "_vvStopListening();\n      _vvStartListening();" in options)
     report("local_speech_recorder_exclusive", "if (_vv._capture) return;" in options and "_vv._capture === capture" in options)
     report("local_speech_capture_generation", "capture.generation !== _vv.listenGeneration" in options and "capture.chunks" in options)
-    report("local_speech_recorder_finalizes_before_rearm", "var ownsCapture = _vv._capture === capture;" in options and "if (ownsCapture && _vv.open && _vv.whisperMode" in options)
+    report("local_speech_recorder_finalizes_before_rearm", "var ownsCapture = _vv._capture === capture;" in options and "if (ownsCapture && _vvIsActive() && _vv.whisperMode" in options)
     report("local_speech_400_recovers", "if (/HTTP 400/.test(message))" in options and "if (_vv.phase === 'speaking')" in options and "if (_vv.phase === 'awake')" in options and "_vvEnterAwake(_vv.convoMode ? _vv.convoTimeoutMs : 10000)" in options)
     report("local_speech_energy_barge", "_vv.whisperProvider !== 'local'" in options and "_vv._bargeEnergyFrames >= 4" in options)
     report("local_speech_voice_threshold", "var threshold = 12;" in options)
@@ -1198,6 +1199,24 @@ def test_sidebar_workflow_contract():
     report("workflow_native_context_menu", "webContents.on('context-menu'" in standalone_main and "buildContextMenuTemplate" in standalone_main and os.path.isfile("standalone/context-menu.js") and os.path.isfile("tools/tests/test_context_menu.js"))
     report("workflow_skills_database_copy", "stores it in the database" in html and "stores it in ADX" not in html)
     report("workflow_audio_settings_persist", "function initAudioPreferences" in options_js and "tts_engine" in options_js and "tts_auto_speak" in options_js and "tts_voice" in options_js)
+    dialogs_js = open("core/js/dialogs.js").read()
+    voice_js = open("core/js/voice.js").read()
+    harness_js = open("core/js/harness-control.js").read()
+    report("workflow_text_prompt_lazy_binding", "function _bindEvaTextPrompt" in dialogs_js and "_bindEvaTextPrompt();" in dialogs_js and "dialog.dataset.bound" in dialogs_js)
+    report("workflow_text_prompt_voice_handoff", "function evaTextPromptConsumeVoice" in dialogs_js and "function evaTextPromptIsOpen" in dialogs_js and "function _evaGithubPromptCorrection" in dialogs_js and "github_repository_url" in dialogs_js and "Say the corrected repository name" in dialogs_js and "form.requestSubmit()" in dialogs_js and "dispatchEvent(new Event('input'" in dialogs_js and "evaTextPromptConsumeVoice(transcript)" in options_js and "evaTextPromptConsumeVoice(transcript)" in voice_js)
+    report("workflow_native_field_control", "function evaTextPromptDescribe" in dialogs_js and "function evaTextPromptSetField" in dialogs_js and "function evaTextPromptSubmit" in dialogs_js and "inspect_form" in harness_js and "set_field" in harness_js and "submit_form" in harness_js and "CURRENT NATIVE FORM" in harness_js)
+    eva_theme = open("core/themes/eva.css").read()
+    report("workflow_compact_voice_control", 'id="evaSidebarMicButton"' in html and 'id="evaSidebarVoiceStatus"' in html and 'id="evaSidebarVoiceViewButton"' in html and "eva-sidebar-voice" in eva_theme and "toggleCompactVoiceController()" in html and "function toggleCompactVoiceController" in options_js)
+    report("workflow_compact_voice_full_pipeline", "compactActive: false" in options_js and "function _vvIsActive" in options_js and "_vvStartListening();" in options_js.split("function toggleCompactVoiceController", 1)[1].split("function toggleVoiceView", 1)[0] and "_vvIsActive() || !_vv.whisperMode" in options_js and "_runVoiceNavigationCommand(command)" in options_js.split("function _vvSendCommand", 1)[1].split("function _vvWatchForResponse", 1)[0] and "var keepCompactController = _vv.compactActive;" in options_js and "if (!keepCompactController) _vvStopListening();" in options_js)
+    report("workflow_compact_voice_shared_status", "evaSidebarMicButton" in voice_js and "evaSidebarVoiceStatus" in voice_js and "buttons.forEach" in voice_js)
+    report("workflow_voice_native_navigation", "function _runVoiceNavigationCommand" in voice_js and "EvaHarness.resolveNavigationRequest(phrase)" in voice_js and "EvaHarness.navigate(route.target)" in voice_js and "EvaHarness.resolveNavigationRequest(protectedRawText)" in options_js and "EvaHarness.navigate(nativeRoute.target)" in options_js)
+    report("workflow_voice_workspace_compound_navigation", "route.target === 'workspaces'" in voice_js and "read-only workspace commands" in voice_js)
+    report("workflow_voice_graph_disabled", "VOICE_MEMORY_GRAPH_ENABLED = false" in options_js and "if (VOICE_MEMORY_GRAPH_ENABLED) _vvStartMemoryGraph();" in options_js and ".vv-memory-graph" in eva_theme and "display: none" in eva_theme)
+    report("workflow_compact_voice_reduced_motion", "@media (prefers-reduced-motion: reduce)" in eva_theme and ".eva-sidebar-voice-shell-scan" in eva_theme and "animation: none;" in eva_theme)
+    report("workflow_native_harness_api", "core/js/harness-control.js" in html and "var EvaHarness" in harness_js and "function execute" in harness_js and "function capabilities" in harness_js and "function resolveSurface" in harness_js and "function resolveNavigationRequest" in harness_js and "nativeOnly: true" in harness_js and all(target in harness_js for target in ("agent_operations", "voice_control", "models", "personality", "goals", "background_jobs", "schedules", "accounts", "tools_memory", "learning", "profile")))
+    report("workflow_native_harness_marker", "EVA_HARNESS" in options_js and "EvaHarness.execute" in options_js and "browserLaunch = null;" in options_js and "desktopLaunch = null;" in options_js and "EvaHarness.promptContract" in options_js and options_js.find("var desktopLaunch = null;") < options_js.find("if (harnessActions.length) {\n    browserLaunch = null;"))
+    report("workflow_native_github_import", "import_github" in harness_js and "repository_url" in harness_js and "EvaWorkspaces.importGitHub" in harness_js and "nativeRoute.action && nativeRoute.action !== 'navigate'" in options_js and "route.action && route.action !== 'navigate'" in voice_js)
+    report("workflow_native_workspace_description", "describe_workspaces" in harness_js and "EvaWorkspaces.describe" in harness_js and "Promise.resolve(EvaWorkspaces.describe())" in harness_js and "await Promise.resolve" in options_js and "Promise.resolve(pendingResult)" in voice_js and "evaTextPromptCancel()" in voice_js)
 
 
 def test_workspace_terminal_contract():
@@ -1216,6 +1235,8 @@ def test_workspace_terminal_contract():
     dependencies = package.get("dependencies", {})
     packaged_files = package.get("build", {}).get("files", [])
     report("workspace_terminal_feature_flagged", "EVA_WORKSPACE_TERMINAL_V1" in standalone_main and "--eva-workspace-terminal-v1" in standalone_main and standalone_main.count("requireWorkspaceFeature(event);") >= 7 and "if (workspaceTerminalEnabled())" in standalone_main)
+    installer = open("install.sh").read()
+    report("workspace_terminal_system_launcher_flagged", '${BASH_SOURCE[0]}' in installer and "refresh_system_launcher()" in installer and "--eva-workspace-terminal-v1" in installer and "System launcher refreshed" in installer and "refresh_system_launcher;" in installer)
     report("workspace_terminal_trusted_renderer", "requireTerminalBroker(event)" in standalone_main and "isTrustedEvaRenderer(event)" in standalone_main)
     report("workspace_terminal_no_preload_process_access", "child_process" not in standalone_preload and "terminalCreate" in standalone_preload and "onTerminalData" in standalone_preload)
     report("workspace_terminal_opaque_root", "registerRoot('app-root', getAppRoot(), { allowSymlinks: true })" in standalone_main and "CREATE_FIELDS = new Set(['rootId', 'cols', 'rows'])" in broker and "_assertNoSymlinkComponents" in broker)
@@ -1238,6 +1259,8 @@ def test_coding_workspace_contract():
         standalone_preload = f.read()
     with open("core/js/workspaces.js") as f:
         workspace_ui = f.read()
+    with open("core/js/options.js") as f:
+        options_js = f.read()
     with open("core/js/assets.js") as f:
         assets_ui = f.read()
     with open("core/js/sessions.js") as f:
@@ -1264,8 +1287,8 @@ def test_coding_workspace_contract():
     workspace_utils = open("tools/bridge/utils.py").read()
     acp_client = open("tools/bridge/acp_client.py").read()
     report("coding_workspace_agent_cwd", 'task.get("_cwd")' in workspace_utils and 'cwd=assigned_cwd' in workspace_utils and '"coding_run_id": task.get("coding_run_id"' in bridge_core)
-    report("coding_workspace_agent_auto_permission", 'permission_mode == "workspace_write"' in acp_client and 'tool_kind in {"read", "search", "fetch", "think"}' in acp_client and 'decision="workspace-auto-allow"' in acp_client and 'permission_mode=permission_mode' in workspace_utils)
-    report("coding_workspace_agent_durable_completion", "status = 'completed'" in workspaces and "agent_completed" in workspaces and '"agent": self._agent_payload' in workspaces)
+    report("coding_workspace_agent_auto_permission", 'permission_mode == "workspace_write"' in acp_client and 'tool_kind in {"read", "search", "fetch", "think"}' in acp_client and 'decision="workspace-auto-allow"' in acp_client and 'workspace-auto-allow-read-execute' in acp_client and 'auto-allow-read-execute' in acp_client and 'def _workspace_read_only_execute' in acp_client and 'def _command_summary' in acp_client and '_WORKSPACE_READ_ONLY_COMMANDS' in acp_client and 'find' not in acp_client.split('_WORKSPACE_READ_ONLY_COMMANDS =', 1)[1].split('\n', 1)[0] and 'permission_mode=permission_mode' in workspace_utils)
+    report("coding_workspace_agent_durable_completion", "status = 'completed'" in workspaces and "agent_completed" in workspaces and "agent_cancelled" in workspaces and '"agent": self._agent_payload' in workspaces)
     report("coding_workspace_agent_no_private_path", "_public_subagent_task" in bridge_core and 'not key.startswith("_")' in bridge_core)
     report("coding_workspace_bridge_capability", "_require_workspace_capability" in bridge_core and "EVA_WORKSPACE_CAPABILITY" in bridge_core and "workspaceCapabilityToken" in standalone_main and "workspaceCapabilityToken" not in standalone_preload)
     report("coding_workspace_imports", "dialog.showOpenDialog" in standalone_main and "workspace-select-project" in standalone_main and "workspace-import-github" in standalone_main and "import_github_repository" in workspaces and "parsed = urlparse(value)" in workspaces and 'parsed.scheme != "https"' in workspaces and 'parsed.hostname.lower() != "github.com"' in workspaces and 'parsed.netloc.lower() != "github.com"' in workspaces and "parsed.username is not None" in workspaces and "parsed.query" in workspaces and "parsed.fragment" in workspaces and "len(parts) != 2" in workspaces and "_GITHUB_REPOSITORY_PART_RE.fullmatch(owner)" in workspaces)
@@ -1277,13 +1300,21 @@ def test_coding_workspace_contract():
     report("coding_workspace_current_monitor_snapshot", workspace_ui.find("state.runs = runs;") < workspace_ui.find("narrateRunChanges(state.runs);") and "workspaceCheckoutStatus(selected.checkout.id)" in workspace_ui)
     report("coding_workspace_ui_wired", "core/js/workspaces.js" in html and "workspacePanel" in html and "workspaceWorkbench" in html and "openWorkspaceTerminal" in workspace_ui and "_evaWorkspaceTerminalTarget" in sessions_js and "body.eva-standalone .workspace-panel" in style_css)
     report("coding_workspace_monitor_observation_only", "setInterval(monitor, 10000)" in workspace_ui and "api().terminalList()" in workspace_ui and "terminalCreate" not in workspace_ui.split("async function monitor()", 1)[1].split("function openWorkbench", 1)[0] and "registerWorkspaceRoot" not in list_projects_handler and "registerWorkspaceRoot" not in list_runs_handler and "ensureTerminalRoot(rootId)" in standalone_main)
-    report("coding_workspace_monitor_text_voice_updates", "addMonitorActivity" in workspace_ui and "autoSpeak.checked" in workspace_ui and "speakText(message)" in workspace_ui and "lastPeriodicNoteAt" in workspace_ui)
+    report("coding_workspace_monitor_text_voice_updates", "addMonitorActivity" in workspace_ui and "forceVoice" in workspace_ui and "autoSpeak.checked" in workspace_ui and "speakText(message)" in workspace_ui and "lastPeriodicNoteAt" in workspace_ui)
     report("coding_workspace_main_navigation", "openWorkbench" in workspace_ui and "workspace-workbench-open" in style_css and "closeWorkbench" in sessions_js and "closeWorkbench" in open("core/js/agents.js").read())
     report("coding_workspace_mcp_isolation", "project_mcp_preferences" in workspaces and "approved_digest" in workspaces and "_mcp_config_digest" in workspaces and "_MCP_RESERVED_ENV_KEYS" in workspaces and "BASH_ENV" in workspaces and "key.startswith(\"LD_\")" in workspaces and "mcp_config_for_run" in workspaces and "_workspace_mcp_config" in bridge_core and "workspace_mcp_prefix" in bridge_core and "_subagent_mcp_config(template, task)" in workspace_utils and "return copy.deepcopy(workspace_config)" in workspace_utils and "workspaceSetMcpServer" in workspace_ui and "Any configuration change will revoke this approval" in workspace_ui and "envKeys" in renderer_project and "headerKeys" in renderer_project and "env:" not in renderer_project and "headers:" not in renderer_project)
     report("coding_workspace_github_prompt_visible", ":not(#workspaceWorkbench):not(#textToSynth)" in style_css and "#textToSynth > :not(#evaTextPrompt)" in style_css and "workspaceImportGitHub" in workspace_ui and "evaTextPrompt('GitHub repository URL'" in workspace_ui)
+    report("coding_workspace_github_native_api", "importGitHub: importGitHubProject" in workspace_ui and "repositoryUrl = typeof repositoryUrl === 'string'" in workspace_ui)
+    report("coding_workspace_github_retry_prompt", "while (repositoryUrl)" in workspace_ui and "Correct GitHub repository URL" in workspace_ui and "The URL is back in the prompt so you can correct it." in workspace_ui and "GitHub workspace imported." in workspace_ui)
+    report("coding_workspace_native_description", "async function describeCurrent" in workspace_ui and "Promise.all([api().workspaceListProjects(), api().workspaceListRuns()])" in workspace_ui and "describe: describeCurrent" in workspace_ui)
     report("coding_workspace_project_navigation", "list_project_files" in workspaces and "resolve_project_file" in workspaces and "workspaceListProjectFiles" in standalone_preload and "workspaceOpenProjectFile" in standalone_preload and "workspaceProjectFiles" in workspace_ui and "Open project terminal" in workspace_ui and "['source', 'worktree'].includes(checkout.kind)" in standalone_main)
-    report("coding_workspace_draft_stable", "var shouldRender = changed;" in workspace_ui and "state.workbenchOpen && shouldRender" in workspace_ui and "runDrafts" in workspace_ui and "draft.objective = objective.value" in workspace_ui and "draft.baseRef = baseRef.value" in workspace_ui)
+    report("coding_workspace_draft_stable", "var shouldRender = changed || permissionsChanged;" in workspace_ui and "state.workbenchOpen && shouldRender" in workspace_ui and "runDrafts" in workspace_ui and "draft.objective = objective.value" in workspace_ui and "draft.baseRef = baseRef.value" in workspace_ui)
+    report("coding_workspace_permission_rerender", "permissionSignature" in workspace_ui and "permissionsChanged" in workspace_ui and "changed || permissionsChanged" in workspace_ui)
+    cancellation_worker = workspace_utils.split('prompt_result = client.prompt(', 1)[1].split('while True:', 1)[0]
+    report("coding_workspace_structured_cancellation", '"permission_cancelled": False' in acp_client and 'state["permission_cancelled"] = True' in acp_client and '"error": result["error"]' in acp_client and 'workspace_rejection' in acp_client and 'prompt_result.get("permission_cancelled")' in workspace_utils and '_workspace_permission_cancelled' not in workspace_utils and cancellation_worker.find('permission_cancelled =') < cancellation_worker.find('result_text = _subagent_result_text'))
+    report("coding_workspace_informed_approval", '"command_summary"' in acp_client and '"approval_allowed"' in acp_client and "commandSummary" in workspace_ui and "approvalAllowed" in workspace_ui and "command_summary" in options_js and "approval_allowed" in options_js)
     report("coding_workspace_project_tree", "buildProjectFileTree" in workspace_ui and "renderProjectTreeNode" in workspace_ui and "projectTreeExpanded" in workspace_ui and "workspace-tree-folder" in style_css and "workspace-tree-chevron" in style_css)
+    report("coding_workspace_execution_approval", "workspace_acp_clients" in bridge_core and "workspace_run_id" in bridge_core and "pendingPermissions" in workspace_ui and "EXECUTION APPROVAL" in workspace_ui and "resolveWorkspacePermission" in workspace_ui)
     report("coding_workspace_monitor_responsive", "workspace-workbench-body" in style_css and "@media (max-width: 760px)" in style_css and "resize: horizontal" in style_css and "terminal-panel-expanded" in style_css and "terminal-panel-docked" in style_css and "text-align: left !important" in style_css and "toggleTerminalWidth" in sessions_js)
     report("coding_workspace_assets_index", "list_workspace_assets" in workspaces and "resolve_workspace_asset" in workspaces and "_resolve_checkout_file" in workspaces and "_validated_managed_checkout" in workspaces and "../README.md" in open("tools/tests/test_workspaces_e2e.py").read())
     report("coding_workspace_assets_main_view", "assetsView" in html and "assets-view-open" in style_css and "workspaceListAssets" in assets_ui and "workspaceOpenAsset" in assets_ui)

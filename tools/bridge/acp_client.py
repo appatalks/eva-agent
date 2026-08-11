@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -24,6 +25,82 @@ _ACP_SESSION_IDLE_SECONDS = _cfg.ACP_SESSION_IDLE_SECONDS
 _ARTIFACTS_DIR = _cfg.ARTIFACTS_DIR
 _ACP_TOOL_PROFILES = _cfg.ACP_TOOL_PROFILES
 _SECRET_MARKERS = ("TOKEN", "KEY", "SECRET", "PAT", "PASSWORD", "CREDENTIAL")
+_WORKSPACE_READ_ONLY_COMMANDS = {"pwd", "ls", "git"}
+_WORKSPACE_READ_ONLY_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "rev-parse"}
+
+
+def _tool_call_command(tool_call):
+    tool_call = tool_call if isinstance(tool_call, dict) else {}
+    raw_input = tool_call.get("rawInput")
+    if isinstance(raw_input, dict):
+        candidate = raw_input.get("command") or raw_input.get("cmd") or ""
+        arguments = raw_input.get("args")
+        if isinstance(candidate, str):
+            if isinstance(arguments, list) and all(isinstance(argument, str) for argument in arguments):
+                return shlex.join([candidate, *arguments])
+            return candidate
+    return ""
+
+
+def _command_summary(tool_call):
+    """Return a bounded redacted descriptor only for structured command input."""
+    tool_call = tool_call if isinstance(tool_call, dict) else {}
+    raw_input = tool_call.get("rawInput")
+    if not isinstance(raw_input, dict):
+        return ""
+    command = raw_input.get("command") or raw_input.get("cmd") or ""
+    arguments = raw_input.get("args")
+    if not isinstance(command, str) or not isinstance(arguments, list) or not all(isinstance(argument, str) for argument in arguments):
+        return ""
+    if re.search(r"[\x00-\x1f\x7f]", command) or any(re.search(r"[\x00-\x1f\x7f]", argument) for argument in arguments):
+        return ""
+    safe = [command]
+    redact_next = False
+    for argument in arguments:
+        upper = argument.upper()
+        sensitive = redact_next or any(marker in upper for marker in _SECRET_MARKERS)
+        safe.append("<redacted>" if sensitive else argument)
+        redact_next = argument.lower() in {"--token", "--password", "--secret", "--api-key", "--key"}
+    return shlex.join(safe)[:300]
+
+
+def _workspace_local_path(value, cwd):
+    if not value or value.startswith(("-", ":")):
+        return True
+    if value.startswith("~") or os.path.isabs(value):
+        return False
+    root = os.path.realpath(cwd or os.getcwd())
+    candidate = os.path.realpath(os.path.join(root, value))
+    try:
+        return os.path.commonpath([root, candidate]) == root
+    except ValueError:
+        return False
+
+
+def _workspace_read_only_execute(tool_call, cwd=None):
+    """Allow only transparent, non-mutating workspace inspection commands."""
+    command = _tool_call_command(tool_call)
+    if not command or re.search(r"[\n\r;|&><`]|\$\(|\$\{", command):
+        return False
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if not parts or parts[0] not in _WORKSPACE_READ_ONLY_COMMANDS:
+        return False
+    if parts[0] == "pwd":
+        return all(part in {"-L", "-P"} for part in parts[1:])
+    if parts[0] == "ls":
+        allowed_ls_flags = re.compile(r"^-[aAlh1dF]+$")
+        return all(allowed_ls_flags.fullmatch(part) or _workspace_local_path(part, cwd) for part in parts[1:])
+    if parts[0] == "git":
+        if len(parts) < 2 or parts[1] not in _WORKSPACE_READ_ONLY_GIT_SUBCOMMANDS:
+            return False
+        forbidden_git = {"--output", "--ext-diff", "--textconv", "--exec-path", "--config-env", "--no-index"}
+        if any(part == "-c" or part.startswith("-c=") or part.split("=", 1)[0] in forbidden_git for part in parts[2:]):
+            return False
+        return all(_workspace_local_path(part, cwd) for part in parts[2:])
+    return False
 
 
 def _hidden_subprocess_options():
@@ -500,21 +577,32 @@ class ACPClient:
                 _telemetry_emit("acp_permission", decision="workspace-auto-allow",
                                 tool_kind=tool_kind, option_count=len(options))
                 return
+        allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
+        if tool_kind == "execute" and allow_once and _workspace_read_only_execute(tool_call, self.cwd):
+            self._send_response(rpc_id, {
+                "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
+            })
+            decision = "workspace-auto-allow-read-execute" if permission_mode == "workspace_write" else "auto-allow-read-execute"
+            _telemetry_emit("acp_permission", decision=decision,
+                            tool_kind=tool_kind, option_count=len(options))
+            return
         routine_allowed = bool(_get_learning_consent().get("routine_tools")) and tool_kind in {
             "read", "search", "fetch", "think"
         }
-        allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
         if routine_allowed and allow_once:
             self._send_response(rpc_id, {"outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}})
             _telemetry_emit("acp_permission", decision="standing-consent", tool_kind=tool_kind, option_count=len(options))
             return
 
         permission_id = uuid.uuid4().hex
+        command_summary = _command_summary(tool_call) if tool_kind == "execute" else ""
         entry = {
             "id": permission_id,
             "rpc_id": rpc_id,
             "session_id": str(params.get("sessionId") or "")[:120],
             "tool_kind": tool_kind,
+            "command_summary": command_summary,
+            "approval_allowed": tool_kind != "execute" or bool(command_summary),
             "options": options,
             "created_at": time.time(),
         }
@@ -530,6 +618,8 @@ class ACPClient:
             return [{
                 "id": entry["id"],
                 "tool_kind": entry["tool_kind"],
+                "command_summary": entry.get("command_summary", ""),
+                "approval_allowed": entry.get("approval_allowed", True),
                 "options": list(entry["options"]),
                 "created_at": entry["created_at"],
             } for entry in self.pending_permissions.values()]
@@ -544,10 +634,15 @@ class ACPClient:
             if option["option_id"] == str(option_id or "")
             and option["kind"] in {"allow_once", "reject_once"}
         ), None)
-        if selected:
+        workspace_rejection = selected and selected["kind"] == "reject_once" and bool(getattr(self, "workspace_run_id", ""))
+        if selected and entry.get("approval_allowed", True) and not workspace_rejection:
             self._send_response(entry["rpc_id"], {"outcome": {"outcome": "selected", "optionId": selected["option_id"]}})
             decision = selected["kind"] or "selected"
         else:
+            with self._prompt_state_lock:
+                for state in self._active_prompts.values():
+                    if state.get("session_id") == entry["session_id"]:
+                        state["permission_cancelled"] = True
             self._send_notification("session/cancel", {"sessionId": entry["session_id"]})
             self._send_response(entry["rpc_id"], {"outcome": {"outcome": "cancelled"}})
             decision = "cancelled"
@@ -675,6 +770,7 @@ class ACPClient:
                 "on_chunk": on_chunk,
                 "on_event": on_event,
                 "permission_mode": permission_mode,
+                "permission_cancelled": False,
                 "chunk_count": 0,
                 "first_chunk_at": None,
                 "started_at": time.perf_counter(),
@@ -688,6 +784,7 @@ class ACPClient:
         started_at = state.get("started_at")
         return response_text, {
             "chunk_count": state.get("chunk_count", 0),
+            "permission_cancelled": bool(state.get("permission_cancelled")),
             "first_chunk_ms": round((first_chunk_at - started_at) * 1000.0, 1)
             if first_chunk_at is not None and started_at is not None else None,
         }
@@ -719,21 +816,27 @@ class ACPClient:
                                 ms=_ms, stop_reason="error",
                                 chunk_count=prompt_metrics["chunk_count"],
                                 first_chunk_ms=prompt_metrics["first_chunk_ms"])
-                return {"error": result["error"]}
+                return {"error": result["error"],
+                    "permission_cancelled": prompt_metrics["permission_cancelled"]}
             stop_reason = result.get("stopReason", "end_turn")
             _telemetry_emit("acp_prompt", model=self.model or "default",
                             prompt_chars=len(text or ""), response_chars=len(response_text or ""),
                             ms=_ms, stop_reason=stop_reason,
                             chunk_count=prompt_metrics["chunk_count"],
                             first_chunk_ms=prompt_metrics["first_chunk_ms"])
-            return {"text": response_text, "stop_reason": stop_reason}
+            return {
+                "text": response_text,
+                "stop_reason": stop_reason,
+                "permission_cancelled": prompt_metrics["permission_cancelled"],
+            }
 
         _telemetry_emit("acp_prompt", model=self.model or "default",
                         prompt_chars=len(text or ""), response_chars=len(response_text or ""),
                         ms=_ms, stop_reason="end_turn",
                         chunk_count=prompt_metrics["chunk_count"],
                         first_chunk_ms=prompt_metrics["first_chunk_ms"])
-        return {"text": response_text, "stop_reason": "end_turn"}
+        return {"text": response_text, "stop_reason": "end_turn",
+            "permission_cancelled": prompt_metrics["permission_cancelled"]}
 
     def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None):
         with _pin_acp_client(self) as acquired:

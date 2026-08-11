@@ -62,7 +62,7 @@ for arg in "$@"; do
   esac
 done
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ── Parallel arrays acting as the dependency queue (bash 3.2 compatible) ─────
@@ -398,6 +398,30 @@ self_update() {
 }
 
 # ── Build the standalone AppImage ───────────────────────────────────────────
+refresh_system_launcher() {
+  [ "$OS" = "linux" ] || return 0
+  local appimage launcher desktop
+  appimage="$(find "$SCRIPT_DIR/standalone/dist" -maxdepth 1 -type f -name 'Eva Standalone-*.AppImage' -print | sort -V | tail -n 1)"
+  [ -n "$appimage" ] && [ -x "$appimage" ] || { warn "Built AppImage was not found; launcher was not refreshed."; return 1; }
+  launcher="$HOME/.local/bin/eva"
+  desktop="$HOME/.local/share/applications/eva.desktop"
+  mkdir -p "$(dirname "$launcher")" "$(dirname "$desktop")"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf 'exec %q --eva-workspace-terminal-v1 "$@"\n' "$appimage"
+  } > "$launcher"
+  chmod 755 "$launcher"
+  {
+    printf '%s\n' '[Desktop Entry]'
+    printf '%s\n' 'Type=Application'
+    printf '%s\n' 'Name=Eva'
+    printf 'Exec=%s\n' "$launcher"
+    printf '%s\n' 'Terminal=false'
+    printf '%s\n' 'Categories=Utility;Development;'
+  } > "$desktop"
+  ok "System launcher refreshed: $launcher"
+}
+
 build_appimage() {
   [ -d "$SCRIPT_DIR/standalone" ] || { warn "No standalone/ directory; skipping build."; return; }
   have_cmd npm || { warn "npm not available; cannot build the AppImage."; return; }
@@ -405,7 +429,7 @@ build_appimage() {
   ( cd "$SCRIPT_DIR/standalone" \
       && { [ -d node_modules ] || npm install; } \
       && npm run dist ) \
-    && ok "AppImage rebuilt under standalone/dist/" \
+    && { ok "AppImage rebuilt under standalone/dist/"; refresh_system_launcher; } \
     || err "AppImage build failed (see output above)."
 }
 
