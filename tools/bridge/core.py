@@ -519,7 +519,11 @@ def _dispatch_workspace_run(run):
         "You are Eva's coding implementation agent. Work autonomously in the assigned Git worktree. "
         "Do not wait for further approval. Inspect the repository, implement the objective, run focused tests, "
         "and leave all requested files in the worktree. Do not access or modify paths outside the assigned "
-        "worktree. Finish with a concise report of changed files, tests, and any remaining issue.\n\n"
+        "worktree. Do not launch a browser, desktop, camera, external application, or new window, and do not "
+        "emit Eva browser, desktop, camera, or renderer action markers. For a GitHub issue or other remote "
+        "operation, use only an explicitly enabled workspace MCP tool. If that tool is unavailable or requires "
+        "permission that is not approved, report the blocker clearly instead of attempting another surface. "
+        "Finish with a concise report of changed files, tests, and any remaining issue.\n\n"
         "Objective:\n" + objective
     )
     task = {
@@ -1557,7 +1561,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _acp_clients():
         seen = set()
         clients = []
-        for client in list(_st.acp_pool.values()) + ([_st.acp_client] if _st.acp_client else []):
+        with _st.subagent_lock:
+            workspace_clients = list(_st.workspace_acp_clients.values())
+        for client in list(_st.acp_pool.values()) + ([_st.acp_client] if _st.acp_client else []) + workspace_clients:
             if client and id(client) not in seen:
                 seen.add(id(client))
                 clients.append(client)
@@ -1568,7 +1574,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         rows = []
         for client in self._acp_clients():
-            rows.extend(client.list_pending_permissions())
+            for row in client.list_pending_permissions():
+                workspace_run_id = getattr(client, "workspace_run_id", "")
+                if workspace_run_id:
+                    row["workspace_run_id"] = workspace_run_id
+                rows.append(row)
         rows.sort(key=lambda row: row.get("created_at", 0))
         self._json_response(200, {"permissions": rows[:20]})
 

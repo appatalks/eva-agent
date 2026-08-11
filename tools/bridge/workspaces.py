@@ -682,6 +682,13 @@ class WorkspaceStore:
                        WHERE id = ? AND status = 'active'""",
                     (now, row["coding_run_id"]),
                 )
+            elif status == "cancelled":
+                self.connection.execute(
+                    """UPDATE coding_runs
+                       SET status = 'cancelled', final_disposition = 'agent_cancelled', updated_at = ?
+                       WHERE id = ? AND status = 'active'""",
+                    (now, row["coding_run_id"]),
+                )
             else:
                 self.connection.execute(
                     "UPDATE coding_runs SET updated_at = ? WHERE id = ?", (now, row["coding_run_id"])

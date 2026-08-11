@@ -1566,7 +1566,7 @@ function _evaAgentFeedback(status, endpoint, title) {
   //    narration reflects the actual result instead of the pre-action intent.
   try {
     var autoSpeakEl = document.getElementById('autoSpeak');
-    var voiceOpen = (typeof _vv !== 'undefined' && _vv.open);
+    var voiceOpen = (typeof _vv !== 'undefined' && _vvIsActive());
     if ((voiceOpen || (autoSpeakEl && autoSpeakEl.checked)) && typeof speakText === 'function') {
       speakText(spoken);
     }
@@ -1589,7 +1589,7 @@ function _evaAgentFeedback(status, endpoint, title) {
   //    machine may be stuck in 'speaking' or 'thinking' since the agent ran
   //    outside the normal turn cycle. Nudge it back after TTS finishes.
   try {
-    if (typeof _vv !== 'undefined' && _vv.open) {
+    if (typeof _vv !== 'undefined' && _vvIsActive()) {
       setTimeout(function() {
         if (_vv.phase === 'speaking' || _vv.phase === 'thinking') {
           if (typeof _vv._finishSpeaking === 'function') {
@@ -1628,7 +1628,7 @@ function _evaCameraLookResult(desc) {
   }
   try {
     var autoSpeakEl = document.getElementById('autoSpeak');
-    var voiceOpen = (typeof _vv !== 'undefined' && _vv.open);
+    var voiceOpen = (typeof _vv !== 'undefined' && _vvIsActive());
     if ((voiceOpen || (autoSpeakEl && autoSpeakEl.checked)) && typeof speakText === 'function') {
       speakText(desc);
     }
@@ -1676,7 +1676,7 @@ function _evaAgentProgress(subgoal) {
   }
   try {
     var autoSpeakEl = document.getElementById('autoSpeak');
-    var voiceOpen = (typeof _vv !== 'undefined' && _vv.open);
+    var voiceOpen = (typeof _vv !== 'undefined' && _vvIsActive());
     if ((voiceOpen || (autoSpeakEl && autoSpeakEl.checked)) && typeof speakText === 'function') {
       speakText(line);
     }
@@ -1718,7 +1718,7 @@ function _evaAgentConfirmAsk(question, needsText) {
   }
   try {
     var autoSpeakEl = document.getElementById('autoSpeak');
-    var voiceOpen = (typeof _vv !== 'undefined' && _vv.open);
+    var voiceOpen = (typeof _vv !== 'undefined' && _vvIsActive());
     if ((voiceOpen || (autoSpeakEl && autoSpeakEl.checked)) && typeof speakText === 'function') {
       speakText(q);
     }
@@ -1779,7 +1779,7 @@ function _agentConfirmEcho(userMsg, decision) {
   }
   try {
     var autoSpeakEl = document.getElementById('autoSpeak');
-    var voiceOpen = (typeof _vv !== 'undefined' && _vv.open);
+    var voiceOpen = (typeof _vv !== 'undefined' && _vvIsActive());
     if (reply && (voiceOpen || (autoSpeakEl && autoSpeakEl.checked)) && typeof speakText === 'function') {
       speakText(reply);
     }
@@ -2332,7 +2332,7 @@ function initAudioDevicePreferences() {
     input._audioDeviceBound = true;
     input.addEventListener('change', function() {
       localStorage.setItem('audio_input_device_id', input.value);
-      if (_vv.open && (_vv.recognition || _vv.whisperMode)) {
+      if (_vvIsActive() && (_vv.recognition || _vv.whisperMode)) {
         _vvStopListening();
         _vvStartListening();
       }
@@ -2478,9 +2478,9 @@ var PERSONALITY_PRESETS = {
 
 function getSystemPrompt() {
   var txt = document.getElementById('txtSystemPrompt');
-  if (txt && txt.value.trim()) return txt.value.trim();
-  // Fallback to personality preset
-  return PERSONALITY_PRESETS['default'];
+  var prompt = txt && txt.value.trim() ? txt.value.trim() : PERSONALITY_PRESETS['default'];
+  if (window.EvaHarness && typeof EvaHarness.promptContract === 'function') prompt += EvaHarness.promptContract();
+  return prompt;
 }
 
 function applyPersonalityPreset() {
@@ -3308,6 +3308,7 @@ function showWelcome() {
 
 var _vv = {
   open: false,
+  compactActive: false,
   animFrame: null,
   waveFrame: null,
   audioCtx: null,
@@ -3344,6 +3345,44 @@ var _vv = {
   cmdStart: 0
 };
 
+var VOICE_MEMORY_GRAPH_ENABLED = false;
+
+function _vvIsActive() {
+  return _vv.open || _vv.compactActive;
+}
+
+function _vvLoadPreferences() {
+  try {
+    _vv.convoMode = localStorage.getItem('vvConvoMode') !== '0';
+    var savedTimeout = parseInt(localStorage.getItem('vvConvoTimeoutMs'), 10);
+    if (Number.isInteger(savedTimeout) && savedTimeout >= 5000 && savedTimeout <= 300000) {
+      _vv.convoTimeoutMs = savedTimeout;
+    }
+    var savedEndpointDelay = parseInt(localStorage.getItem('voice_endpoint_delay_ms'), 10);
+    if (Number.isInteger(savedEndpointDelay) && savedEndpointDelay >= 1000 && savedEndpointDelay <= 5000) {
+      _vv.endpointDelayMs = savedEndpointDelay;
+    }
+  } catch (e) {}
+}
+
+function toggleCompactVoiceController() {
+  if (_vv.compactActive) {
+    _vv.compactActive = false;
+    _vvSetLiveTranslation(false, true);
+    _vvStopListening();
+    _vvSetStatus('idle');
+    return;
+  }
+  if (typeof stopVoiceListener === 'function') stopVoiceListener();
+  _vv.compactActive = true;
+  _vvLoadPreferences();
+  _vvSyncConvoControls();
+  _vvSyncLiveTranslationControls();
+  _vvPrepareAcknowledgements();
+  _vvSetStatus('idle');
+  _vvStartListening();
+}
+
 function toggleVoiceView() {
   if (_vv.open) {
     closeVoiceView();
@@ -3362,17 +3401,7 @@ function openVoiceView() {
   el.setAttribute('aria-hidden', 'false');
   // Conversation mode: after the wake word, keep listening between turns until a
   // quiet period elapses. Persisted so the user's choice survives restarts.
-  try {
-    _vv.convoMode = localStorage.getItem('vvConvoMode') !== '0';
-    var savedTimeout = parseInt(localStorage.getItem('vvConvoTimeoutMs'), 10);
-    if (Number.isInteger(savedTimeout) && savedTimeout >= 5000 && savedTimeout <= 300000) {
-      _vv.convoTimeoutMs = savedTimeout;
-    }
-    var savedEndpointDelay = parseInt(localStorage.getItem('voice_endpoint_delay_ms'), 10);
-    if (Number.isInteger(savedEndpointDelay) && savedEndpointDelay >= 1000 && savedEndpointDelay <= 5000) {
-      _vv.endpointDelayMs = savedEndpointDelay;
-    }
-  } catch (e) {}
+  _vvLoadPreferences();
   _vvSyncConvoControls();
   _vvSyncLiveTranslationControls();
   _vvSetStatus('idle');
@@ -3395,11 +3424,12 @@ function openVoiceView() {
   _vvStartWaveBar();
   _vvStartHUD();
   _vvStartLogStream();
-  _vvStartMemoryGraph();
+  if (VOICE_MEMORY_GRAPH_ENABLED) _vvStartMemoryGraph();
 }
 
 function closeVoiceView() {
-  _vvSetLiveTranslation(false, true);
+  var keepCompactController = _vv.compactActive;
+  if (!keepCompactController) _vvSetLiveTranslation(false, true);
   _vv.open = false;
   var el = document.getElementById('voiceView');
   if (el) {
@@ -3407,11 +3437,13 @@ function closeVoiceView() {
     el.setAttribute('aria-hidden', 'true');
     el.removeAttribute('data-phase');
   }
-  if (_vv.speakObserver) { _vv.speakObserver.disconnect(); _vv.speakObserver = null; }
-  _vvDetachSpeakStartListeners();
-  if (_vv._watchTimer) { clearTimeout(_vv._watchTimer); _vv._watchTimer = null; }
-  if (_vv._postTextTimer) { clearTimeout(_vv._postTextTimer); _vv._postTextTimer = null; }
-  _vvStopBargeMonitor();
+  if (!keepCompactController) {
+    if (_vv.speakObserver) { _vv.speakObserver.disconnect(); _vv.speakObserver = null; }
+    _vvDetachSpeakStartListeners();
+    if (_vv._watchTimer) { clearTimeout(_vv._watchTimer); _vv._watchTimer = null; }
+    if (_vv._postTextTimer) { clearTimeout(_vv._postTextTimer); _vv._postTextTimer = null; }
+    _vvStopBargeMonitor();
+  }
   _vvStopLogStream();
   _vvStopMemoryGraph();
   // Clear the embedded vision panel so a stale frame does not linger on reopen.
@@ -3424,7 +3456,7 @@ function closeVoiceView() {
     var vvText = document.getElementById('vvVisionText');
     if (vvText) vvText.textContent = '';
   }
-  if (_vv._wasAutoSpeak !== undefined) {
+  if (!keepCompactController && _vv._wasAutoSpeak !== undefined) {
     var autoSpeak = document.getElementById('autoSpeak');
     if (autoSpeak) autoSpeak.checked = _vv._wasAutoSpeak;
     delete _vv._wasAutoSpeak;
@@ -3433,7 +3465,7 @@ function closeVoiceView() {
     document.removeEventListener('keydown', _vv._onEscape);
     delete _vv._onEscape;
   }
-  _vvStopListening();
+  if (!keepCompactController) _vvStopListening();
   _vvStopCanvas();
   _vvStopWaveBar();
   _vvStopHUD();
@@ -3449,6 +3481,16 @@ function _vvSetStatus(phase) {
   if (ph) {
     var labels = { idle: 'IDLE', listening: 'LISTENING', awake: 'AWAKE', thinking: 'PROCESSING', speaking: 'SPEAKING', error: 'ERROR' };
     ph.textContent = labels[phase] || phase.toUpperCase();
+  }
+  var compact = document.querySelector('.eva-sidebar-voice');
+  var compactStatus = document.getElementById('evaSidebarVoiceStatus');
+  var compactButton = document.getElementById('evaSidebarMicButton');
+  var compactLabels = { idle: 'STANDBY', listening: 'LISTENING', awake: 'AWAKE', thinking: 'WORKING', speaking: 'SPEAKING', error: 'ERROR' };
+  if (compact) compact.dataset.state = phase;
+  if (compactStatus) compactStatus.textContent = compactLabels[phase] || phase.toUpperCase();
+  if (compactButton) {
+    compactButton.title = phase === 'idle' ? 'Start Eva voice control' : 'Stop Eva voice control';
+    compactButton.setAttribute('aria-label', compactButton.title);
   }
 }
 
@@ -4484,12 +4526,12 @@ function _vvStartListening() {
   };
 
   _vv.recognition.onend = function() {
-    if (_vv.recognition && _vv.open) {
+    if (_vv.recognition && _vvIsActive()) {
       // Browser stopped recognition (normal after silence/timeout). Restart.
       _vv._restartAttempts = (_vv._restartAttempts || 0) + 1;
       var delay = Math.min(300 * _vv._restartAttempts, 2000);
       setTimeout(function() {
-        if (!_vv.recognition || !_vv.open) return;
+        if (!_vv.recognition || !_vvIsActive()) return;
         try {
           _vv.recognition.start();
           _vv._restartAttempts = 0; // reset on success
@@ -4520,7 +4562,7 @@ function _vvStartListening() {
   // sometimes silently stops delivering results without firing onend.
   if (_vv._watchdog) clearInterval(_vv._watchdog);
   _vv._watchdog = setInterval(function() {
-    if (!_vv.open || !_vv.recognition) {
+    if (!_vvIsActive() || !_vv.recognition) {
       clearInterval(_vv._watchdog);
       _vv._watchdog = null;
       return;
@@ -4531,7 +4573,7 @@ function _vvStartListening() {
       console.warn('[VoiceView] Watchdog: no results for 60s, restarting recognition');
       try { _vv.recognition.stop(); } catch(_) {}
       setTimeout(function() {
-        if (_vv.recognition && _vv.open) {
+        if (_vv.recognition && _vvIsActive()) {
           try { _vv.recognition.start(); _vv._lastResultTime = Date.now(); } catch(_) {}
         }
       }, 500);
@@ -4568,7 +4610,7 @@ function _vvStopListening() {
   _vvStopAck();
   _vvStopMicAnalyser();
   _vvDisconnectTTSAnalyser();
-  if (_vv.open) _vvSetStatus('idle');
+  if (_vvIsActive()) _vvSetStatus('idle');
 }
 
 // --- Whisper fallback ---
@@ -4584,9 +4626,9 @@ function _vvStartWhisperListening(provider) {
   _vvSetStatus('listening');
 
   function beginRecording() {
-    if (generation !== _vv.listenGeneration || !_vv.open || !_vv.whisperMode) return;
+    if (generation !== _vv.listenGeneration || !_vvIsActive() || !_vv.whisperMode) return;
     _vvStartMicAnalyser().then(function() {
-      if (generation !== _vv.listenGeneration || !_vv.open || !_vv.whisperMode) {
+      if (generation !== _vv.listenGeneration || !_vvIsActive() || !_vv.whisperMode) {
         _vvStopMicAnalyser();
         return;
       }
@@ -4603,7 +4645,7 @@ function _vvStartWhisperListening(provider) {
       _vvWarmAcknowledgements();
       beginRecording();
     }).catch(function(error) {
-      if (generation !== _vv.listenGeneration || !_vv.open || !_vv.whisperMode) return;
+      if (generation !== _vv.listenGeneration || !_vvIsActive() || !_vv.whisperMode) return;
       console.warn('[VoiceView] Local transcription unavailable:', error && error.message ? error.message : error);
       _vvSetStatus('error');
     });
@@ -4615,7 +4657,7 @@ function _vvStartWhisperListening(provider) {
   // recorder and no API call in flight) while we should be listening, restart.
   if (_vv._whisperWatchdog) clearInterval(_vv._whisperWatchdog);
   _vv._whisperWatchdog = setInterval(function() {
-    if (!_vv.open || !_vv.whisperMode) {
+    if (!_vvIsActive() || !_vv.whisperMode) {
       clearInterval(_vv._whisperWatchdog); _vv._whisperWatchdog = null;
       return;
     }
@@ -4629,7 +4671,7 @@ function _vvStartWhisperListening(provider) {
 }
 
 function _vvWhisperRecord() {
-  if (!_vv.open || !_vv.whisperMode || !_vv.micStream) return;
+  if (!_vvIsActive() || !_vv.whisperMode || !_vv.micStream) return;
   if (_vv.phase === 'thinking') return;
   // A recorder remains owned until its onstop callback has drained its final
   // chunks. MediaRecorder changes to inactive before that callback, so checking
@@ -4676,16 +4718,16 @@ function _vvWhisperRecord() {
       _vv.recordingCap = null;
       _vv.silenceTimer = null;
     }
-    if (capture.generation !== _vv.listenGeneration || !_vv.open || !_vv.whisperMode) {
+    if (capture.generation !== _vv.listenGeneration || !_vvIsActive() || !_vv.whisperMode) {
       // A fast stop/start leaves the old recorder pending onstop. Release it
       // first, then immediately arm the newer listening generation.
-      if (ownsCapture && _vv.open && _vv.whisperMode && _vv.phase !== 'thinking') {
+      if (ownsCapture && _vvIsActive() && _vv.whisperMode && _vv.phase !== 'thinking') {
         setTimeout(function() { _vvWhisperRecord(); }, 0);
       }
       return;
     }
     if (!capture.speechDetected || !capture.chunks.length) {
-      if (_vv.open && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 200);
+      if (_vvIsActive() && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 200);
       return;
     }
     var blob = new Blob(capture.chunks, { type: mimeType });
@@ -4707,7 +4749,7 @@ function _vvWhisperRecord() {
 }
 
 function _vvWhisperMonitor(capture) {
-  if (!_vv.open || !_vv.whisperMode || !_vv.analyser || !_vv.dataArray) return;
+  if (!_vvIsActive() || !_vv.whisperMode || !_vv.analyser || !_vv.dataArray) return;
 
   // A fixed high threshold can animate the waveform without ever qualifying
   // ordinary near-field speech for transcription, especially on laptop mics.
@@ -4718,7 +4760,7 @@ function _vvWhisperMonitor(capture) {
   // throttle the energy monitor to 0 fps when the window is unfocused.
   if (_vv._energyMonitor) clearInterval(_vv._energyMonitor);
   _vv._energyMonitor = setInterval(function() {
-    if (!_vv.open || !_vv.whisperMode || _vv._capture !== capture || !_vv.analyser || !_vv.dataArray) {
+    if (!_vvIsActive() || !_vv.whisperMode || _vv._capture !== capture || !_vv.analyser || !_vv.dataArray) {
       clearInterval(_vv._energyMonitor); _vv._energyMonitor = null; return;
     }
     if (_vv.phase === 'thinking') return;
@@ -4795,7 +4837,7 @@ function _vvWhisperTranscribe(blob) {
       var emptyTranscriptEl = document.getElementById('vvTranscript');
       if (emptyTranscriptEl) emptyTranscriptEl.textContent = 'I did not catch that.';
     }
-    if (_vv.open && _vv.whisperMode && _vv.phase !== 'thinking') {
+    if (_vvIsActive() && _vv.whisperMode && _vv.phase !== 'thinking') {
       _vvWhisperRecord();
     }
   }).catch(function(err) {
@@ -4808,7 +4850,7 @@ function _vvWhisperTranscribe(blob) {
       // Do not steal the state from an active response: a failed background
       // capture while Eva is speaking/thinking must not silence or bypass it.
       if (_vv.phase === 'speaking') {
-        if (_vv.open && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 200);
+        if (_vvIsActive() && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 200);
         return;
       }
       if (_vv.phase === 'thinking') return;
@@ -4819,11 +4861,11 @@ function _vvWhisperTranscribe(blob) {
       } else {
         _vvSetStatus('listening');
       }
-      if (_vv.open && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 200);
+      if (_vvIsActive() && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 200);
       return;
     }
     console.warn('[VoiceView] transcription error:', message);
-    if (_vv.open && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 1000);
+    if (_vvIsActive() && _vv.whisperMode) setTimeout(function() { _vvWhisperRecord(); }, 1000);
   });
 }
 
@@ -4842,7 +4884,7 @@ function _vvSyncConvoControls() {
         _vv.convoMode = !!toggle.checked;
         try { localStorage.setItem('vvConvoMode', _vv.convoMode ? '1' : '0'); } catch (e) {}
         // Apply immediately if currently idling between turns.
-        if (_vv.open) {
+        if (_vvIsActive()) {
           if (_vv.convoMode && _vv.phase === 'listening') {
             _vvEnterAwake(_vv.convoTimeoutMs);
           } else if (!_vv.convoMode && _vv.phase === 'awake') {
@@ -4862,7 +4904,7 @@ function _vvSyncConvoControls() {
         if (Number.isInteger(ms) && ms >= 5000 && ms <= 300000) {
           _vv.convoTimeoutMs = ms;
           try { localStorage.setItem('vvConvoTimeoutMs', String(ms)); } catch (e) {}
-          if (_vv.open && _vv.phase === 'awake') _vvEnterAwake(ms);
+          if (_vvIsActive() && _vv.phase === 'awake') _vvEnterAwake(ms);
         }
       });
     }
@@ -4941,14 +4983,14 @@ function _vvSetLiveTranslation(enabled, silent) {
   _vvUpdateLiveTranslationHint();
   if (!enabled) {
     if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (_) {} }
-    if (!silent && _vv.open) _vvSpeakLiveStatus('Live translation off. Returning to Eva voice.');
-    if (!silent && _vv.open && (_vv.recognition || _vv.whisperMode)) {
+    if (!silent && _vvIsActive()) _vvSpeakLiveStatus('Live translation off. Returning to Eva voice.');
+    if (!silent && _vvIsActive() && (_vv.recognition || _vv.whisperMode)) {
       _vvStopListening();
       _vvStartListening();
     }
     return;
   }
-  if (!_vv.open) return;
+  if (!_vvIsActive()) return;
   _vvStopListening();
   _vv.liveTranslation = true;
   _vvSyncLiveTranslationControls();
@@ -5039,7 +5081,7 @@ function _vvEnterAwake(timeoutMs) {
 // follow-up; otherwise she returns to standby and waits for the wake word.
 function _vvAfterTurn() {
   _vv._thinkingStart = null;
-  if (!_vv.open) return;
+  if (!_vvIsActive()) return;
   if (!(_vv.recognition || _vv.whisperMode)) { _vvSetStatus('idle'); return; }
   if (_vv.convoMode) {
     _vvEnterAwake(_vv.convoTimeoutMs);
@@ -5082,13 +5124,13 @@ function _vvBargeIn() {
 // After a barge-in, open the conversation window (no wake word needed) and arm
 // capture so the user's redirect is heard right away.
 function _vvAfterBarge() {
-  if (!_vv.open) return;
+  if (!_vvIsActive()) return;
   if (!(_vv.recognition || _vv.whisperMode)) { _vvSetStatus('idle'); return; }
   // Re-arm speech recognition in case the browser killed it during TTS
   if (_vv.recognition) {
     try { _vv.recognition.stop(); } catch (_) {}
     setTimeout(function() {
-      if (_vv.open) {
+      if (_vvIsActive()) {
         try { _vv.recognition.start(); } catch (_) {}
       }
     }, 200);
@@ -5133,6 +5175,12 @@ function _vvWakeWordMatch(transcript) {
 }
 
 function _vvHandleTranscript(transcript) {
+  if (typeof evaTextPromptConsumeVoice === 'function' && evaTextPromptConsumeVoice(transcript)) {
+    var promptTranscript = document.getElementById('vvTranscript');
+    if (promptTranscript) promptTranscript.textContent = '\u25B8 ' + transcript;
+    if (_vvIsActive()) _vvEnterAwake(_vv.convoTimeoutMs);
+    return;
+  }
   var translationCommand = _vvTranslationCommand(transcript);
   var commandIsAuthorized = _vv.liveTranslation || _vv.phase === 'awake' || !!_vvWakeWordMatch(transcript);
   if (translationCommand === true && commandIsAuthorized) {
@@ -5289,7 +5337,7 @@ function _vvSpeakAck() {
     languageMode: language,
     profileId: profileId
   }).then(function(bytes) {
-    if (runId !== _vv._ackRunId || !_vv.open || _vv.phase !== 'thinking') return;
+    if (runId !== _vv._ackRunId || !_vvIsActive() || _vv.phase !== 'thinking') return;
     var audio = new Audio();
     var url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
     _vv._ackAudio = audio;
@@ -5329,6 +5377,10 @@ function _vvSendCommand(command, fromWakeWord) {
       if (typeof _vvAfterTurn === 'function') _vvAfterTurn();
       return;
     }
+  }
+  if (typeof _runVoiceNavigationCommand === 'function' && _runVoiceNavigationCommand(command)) {
+    _vvAfterTurn();
+    return;
   }
   _vv.lastTranscript = command;
   _vv.cmdStart = performance.now();
@@ -5379,11 +5431,11 @@ function _vvWatchForResponse() {
   }
 
   function finishToListening() {
-    if (finished || !_vv.open) return;
+    if (finished || !_vvIsActive()) return;
     finished = true;
     cleanupTriggers();
     _vvRestoreAutoSpeak();
-    if (_vv.open) {
+    if (_vvIsActive()) {
       _vvSetStatus('listening');
       if (_vv.whisperMode) _vvWhisperRecord();
     }
@@ -5396,7 +5448,7 @@ function _vvWatchForResponse() {
   // sound, which then timed out back to 'listening' just before the real audio
   // started. Triggering on the actual audio/synth start keeps them in sync.
   function beginSpeaking() {
-    if (finished || speaking || !_vv.open) return;
+    if (finished || speaking || !_vvIsActive()) return;
     speaking = true;
     _vvStopAck();
     if (_vv.speakObserver) { _vv.speakObserver.disconnect(); _vv.speakObserver = null; }
@@ -5438,7 +5490,7 @@ function _vvWatchForResponse() {
   // the response was effectively silent, so return to listening rather than
   // showing a speaking phase that never produces sound.
   function onResponseText() {
-    if (finished || speaking || gotText || !_vv.open) return;
+    if (finished || speaking || gotText || !_vvIsActive()) return;
     var evaResponse = (typeof lastResponse === 'string') ? lastResponse.trim() : '';
     if (!evaResponse || evaResponse === _vv.lastEvaReply) return;
     gotText = true;
@@ -5468,7 +5520,7 @@ function _vvWatchForResponse() {
   }
   if (synth) {
     _vv._synthPoll = setInterval(function() {
-      if (finished || !_vv.open) { clearInterval(_vv._synthPoll); _vv._synthPoll = null; return; }
+      if (finished || !_vvIsActive()) { clearInterval(_vv._synthPoll); _vv._synthPoll = null; return; }
       // Ignore the short acknowledgment filler so it does not flip the phase
       // to 'speaking' before the real reply audio actually starts.
       if (synth.speaking && !_vv._ackActive) beginSpeaking();
@@ -5485,7 +5537,7 @@ function _vvWatchForResponse() {
   var WATCH_ABS_MAX = 600000; // 10 min hard ceiling
   function watchdog() {
     _vv._watchTimer = null;
-    if (finished || speaking || gotText || !_vv.open) return;
+    if (finished || speaking || gotText || !_vvIsActive()) return;
     if (_vv.phase === 'thinking' && (performance.now() - watchStart) < WATCH_ABS_MAX) {
       _vv._watchTimer = setTimeout(watchdog, 10000);
       return;
@@ -5519,7 +5571,7 @@ function _vvWaitForSpeechEnd(callback) {
   // wait for the whole chunk queue to drain rather than a single 'ended'.
   if (typeof _ttsChunk !== 'undefined' && _ttsChunk.active) {
     var chunkPoll = setInterval(function () {
-      if (!_vv.open || !_ttsChunk.active || _ttsChunk.cancelled) {
+      if (!_vvIsActive() || !_ttsChunk.active || _ttsChunk.cancelled) {
         clearInterval(chunkPoll); setTimeout(callback, 300);
       }
     }, 300);
@@ -5541,7 +5593,7 @@ function _vvWaitForSpeechEnd(callback) {
   var checkCount = 0;
   var maxChecks = 30;
   function check() {
-    if (!_vv.open) { callback(); return; }
+    if (!_vvIsActive()) { callback(); return; }
     checkCount++;
     if (checkCount > maxChecks) { callback(); return; }
     if (!audio.paused && !audio.ended) {
@@ -5815,6 +5867,23 @@ async function sendData() {
     var protectedRawText = protectedInput ? (protectedInput.innerText || protectedInput.textContent || '') : '';
     if (typeof captureProtectedMemoryFromChat === 'function' && await captureProtectedMemoryFromChat(protectedRawText)) {
       return;
+    }
+    if (window.EvaHarness && typeof EvaHarness.resolveNavigationRequest === 'function') {
+      var nativeRoute = EvaHarness.resolveNavigationRequest(protectedRawText);
+      if (nativeRoute) {
+        if (typeof evaTextPromptCancel === 'function') evaTextPromptCancel();
+        var nativeResult = await Promise.resolve(
+          nativeRoute.action && nativeRoute.action !== 'navigate'
+            ? EvaHarness.execute(nativeRoute)
+            : EvaHarness.navigate(nativeRoute.target)
+        );
+        if (protectedInput) protectedInput.innerHTML = '';
+        if (typeof setStatus === 'function') {
+          setStatus(nativeResult.ok ? 'info' : 'error', nativeResult.message);
+        }
+        if (nativeRoute.action === 'describe_workspaces' && nativeResult.ok && typeof speakText === 'function') speakText(nativeResult.message);
+        return;
+      }
     }
     // Hide Eva welcome MOTD on first send
     hideEvaWelcome();
@@ -7229,6 +7298,25 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     return ((hash << 5) - hash + character.charCodeAt(0)) | 0;
   }, 0).toString(36));
 
+  // Native Eva controls are executed through a small allowlist instead of a
+  // browser or desktop agent. A response that contains one takes precedence
+  // over visual-agent markers so Eva does not automate her own interface.
+  var harnessActions = [];
+  text = text.replace(/\[\[EVA_HARNESS\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_HARNESS\]\])?/g, function(full, json) {
+    try {
+      var action = JSON.parse(json);
+      if (action && typeof action === 'object') harnessActions.push(action);
+    } catch (e) {}
+    return '';
+  });
+  var harnessResults = [];
+  if (harnessActions.length && window.EvaHarness && typeof EvaHarness.execute === 'function') {
+    harnessResults = await Promise.all(harnessActions.slice(0, 3).map(function(action) { return Promise.resolve(EvaHarness.execute(action, { source: 'model' })); }));
+    text = text.replace(/\n{3,}/g, '\n\n').trim();
+    var harnessSummary = harnessResults.map(function(item) { return item.ok ? item.message : 'Native control failed: ' + item.message; }).join(' ');
+    if (harnessSummary) text = (text ? text + '\n\n' : '') + '_' + harnessSummary + '_';
+  }
+
   // Detect Eva browser-agent launch marker:
   // [[EVA_BROWSER]]{"goal":"...","start_url":"..."}[[/EVA_BROWSER]]
   var browserLaunch = null;
@@ -7259,6 +7347,12 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   });
   if (desktopLaunch) {
     text = text.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  if (harnessActions.length) {
+    browserLaunch = null;
+    desktopLaunch = null;
+    text = text.replace(/_Opening the (?:browser|desktop) agent…_\s*/g, '');
   }
 
   // Detect Eva camera "look" marker:

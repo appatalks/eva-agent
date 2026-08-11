@@ -82,6 +82,7 @@ subagent_lock = threading.Lock()
 # ── Durable coding workspaces ───────────────────────────────────────
 workspace_store = None
 workspace_lock = threading.RLock()
+workspace_acp_clients = {}  # task_id -> live workspace-scoped ACPClient
 
 # ── Telemetry ───────────────────────────────────────────────────────
 telemetry_enabled = os.environ.get("EVA_TELEMETRY", "1") not in ("0", "false", "no")

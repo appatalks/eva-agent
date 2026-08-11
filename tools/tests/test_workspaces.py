@@ -259,6 +259,16 @@ def main():
         assert restored.get_run(lifecycle_run["id"])["status"] == "archived"
         assert restored.discard_run(lifecycle_run["id"])["status"] == "discarded"
 
+        cancelled_run = restored.create_run(project["id"], "Report a cancelled workspace permission")
+        cancelled_agent_id = "22222222-2222-4222-8222-222222222222"
+        restored.create_agent_run(
+            cancelled_agent_id, cancelled_run["id"], cancelled_run["checkout"]["id"], "cancelled-test"
+        )
+        restored.update_agent_run(cancelled_agent_id, "cancelled", "Execution permission was not approved.")
+        assert restored.get_run(cancelled_run["id"])["status"] == "cancelled"
+        assert restored.get_run(cancelled_run["id"])["final_disposition"] == "agent_cancelled"
+        assert restored.discard_run(cancelled_run["id"])["status"] == "discarded"
+
         symlink_run = restored.create_run(project["id"], "Reject workspace symlink escapes")
         symlink_checkout = Path(symlink_run["checkout"]["path"])
         external = sandbox / "external-files"
