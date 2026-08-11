@@ -2,7 +2,7 @@
 description: "Use when: reviewing pull request readiness from untrusted diffs, comments, and CI evidence in automation."
 tools: [view, rg]
 agents: []
-model: "GPT-5.6 Terra (copilot)"
+model: "GPT-5.6 Luna (copilot)"
 user-invocable: false
 disable-model-invocation: true
 ---
