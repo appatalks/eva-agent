@@ -225,12 +225,13 @@ var EvaWorkspaces = (function() {
     section.appendChild(heading);
     permissions.forEach(function(permission) {
       var message = document.createElement('p');
-      message.textContent = 'Eva needs approval to continue a ' + (permission.toolKind || 'tool') + ' action in this workspace.';
+      var summary = permission.commandSummary ? ' Command: ' + permission.commandSummary : '';
+      message.textContent = 'Eva needs approval to continue a ' + (permission.toolKind || 'tool') + ' action in this workspace.' + summary;
       var actions = document.createElement('div');
       actions.className = 'workspace-monitor-detail-actions';
       var allow = (permission.options || []).find(function(option) { return option.kind === 'allow_once'; });
       actions.append(
-        actionButton('Allow once', 'Allow this workspace action once', function() { resolveWorkspacePermission(permission, allow); }, !allow),
+        actionButton('Allow once', 'Allow this workspace action once', function() { resolveWorkspacePermission(permission, allow); }, !allow || permission.approvalAllowed === false),
         actionButton('Reject', 'Reject this workspace action', function() { resolveWorkspacePermission(permission, null); })
       );
       section.append(message, actions);
@@ -874,6 +875,8 @@ var EvaWorkspaces = (function() {
               id: permission.id,
               workspaceRunId: permission.workspace_run_id || '',
               toolKind: permission.tool_kind || '',
+              commandSummary: permission.command_summary || '',
+              approvalAllowed: permission.approval_allowed !== false,
               options: permission.options || []
             };
           }).filter(function(permission) { return permission.workspaceRunId; });

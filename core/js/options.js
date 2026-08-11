@@ -1887,7 +1887,8 @@ function _renderACPPermission(permission) {
   bubble.className = 'chat-bubble eva-bubble';
   var text = document.createElement('div');
   text.className = 'md';
-  text.textContent = 'Allow this ' + String(permission.tool_kind || 'tool') + ' action once?';
+  var commandSummary = permission.command_summary ? ' Command: ' + String(permission.command_summary) : '';
+  text.textContent = 'Allow this ' + String(permission.tool_kind || 'tool') + ' action once?' + commandSummary;
   bubble.appendChild(text);
   var actions = document.createElement('div');
   actions.className = 'background-actions';
@@ -1897,7 +1898,7 @@ function _renderACPPermission(permission) {
   allowButton.type = 'button';
   allowButton.className = 'auth-toggle';
   allowButton.textContent = 'Allow once';
-  allowButton.disabled = !allow;
+  allowButton.disabled = !allow || permission.approval_allowed === false;
   allowButton.addEventListener('click', function() { _resolveACPPermission(permission.id, allow && allow.option_id, bubble); });
   var rejectButton = document.createElement('button');
   rejectButton.type = 'button';

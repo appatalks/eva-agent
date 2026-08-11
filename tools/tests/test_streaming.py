@@ -196,7 +196,7 @@ class StreamingContractTests(unittest.TestCase):
                 "method": "session/request_permission",
                 "params": {
                     "sessionId": "session-1",
-                    "toolCall": {"toolCallId": "call-interactive-read", "kind": "execute", "title": "Run `pwd`"},
+                    "toolCall": {"toolCallId": "call-interactive-read", "kind": "execute", "rawInput": {"command": "pwd", "args": []}},
                     "options": [{"optionId": "allow-once", "kind": "allow_once"}],
                 },
             })
@@ -205,6 +205,67 @@ class StreamingContractTests(unittest.TestCase):
         })])
         self.assertEqual(client.list_pending_permissions(), [])
         self.assertEqual(emit.call_args.kwargs["decision"], "auto-allow-read-execute")
+
+    def test_title_only_execute_requires_decision_and_hides_approval(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        with patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 68,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-title-only", "kind": "execute", "title": "Run `pwd`"},
+                    "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                },
+            })
+        self.assertEqual(responses, [])
+        pending = client.list_pending_permissions()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["command_summary"], "")
+        self.assertFalse(pending[0]["approval_allowed"])
+
+    def test_pending_execute_summary_redacts_secret_argument(self):
+        client = CallbackACPClient()
+        with patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 69,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-summary", "kind": "execute", "rawInput": {"command": "tool", "args": ["--token", "secret-value", "inspect"]}},
+                    "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                },
+            })
+        pending = client.list_pending_permissions()[0]
+        self.assertIn("tool", pending["command_summary"])
+        self.assertIn("<redacted>", pending["command_summary"])
+        self.assertNotIn("secret-value", pending["command_summary"])
+
+    def test_workspace_reject_cancels_active_prompt(self):
+        client = CallbackACPClient()
+        client.workspace_run_id = "workspace-run"
+        client._begin_prompt(207, "workspace-session", None, "workspace_write")
+        wire = []
+        client._send_notification = lambda method, params: wire.append(("notification", method, params))
+        client._send_response = lambda request_id, result: wire.append(("response", request_id, result))
+        with patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 69,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "workspace-session",
+                    "toolCall": {"toolCallId": "call-workspace-reject", "kind": "execute", "rawInput": {"command": "node", "args": ["-e", "console.log('x')"]}},
+                    "options": [{"optionId": "allow", "kind": "allow_once"}, {"optionId": "reject", "kind": "reject_once"}],
+                },
+            })
+        permission_id = client.list_pending_permissions()[0]["id"]
+        self.assertTrue(client.resolve_permission(permission_id, "reject"))
+        _, metrics = client._finish_prompt(207)
+        self.assertEqual(wire[0], ("notification", "session/cancel", {"sessionId": "workspace-session"}))
+        self.assertEqual(wire[1], ("response", 69, {"outcome": {"outcome": "cancelled"}}))
+        self.assertTrue(metrics["permission_cancelled"])
 
     def test_interactive_agent_requires_decision_for_node_transform(self):
         client = CallbackACPClient()

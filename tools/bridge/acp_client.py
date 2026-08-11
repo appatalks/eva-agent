@@ -39,13 +39,29 @@ def _tool_call_command(tool_call):
             if isinstance(arguments, list) and all(isinstance(argument, str) for argument in arguments):
                 return shlex.join([candidate, *arguments])
             return candidate
-    if isinstance(raw_input, str):
-        return raw_input
-    title = str(tool_call.get("title") or "").strip()
-    match = re.search(r"(?:run|execute)\s+(?:command\s*:\s*)?`([^`]+)`", title, re.IGNORECASE)
-    if not match:
-        match = re.search(r"(?:run|execute)\s+command\s*:\s*(.+)$", title, re.IGNORECASE)
-    return match.group(1).strip() if match else ""
+    return ""
+
+
+def _command_summary(tool_call):
+    """Return a bounded redacted descriptor only for structured command input."""
+    tool_call = tool_call if isinstance(tool_call, dict) else {}
+    raw_input = tool_call.get("rawInput")
+    if not isinstance(raw_input, dict):
+        return ""
+    command = raw_input.get("command") or raw_input.get("cmd") or ""
+    arguments = raw_input.get("args")
+    if not isinstance(command, str) or not isinstance(arguments, list) or not all(isinstance(argument, str) for argument in arguments):
+        return ""
+    if re.search(r"[\x00-\x1f\x7f]", command) or any(re.search(r"[\x00-\x1f\x7f]", argument) for argument in arguments):
+        return ""
+    safe = [command]
+    redact_next = False
+    for argument in arguments:
+        upper = argument.upper()
+        sensitive = redact_next or any(marker in upper for marker in _SECRET_MARKERS)
+        safe.append("<redacted>" if sensitive else argument)
+        redact_next = argument.lower() in {"--token", "--password", "--secret", "--api-key", "--key"}
+    return shlex.join(safe)[:300]
 
 
 def _workspace_local_path(value, cwd):
@@ -579,11 +595,14 @@ class ACPClient:
             return
 
         permission_id = uuid.uuid4().hex
+        command_summary = _command_summary(tool_call) if tool_kind == "execute" else ""
         entry = {
             "id": permission_id,
             "rpc_id": rpc_id,
             "session_id": str(params.get("sessionId") or "")[:120],
             "tool_kind": tool_kind,
+            "command_summary": command_summary,
+            "approval_allowed": tool_kind != "execute" or bool(command_summary),
             "options": options,
             "created_at": time.time(),
         }
@@ -599,6 +618,8 @@ class ACPClient:
             return [{
                 "id": entry["id"],
                 "tool_kind": entry["tool_kind"],
+                "command_summary": entry.get("command_summary", ""),
+                "approval_allowed": entry.get("approval_allowed", True),
                 "options": list(entry["options"]),
                 "created_at": entry["created_at"],
             } for entry in self.pending_permissions.values()]
@@ -613,7 +634,8 @@ class ACPClient:
             if option["option_id"] == str(option_id or "")
             and option["kind"] in {"allow_once", "reject_once"}
         ), None)
-        if selected:
+        workspace_rejection = selected and selected["kind"] == "reject_once" and bool(getattr(self, "workspace_run_id", ""))
+        if selected and entry.get("approval_allowed", True) and not workspace_rejection:
             self._send_response(entry["rpc_id"], {"outcome": {"outcome": "selected", "optionId": selected["option_id"]}})
             decision = selected["kind"] or "selected"
         else:

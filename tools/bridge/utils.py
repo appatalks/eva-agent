@@ -66,11 +66,6 @@ def _subagent_result_text(result):
     return str(result or "")
 
 
-def _workspace_permission_cancelled(result_text):
-    """Recognize ACP's terminal cancellation result without treating it as a completed run."""
-    return bool(re.search(r"\b(?:operation|permission)\s+cancelled\b|\bcancelled\s+by\s+user\b", str(result_text or ""), re.IGNORECASE))
-
-
 def _subagent_dependency_context(task_id, timeout=300):
     """Wait for prerequisite tasks and return their labeled outputs."""
     deadline = time.time() + timeout
@@ -407,9 +402,6 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 cancel_workspace_run()
                 return
             result_text = _subagent_result_text(prompt_result)
-            if task.get("coding_run_id") and _workspace_permission_cancelled(result_text):
-                cancel_workspace_run()
-                return
             while True:
                 with _st.subagent_lock:
                     task["result"] = result_text[-4000:]
@@ -436,9 +428,6 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                     cancel_workspace_run()
                     return
                 result_text = _subagent_result_text(prompt_result)
-                if task.get("coding_run_id") and _workspace_permission_cancelled(result_text):
-                    cancel_workspace_run()
-                    return
         finally:
             client.stop()
             with _st.subagent_lock:

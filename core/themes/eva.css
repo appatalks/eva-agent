@@ -325,6 +325,13 @@ body.eva-standalone.theme-eva.memory-view-open .memory-inspector-panel {
   from { transform: scale(0.72); opacity: 0.64; }
   to { transform: scale(1.18); opacity: 1; }
 }
+@media (prefers-reduced-motion: reduce) {
+  .eva-sidebar-voice-shell-scan,
+  .eva-sidebar-voice[data-state="thinking"] .eva-sidebar-voice-shell-core,
+  .eva-sidebar-voice[data-state="speaking"] .eva-sidebar-voice-shell-core {
+    animation: none;
+  }
+}
 .eva-sidebar-voice[data-state="sending"] { border-color: rgba(255,211,116,0.55); }
 .eva-sidebar-voice[data-state="sending"] .eva-sidebar-voice-shell-core { background: #ffe3a0; box-shadow: 0 0 7px #ffe3a0, 0 0 20px rgba(255, 194, 89, 0.78); }
 .eva-sidebar-voice[data-state="error"] { border-color: rgba(255,130,130,0.5); }
