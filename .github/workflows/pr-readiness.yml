@@ -372,10 +372,11 @@ jobs:
               -f context='PR Readiness / Terra verdict' \
               -f description="$2" \
               -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            touch readiness/status-published
+            touch "$RUNNER_TEMP/eva-readiness-status-published-$HEAD_SHA"
           }
               verdict_json="$(python3 tools/readiness_verdict.py readiness/copilot-review.md)"
               verdict="$(jq -r '.verdict // ""' <<< "$verdict_json")"
+          printf 'verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
           case "$verdict" in
             APPROVE)
               publish_status success 'Terra approved PR readiness'
@@ -414,16 +415,13 @@ jobs:
           esac
 
       - name: Post maintainer summary
-        if: steps.verdict.outcome == 'success' && contains(steps.verdict.outputs.status_published, 'true')
+        if: steps.verdict.outcome == 'success' && steps.verdict.outputs.verdict == 'NEEDS_MAINTAINER' && contains(steps.verdict.outputs.status_published, 'true')
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
           HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
         run: |
           set -euo pipefail
-          verdict_json="$(python3 tools/readiness_verdict.py readiness/copilot-review.md)"
-          verdict="$(jq -r '.verdict // ""' <<< "$verdict_json")"
-          [[ "$verdict" == "NEEDS_MAINTAINER" ]] || exit 0
           current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
           if [[ "$current_head" != "$HEAD_SHA" ]]; then
             echo "::notice::PR head advanced to $current_head; skipping stale maintainer summary for $HEAD_SHA."
@@ -451,7 +449,7 @@ jobs:
           PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
           HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
         run: |
-          if [[ -f readiness/status-published ]]; then
+          if [[ -f "$RUNNER_TEMP/eva-readiness-status-published-$HEAD_SHA" ]]; then
             echo "::notice::An authoritative Terra status was already published; preserving that verdict."
             exit 0
           fi
