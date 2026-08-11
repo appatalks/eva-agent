@@ -74,5 +74,6 @@ tools/tests/__pycache__/
 
 # Ad hoc regression scripts remain local validation unless deliberately
 # promoted into the committed CI contract.
+tools/local-tests/
 tools/tests/local/test_readiness_verdict.py
 tools/tests/local/test_kusto_turn_stages.py
