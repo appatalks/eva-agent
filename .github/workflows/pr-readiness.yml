@@ -414,8 +414,15 @@ jobs:
             exit 0
           fi
           python3 tools/readiness_maintainer_comment.py readiness/copilot-review.md --head-sha "$HEAD_SHA" > readiness/maintainer-comment.md
-          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-            -f body="$(cat readiness/maintainer-comment.md)"
+          if ! comment_error="$(gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            -f body="$(cat readiness/maintainer-comment.md)" 2>&1)"; then
+            echo "::warning::Readiness status was published, but the optional maintainer comment could not be created: $comment_error"
+            {
+              echo "### Maintainer comment unavailable"
+              echo
+              echo "The authoritative readiness status was published for \`$HEAD_SHA\`, but GitHub denied the optional PR comment."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Publish unexpected readiness failure
         if: failure() && steps.credential_scan.outcome != 'failure' && steps.verdict.outputs.status_published != 'true'
