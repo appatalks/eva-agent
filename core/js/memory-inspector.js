@@ -217,6 +217,14 @@
     if (refresh) refresh.addEventListener('click', load);
   }
 
-  window.EvaMemoryInspector = { open: function () { open(true); }, close: function () { open(false); }, refresh: load };
+  window.EvaMemoryInspector = {
+    open: function () { open(true); },
+    close: function () { open(false); },
+    toggle: function (event) {
+      if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+      open();
+    },
+    refresh: load
+  };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 }());

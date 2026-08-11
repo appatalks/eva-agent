@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Tests for strict maintainer readiness command parsing."""
 
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from readiness_decision import parse_command
 

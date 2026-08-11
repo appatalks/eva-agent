@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-TOOLS_DIR = Path(__file__).resolve().parent
+TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
 
 from bridge import state

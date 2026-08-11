@@ -158,8 +158,8 @@ jobs:
             echo 'Autofix touched a protected path.' >&2
             exit 1
           fi
-          node tools/test_voice_endpoint.js
-          python tools/test_static.py
+          node tools/tests/test_voice_endpoint.js
+          python tools/tests/test_static.py
 
       - name: Commit, push, and request maintainer review
         if: inputs.dry_run == false

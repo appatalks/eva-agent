@@ -14,6 +14,9 @@ var EvaAgents = (function() {
     nodeMap: {},
     hoverNode: null,
     dragNode: null,
+    focusNode: null,
+    graphPointerStart: null,
+    entry: 'agents',
     canvasWidth: 0,
     canvasHeight: 0,
     lastFrame: 0,
@@ -50,19 +53,37 @@ var EvaAgents = (function() {
     return minutes < 60 ? minutes + 'm ' + (seconds % 60) + 's' : Math.floor(minutes / 60) + 'h ' + (minutes % 60) + 'm';
   }
 
-  function open() {
-    if (state.open) return Promise.resolve();
+  function setEntry(entry) {
+    state.entry = entry === 'workspace' ? 'workspace' : 'agents';
+    var workspace = state.entry === 'workspace';
+    document.body.classList.toggle('agent-workspace-open', workspace);
+    var view = document.getElementById('agentsView');
+    var agentsButton = document.getElementById('evaAgentsBtn');
+    var workspaceButton = document.getElementById('evaWorkspacesBtn');
+    var kicker = document.getElementById('agentsViewKicker');
+    var title = document.getElementById('agentsViewTitle');
+    if (view) view.setAttribute('aria-label', workspace ? 'Agentic sessions workspace' : 'Agent operations');
+    if (agentsButton) agentsButton.classList.toggle('active', !workspace && state.open);
+    if (workspaceButton) workspaceButton.classList.toggle('active', workspace && state.open);
+    if (kicker) kicker.textContent = workspace ? 'RUNNING AGENTIC SESSIONS' : 'LIVE ORCHESTRATION';
+    if (title) title.textContent = workspace ? 'Workspace' : 'Agent Operations';
+  }
+
+  function open(entry) {
+    if (state.open) {
+      setEntry(entry);
+      return refresh(true);
+    }
     if (typeof closeVoiceView === 'function' && typeof _vv !== 'undefined' && _vv.open) closeVoiceView();
     if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
     if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();
     if (window.EvaSkills && typeof window.EvaSkills.close === 'function') window.EvaSkills.close();
     closeSidePanels();
     state.open = true;
+    setEntry(entry);
     document.body.classList.add('agents-view-open');
     var view = document.getElementById('agentsView');
-    var button = document.getElementById('evaAgentsBtn');
     if (view) view.setAttribute('aria-hidden', 'false');
-    if (button) button.classList.add('active');
     var refreshPromise = refreshAndSchedule();
     startGraph();
     return refreshPromise;
@@ -70,11 +91,13 @@ var EvaAgents = (function() {
 
   function close() {
     state.open = false;
-    document.body.classList.remove('agents-view-open');
+    document.body.classList.remove('agents-view-open', 'agent-workspace-open');
     var view = document.getElementById('agentsView');
     var button = document.getElementById('evaAgentsBtn');
+    var workspaceButton = document.getElementById('evaWorkspacesBtn');
     if (view) view.setAttribute('aria-hidden', 'true');
     if (button) button.classList.remove('active');
+    if (workspaceButton) workspaceButton.classList.remove('active');
     if (state.pollTimer) clearTimeout(state.pollTimer);
     state.pollTimer = null;
     state.refreshSequence++;
@@ -99,7 +122,11 @@ var EvaAgents = (function() {
   }
 
   function toggle() {
-    if (state.open) close(); else open();
+    if (state.open && state.entry === 'agents') close(); else open('agents');
+  }
+
+  function openWorkspace() {
+    return open('workspace');
   }
 
   async function refresh(forceGraph) {
@@ -406,32 +433,78 @@ var EvaAgents = (function() {
     if (panel) panel.setAttribute('aria-hidden', 'true');
   }
 
+  function graphUnit(value) {
+    var text = String(value || '');
+    var hash = 2166136261;
+    for (var index = 0; index < text.length; index++) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0) / 4294967295;
+  }
+
+  function graphHomes(nodes, edges) {
+    var homes = { 'eva-root': { x: 0.5, y: 0.5 } };
+    var entities = nodes.filter(function(node) { return node.type === 'entity'; });
+    var agents = nodes.filter(function(node) { return node.type === 'agent'; });
+    var children = {};
+    edges.forEach(function(edge) {
+      if (edge.type !== 'memory') return;
+      children[edge.source] = children[edge.source] || [];
+      children[edge.source].push(edge.target);
+    });
+    entities.forEach(function(node, index) {
+      var angle = -Math.PI / 2 + (Math.PI * 2 * index / Math.max(entities.length, 1));
+      var radius = 0.22 + graphUnit(node.id) * 0.08;
+      homes[node.id] = { x: 0.5 + Math.cos(angle) * radius, y: 0.5 + Math.sin(angle) * radius };
+    });
+    agents.forEach(function(node, index) {
+      var angle = -Math.PI / 2 + (Math.PI * 2 * index / Math.max(agents.length, 1));
+      homes[node.id] = { x: 0.5 + Math.cos(angle) * 0.38, y: 0.5 + Math.sin(angle) * 0.31 };
+    });
+    Object.keys(children).forEach(function(parentId) {
+      var parent = homes[parentId] || homes['eva-root'];
+      children[parentId].forEach(function(childId, index) {
+        var angle = graphUnit(childId) * Math.PI * 2 + index * 0.46;
+        var radius = 0.07 + (index % 3) * 0.025;
+        homes[childId] = {
+          x: Math.max(0.06, Math.min(0.94, parent.x + Math.cos(angle) * radius)),
+          y: Math.max(0.08, Math.min(0.92, parent.y + Math.sin(angle) * radius))
+        };
+      });
+    });
+    nodes.forEach(function(node) {
+      if (homes[node.id]) return;
+      var angle = graphUnit(node.id) * Math.PI * 2;
+      homes[node.id] = { x: 0.5 + Math.cos(angle) * 0.18, y: 0.5 + Math.sin(angle) * 0.18 };
+    });
+    return homes;
+  }
+
   function updateGraph(sourceNodes, sourceEdges) {
     var keep = selectGraphNodes(sourceNodes, 90);
     var allowed = {};
-    var agentNodes = keep.filter(function(node) { return node.type === 'agent'; });
-    var agentPositions = {};
-    agentNodes.forEach(function(node, index) {
-      var angle = -Math.PI / 2 + (Math.PI * 2 * index / Math.max(agentNodes.length, 1));
-      agentPositions[node.id] = { x: 0.5 + Math.cos(angle) * 0.28, y: 0.5 + Math.sin(angle) * 0.3 };
-    });
+    keep.forEach(function(node) { allowed[node.id] = true; });
+    var visibleEdges = sourceEdges.filter(function(edge) { return allowed[edge.source] && allowed[edge.target]; });
+    var homes = graphHomes(keep, visibleEdges);
     state.nodes = keep.map(function(raw, index) {
-      allowed[raw.id] = true;
       var existing = state.nodeMap[raw.id];
+      var home = homes[raw.id] || { x: 0.5, y: 0.5 };
       if (existing) {
         Object.keys(raw).forEach(function(key) { existing[key] = raw[key]; });
+        existing.homeX = home.x;
+        existing.homeY = home.y;
         if (raw.id === 'eva-root') { existing.x = 0.5; existing.y = 0.5; existing.vx = 0; existing.vy = 0; }
         return existing;
       }
-      var angle = index * 2.39996;
-      var initial = raw.id === 'eva-root' ? { x: 0.5, y: 0.5 } :
-                    (agentPositions[raw.id] || { x: 0.5 + Math.cos(angle) * 0.22, y: 0.5 + Math.sin(angle) * 0.34 });
       var node = {
         id: raw.id,
         label: raw.label,
         type: raw.type,
-        x: initial.x,
-        y: initial.y,
+        x: home.x,
+        y: home.y,
+        homeX: home.x,
+        homeY: home.y,
         vx: 0,
         vy: 0
       };
@@ -439,7 +512,8 @@ var EvaAgents = (function() {
       state.nodeMap[raw.id] = node;
       return node;
     });
-    state.edges = sourceEdges.filter(function(edge) { return allowed[edge.source] && allowed[edge.target]; });
+    state.edges = visibleEdges;
+    if (state.focusNode && !allowed[state.focusNode.id]) state.focusNode = null;
     var empty = document.getElementById('agentGraphEmpty');
     if (empty) empty.hidden = state.nodes.length > 0;
   }
@@ -501,8 +575,8 @@ var EvaAgents = (function() {
         return;
       }
       if (state.dragNode === node) return;
-      node.vx += (0.5 - node.x) * 0.00012;
-      node.vy += (0.5 - node.y) * 0.00012;
+      node.vx += ((node.homeX === undefined ? 0.5 : node.homeX) - node.x) * 0.00055;
+      node.vy += ((node.homeY === undefined ? 0.5 : node.homeY) - node.y) * 0.00055;
       node.vx *= 0.91;
       node.vy *= 0.91;
       var horizontalMargin = node.type === 'agent' || node.type === 'core' ? 100 : 55;
@@ -520,6 +594,15 @@ var EvaAgents = (function() {
     context.clearRect(0, 0, width, height);
     drawGrid(context, width, height, time);
     simulate();
+    state.nodes.filter(function(node) { return node.type === 'entity'; }).forEach(function(node) {
+      var x = node.x * width;
+      var y = node.y * height;
+      context.beginPath();
+      context.arc(x, y, 30 + Math.sin(time * 0.001 + graphUnit(node.id) * 8) * 3, 0, Math.PI * 2);
+      context.strokeStyle = 'rgba(213, 134, 255, 0.11)';
+      context.lineWidth = 0.7;
+      context.stroke();
+    });
     state.edges.forEach(function(edge, index) {
       var source = state.nodeMap[edge.source];
       var target = state.nodeMap[edge.target];
@@ -528,14 +611,15 @@ var EvaAgents = (function() {
       var sy = source.y * height;
       var tx = target.x * width;
       var ty = target.y * height;
+      var focused = state.focusNode && (state.focusNode.id === source.id || state.focusNode.id === target.id);
       context.beginPath();
       context.moveTo(sx, sy);
       context.lineTo(tx, ty);
       var dependency = edge.type === 'dependency';
       var orchestration = edge.type === 'orchestration';
-      context.strokeStyle = dependency ? 'rgba(167, 139, 250, 0.62)' :
-                            (orchestration ? 'rgba(91, 154, 255, 0.5)' : 'rgba(74, 222, 199, ' + (0.12 + edge.confidence * 0.2) + ')');
-      context.lineWidth = dependency ? 2 : (orchestration ? 1.4 : 0.7 + edge.confidence);
+      context.strokeStyle = dependency ? 'rgba(167, 139, 250,' + (focused ? '0.95' : '0.62') + ')' :
+                (orchestration ? 'rgba(91, 154, 255,' + (focused ? '0.88' : '0.5') + ')' : 'rgba(74, 222, 199, ' + (focused ? '0.76' : 0.12 + edge.confidence * 0.2) + ')');
+      context.lineWidth = dependency ? (focused ? 2.5 : 2) : (orchestration ? (focused ? 2 : 1.4) : 0.7 + edge.confidence + (focused ? 0.8 : 0));
       context.stroke();
       if (!target.status || isActive(target.status)) {
         var progress = ((time * 0.00012) + index * 0.173) % 1;
@@ -543,6 +627,13 @@ var EvaAgents = (function() {
         context.arc(sx + (tx - sx) * progress, sy + (ty - sy) * progress, 1.7, 0, Math.PI * 2);
         context.fillStyle = dependency ? 'rgba(196, 181, 253, 0.9)' : 'rgba(137, 255, 234, 0.82)';
         context.fill();
+      }
+      if (focused && edge.label) {
+        context.font = '600 9px monospace';
+        context.fillStyle = 'rgba(224, 255, 248, 0.82)';
+        context.textAlign = 'center';
+        context.fillText(String(edge.label).replace(/_/g, ' '), (sx + tx) / 2, (sy + ty) / 2 - 5);
+        context.textAlign = 'left';
       }
     });
     state.nodes.forEach(function(node, index) {
@@ -556,17 +647,23 @@ var EvaAgents = (function() {
       var pulse = 1 + Math.sin(time * 0.002 + index) * 0.18;
       context.beginPath();
       context.arc(x, y, radius * 2.4 * pulse, 0, Math.PI * 2);
-      context.fillStyle = core ? 'rgba(255, 190, 92, 0.16)' : (entity ? 'rgba(255, 190, 92, 0.07)' : (agent ? 'rgba(91, 154, 255, 0.11)' : 'rgba(74, 222, 199, 0.055)'));
+      context.fillStyle = core ? 'rgba(255, 190, 92, 0.16)' : (entity ? 'rgba(213, 134, 255, 0.12)' : (agent ? 'rgba(91, 154, 255, 0.11)' : 'rgba(74, 222, 199, 0.055)'));
       context.fill();
       context.beginPath();
       if (agent && !doneAgent) {
         context.rect(x - radius, y - radius, radius * 2, radius * 2);
+      } else if (!core && !entity && !agent) {
+        context.save();
+        context.translate(x, y);
+        context.rotate(Math.PI / 4);
+        context.rect(-radius, -radius, radius * 2, radius * 2);
+        context.restore();
       } else {
         context.arc(x, y, radius, 0, Math.PI * 2);
       }
-      context.fillStyle = core ? '#ffbe5c' : (entity ? '#ffbe5c' : (doneAgent ? '#4adec7' : (agent ? '#5b9aff' : '#4adec7')));
+      context.fillStyle = core ? '#ffbe5c' : (entity ? '#d586ff' : (doneAgent ? '#4adec7' : (agent ? '#5b9aff' : '#4adec7')));
       context.fill();
-      context.strokeStyle = (core || entity) ? 'rgba(255,224,168,0.8)' : (agent ? 'rgba(195,218,255,0.9)' : 'rgba(184,255,245,0.72)');
+      context.strokeStyle = core ? 'rgba(255,224,168,0.8)' : (entity ? 'rgba(244,202,255,0.88)' : (agent ? 'rgba(195,218,255,0.9)' : 'rgba(184,255,245,0.72)'));
       context.lineWidth = 1;
       context.stroke();
       if (core) {
@@ -585,7 +682,7 @@ var EvaAgents = (function() {
         context.font = '700 9px monospace'; context.fillStyle = '#07100f'; context.textAlign = 'center';
         context.fillText('✓', x, y + 3); context.textAlign = 'left';
       }
-      if (!core && (entity || agent || state.hoverNode === node)) {
+      if (!core && (entity || agent || state.hoverNode === node || state.focusNode === node)) {
         var statusSuffix = agent ? ' · ' + statusLabel(node.status) : '';
         var label = (node.label || node.id).slice(0, 24) + statusSuffix;
         context.font = (core || entity || agent) ? '600 10px monospace' : '10px monospace';
@@ -656,11 +753,22 @@ var EvaAgents = (function() {
     });
     canvas.addEventListener('pointerdown', function(event) {
       state.dragNode = nearestNode(pointerPosition(event));
+      state.graphPointerStart = pointerPosition(event);
       if (state.dragNode) canvas.setPointerCapture(event.pointerId);
     });
-    canvas.addEventListener('pointerup', function() { state.dragNode = null; });
+    canvas.addEventListener('pointerup', function(event) {
+      var node = state.dragNode;
+      var start = state.graphPointerStart;
+      var end = pointerPosition(event);
+      if (node && start && Math.hypot(end.x - start.x, end.y - start.y) < 5) {
+        state.focusNode = state.focusNode === node ? null : node;
+      }
+      state.dragNode = null;
+      state.graphPointerStart = null;
+    });
     canvas.addEventListener('pointerleave', function() {
       state.dragNode = null;
+      state.graphPointerStart = null;
       state.hoverNode = null;
       var tooltip = document.getElementById('agentGraphTooltip');
       if (tooltip) tooltip.setAttribute('aria-hidden', 'true');
@@ -753,6 +861,7 @@ var EvaAgents = (function() {
 
   return {
     open: open,
+    openWorkspace: openWorkspace,
     close: close,
     toggle: toggle,
     refresh: refresh,

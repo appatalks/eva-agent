@@ -4824,7 +4824,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         cluster, db, ok = self._kusto_context()
         if not ok:
             return None
-        required = {"IdentityClaims", "MemoryAtoms", "MemoryEvidence", "MemoryScenarios", "ScenarioMembers", "UserPersonaTraits", "MemoryTurns", "GrowthProposals"}
+        required = {"IdentityClaims", "MemoryAtoms", "MemoryEvidence", "MemoryScenarios", "ScenarioMembers", "UserPersonaTraits", "MemoryTurns", "MemoryTurnStages", "GrowthProposals"}
         missing = sorted(table for table in required if not _get_table_columns(cluster, db, table))
         if missing:
             self._json_response(409, {"error": {"message": "structured memory tables are unavailable; apply the current Kusto seed", "missing_tables": missing}})

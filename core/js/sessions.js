@@ -608,12 +608,12 @@ function initSessions() {
   var termExpand = document.getElementById('terminalPanelExpand');
   if (termExpand) termExpand.addEventListener('click', toggleTerminalWidth);
 
-  // Agent Operations is a full workspace view. Any other sidebar destination
+  // Agent Operations and Workspace are full views. Any other sidebar destination
   // must first reveal the normal workspace so its panel/view is visible.
   var evaSidebar = document.getElementById('evaSidebar');
   if (evaSidebar) evaSidebar.addEventListener('click', function(event) {
     var target = event.target;
-    if (target && target.closest && !target.closest('#evaAgentsBtn')) {
+    if (target && target.closest && !target.closest('#evaAgentsBtn, #evaWorkspacesBtn')) {
       closeAgentOperationsForNavigation();
     }
     if (target && target.closest && !target.closest('#evaWorkspacesBtn') && !target.closest('#evaTerminalBtn') && window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {

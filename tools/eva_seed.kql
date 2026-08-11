@@ -148,6 +148,13 @@ core-identity-v1,1,"Eva is a personal AI assistant: warm, curious, direct, evide
     CompletedAt: datetime
 )
 
+.create-merge table MemoryTurnStages (
+    TurnId: string,
+    Stage: string,
+    Status: string,
+    CreatedAt: datetime
+)
+
 .create-merge table AutonomyPolicy (
     PolicyId: string,
     Version: int,
@@ -203,12 +210,13 @@ autonomy-policy-v1,1,"Eva may investigate, reason with subagents, create draft s
     Model: string,
     Content: string,
     TokenEstimate: int,
-    ImageGenerated: bool
+    ImageGenerated: bool,
+    TurnId: string
 )
 
 .ingest inline into table Conversations <|
-seed-001,2026-01-01T00:00:00Z,user,seed,seed,Hello Eva!,2,false
-seed-001,2026-01-01T00:00:00Z,assistant,seed,seed,Hello! I'm Eva — your AI assistant with persistent memory. How can I help you today?,15,false
+seed-001,2026-01-01T00:00:00Z,user,seed,seed,Hello Eva!,2,false,seed-conversation-001
+seed-001,2026-01-01T00:00:00Z,assistant,seed,seed,Hello! I'm Eva — your AI assistant with persistent memory. How can I help you today?,15,false,seed-conversation-001
 
 // ── Table: EmotionState ───────────────────────────────────────────
 // Eva's computed emotional vector after each exchange.
@@ -222,11 +230,12 @@ seed-001,2026-01-01T00:00:00Z,assistant,seed,seed,Hello! I'm Eva — your AI ass
     Calm: real,
     Empathy: real,
     Trigger: string,
-    DecayRate: real
+    DecayRate: real,
+    TurnId: string
 )
 
 .ingest inline into table EmotionState <|
-2026-01-01T00:00:00Z,0.6,0.7,0.1,0.5,0.8,0.6,Initial startup — ready to help,0.1
+2026-01-01T00:00:00Z,0.6,0.7,0.1,0.5,0.8,0.6,Initial startup — ready to help,0.1,seed-emotion-001
 
 // ── Table: EmotionBaseline ────────────────────────────────────────
 // Default emotional resting state (loaded once, rarely changes).
@@ -248,11 +257,12 @@ Empathy,0.6
 .create-merge table MemorySummaries (
     Period: string,
     Summary: string,
-    Timestamp: datetime
+    Timestamp: datetime,
+    TurnId: string
 )
 
 .ingest inline into table MemorySummaries <|
-2026-01-01,Initial setup — Eva database seeded with starter knowledge and emotion baseline.,2026-01-01T00:00:00Z
+2026-01-01,Initial setup — Eva database seeded with starter knowledge and emotion baseline.,2026-01-01T00:00:00Z,seed-summary-001
 
 // -- Table: BackgroundProposals -----------------------------------
 // Human-reviewed proposals produced by bridge-internal background jobs.
@@ -299,11 +309,12 @@ seed-background-tick-001,2026-01-01T00:00:00Z,2026-01-01T00:00:01Z,memory_consol
     Trigger: string,
     Observation: string,
     ActionTaken: string,
-    Effectiveness: string
+    Effectiveness: string,
+    TurnId: string
 )
 
 .ingest inline into table Reflections <|
-2026-01-01T00:00:00Z,Initial seed,I was just created with a new memory database. I look forward to learning about my user and building a meaningful relationship.,seed,0.0
+2026-01-01T00:00:00Z,Initial seed,I was just created with a new memory database. I look forward to learning about my user and building a meaningful relationship.,seed,0.0,seed-reflection-001
 
 // ── Table: HeuristicsIndex ────────────────────────────────────────
 // Pattern tracking — entities mentioned across conversations.
@@ -314,11 +325,12 @@ seed-background-tick-001,2026-01-01T00:00:00Z,2026-01-01T00:00:01Z,memory_consol
     Frequency: int,
     Sentiment: real,
     Tags: string,
-    Context: string
+    Context: string,
+    TurnId: string
 )
 
 .ingest inline into table HeuristicsIndex <|
-Eva,assistant,2026-01-01T00:00:00Z,1,0.0,[],seed data
+Eva,assistant,2026-01-01T00:00:00Z,1,0.0,[],seed data,seed-heuristic-001
 
 // -- Table: Goals --------------------------------------------------
 // Persistent intentions that influence Eva's prompting and routing.

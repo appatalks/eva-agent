@@ -5,9 +5,9 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const path = require('path');
-const { chromium } = require('../standalone/node_modules/playwright-core');
+const { chromium } = require('../../standalone/node_modules/playwright-core');
 
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(__dirname, '..', '..');
 const electronPath = process.env.EVA_ELECTRON_BINARY || path.join(root, 'standalone', 'dist', 'linux-unpacked', 'eva-standalone');
 
 function git(directory, args) {
@@ -110,7 +110,7 @@ async function main() {
     fs.writeFileSync(path.join(repository, 'README.md'), '# packaged workspace test\n');
     git(repository, ['add', 'README.md']);
     git(repository, ['commit', '-m', 'Initial commit']);
-    execFileSync('python3', [path.join(root, 'tools', 'test_workspace_electron_setup.py'), configDirectory, repository], { encoding: 'utf8' });
+    execFileSync('python3', [path.join(root, 'tools', 'tests', 'test_workspace_electron_setup.py'), configDirectory, repository], { encoding: 'utf8' });
 
     const debuggingPort = await reservePort();
     child = spawn(electronPath, ['--eva-workspace-terminal-v1', '--remote-debugging-port=' + debuggingPort], {
@@ -124,6 +124,10 @@ async function main() {
     await page.setViewportSize({ width: 1280, height: 900 });
 
     await page.locator('#evaWorkspacesBtn').click();
+    await page.locator('#agentsView').waitFor({ state: 'visible' });
+    assert.strictEqual(await page.locator('#agentsViewTitle').innerText(), 'Workspace', 'Workspace tab did not open the agentic-session workspace');
+    assert.strictEqual(await page.locator('#evaWorkspacesBtn').evaluate(function(button) { return button.classList.contains('active'); }), true, 'Workspace tab is not active for the agentic-session workspace');
+    await page.evaluate(function() { window.EvaWorkspaces.openWorkbench(); });
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
     await page.waitForFunction(function() {
       const workbenchHeader = document.querySelector('#workspaceWorkbench .workspace-workbench-header').getBoundingClientRect();
@@ -215,6 +219,9 @@ async function main() {
     await page.locator('#assetsViewDetail').filter({ hasText: 'E2E workspace run' }).waitFor();
     assert.strictEqual(await page.locator('#workspaceWorkbench').isVisible(), false, 'Assets did not become the primary main view');
     await page.locator('#evaWorkspacesBtn').click();
+    await page.locator('#agentsView').waitFor({ state: 'visible' });
+    assert.strictEqual(await page.locator('#agentsViewTitle').innerText(), 'Workspace', 'Workspace tab did not restore the agentic-session workspace');
+    await page.evaluate(function() { window.EvaWorkspaces.openWorkbench(); });
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
     await page.locator('#evaTerminalBtn').click();
     await page.locator('#terminalPanel[aria-hidden="false"]').waitFor();

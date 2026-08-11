@@ -354,7 +354,8 @@ jobs:
               -f description="$2" \
               -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           }
-          verdict="$(sed -nE 's/^VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES|NEEDS_MAINTAINER)[[:space:]]*$/\1/p' readiness/copilot-review.md | head -n 1)"
+              verdict_json="$(python3 tools/readiness_verdict.py readiness/copilot-review.md)"
+              verdict="$(jq -r '.verdict // ""' <<< "$verdict_json")"
           case "$verdict" in
             APPROVE)
               publish_status success 'Terra approved PR readiness'
@@ -376,23 +377,9 @@ jobs:
               exit 1
               ;;
             *)
-              response_kind="$(python3 - <<'PY'
-          import hashlib
-          import json
-          from pathlib import Path
-
-          review = Path("readiness/copilot-review.md").read_bytes()
-          nonempty_lines = sum(bool(line.strip()) for line in review.splitlines())
-          kind = "empty" if not review.strip() else "malformed"
-          Path("readiness/terra-verdict-diagnostic.json").write_text(json.dumps({
-              "response_kind": kind,
-              "response_bytes": len(review),
-              "nonempty_lines": nonempty_lines,
-              "response_sha256": hashlib.sha256(review).hexdigest(),
-          }, separators=(",", ":")) + "\n", encoding="utf-8")
-          print(kind)
-          PY
-          )"
+                response_kind="$(jq -r '.kind' <<< "$verdict_json")"
+              python3 tools/readiness_verdict.py readiness/copilot-review.md \
+              --diagnostic-output readiness/terra-verdict-diagnostic.json > /dev/null
               printf 'invalid_verdict=true\n' >> "$GITHUB_OUTPUT"
               if [[ "$response_kind" == "empty" ]]; then
                 publish_status error 'Terra returned no review output'
@@ -414,7 +401,8 @@ jobs:
           HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
         run: |
           set -euo pipefail
-          verdict="$(sed -nE 's/^VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES|NEEDS_MAINTAINER)[[:space:]]*$/\1/p' readiness/copilot-review.md | head -n 1)"
+          verdict_json="$(python3 tools/readiness_verdict.py readiness/copilot-review.md)"
+          verdict="$(jq -r '.verdict // ""' <<< "$verdict_json")"
           [[ "$verdict" == "NEEDS_MAINTAINER" ]] || exit 0
           current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
           if [[ "$current_head" != "$HEAD_SHA" ]]; then

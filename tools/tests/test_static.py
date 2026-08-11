@@ -4,7 +4,7 @@ Eva Static Tests - Run in CI without a live bridge.
 Tests Python syntax, import integrity, config safety, and Kusto ingest logic.
 
 Usage:
-    python3 tools/test_static.py
+    python3 tools/tests/test_static.py
 """
 
 import json
@@ -75,25 +75,25 @@ def test_required_files():
         "tools/acp_bridge.py",
         "tools/bridge/workspaces.py",
         "tools/kusto_mcp.py",
-        "tools/test_prompt_budget.js",
-        "tools/test_request_routing.js",
-        "tools/test_cognition_provider.js",
-        "tools/test_provider_token_budget.js",
-        "tools/test_fast_route.py",
-        "tools/test_tool_profiles.py",
-        "tools/test_kusto_cache.py",
-        "tools/test_latency.py",
-        "tools/test_latency_fake_server.py",
-        "tools/test_streaming.py",
-        "tools/test_learning.py",
-        "tools/test_learning.js",
+        "tools/tests/test_prompt_budget.js",
+        "tools/tests/test_request_routing.js",
+        "tools/tests/test_cognition_provider.js",
+        "tools/tests/test_provider_token_budget.js",
+        "tools/tests/test_fast_route.py",
+        "tools/tests/test_tool_profiles.py",
+        "tools/tests/test_kusto_cache.py",
+        "tools/tests/test_latency.py",
+        "tools/tests/test_latency_fake_server.py",
+        "tools/tests/test_streaming.py",
+        "tools/tests/test_learning.py",
+        "tools/tests/test_learning.js",
         "tools/protected_memory.py",
-        "tools/test_protected_memory.py",
-        "tools/test_terminal_broker.js",
-        "tools/test_workspaces.py",
-        "tools/test_workspaces_e2e.py",
-        "tools/test_workspace_electron_e2e.js",
-        "tools/test_workspace_projection.js",
+        "tools/tests/test_protected_memory.py",
+        "tools/tests/test_terminal_broker.js",
+        "tools/tests/test_workspaces.py",
+        "tools/tests/test_workspaces_e2e.py",
+        "tools/tests/test_workspace_electron_e2e.js",
+        "tools/tests/test_workspace_projection.js",
         "standalone/terminal-broker.js",
         "standalone/workspace-projection.js",
         ".gitignore",
@@ -146,12 +146,12 @@ def test_pr_automation_workflows():
     report("pr_automation_readiness_base_only", "workflow_run:" in readiness and 'workflows: ["Eva CI", "Secret Scanning Status Check", "CodeQL"]' in readiness and "pull_request:" not in readiness and "pull_request_target:" not in readiness and "workflow_dispatch:" in readiness and "head_sha:" in readiness and "Current PR head SHA" in readiness and "actual_head_sha" in readiness and "The dispatched head SHA is stale" in readiness and "PR head changed while resolving readiness" in readiness and "gh pr diff" in readiness and "workflow_run.head_sha" in readiness and "ref: ${{ github.event.repository.default_branch }}" in readiness and "persist-credentials: false" in readiness and "no PR commit is checked out or executed here" in readiness and "ref: ${{ needs.prepare.outputs" not in readiness and "readiness-agent-source" not in readiness)
     report("pr_automation_terra_reviewer", "timeout 240 copilot --agent readiness-reviewer" in readiness and "--available-tools='read,search'" in readiness and "--disable-builtin-mcps" in readiness and "--no-color --stream off --output-format text" in readiness and "--silent" not in readiness and "run_terra readiness/copilot-review.md" in readiness and "copilot-review-retry.md" in readiness and "Read readiness/evidence.md" in readiness and "$(cat readiness/copilot-prompt.txt)" not in readiness and "cat readiness/evidence.md readiness/diff.patch" not in readiness and "--no-auto-update" not in readiness and "--mode plan" not in readiness and "--yolo" not in readiness and os.path.isfile(".github/agents/readiness-reviewer.agent.md"))
     report("pr_automation_readiness_reviewer_restricted", "tools: [read, search]" in readiness_agent and "agents: []" in readiness_agent and "disable-model-invocation: true" in readiness_agent and "Do not execute commands" in readiness_agent and "access the network" in readiness_agent and "MAINTAINER_CATEGORY:" in readiness_agent and "Do not include a freeform maintainer summary" in readiness_agent)
-    report("pr_automation_verdict_gate", "name: PR Readiness / Terra verdict" in readiness and "Gate Terra verdict" in readiness and "REQUEST_CHANGES" in readiness and "NEEDS_MAINTAINER" in readiness and "if: always()" in readiness and "Publish readiness in progress" in readiness and "Publish trusted metadata failure" in readiness and "statuses: write" in readiness and "statuses/$HEAD_SHA" in readiness and "Terra approved PR readiness" in readiness and "Publish unexpected readiness failure" in readiness and "status_published" in readiness and "invalid_verdict=true" in readiness and "terra-verdict-diagnostic.json" in readiness and "response_sha256" in readiness and "steps.credential_scan.outcome != 'failure'" in readiness and "Readiness workflow execution failed" in readiness and "group: pr-readiness-review-${{ needs.prepare.outputs.head_sha }}" in readiness and readiness.count("current_head=\"$(gh api") >= 4 and "skipping stale readiness status" in readiness and "copilot-review.md >> \"$GITHUB_STEP_SUMMARY\"" not in readiness and "Verdict: APPROVE" in readiness)
+    report("pr_automation_verdict_gate", "name: PR Readiness / Terra verdict" in readiness and "Gate Terra verdict" in readiness and "REQUEST_CHANGES" in readiness and "NEEDS_MAINTAINER" in readiness and "if: always()" in readiness and "Publish readiness in progress" in readiness and "Publish trusted metadata failure" in readiness and "statuses: write" in readiness and "statuses/$HEAD_SHA" in readiness and "Terra approved PR readiness" in readiness and "Publish unexpected readiness failure" in readiness and "status_published" in readiness and "invalid_verdict=true" in readiness and "terra-verdict-diagnostic.json" in readiness and "response_sha256" not in readiness and "--diagnostic-output readiness/terra-verdict-diagnostic.json" in readiness and "steps.credential_scan.outcome != 'failure'" in readiness and "Readiness workflow execution failed" in readiness and "group: pr-readiness-review-${{ needs.prepare.outputs.head_sha }}" in readiness and readiness.count("current_head=\"$(gh api") >= 4 and "skipping stale readiness status" in readiness and "copilot-review.md >> \"$GITHUB_STEP_SUMMARY\"" not in readiness and "Verdict: APPROVE" in readiness and readiness.count("tools/readiness_verdict.py") == 3 and "sed -nE 's/^VERDICT:" not in readiness and "python3 - \"$response_kind\"" not in readiness and os.path.isfile("tools/readiness_verdict.py"))
     report("pr_automation_invalid_verdict_diagnostic_order", readiness.index("invalid_verdict=true") < readiness.index("publish_status error 'Terra returned no review output'"))
     report("pr_automation_waits_for_required_checks", "Gate completed PR checks" in readiness and "checks_ready" in readiness and 'required_checks=' in readiness and '"static-checks","python-tests","Secret-Scanning-Check"' in readiness and 'head_repo" == "$GITHUB_REPOSITORY' in readiness and '"Analyze (actions)"' in readiness and '"Analyze (javascript)"' in readiness and '"Analyze (python)"' in readiness and '"CodeQL"' in readiness and "workflow completion will re-evaluate readiness" in readiness and '"NEUTRAL", "SKIPPED"' in readiness and "Prerequisite checks failed" in readiness and "gh api --paginate" in readiness and "Multiple open PRs match" in readiness and "Unable to read PR checks after retries" in readiness and "for attempt in $(seq 1 60)" not in readiness and "Timed out waiting for required PR checks" not in readiness and "sleep 10" not in readiness)
-    report("pr_automation_scans_untrusted_diff", "Scan PR diff for credential material" in readiness and "tools/scan_pr_diff_secrets.py" in readiness and "--text-path readiness/pr.json" in readiness and "--text-path readiness/inline-comments.json" in readiness and "--text-path readiness/reviews.json" in readiness and "--text-path readiness/evidence.md" in readiness and "credential-scan.json" in readiness and "Credential material detected in PR diff" in readiness and "rm -f readiness/diff.patch" in readiness and "Upload credential scan finding" in readiness and "if: always() && steps.credential_scan.outcome == 'failure'" in readiness and readiness.count("path: readiness/credential-scan.json") == 2 and "readiness/copilot-prompt.txt" not in readiness[readiness.index("- uses: actions/upload-artifact@v7"):readiness.index("- name: Upload credential scan finding")] and os.path.isfile("tools/scan_pr_diff_secrets.py") and os.path.isfile("tools/test_pr_diff_secret_scan.py"))
-    report("pr_automation_maintainer_summary", "Post maintainer summary" in readiness and "issues: write" in readiness and "readiness_maintainer_comment.py" in readiness and "--has-marker readiness/pr-comments.json" in readiness and "github-actions[bot]" in open("tools/readiness_maintainer_comment.py").read() and "MAINTAINER_CATEGORY:" in readiness_agent and os.path.isfile("tools/readiness_maintainer_comment.py") and os.path.isfile("tools/test_readiness_maintainer_comment.py"))
-    report("pr_automation_maintainer_decision", "issue_comment:" in readiness_decision and "github.event.issue.pull_request" in readiness_decision and "python3 - <<'PY'" in readiness_decision and "tools/readiness_decision.py" not in readiness_decision and "actions/checkout" not in readiness_decision and "collaborators/$ACTOR/permission" in readiness_decision and "admin|maintain|write" in readiness_decision and "expected_head_sha" in readiness_decision and "PR Readiness / Terra verdict" in readiness_decision and "statuses: write" in readiness_decision and os.path.isfile("tools/readiness_decision.py") and os.path.isfile("tools/test_readiness_decision.py"))
+    report("pr_automation_scans_untrusted_diff", "Scan PR diff for credential material" in readiness and "tools/scan_pr_diff_secrets.py" in readiness and "--text-path readiness/pr.json" in readiness and "--text-path readiness/inline-comments.json" in readiness and "--text-path readiness/reviews.json" in readiness and "--text-path readiness/evidence.md" in readiness and "credential-scan.json" in readiness and "Credential material detected in PR diff" in readiness and "rm -f readiness/diff.patch" in readiness and "Upload credential scan finding" in readiness and "if: always() && steps.credential_scan.outcome == 'failure'" in readiness and readiness.count("path: readiness/credential-scan.json") == 2 and "readiness/copilot-prompt.txt" not in readiness[readiness.index("- uses: actions/upload-artifact@v7"):readiness.index("- name: Upload credential scan finding")] and os.path.isfile("tools/scan_pr_diff_secrets.py") and os.path.isfile("tools/tests/test_pr_diff_secret_scan.py"))
+    report("pr_automation_maintainer_summary", "Post maintainer summary" in readiness and "issues: write" in readiness and "readiness_maintainer_comment.py" in readiness and "--has-marker readiness/pr-comments.json" in readiness and "github-actions[bot]" in open("tools/readiness_maintainer_comment.py").read() and "MAINTAINER_CATEGORY:" in readiness_agent and os.path.isfile("tools/readiness_maintainer_comment.py") and os.path.isfile("tools/tests/test_readiness_maintainer_comment.py"))
+    report("pr_automation_maintainer_decision", "issue_comment:" in readiness_decision and "github.event.issue.pull_request" in readiness_decision and "python3 - <<'PY'" in readiness_decision and "tools/readiness_decision.py" not in readiness_decision and "actions/checkout" not in readiness_decision and "collaborators/$ACTOR/permission" in readiness_decision and "admin|maintain|write" in readiness_decision and "expected_head_sha" in readiness_decision and "PR Readiness / Terra verdict" in readiness_decision and "statuses: write" in readiness_decision and os.path.isfile("tools/readiness_decision.py") and os.path.isfile("tools/tests/test_readiness_decision.py"))
     report("pr_automation_autofix_is_opt_in", "workflow_dispatch:" in autofix and "autofix-requested" in autofix and "Fork PRs are review-only" in autofix and "expected_head_sha" in autofix and "dry_run:" in autofix and "if: inputs.dry_run == false" in autofix)
     report("pr_automation_autofix_scoped", "--agent reviewer" in autofix and "--agent eva" in autofix and "terra-review.md" in autofix and "--deny-tool='shell(git push)'" in autofix and "Autofix touched a protected path" in autofix)
     report("pr_automation_preserves_review_threads", "resolveReviewThread" not in autofix and "Review threads remain open" in autofix)
@@ -196,7 +196,7 @@ def test_no_hardcoded_keys():
 
 def test_python_syntax():
     """All Python files compile without errors."""
-    for py in ["tools/acp_bridge.py", "tools/kusto_mcp.py", "tools/local_voices_bridge.py", "tools/protected_memory.py", "tools/test_protected_memory.py", "tools/voice_clone_module/src/voice_clone_module/service.py", "tools/test_eva.py", "tools/eval/run.py"]:
+    for py in ["tools/acp_bridge.py", "tools/kusto_mcp.py", "tools/local_voices_bridge.py", "tools/protected_memory.py", "tools/tests/test_protected_memory.py", "tools/voice_clone_module/src/voice_clone_module/service.py", "tools/tests/test_eva.py", "tools/eval/run.py"]:
         if not os.path.isfile(py):
             report(f"python_syntax:{py}", None, "file missing")
             continue
@@ -1023,7 +1023,7 @@ def test_issue_130_latency_contract():
         kusto = f.read()
     with open("tools/bridge/cognition.py") as f:
         cognition = f.read()
-    with open("tools/test_latency.py") as f:
+    with open("tools/tests/test_latency.py") as f:
         latency = f.read()
     report("request_routing_script_loaded", "core/js/request-routing.js" in html and "classifyRequestType" in routing)
     report("lmstudio_retrieval_is_gated", "needsDataRetrieval" in lm_studio and "/v1/data/retrieve" in lm_studio)
@@ -1194,7 +1194,7 @@ def test_sidebar_workflow_contract():
     report("workflow_encrypted_auth_persistence", "safeStorage.encryptString" in standalone_main and "safeStorage.decryptString" in standalone_main and "authLoad" in standalone_preload)
     report("workflow_auth_ipc_trusted_renderer", "isTrustedEvaRenderer" in standalone_main and "fileURLToPath(event.senderFrame.url)" in standalone_main)
     report("workflow_http_navigation_blocked", "event.preventDefault()" in standalone_main and "if (!url.startsWith('http://127.0.0.1')" in standalone_main)
-    report("workflow_native_context_menu", "webContents.on('context-menu'" in standalone_main and "buildContextMenuTemplate" in standalone_main and os.path.isfile("standalone/context-menu.js") and os.path.isfile("tools/test_context_menu.js"))
+    report("workflow_native_context_menu", "webContents.on('context-menu'" in standalone_main and "buildContextMenuTemplate" in standalone_main and os.path.isfile("standalone/context-menu.js") and os.path.isfile("tools/tests/test_context_menu.js"))
     report("workflow_skills_database_copy", "stores it in the database" in html and "stores it in ADX" not in html)
     report("workflow_audio_settings_persist", "function initAudioPreferences" in options_js and "tts_engine" in options_js and "tts_auto_speak" in options_js and "tts_voice" in options_js)
 
@@ -1279,10 +1279,10 @@ def test_coding_workspace_contract():
     report("coding_workspace_monitor_text_voice_updates", "addMonitorActivity" in workspace_ui and "autoSpeak.checked" in workspace_ui and "speakText(message)" in workspace_ui and "lastPeriodicNoteAt" in workspace_ui)
     report("coding_workspace_main_navigation", "openWorkbench" in workspace_ui and "workspace-workbench-open" in style_css and "closeWorkbench" in sessions_js and "closeWorkbench" in open("core/js/agents.js").read())
     report("coding_workspace_monitor_responsive", "workspace-workbench-body" in style_css and "@media (max-width: 760px)" in style_css and "resize: horizontal" in style_css and "terminal-panel-expanded" in style_css and "terminal-panel-docked" in style_css and "text-align: left !important" in style_css and "toggleTerminalWidth" in sessions_js)
-    report("coding_workspace_assets_index", "list_workspace_assets" in workspaces and "resolve_workspace_asset" in workspaces and "_resolve_checkout_file" in workspaces and "_validated_managed_checkout" in workspaces and "../README.md" in open("tools/test_workspaces_e2e.py").read())
+    report("coding_workspace_assets_index", "list_workspace_assets" in workspaces and "resolve_workspace_asset" in workspaces and "_resolve_checkout_file" in workspaces and "_validated_managed_checkout" in workspaces and "../README.md" in open("tools/tests/test_workspaces_e2e.py").read())
     report("coding_workspace_assets_main_view", "assetsView" in html and "assets-view-open" in style_css and "workspaceListAssets" in assets_ui and "workspaceOpenAsset" in assets_ui)
     report("coding_workspace_assets_path_private", "workspace-list-assets" in standalone_main and "workspace-open-asset" in standalone_main and "workspaceListAssets" in standalone_preload and "workspaceOpenAsset" in standalone_preload and "path:" not in assets_ui)
-    report("coding_workspace_report_path_redaction", "redactKnownPaths" in standalone_main and "workspace-projection.js" in json.dumps(package.get("build", {}).get("files", [])) and os.path.isfile("tools/test_workspace_projection.js"))
+    report("coding_workspace_report_path_redaction", "redactKnownPaths" in standalone_main and "workspace-projection.js" in json.dumps(package.get("build", {}).get("files", [])) and os.path.isfile("tools/tests/test_workspace_projection.js"))
 
 
 def test_pages_comparison_contract():

@@ -3335,6 +3335,12 @@ var _vv = {
   ttsDelay: null,
   particles: [],
   hudInterval: null,
+  memoryGraph: null,
+  memoryGraphFrame: null,
+  memoryGraphTimer: null,
+  memoryGraphFetchInFlight: false,
+  memoryGraphWidth: 0,
+  memoryGraphHeight: 0,
   cmdStart: 0
 };
 
@@ -3389,6 +3395,7 @@ function openVoiceView() {
   _vvStartWaveBar();
   _vvStartHUD();
   _vvStartLogStream();
+  _vvStartMemoryGraph();
 }
 
 function closeVoiceView() {
@@ -3406,6 +3413,7 @@ function closeVoiceView() {
   if (_vv._postTextTimer) { clearTimeout(_vv._postTextTimer); _vv._postTextTimer = null; }
   _vvStopBargeMonitor();
   _vvStopLogStream();
+  _vvStopMemoryGraph();
   // Clear the embedded vision panel so a stale frame does not linger on reopen.
   var vvVision = document.getElementById('vvVision');
   if (vvVision) {
@@ -3493,6 +3501,175 @@ function _vvStopLogStream() {
   if (_vv.logInterval) { clearInterval(_vv.logInterval); _vv.logInterval = null; }
   var el = document.getElementById('vvLogStream');
   if (el) el.innerHTML = '';
+}
+
+function _vvGraphHash(value) {
+  var text = String(value || '');
+  var hash = 2166136261;
+  for (var index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967295;
+}
+
+function _vvMemoryGraphSnapshot(graph) {
+  var rawNodes = (graph && graph.nodes || []).slice(0, 48);
+  var allowed = {};
+  rawNodes.forEach(function(node) { allowed[node.id] = true; });
+  var edges = (graph && graph.edges || []).filter(function(edge) {
+    return allowed[edge.source] && allowed[edge.target];
+  }).slice(0, 72);
+  var nodes = {};
+  rawNodes.forEach(function(node) { nodes[node.id] = Object.assign({}, node); });
+
+  var entityNodes = rawNodes.filter(function(node) { return node.type === 'entity'; });
+  var agentNodes = rawNodes.filter(function(node) { return node.type === 'agent'; });
+  var childEdges = {};
+  edges.forEach(function(edge) {
+    if (edge.type !== 'memory') return;
+    childEdges[edge.source] = childEdges[edge.source] || [];
+    childEdges[edge.source].push(edge.target);
+  });
+  var positions = { 'eva-root': { x: 0.5, y: 0.5 } };
+  entityNodes.forEach(function(node, index) {
+    var angle = -Math.PI / 2 + (Math.PI * 2 * index / Math.max(entityNodes.length, 1));
+    var radius = 0.23 + (_vvGraphHash(node.id) * 0.08);
+    positions[node.id] = { x: 0.5 + Math.cos(angle) * radius, y: 0.5 + Math.sin(angle) * radius };
+  });
+  agentNodes.forEach(function(node, index) {
+    var angle = -Math.PI / 2 + (Math.PI * 2 * index / Math.max(agentNodes.length, 1));
+    positions[node.id] = { x: 0.5 + Math.cos(angle) * 0.39, y: 0.5 + Math.sin(angle) * 0.32 };
+  });
+  Object.keys(childEdges).forEach(function(parentId) {
+    var parent = positions[parentId] || positions['eva-root'];
+    childEdges[parentId].forEach(function(childId, index) {
+      var angle = (_vvGraphHash(childId) * Math.PI * 2) + index * 0.42;
+      var radius = 0.07 + (index % 3) * 0.028;
+      positions[childId] = {
+        x: Math.max(0.06, Math.min(0.94, parent.x + Math.cos(angle) * radius)),
+        y: Math.max(0.08, Math.min(0.92, parent.y + Math.sin(angle) * radius))
+      };
+    });
+  });
+  rawNodes.forEach(function(node, index) {
+    if (positions[node.id]) return;
+    var theta = _vvGraphHash(node.id) * Math.PI * 2;
+    positions[node.id] = { x: 0.5 + Math.cos(theta) * 0.18, y: 0.5 + Math.sin(theta) * 0.18 };
+  });
+  return { nodes: nodes, edges: edges, positions: positions };
+}
+
+function _vvStartMemoryGraph() {
+  _vv.memoryGraph = null;
+  _vv.memoryGraphFetchInFlight = false;
+  _vvRefreshMemoryGraph();
+  _vv.memoryGraphTimer = setInterval(_vvRefreshMemoryGraph, 12000);
+  _vvDrawMemoryGraph();
+}
+
+function _vvStopMemoryGraph() {
+  if (_vv.memoryGraphTimer) { clearInterval(_vv.memoryGraphTimer); _vv.memoryGraphTimer = null; }
+  if (_vv.memoryGraphFrame) { cancelAnimationFrame(_vv.memoryGraphFrame); _vv.memoryGraphFrame = null; }
+  _vv.memoryGraph = null;
+  _vv.memoryGraphFetchInFlight = false;
+  var canvas = document.getElementById('vvMemoryGraph');
+  if (canvas) {
+    var context = canvas.getContext('2d');
+    context.clearRect(0, 0, canvas.width, canvas.height);
+  }
+}
+
+async function _vvRefreshMemoryGraph() {
+  if (!_vv.open || _vv.memoryGraphFetchInFlight) return;
+  var base = (typeof getSafeBridgeBaseUrl === 'function') ? getSafeBridgeBaseUrl() : '';
+  if (!base) return;
+  _vv.memoryGraphFetchInFlight = true;
+  try {
+    var options = { method: 'GET' };
+    if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) options.signal = AbortSignal.timeout(3000);
+    var response = await fetch(base.replace(/\/+$/, '') + '/v1/agents/overview?include_graph=1', options);
+    if (!response.ok) return;
+    var payload = await response.json();
+    if (_vv.open && payload && payload.graph) _vv.memoryGraph = _vvMemoryGraphSnapshot(payload.graph);
+  } catch (_) {
+    // The topology is ambient; a transient bridge failure should stay invisible.
+  } finally {
+    _vv.memoryGraphFetchInFlight = false;
+  }
+}
+
+function _vvDrawMemoryGraph() {
+  var canvas = document.getElementById('vvMemoryGraph');
+  if (!canvas) return;
+  var context = canvas.getContext('2d');
+  function draw(now) {
+    if (!_vv.open) return;
+    var bounds = canvas.getBoundingClientRect();
+    var ratio = Math.min(window.devicePixelRatio || 1, 2);
+    if (bounds.width !== _vv.memoryGraphWidth || bounds.height !== _vv.memoryGraphHeight) {
+      _vv.memoryGraphWidth = bounds.width;
+      _vv.memoryGraphHeight = bounds.height;
+      canvas.width = Math.max(1, Math.round(bounds.width * ratio));
+      canvas.height = Math.max(1, Math.round(bounds.height * ratio));
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    }
+    var width = Math.max(1, bounds.width);
+    var height = Math.max(1, bounds.height);
+    context.clearRect(0, 0, width, height);
+    var graph = _vv.memoryGraph;
+    if (graph && graph.edges.length) {
+      var time = now / 1000;
+      var phaseEnergy = _vv.phase === 'speaking' ? 1 : _vv.phase === 'thinking' ? 0.75 : _vv.phase === 'awake' ? 0.55 : 0.3;
+      graph.edges.forEach(function(edge, index) {
+        var source = graph.positions[edge.source];
+        var target = graph.positions[edge.target];
+        if (!source || !target) return;
+        var sx = source.x * width;
+        var sy = source.y * height;
+        var tx = target.x * width;
+        var ty = target.y * height;
+        var agentLink = edge.type === 'orchestration' || edge.type === 'dependency';
+        context.beginPath();
+        context.moveTo(sx, sy);
+        context.lineTo(tx, ty);
+        context.strokeStyle = agentLink ? 'rgba(125,172,255,0.42)' : 'rgba(95,240,207,' + (0.16 + Number(edge.confidence || 0) * 0.24) + ')';
+        context.lineWidth = agentLink ? 1.1 : 0.7;
+        context.stroke();
+        if (phaseEnergy > 0.45 && (agentLink || Number(edge.confidence || 0) >= 0.8)) {
+          var progress = (time * (agentLink ? 0.22 : 0.14) + index * 0.131) % 1;
+          context.beginPath();
+          context.arc(sx + (tx - sx) * progress, sy + (ty - sy) * progress, agentLink ? 2 : 1.35, 0, Math.PI * 2);
+          context.fillStyle = agentLink ? 'rgba(191,218,255,0.8)' : 'rgba(177,255,233,0.7)';
+          context.fill();
+        }
+      });
+      Object.keys(graph.nodes).forEach(function(nodeId) {
+        var node = graph.nodes[nodeId];
+        var position = graph.positions[nodeId];
+        if (!position) return;
+        var x = position.x * width;
+        var y = position.y * height;
+        var core = node.type === 'core';
+        var entity = node.type === 'entity';
+        var agent = node.type === 'agent';
+        var radius = core ? 7 : entity ? 4.5 : agent ? 4 : 2.2;
+        var color = core ? 'rgba(255,211,116,0.9)' : entity ? 'rgba(213,134,255,0.8)' : agent ? 'rgba(137,184,255,0.86)' : 'rgba(104,241,204,0.72)';
+        var pulse = 1 + Math.sin(now * 0.002 + _vvGraphHash(nodeId) * 12) * 0.18;
+        context.beginPath();
+        context.arc(x, y, radius * pulse * 2.2, 0, Math.PI * 2);
+        context.fillStyle = color.replace(/,[^,]+\)$/, ',0.12)');
+        context.fill();
+        context.beginPath();
+        if (agent) context.rect(x - radius, y - radius, radius * 2, radius * 2);
+        else context.arc(x, y, radius, 0, Math.PI * 2);
+        context.fillStyle = color;
+        context.fill();
+      });
+    }
+    _vv.memoryGraphFrame = requestAnimationFrame(draw);
+  }
+  _vv.memoryGraphFrame = requestAnimationFrame(draw);
 }
 
 async function _vvPollLogStream() {

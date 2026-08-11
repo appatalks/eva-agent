@@ -68,4 +68,11 @@ tools/eval/results/
 
 # Core-maintainer local validation. New phase tests and their fixtures remain
 # local-only; generated results belong under this directory as well.
-tools/local-tests/
+tools/tests/local/
+tools/tests/.pytest_cache/
+tools/tests/__pycache__/
+
+# Ad hoc regression scripts remain local validation unless deliberately
+# promoted into the committed CI contract.
+tools/tests/local/test_readiness_verdict.py
+tools/tests/local/test_kusto_turn_stages.py

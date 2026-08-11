@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Tests for safe maintainer-summary comments from readiness verdicts."""
 
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from readiness_maintainer_comment import category_from_review, comment_body, trusted_marker_comment
 

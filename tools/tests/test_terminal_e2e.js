@@ -5,9 +5,9 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const path = require('path');
-const { chromium } = require('../standalone/node_modules/playwright-core');
+const { chromium } = require('../../standalone/node_modules/playwright-core');
 
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(__dirname, '..', '..');
 const configuredEndpoint = process.env.EVA_ELECTRON_CDP || '';
 const electronPath = process.env.EVA_ELECTRON_BINARY || path.join(root, 'standalone', 'dist', 'linux-unpacked', 'eva-standalone');
 const artifactDirectory = process.env.EVA_E2E_ARTIFACTS || path.join(__dirname, '..', 'standalone', 'dist');
@@ -219,6 +219,14 @@ async function run() {
   await page.locator('#skillsPanel').waitFor({ state: 'visible' });
   await skillsLoaded;
   assert.strictEqual(await page.locator('body').evaluate(function(body) { return body.classList.contains('skills-view-open'); }), true, 'Skills did not open as a main view');
+  const skillsGeometry = await page.locator('#skillsPanel').evaluate(function(panel) {
+    const bounds = panel.getBoundingClientRect();
+    const sidebar = document.querySelector('#evaSidebar').getBoundingClientRect();
+    return { left: bounds.left, width: bounds.width, sidebarRight: sidebar.right, sidebarWidth: sidebar.width, viewport: window.innerWidth, ariaHidden: panel.getAttribute('aria-hidden'), transform: getComputedStyle(panel).transform };
+  });
+  assert.strictEqual(skillsGeometry.left >= skillsGeometry.sidebarRight - 1 && skillsGeometry.width >= skillsGeometry.viewport - skillsGeometry.sidebarWidth - 2, true, 'Skills did not preserve the Eva sidebar while occupying the main view: ' + JSON.stringify(skillsGeometry));
+  assert.strictEqual(await page.locator('#memoryInspectorPanel').isVisible(), false, 'Skills mode displayed the Memory inspector');
+  assert.strictEqual(await page.locator('#memoryInspectorPanel').evaluate(function(panel) { return panel.classList.contains('skills-panel'); }), false, 'Memory inspector retained the shared Skills panel hook');
   await page.evaluate(function() {
     _skillsState.skills = [
       { SkillId: 'skill-alpha', Name: 'Alpha Formatter', Description: 'Formats alpha reports', Status: 'active', Tools: 'file.download', Tags: 'format, report', Source: 'paste', UpdatedAt: '2026-08-08T10:00:00Z' },
@@ -228,6 +236,22 @@ async function run() {
     renderSkillsList();
   });
   assert.strictEqual(await page.locator('.skill-card').count(), 3, 'Skills library did not render cards');
+  assert.deepStrictEqual(await page.locator('.skills-view-toolbar select').evaluateAll(function(selects) {
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    return selects.filter(function(select) {
+      const style = getComputedStyle(select);
+      context.font = style.font;
+      const label = select.selectedOptions[0] ? select.selectedOptions[0].textContent : '';
+      const usable = select.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      return context.measureText(label).width > usable;
+    }).map(function(select) { return select.selectedOptions[0].textContent; });
+  }), [], 'Skills menu labels overflow at desktop width');
+  assert.deepStrictEqual(await page.locator('.skill-card-actions button:visible').evaluateAll(function(buttons) {
+    return buttons.filter(function(button) {
+      return button.scrollWidth > button.clientWidth + 1 || button.scrollHeight > button.clientHeight + 1;
+    }).map(function(button) { return button.textContent.trim(); });
+  }), [], 'Skills action labels overflow at desktop width');
   await page.locator('#skillsSearch').fill('research');
   assert.strictEqual(await page.locator('.skill-card').count(), 1, 'Skills search did not filter cards');
   assert.match(await page.locator('.skill-card').innerText(), /Beta Research/);
@@ -255,10 +279,60 @@ async function run() {
     return toolbar.scrollWidth > toolbar.clientWidth;
   });
   assert.strictEqual(skillsToolbarOverflow, false, 'Skills toolbar overflows on mobile');
+  assert.deepStrictEqual(await page.locator('.skills-view-toolbar select').evaluateAll(function(selects) {
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    return selects.filter(function(select) {
+      const style = getComputedStyle(select);
+      context.font = style.font;
+      const label = select.selectedOptions[0] ? select.selectedOptions[0].textContent : '';
+      const usable = select.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      return context.measureText(label).width > usable;
+    }).map(function(select) { return select.selectedOptions[0].textContent; });
+  }), [], 'Skills menu labels overflow on mobile');
+  assert.deepStrictEqual(await page.locator('.skill-card-actions button:visible').evaluateAll(function(buttons) {
+    return buttons.filter(function(button) {
+      return button.scrollWidth > button.clientWidth + 1 || button.scrollHeight > button.clientHeight + 1;
+    }).map(function(button) { return button.textContent.trim(); });
+  }), [], 'Skills action labels overflow on mobile');
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.locator('#evaAssetsBtn').click();
   await page.locator('#assetsView').waitFor({ state: 'visible' });
   assert.strictEqual(await page.locator('body').evaluate(function(body) { return body.classList.contains('skills-view-open'); }), false, 'Skills remained layered under Assets');
+
+  var memoryLoaded = page.waitForResponse(function(response) {
+    return response.request().method() === 'GET' && /\/v1\/memory\/inspector(?:\?|$)/.test(response.url());
+  });
+  await page.locator('#evaMemoryBtn').click();
+  await page.locator('#memoryInspectorPanel').waitFor({ state: 'visible' });
+  await memoryLoaded;
+  assert.strictEqual(await page.locator('body').evaluate(function(body) { return body.classList.contains('memory-view-open'); }), true, 'Memory did not open as a main view');
+  assert.strictEqual(await page.locator('#assetsView').isVisible(), false, 'Assets remained layered under Memory');
+  assert.strictEqual(await page.locator('#memoryInspectorPanel').evaluate(function(panel) {
+    const bounds = panel.getBoundingClientRect();
+    const sidebar = document.querySelector('#evaSidebar').getBoundingClientRect();
+    return bounds.left >= sidebar.right && bounds.width === window.innerWidth - sidebar.width && bounds.height >= window.innerHeight - 32 && bounds.top >= 0 && bounds.top <= 32;
+  }), true, 'Memory inspector did not occupy the main view');
+  await page.evaluate(function() {
+    const probe = document.createElement('div');
+    probe.id = 'memoryActionFitProbe';
+    probe.className = 'memory-inspector-actions';
+    ['Use preference', 'Correct', 'Remove', 'Approve', 'Reject'].forEach(function(label, index) {
+      const button = document.createElement('button');
+      button.className = (index === 2 || index === 4 ? 'auth-toggle' : 'auth-save') + ' background-inline-button';
+      button.textContent = label;
+      probe.appendChild(button);
+    });
+    document.querySelector('#memoryAtomsList').appendChild(probe);
+  });
+  assert.deepStrictEqual(await page.locator('#memoryActionFitProbe button').evaluateAll(function(buttons) {
+    return buttons.filter(function(button) {
+      return button.scrollWidth > button.clientWidth + 1 || button.scrollHeight > button.clientHeight + 1;
+    }).map(function(button) { return button.textContent.trim(); });
+  }), [], 'Memory action labels overflow their buttons');
+  await page.locator('#evaMemoryBtn').click();
+  await page.waitForFunction(function() { return document.querySelector('#memoryInspectorPanel').getAttribute('aria-hidden') === 'true'; });
+  assert.strictEqual(await page.locator('body').evaluate(function(body) { return body.classList.contains('memory-view-open'); }), false, 'Memory sidebar button did not close the main view');
 
     assert.deepStrictEqual(errors, [], 'Renderer errors: ' + errors.join('\n'));
     console.log('terminal Electron E2E: PASS');

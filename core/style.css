@@ -765,7 +765,8 @@ body.agents-view-open #idContainer { max-width: none; width: 100%; }
 body.agents-view-open .eva-status-footer,
 body.agents-view-open .eva-disclaimer,
 body.agents-view-open .cog-badge { display: none !important; }
-body.agents-view-open #evaAgentsBtn { background: rgba(74,222,199,0.1); color: #8ffff0; }
+body.agents-view-open:not(.agent-workspace-open) #evaAgentsBtn { background: rgba(74,222,199,0.1); color: #8ffff0; }
+body.agents-view-open.agent-workspace-open #evaWorkspacesBtn { background: rgba(74,222,199,0.1); color: #8ffff0; }
 body.agents-view-open .agents-view {
   position: relative;
   display: grid;
@@ -821,7 +822,8 @@ body.skills-view-open .skills-panel {
   inset: auto;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  transform: none;
+  transform: none !important;
+  transition: none !important;
   width: 100%;
   max-width: none;
   height: 100%;
@@ -836,14 +838,13 @@ body.eva-standalone.skills-view-open .skills-panel { top: auto; height: 100%; }
 body.skills-view-open .skills-panel .session-panel-header { padding: 16px 22px 11px; border-bottom-color: rgba(74,222,199,0.18); }
 body.skills-view-open .skills-panel-body { padding: 0; overflow: hidden; }
 .memory-inspector-panel { display: none; }
-body.memory-view-open #idContainer > :not(#memoryInspectorPanel) { display: none !important; }
-body.memory-view-open #idContainer { max-width: none; width: 100%; }
+body.memory-view-open #idContainer { display: none !important; }
 body.memory-view-open .eva-status-footer,
 body.memory-view-open .eva-disclaimer,
 body.memory-view-open .cog-badge { display: none !important; }
 body.memory-view-open #evaMemoryBtn { background: rgba(74,222,199,0.12); color: #c7fff7; }
-body.memory-view-open .memory-inspector-panel { display: flex; position: relative; inset: auto; width: 100%; max-width: none; height: 100%; transform: none; border: 0; border-radius: 0; flex-direction: column; background: #081211; }
-body.eva-standalone.memory-view-open .memory-inspector-panel { top: auto; height: 100%; }
+body.memory-view-open .memory-inspector-panel { display: flex; position: fixed; inset: 0; width: 100vw; max-width: none; height: 100vh; transform: none !important; transition: none !important; border: 0; border-radius: 0; flex-direction: column; background: #081211; z-index: 9001; }
+body.eva-standalone.memory-view-open .memory-inspector-panel { top: 32px; height: calc(100vh - 32px); }
 body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 16px 22px 11px; border-bottom-color: rgba(74,222,199,0.18); }
 .memory-inspector-toolbar { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
 .memory-inspector-toolbar .auth-note { margin: 0; }
@@ -856,12 +857,36 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .memory-inspector-card strong { color: #e8fffb; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .memory-inspector-value { color: #abc6c1; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }
 .memory-inspector-meta,
-.memory-inspector-actions { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.memory-inspector-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: stretch; }
 .memory-inspector-pill { max-width: 100%; padding: 2px 5px; border: 1px solid rgba(129,177,168,0.25); border-radius: 3px; color: #82a9a2; font: 9px monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.memory-inspector-actions .background-inline-button { min-width: 64px; }
-.skills-view-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 150px 150px 160px auto; align-items: center; gap: 7px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
+.memory-inspector-actions button,
+.skill-card-actions button {
+  box-sizing: border-box;
+  width: auto;
+  min-width: 64px;
+  min-height: 30px;
+  margin: 0;
+  padding: 5px 9px;
+  font: 600 10px/1.25 monospace;
+  letter-spacing: 0;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.memory-inspector-actions .background-inline-button { min-width: 72px; }
+.memory-inspector-actions button:first-child { flex: 0 1 auto; }
+.skills-view-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(132px, 150px) minmax(132px, 150px) minmax(158px, 176px) auto; align-items: center; gap: 7px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
 .skills-view-toolbar input,
 .skills-view-toolbar select { min-width: 0; height: 32px; border: 1px solid rgba(74,222,199,0.18); border-radius: 3px; background: #0c1b19; color: #e5faf7; padding: 0 9px; font: 11px inherit; }
+.skills-view-toolbar select {
+  width: 100%;
+  margin: 0;
+  padding: 0 28px 0 9px;
+  font: 500 10px/1.2 monospace;
+  letter-spacing: 0;
+  white-space: nowrap;
+  text-overflow: clip;
+}
 .skills-view-toolbar input:focus,
 .skills-view-toolbar select:focus { outline: none; border-color: #4adec7; }
 #skillsViewSummary { color: #759c97; font: 10px monospace; white-space: nowrap; }
@@ -893,8 +918,19 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .skill-card-chips span { padding: 3px 6px; border-radius: 3px; background: rgba(74,222,199,0.08); color: #83bbb4; font: 9px monospace; }
 .skill-card-chips .skill-tool-chip { background: rgba(91,154,255,0.09); color: #91baff; }
 .skill-card-chips .skill-source-chip { background: rgba(255,190,92,0.08); color: #d9a95f; }
-.skill-card-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: auto; padding-top: 13px; }
-.skill-card-actions button { width: auto; margin: 0; padding: 5px 8px; font-size: 10px; }
+.skill-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 13px; align-items: stretch; }
+.skills-editor .background-actions button,
+.memory-inspector-toolbar button {
+  box-sizing: border-box;
+  width: auto;
+  min-width: 72px;
+  min-height: 32px;
+  margin: 0;
+  padding: 6px 10px;
+  font: 600 11px/1.25 monospace;
+  letter-spacing: 0;
+  white-space: normal;
+}
 .skills-view-empty { grid-column: 1 / -1; padding: 40px 16px; color: #688e89; text-align: center; font: 11px monospace; }
 .assets-view-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 24px 12px; border-bottom: 1px solid rgba(255,190,92,0.18); }
 .assets-view-kicker { color: #ffbe5c; font: 600 10px monospace; letter-spacing: 0.15em; }
@@ -1143,9 +1179,10 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .agent-graph-legend { display: flex; align-items: center; gap: 14px; color: #608b86; font: 9px monospace; }
 .agent-graph-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .agent-graph-legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; }
-.legend-entity { background: #ffbe5c; box-shadow: 0 0 7px rgba(255,190,92,0.5); }
+.legend-entity { background: #d586ff; box-shadow: 0 0 7px rgba(213,134,255,0.5); }
 .legend-fact { background: #4adec7; box-shadow: 0 0 7px rgba(74,222,199,0.5); }
 .legend-agent { background: #5b9aff; box-shadow: 0 0 7px rgba(91,154,255,0.55); }
+.legend-relation { width: 14px !important; height: 2px !important; border-radius: 0 !important; background: #dffffa; box-shadow: 0 0 7px rgba(223,255,250,0.5); }
 .agent-graph-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
 #agentGraphCanvas { display: block; width: 100%; height: 100%; touch-action: none; }
 .agent-graph-empty { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; color: rgba(74,222,199,0.35); font: 11px monospace; letter-spacing: 0.18em; }

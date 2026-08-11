@@ -5,7 +5,7 @@ External services are stubbed: Kusto becomes an in-memory append-only store
 returns a normalized skill JSON for the Eva'rise step. The actual
 ThreadingHTTPServer and request routing are exercised over real HTTP.
 
-Run: python3 tools/test_skills_e2e.py
+Run: python3 tools/tests/test_skills_e2e.py
 """
 import json
 import os
@@ -15,7 +15,7 @@ import time
 import urllib.request
 import urllib.error
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from bridge import core as m

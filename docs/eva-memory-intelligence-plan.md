@@ -439,13 +439,13 @@ override it.
 
 | Area | Focused validation |
 | --- | --- |
-| Memory trust | `python3 tools/test_memory_recall.py` plus hostile durable-fact tests |
-| Learning effects | `python3 tools/test_learning.py` plus create/apply/delete lifecycle tests |
+| Memory trust | `python3 tools/tests/test_memory_recall.py` plus hostile durable-fact tests |
+| Learning effects | `python3 tools/tests/test_learning.py` plus create/apply/delete lifecycle tests |
 | Provider parity | Provider mocks covering context fetch, reflection, stream failure, and one-capture semantics |
-| Skills | `python3 tools/test_skills_e2e.py` plus draft/approval/trigger tests |
-| Prompt budgets | `node tools/test_prompt_budget.js` and provider prompt-view snapshots |
-| Static integration | `python3 tools/test_static.py` |
-| Protected memory | `python3 tools/test_protected_memory.py` and no-leak regression cases |
+| Skills | `python3 tools/tests/test_skills_e2e.py` plus draft/approval/trigger tests |
+| Prompt budgets | `node tools/tests/test_prompt_budget.js` and provider prompt-view snapshots |
+| Static integration | `python3 tools/tests/test_static.py` |
+| Protected memory | `python3 tools/tests/test_protected_memory.py` and no-leak regression cases |
 
 ## Branch Working Agreement
 

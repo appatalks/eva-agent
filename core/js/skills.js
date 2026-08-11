@@ -463,7 +463,12 @@ function initSkills() {
   updateSkillSourceFields();
 }
 
-function toggleSkillsPanel(force) {
+function toggleSkillsPanel(force, event) {
+  if (force && typeof force.stopPropagation === 'function') {
+    event = force;
+    force = undefined;
+  }
+  if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
   var panel = document.getElementById('skillsPanel');
   if (!panel) return;
   var open = document.body.classList.contains('skills-view-open');
