@@ -262,13 +262,21 @@ var EvaWorkspaces = (function() {
     detail.append(heading, objective, facts, actions);
   }
 
-  function monitorSignature(runs, terminals) {
-    return runs.map(function(run) {
+  function monitorSignature(runs, terminals, projects) {
+    var runSignature = runs.map(function(run) {
       return [run.id, run.status, run.checkout && run.checkout.dirtyFileCount, run.checkout && run.checkout.lifecycle,
         run.agent && run.agent.status, run.agent && run.agent.updatedAt, run.agent && run.agent.report].join(':');
-    }).sort().join('|') + '//' + terminals.map(function(terminal) {
+    }).sort().join('|');
+    var terminalSignature = terminals.map(function(terminal) {
       return [terminal.rootId, terminal.id, terminal.exited].join(':');
     }).sort().join('|');
+    var projectSignature = (projects || []).map(function(project) {
+      var servers = ((project.mcpServers || {}).servers || []).map(function(server) {
+        return [server.name, server.digest, server.enabled].join(':');
+      }).sort().join(',');
+      return project.id + ':' + servers;
+    }).sort().join('|');
+    return runSignature + '//' + terminalSignature + '//' + projectSignature;
   }
 
   function narrateRunChanges(runs) {
@@ -814,7 +822,7 @@ var EvaWorkspaces = (function() {
         selected.checkout = await api().workspaceCheckoutStatus(selected.checkout.id);
       }
       var terminals = await api().terminalList();
-      var signature = monitorSignature(runs, terminals);
+      var signature = monitorSignature(runs, terminals, state.projects);
       var changed = signature !== state.monitorSignature;
       var shouldRender = changed;
       state.runs = runs;

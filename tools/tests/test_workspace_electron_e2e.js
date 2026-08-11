@@ -110,9 +110,10 @@ async function main() {
     fs.writeFileSync(path.join(repository, 'README.md'), '# packaged workspace test\n');
     fs.mkdirSync(path.join(repository, 'src', 'features'), { recursive: true });
     fs.writeFileSync(path.join(repository, 'src', 'features', 'index.js'), 'module.exports = {};\n');
-    fs.writeFileSync(path.join(repository, 'mcp.json'), JSON.stringify({
+    const workspaceMcpConfig = JSON.stringify({
       mcpServers: { 'project-docs': { command: 'example-mcp', args: ['--docs'] } }
-    }));
+    });
+    fs.writeFileSync(path.join(repository, 'mcp.json'), workspaceMcpConfig);
     git(repository, ['add', 'README.md', 'mcp.json', 'src/features/index.js']);
     git(repository, ['commit', '-m', 'Initial commit']);
     execFileSync('python3', [path.join(root, 'tools', 'tests', 'test_workspace_electron_setup.py'), configDirectory, repository], { encoding: 'utf8' });
@@ -207,8 +208,20 @@ async function main() {
     const monitorChangeTerminal = await page.evaluate(async function(rootId) {
       return window.evaStandalone.terminalCreate({ rootId: rootId, cols: 80, rows: 24 });
     }, sourceCheckout.id);
-    await page.waitForTimeout(11000);
+    fs.writeFileSync(path.join(repository, 'mcp.json'), JSON.stringify({
+      mcpServers: { 'project-docs': { command: 'changed-mcp', args: [] } }
+    }));
+    await page.waitForFunction(function() {
+      const toggle = document.querySelector('#workspaceWorkbenchDetail .workspace-mcp-row input');
+      return toggle && !toggle.checked;
+    }, null, { timeout: 20000 });
     assert.strictEqual(await objectiveInput.inputValue(), 'E2E workspace run', 'Workspace monitor state change cleared the coding objective');
+    fs.writeFileSync(path.join(repository, 'mcp.json'), workspaceMcpConfig);
+    await page.waitForFunction(function() {
+      const toggle = document.querySelector('#workspaceWorkbenchDetail .workspace-mcp-row input');
+      return toggle && toggle.checked;
+    }, null, { timeout: 20000 });
+    assert.strictEqual(await objectiveInput.inputValue(), 'E2E workspace run', 'MCP approval refresh cleared the coding objective');
     await page.evaluate(async function(terminalId) { await window.evaStandalone.terminalClose(terminalId); }, monitorChangeTerminal.id);
     await page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form').evaluate(function(form) { form.requestSubmit(); });
     const monitoredRun = page.locator('#workspaceWorkbenchRuns .workspace-monitor-run').filter({ hasText: 'E2E workspace run' });

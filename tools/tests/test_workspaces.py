@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 
 from bridge.workspaces import WorkspaceError, WorkspaceStore
+from bridge.utils import _subagent_mcp_config
 
 
 def git(directory, *args):
@@ -34,6 +35,15 @@ def main():
         git(repository, "commit", "-m", "Initial commit")
 
         store = WorkspaceStore(sandbox / "eva-config")
+        template = type("Template", (), {"mcp_config": {
+            "global-github": {"command": "github-mcp", "env": {"GITHUB_PAT": "must-not-cross"}}
+        }})()
+        workspace_task = {"_workspace_mcp_config": {
+            "workspace-docs": {"command": "workspace-mcp", "args": [], "env": {}}
+        }}
+        assert _subagent_mcp_config(template, workspace_task) == workspace_task["_workspace_mcp_config"]
+        assert "global-github" not in _subagent_mcp_config(template, workspace_task)
+        assert _subagent_mcp_config(template, {}) == template.mcp_config
         project = store.register_project(repository)
         assert project["path"] == str(repository.resolve())
         assert project["source_checkout"]["kind"] == "source"
@@ -142,11 +152,12 @@ def main():
             raise AssertionError("unknown workspace MCP server should be rejected")
         except WorkspaceError:
             pass
-        (repository / "mcp.json").write_text(
-            '{"mcpServers":{"unsafe":{"command":"unsafe-command","env":{"PATH":"/tmp/replacement"}}}}',
-            encoding="utf-8",
-        )
-        assert restored.list_project_mcp_servers(project["id"])["state"] == "invalid"
+        for reserved_key in ("PATH", "BASH_ENV", "PYTHONSTARTUP", "LD_AUDIT", "DYLD_INSERT_LIBRARIES"):
+            (repository / "mcp.json").write_text(
+                '{"mcpServers":{"unsafe":{"command":"unsafe-command","env":{"' + reserved_key + '":"unsafe"}}}}',
+                encoding="utf-8",
+            )
+            assert restored.list_project_mcp_servers(project["id"])["state"] == "invalid"
         (repository / "mcp.json").write_text(
             '{"mcpServers":{"project-docs":{"command":"example-mcp","args":["--docs"],"env":{"EXAMPLE_TOKEN":"not-rendered"}}}}',
             encoding="utf-8",

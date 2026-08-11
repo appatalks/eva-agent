@@ -21,7 +21,8 @@ _MCP_CONFIG_MAX_BYTES = 256 * 1024
 _MCP_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _MCP_RESERVED_ENV_KEYS = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "PYTHONPATH", "NODE_OPTIONS",
-    "ELECTRON_RUN_AS_NODE", "LD_PRELOAD", "LD_LIBRARY_PATH",
+    "ELECTRON_RUN_AS_NODE", "LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV", "KSH_ENV", "ZDOTDIR",
+    "PYTHONHOME", "PYTHONSTARTUP", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
 }
 _GITHUB_REPOSITORY_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
@@ -868,6 +869,8 @@ class WorkspaceStore:
                     or not _MCP_ENV_NAME_RE.fullmatch(key)
                     or key in _MCP_RESERVED_ENV_KEYS
                     or key.startswith("EVA_")
+                    or key.startswith("LD_")
+                    or key.startswith("DYLD_")
                     or not isinstance(value, (str, int, float, bool))
                     or len(str(value)) > 4096
                 ):
