@@ -507,6 +507,11 @@ def _dispatch_workspace_run(run):
         )
     checkout = run.get("checkout") or {}
     checkout_path = _workspace_store().validated_checkout_path(checkout.get("id"))
+    workspace_mcp_config = _workspace_store().mcp_config_for_run(run["id"])
+    workspace_mcp_prefix = "workspace-" + str(run.get("project_id") or "workspace").replace("-", "")[:12] + "-"
+    workspace_mcp_config = {
+        workspace_mcp_prefix + name: config for name, config in workspace_mcp_config.items()
+    }
     task_id = "sub-" + uuid.uuid4().hex[:8]
     objective = str(run.get("objective") or "").strip()
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -537,6 +542,7 @@ def _dispatch_workspace_run(run):
         "checkout_id": checkout["id"],
         "capability_policy": "workspace_write",
         "_cwd": checkout_path,
+        "_workspace_mcp_config": workspace_mcp_config,
     }
     if not _reserve_subagent_task(task):
         raise WorkspaceError(f"Agent capacity is full ({_SUBAGENT_MAX} active agents).")
@@ -1057,6 +1063,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._notifications_list()
         elif parsed_path == "/v1/workspaces/projects":
             self._workspace_projects_list()
+        elif re.fullmatch(r"/v1/workspaces/projects/[^/]+/files", parsed_path):
+            self._workspace_project_files_list(urllib.parse.unquote(parsed_path.split("/v1/workspaces/projects/", 1)[1].rsplit("/files", 1)[0]))
         elif parsed_path == "/v1/workspaces/runs":
             self._workspace_runs_list()
         elif parsed_path == "/v1/workspaces/assets":
@@ -1206,12 +1214,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._notifications_mark_seen()
         elif parsed_path == "/v1/workspaces/projects":
             self._workspace_project_register()
+        elif parsed_path == "/v1/workspaces/github-import":
+            self._workspace_github_import()
+        elif re.fullmatch(r"/v1/workspaces/projects/[^/]+/mcp-servers/[^/]+", parsed_path):
+            self._workspace_project_mcp_server_update(parsed_path)
         elif parsed_path == "/v1/workspaces/eva-ready":
             self._workspace_eva_ready()
         elif parsed_path == "/v1/workspaces/runs":
             self._workspace_run_create()
         elif parsed_path == "/v1/workspaces/assets/resolve":
             self._workspace_asset_resolve()
+        elif parsed_path == "/v1/workspaces/projects/files/resolve":
+            self._workspace_project_file_resolve()
         elif re.fullmatch(r"/v1/workspaces/runs/[^/]+/(archive|discard)", parsed_path):
             self._workspace_run_disposition(parsed_path)
         elif re.fullmatch(r"/v1/workspaces/runs/[^/]+/dispatch", parsed_path):
@@ -1307,6 +1321,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except WorkspaceError as error:
             self._json_response(400, {"error": {"message": str(error)}})
 
+    def _workspace_project_files_list(self, project_id):
+        try:
+            payload = _workspace_store().list_project_files(project_id)
+            self._json_response(200, payload)
+        except WorkspaceError as error:
+            self._json_response(404, {"error": {"message": str(error)}})
+
     def _workspace_project_register(self):
         data, error = self._workspace_body()
         if error:
@@ -1323,6 +1344,43 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             project = _workspace_store().register_project(path_value, name_value)
             self._json_response(201, {"project": project})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_github_import(self):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        repository_url = data.get("url")
+        if not isinstance(repository_url, str):
+            self._json_response(400, {"error": {"message": "A GitHub repository URL is required."}})
+            return
+        try:
+            project = _workspace_store().import_github_repository(repository_url)
+            self._json_response(201, {"project": project})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_project_mcp_server_update(self, parsed_path):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        enabled = data.get("enabled")
+        if not isinstance(enabled, bool):
+            self._json_response(400, {"error": {"message": "Workspace MCP server state must be enabled or disabled."}})
+            return
+        suffix = parsed_path.split("/v1/workspaces/projects/", 1)[1]
+        project_id, server_name = suffix.split("/mcp-servers/", 1)
+        try:
+            project = _workspace_store().set_project_mcp_server_enabled(
+                urllib.parse.unquote(project_id),
+                urllib.parse.unquote(server_name),
+                enabled,
+                data.get("approved_digest", ""),
+            )
+            self._json_response(200, {"project": project})
         except WorkspaceError as error:
             self._json_response(400, {"error": {"message": str(error)}})
 
@@ -1368,6 +1426,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         relative_path = data.get("relative_path")
         try:
             path_value = _workspace_store().resolve_workspace_asset(run_id, relative_path)
+            self._json_response(200, {"path": path_value})
+        except WorkspaceError as error:
+            self._json_response(404, {"error": {"message": str(error)}})
+
+    def _workspace_project_file_resolve(self):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        project_id = str(data.get("project_id") or "")
+        relative_path = data.get("relative_path")
+        try:
+            path_value = _workspace_store().resolve_project_file(project_id, relative_path)
             self._json_response(200, {"path": path_value})
         except WorkspaceError as error:
             self._json_response(404, {"error": {"message": str(error)}})
@@ -4824,7 +4895,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         cluster, db, ok = self._kusto_context()
         if not ok:
             return None
-        required = {"IdentityClaims", "MemoryAtoms", "MemoryEvidence", "MemoryScenarios", "ScenarioMembers", "UserPersonaTraits", "MemoryTurns", "GrowthProposals"}
+        required = {"IdentityClaims", "MemoryAtoms", "MemoryEvidence", "MemoryScenarios", "ScenarioMembers", "UserPersonaTraits", "MemoryTurns", "MemoryTurnStages", "GrowthProposals"}
         missing = sorted(table for table in required if not _get_table_columns(cluster, db, table))
         if missing:
             self._json_response(409, {"error": {"message": "structured memory tables are unavailable; apply the current Kusto seed", "missing_tables": missing}})

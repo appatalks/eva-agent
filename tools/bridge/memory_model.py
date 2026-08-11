@@ -275,6 +275,12 @@ class MemoryModel:
 
     def prompt_view(self, session_id, fallback_charter):
         scenario = self.ensure_scenario("session", session_id) if session_id else None
+        user_atoms = self.memory.query(
+            "SELECT Relation, Value, Confidence, UpdatedAt, MemoryId FROM MemoryAtoms "
+            "WHERE Entity = 'User' COLLATE NOCASE AND Scope = 'user' AND Status = 'active' "
+            "AND Confidence >= 0.5 AND (ExpiresAt = '' OR ExpiresAt > ?) "
+            "ORDER BY UpdatedAt DESC, MemoryId DESC LIMIT 100", (_now(),)
+        ) or []
         traits = self.memory.query(
             "SELECT Trait, Value, Confidence, SourceMemoryIds FROM UserPersonaTraits WHERE Status = 'approved' AND Scope = 'user' AND (ExpiresAt = '' OR ExpiresAt > ?) ORDER BY UpdatedAt DESC LIMIT 8", (_now(),)
         ) or []
@@ -284,7 +290,7 @@ class MemoryModel:
                 "SELECT a.* FROM MemoryAtoms a JOIN ScenarioMembers m ON m.MemoryId = a.MemoryId WHERE m.ScenarioId = ? AND a.Status = 'active' AND (a.ExpiresAt = '' OR a.ExpiresAt > ?) ORDER BY a.UpdatedAt DESC LIMIT 12",
                 (scenario["ScenarioId"], _now()),
             ) or []
-        return {"charter": self.active_charter(fallback_charter), "scenario": scenario, "traits": traits, "scenario_atoms": scenario_atoms}
+        return {"charter": self.active_charter(fallback_charter), "scenario": scenario, "user_atoms": user_atoms, "traits": traits, "scenario_atoms": scenario_atoms}
 
     def inspector(self, session_id=""):
         """Return bounded metadata and provenance for the local Memory Inspector."""
@@ -457,12 +463,14 @@ class KustoMemoryModel:
     _SCENARIO_COLUMNS = ["ScenarioId", "Scope", "ScopeId", "Title", "Summary", "Status", "CreatedAt", "UpdatedAt", "ExpiresAt"]
     _PROPOSAL_COLUMNS = ["ProposalId", "Kind", "Payload", "RiskLevel", "Status", "EvidenceRefs", "CreatedAt", "ReviewedAt", "ReviewedBy"]
     _SKILL_COLUMNS = ["SkillId", "Name", "Description", "Instructions", "Tools", "Tags", "Source", "Status", "CreatedAt", "UpdatedAt"]
+    _TURN_STAGE_COLUMNS = ["TurnId", "Stage", "Status", "CreatedAt"]
 
     def __init__(self, cluster, database, query, ingest):
         self.cluster = cluster
         self.database = database
         self.query = query
         self.ingest = ingest
+        self.last_registration_was_retry = False
 
     @staticmethod
     def _quote(value):
@@ -649,11 +657,42 @@ class KustoMemoryModel:
         with _KUSTO_TURN_LOCK:
             existing = self._latest("MemoryTurns", "TurnId", turn_id, "CreatedAt")
             if existing:
+                if existing.get("Status") == "failed":
+                    existing.update({"Status": "started", "CreatedAt": _revision_now(), "CompletedAt": ""})
+                    self._write("MemoryTurns", ["TurnId", "SessionId", "Provider", "Status", "CreatedAt", "CompletedAt"], existing)
+                    self.last_registration_was_retry = True
+                    return True
                 return False
-            row = dict(existing or {})
-            row.update({"TurnId": turn_id, "SessionId": session_id, "Provider": _clip(provider, 80), "Status": "started", "CreatedAt": _revision_now(), "CompletedAt": ""})
+            row = {"TurnId": turn_id, "SessionId": session_id, "Provider": _clip(provider, 80), "Status": "started", "CreatedAt": _revision_now(), "CompletedAt": ""}
             self._write("MemoryTurns", ["TurnId", "SessionId", "Provider", "Status", "CreatedAt", "CompletedAt"], row)
             return True
+
+    def has_conversation_pair(self, session_id, user_message, assistant_response):
+        rows = self._read(
+            "Conversations | where SessionId == " + self._quote(session_id) + " | project Role, Content"
+        )
+        pairs = {(str(row.get("Role", "")), str(row.get("Content", ""))) for row in rows}
+        return ("user", str(user_message)) in pairs and ("assistant", str(assistant_response)) in pairs
+
+    def completed_turn_stages(self, turn_id):
+        rows = self._read(
+            "MemoryTurnStages | where TurnId == " + self._quote(turn_id)
+            + " | summarize arg_max(CreatedAt, *) by Stage | where Status == 'completed' | project Stage"
+        )
+        return {str(row.get("Stage", "")) for row in rows if row.get("Stage")}
+
+    def has_turn_event(self, table, turn_id):
+        return bool(self._read(
+            str(table) + " | where TurnId == " + self._quote(turn_id) + " | take 1"
+        ))
+
+    def complete_turn_stage(self, turn_id, stage):
+        stage = _clip(stage, 80)
+        if not stage:
+            raise ValueError("turn stage is required")
+        self._write("MemoryTurnStages", self._TURN_STAGE_COLUMNS, {
+            "TurnId": _clip(turn_id, 120), "Stage": stage, "Status": "completed", "CreatedAt": _revision_now(),
+        })
 
     def complete_turn(self, turn_id):
         with _KUSTO_TURN_LOCK:

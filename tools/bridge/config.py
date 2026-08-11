@@ -78,7 +78,7 @@ MEMORY_TABLES = [
     "EmotionBaseline", "BackgroundProposals", "BackgroundActivity", "Skills",
     "MemoryMigrations", "CoreIdentity", "IdentityClaims", "MemoryAtoms",
     "MemoryEvidence", "MemoryScenarios", "ScenarioMembers", "UserPersonaTraits",
-    "MemoryTurns", "AutonomyPolicy", "SkillVersions", "SkillEvaluations", "GrowthProposals",
+    "MemoryTurns", "MemoryTurnStages", "AutonomyPolicy", "SkillVersions", "SkillEvaluations", "GrowthProposals",
 ]
 
 # ── Goals ───────────────────────────────────────────────────────────

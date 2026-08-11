@@ -27,7 +27,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh            # install dependencies
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.5.8.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.5.9.AppImage' --eva-workspace-terminal-v1
 ```
 
 Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).
@@ -65,7 +65,7 @@ supported on Windows.
 | **Cron scheduler** | Standard cron expressions, recurring prompts, morning briefings, alerts |
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |
 | **Agent operations** | Live subagent output and sanitized activity updates, browser/desktop runs, steering, and animated memory topology |
-| **Coding workspaces (experimental)** | Eva Standalone can register local Git projects, create isolated durable worktrees, open real PTY terminals, and monitor coding runs in the main workspace; worktree discard is explicit and terminates attached terminal processes first |
+| **Coding workspaces (experimental)** | Eva Standalone imports local Git projects or public GitHub repositories into protected project boundaries, creates isolated durable worktrees, applies each workspace's enabled `mcp.json` servers only to its own coding agents, opens real PTY terminals, and monitors coding runs; worktree discard is explicit and terminates attached terminal processes first |
 | **Multi-provider** | Eva AIG via direct OpenAI API, GitHub Copilot ACP, or LM Studio; direct Gemini remains available only as a deprecated browser compatibility route |
 | **Prompt budgets** | Bounded provider payloads with pinned instructions, recent turns, rolling summaries, and privacy-safe estimates |
 | **Reasoning controls** | Model-specific effort levels for OpenAI, GitHub Models, and Copilot CLI ACP |

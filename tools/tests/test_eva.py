@@ -6,7 +6,7 @@ Simulates the full browser → bridge → ACP/PAT → Kusto flow when the Eva (A
 is selected in the UI.  Tests exercise every endpoint, cognition path, and edge case.
 
 Usage:
-    python3 tools/test_eva.py [--bridge http://localhost:8888] [--verbose]
+    python3 tools/tests/test_eva.py [--bridge http://localhost:8888] [--verbose]
 
 Requires:
     The ACP bridge must be running:

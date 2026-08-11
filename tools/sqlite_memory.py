@@ -73,6 +73,7 @@ _SCHEMA = {
             ("Content", "TEXT NOT NULL"),
             ("TokenEstimate", "INTEGER DEFAULT 0"),
             ("ImageGenerated", "INTEGER DEFAULT 0"),
+            ("TurnId", "TEXT DEFAULT ''"),
         ],
         "indexes": [
             "CREATE INDEX IF NOT EXISTS idx_conv_ts ON Conversations(Timestamp)",
@@ -91,6 +92,7 @@ _SCHEMA = {
             ("Empathy", "REAL DEFAULT 0.5"),
             ("Trigger", "TEXT DEFAULT ''"),
             ("DecayRate", "REAL DEFAULT 0.1"),
+            ("TurnId", "TEXT DEFAULT ''"),
         ],
         "indexes": ["CREATE INDEX IF NOT EXISTS idx_emotion_ts ON EmotionState(Timestamp)"],
     },
@@ -105,6 +107,7 @@ _SCHEMA = {
             ("Period", "TEXT NOT NULL"),
             ("Summary", "TEXT NOT NULL"),
             ("Timestamp", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+            ("TurnId", "TEXT DEFAULT ''"),
         ],
         "indexes": [
             "CREATE INDEX IF NOT EXISTS idx_memsumm_ts ON MemorySummaries(Timestamp)",
@@ -118,6 +121,7 @@ _SCHEMA = {
             ("Observation", "TEXT DEFAULT ''"),
             ("ActionTaken", "TEXT DEFAULT ''"),
             ("Effectiveness", "TEXT DEFAULT ''"),
+            ("TurnId", "TEXT DEFAULT ''"),
         ],
         "indexes": ["CREATE INDEX IF NOT EXISTS idx_refl_ts ON Reflections(Timestamp)"],
     },
@@ -130,6 +134,7 @@ _SCHEMA = {
             ("Sentiment", "REAL DEFAULT 0.0"),
             ("Tags", "TEXT DEFAULT '[]'"),
             ("Context", "TEXT DEFAULT ''"),
+            ("TurnId", "TEXT DEFAULT ''"),
         ],
         "indexes": ["CREATE INDEX IF NOT EXISTS idx_heur_entity ON HeuristicsIndex(Entity)"],
     },
@@ -335,6 +340,17 @@ _SCHEMA = {
         "indexes": [
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_turns_id ON MemoryTurns(TurnId)",
             "CREATE INDEX IF NOT EXISTS idx_memory_turns_session ON MemoryTurns(SessionId, Status)",
+        ],
+    },
+    "MemoryTurnStages": {
+        "columns": [
+            ("TurnId", "TEXT NOT NULL"),
+            ("Stage", "TEXT NOT NULL"),
+            ("Status", "TEXT NOT NULL DEFAULT 'completed'"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+        ],
+        "indexes": [
+            "CREATE INDEX IF NOT EXISTS idx_memory_turn_stages_lookup ON MemoryTurnStages(TurnId, Stage, CreatedAt)",
         ],
     },
     "AutonomyPolicy": {

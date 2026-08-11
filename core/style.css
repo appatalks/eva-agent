@@ -765,7 +765,8 @@ body.agents-view-open #idContainer { max-width: none; width: 100%; }
 body.agents-view-open .eva-status-footer,
 body.agents-view-open .eva-disclaimer,
 body.agents-view-open .cog-badge { display: none !important; }
-body.agents-view-open #evaAgentsBtn { background: rgba(74,222,199,0.1); color: #8ffff0; }
+body.agents-view-open:not(.agent-workspace-open) #evaAgentsBtn { background: rgba(74,222,199,0.1); color: #8ffff0; }
+body.agents-view-open.agent-workspace-open #evaWorkspacesBtn { background: rgba(74,222,199,0.1); color: #8ffff0; }
 body.agents-view-open .agents-view {
   position: relative;
   display: grid;
@@ -782,7 +783,9 @@ body.agents-view-open .agents-view {
   background-size: 32px 32px, 32px 32px, auto, auto;
   overflow: hidden;
 }
-body.workspace-workbench-open #idContainer > :not(#workspaceWorkbench) { display: none !important; }
+body.workspace-workbench-open #idContainer > :not(#workspaceWorkbench):not(#textToSynth) { display: none !important; }
+body.workspace-workbench-open #textToSynth { display: contents !important; }
+body.workspace-workbench-open #textToSynth > :not(#evaTextPrompt) { display: none !important; }
 body.workspace-workbench-open #idContainer { max-width: none; width: 100%; }
 body.workspace-workbench-open .eva-status-footer,
 body.workspace-workbench-open .eva-disclaimer,
@@ -821,7 +824,8 @@ body.skills-view-open .skills-panel {
   inset: auto;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  transform: none;
+  transform: none !important;
+  transition: none !important;
   width: 100%;
   max-width: none;
   height: 100%;
@@ -836,14 +840,13 @@ body.eva-standalone.skills-view-open .skills-panel { top: auto; height: 100%; }
 body.skills-view-open .skills-panel .session-panel-header { padding: 16px 22px 11px; border-bottom-color: rgba(74,222,199,0.18); }
 body.skills-view-open .skills-panel-body { padding: 0; overflow: hidden; }
 .memory-inspector-panel { display: none; }
-body.memory-view-open #idContainer > :not(#memoryInspectorPanel) { display: none !important; }
-body.memory-view-open #idContainer { max-width: none; width: 100%; }
+body.memory-view-open #idContainer { display: none !important; }
 body.memory-view-open .eva-status-footer,
 body.memory-view-open .eva-disclaimer,
 body.memory-view-open .cog-badge { display: none !important; }
 body.memory-view-open #evaMemoryBtn { background: rgba(74,222,199,0.12); color: #c7fff7; }
-body.memory-view-open .memory-inspector-panel { display: flex; position: relative; inset: auto; width: 100%; max-width: none; height: 100%; transform: none; border: 0; border-radius: 0; flex-direction: column; background: #081211; }
-body.eva-standalone.memory-view-open .memory-inspector-panel { top: auto; height: 100%; }
+body.memory-view-open .memory-inspector-panel { display: flex; position: fixed; inset: 0; width: 100vw; max-width: none; height: 100vh; transform: none !important; transition: none !important; border: 0; border-radius: 0; flex-direction: column; background: #081211; z-index: 9001; }
+body.eva-standalone.memory-view-open .memory-inspector-panel { top: 32px; height: calc(100vh - 32px); }
 body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 16px 22px 11px; border-bottom-color: rgba(74,222,199,0.18); }
 .memory-inspector-toolbar { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
 .memory-inspector-toolbar .auth-note { margin: 0; }
@@ -856,12 +859,36 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .memory-inspector-card strong { color: #e8fffb; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .memory-inspector-value { color: #abc6c1; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }
 .memory-inspector-meta,
-.memory-inspector-actions { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.memory-inspector-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: stretch; }
 .memory-inspector-pill { max-width: 100%; padding: 2px 5px; border: 1px solid rgba(129,177,168,0.25); border-radius: 3px; color: #82a9a2; font: 9px monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.memory-inspector-actions .background-inline-button { min-width: 64px; }
-.skills-view-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 150px 150px 160px auto; align-items: center; gap: 7px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
+.memory-inspector-actions button,
+.skill-card-actions button {
+  box-sizing: border-box;
+  width: auto;
+  min-width: 64px;
+  min-height: 30px;
+  margin: 0;
+  padding: 5px 9px;
+  font: 600 10px/1.25 monospace;
+  letter-spacing: 0;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.memory-inspector-actions .background-inline-button { min-width: 72px; }
+.memory-inspector-actions button:first-child { flex: 0 1 auto; }
+.skills-view-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(132px, 150px) minmax(132px, 150px) minmax(158px, 176px) auto; align-items: center; gap: 7px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
 .skills-view-toolbar input,
 .skills-view-toolbar select { min-width: 0; height: 32px; border: 1px solid rgba(74,222,199,0.18); border-radius: 3px; background: #0c1b19; color: #e5faf7; padding: 0 9px; font: 11px inherit; }
+.skills-view-toolbar select {
+  width: 100%;
+  margin: 0;
+  padding: 0 28px 0 9px;
+  font: 500 10px/1.2 monospace;
+  letter-spacing: 0;
+  white-space: nowrap;
+  text-overflow: clip;
+}
 .skills-view-toolbar input:focus,
 .skills-view-toolbar select:focus { outline: none; border-color: #4adec7; }
 #skillsViewSummary { color: #759c97; font: 10px monospace; white-space: nowrap; }
@@ -893,8 +920,19 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .skill-card-chips span { padding: 3px 6px; border-radius: 3px; background: rgba(74,222,199,0.08); color: #83bbb4; font: 9px monospace; }
 .skill-card-chips .skill-tool-chip { background: rgba(91,154,255,0.09); color: #91baff; }
 .skill-card-chips .skill-source-chip { background: rgba(255,190,92,0.08); color: #d9a95f; }
-.skill-card-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: auto; padding-top: 13px; }
-.skill-card-actions button { width: auto; margin: 0; padding: 5px 8px; font-size: 10px; }
+.skill-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 13px; align-items: stretch; }
+.skills-editor .background-actions button,
+.memory-inspector-toolbar button {
+  box-sizing: border-box;
+  width: auto;
+  min-width: 72px;
+  min-height: 32px;
+  margin: 0;
+  padding: 6px 10px;
+  font: 600 11px/1.25 monospace;
+  letter-spacing: 0;
+  white-space: normal;
+}
 .skills-view-empty { grid-column: 1 / -1; padding: 40px 16px; color: #688e89; text-align: center; font: 11px monospace; }
 .assets-view-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 24px 12px; border-bottom: 1px solid rgba(255,190,92,0.18); }
 .assets-view-kicker { color: #ffbe5c; font: 600 10px monospace; letter-spacing: 0.15em; }
@@ -944,11 +982,12 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .workspace-monitor-metrics > div { display: flex; align-items: baseline; gap: 10px; padding: 10px 24px; border-right: 1px solid rgba(120,220,232,0.1); }
 .workspace-monitor-metrics span { color: #73979c; font: 9px monospace; letter-spacing: 0.1em; }
 .workspace-monitor-metrics strong { color: #ffcf85; font: 600 16px monospace; }
-.workspace-workbench-body { display: grid; grid-template-columns: minmax(210px, 0.75fr) minmax(300px, 1.2fr) minmax(260px, 0.9fr); min-height: 0; overflow: hidden; }
+.workspace-workbench-body { display: grid; grid-template-columns: minmax(180px, 0.62fr) minmax(210px, 0.75fr) minmax(300px, 1.2fr) minmax(300px, 1fr); min-height: 0; overflow: hidden; }
 .workspace-monitor-nav,
 .workspace-monitor-activity,
 .workspace-monitor-detail { min-width: 0; min-height: 0; overflow: auto; }
 .workspace-monitor-nav { border-right: 1px solid rgba(120,220,232,0.13); background: rgba(4,16,19,0.62); }
+.workspace-monitor-projects { background: rgba(4,13,17,0.82); }
 .workspace-monitor-activity { border-right: 1px solid rgba(120,220,232,0.13); background: rgba(5,17,20,0.4); }
 .workspace-monitor-detail { background: rgba(7,20,24,0.82); }
 .workspace-monitor-pane-header { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 0 14px; border-bottom: 1px solid rgba(120,220,232,0.11); color: #82b7bd; font: 700 9px monospace; letter-spacing: 0.12em; }
@@ -977,6 +1016,36 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .workspace-monitor-detail-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
 .workspace-monitor-empty { padding: 16px; color: #70969b; font: 11px monospace; }
 .workspace-monitor-report { max-height: 220px; margin: 16px 0 0; padding: 10px; overflow: auto; border-left: 2px solid #78dce8; background: rgba(0,0,0,0.28); color: #d7f3f6; white-space: pre-wrap; font: 11px/1.45 monospace; text-align: left; }
+.workspace-workbench-section { display: grid; gap: 9px; margin: 0 0 20px; padding: 0 0 18px; border-bottom: 1px solid rgba(120,220,232,0.13); }
+.workspace-workbench-section:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
+.workspace-workbench-section h2 { margin: 0; color: #d9fbff; font: 700 10px monospace; letter-spacing: 0.1em; }
+.workspace-workbench-section p { margin: 0; color: #84aab0; font-size: 11px; line-height: 1.45; }
+.workspace-workbench-run-form { display: grid; gap: 8px; }
+.workspace-workbench-run-form label { color: #7fa3a9; font: 700 9px monospace; letter-spacing: 0.08em; }
+.workspace-workbench-run-form textarea,
+.workspace-workbench-run-form input { box-sizing: border-box; width: 100%; margin: 0; border: 1px solid rgba(120,220,232,0.22); border-radius: 3px; background: rgba(2,11,14,0.72); color: #e7fbff; font: 12px/1.4 monospace; }
+.workspace-workbench-run-form textarea { min-height: 88px; padding: 8px; resize: vertical; }
+.workspace-workbench-run-form input { height: 32px; padding: 0 8px; }
+.workspace-workbench-run-form button { min-height: 34px; border: 1px solid rgba(120,220,232,0.32); border-radius: 3px; background: rgba(120,220,232,0.08); color: #dcfbff; font: 700 10px monospace; cursor: pointer; }
+.workspace-workbench-run-form button:hover:not(:disabled) { border-color: #78dce8; background: rgba(120,220,232,0.15); }
+.workspace-mcp-list { display: grid; gap: 2px; }
+.workspace-mcp-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 38px; padding: 7px 0; border-bottom: 1px solid rgba(120,220,232,0.08); cursor: pointer; }
+.workspace-mcp-row input { width: 15px; height: 15px; margin: 0; accent-color: #78dce8; }
+.workspace-mcp-row strong { min-width: 0; color: #e5f9fb; font: 600 11px monospace; overflow-wrap: anywhere; }
+.workspace-mcp-row span { color: #72989e; font: 9px monospace; text-transform: uppercase; }
+.workspace-project-files { display: block; max-height: 320px; overflow: auto; border: 1px solid rgba(120,220,232,0.12); background: rgba(2,11,14,0.45); }
+.workspace-tree-folder { margin: 0; }
+.workspace-tree-folder > summary { list-style: none; }
+.workspace-tree-folder > summary::-webkit-details-marker { display: none; }
+.workspace-tree-row { box-sizing: border-box; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: center; gap: 5px; width: 100%; min-height: 29px; margin: 0; padding: 5px 8px 5px calc(8px + var(--workspace-tree-depth, 0) * 15px); border: 0; border-bottom: 1px solid rgba(120,220,232,0.055); background: transparent; color: #b8d8dc; font: 10px/1.35 monospace; text-align: left; cursor: pointer; }
+.workspace-tree-row:hover { background: rgba(120,220,232,0.09); color: #ecfdff; }
+.workspace-tree-folder-row { color: #d4eef1; user-select: none; }
+.workspace-tree-chevron { display: inline-block; color: #78dce8; transform: rotate(0deg); transition: transform 100ms ease; }
+.workspace-tree-folder[open] > .workspace-tree-folder-row .workspace-tree-chevron { transform: rotate(90deg); }
+.workspace-tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-tree-count { color: #63868b; font-size: 9px; }
+.workspace-tree-file-marker { width: 8px; height: 10px; margin-left: 2px; border: 1px solid rgba(120,220,232,0.35); border-radius: 1px; }
+.workspace-project-files-note { padding: 7px 8px; color: #73979c !important; font: 9px monospace !important; }
 .agents-view::before {
   content: '';
   position: absolute;
@@ -1143,9 +1212,10 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .agent-graph-legend { display: flex; align-items: center; gap: 14px; color: #608b86; font: 9px monospace; }
 .agent-graph-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .agent-graph-legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; }
-.legend-entity { background: #ffbe5c; box-shadow: 0 0 7px rgba(255,190,92,0.5); }
+.legend-entity { background: #d586ff; box-shadow: 0 0 7px rgba(213,134,255,0.5); }
 .legend-fact { background: #4adec7; box-shadow: 0 0 7px rgba(74,222,199,0.5); }
 .legend-agent { background: #5b9aff; box-shadow: 0 0 7px rgba(91,154,255,0.55); }
+.legend-relation { width: 14px !important; height: 2px !important; border-radius: 0 !important; background: #dffffa; box-shadow: 0 0 7px rgba(223,255,250,0.5); }
 .agent-graph-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
 #agentGraphCanvas { display: block; width: 100%; height: 100%; touch-action: none; }
 .agent-graph-empty { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; color: rgba(74,222,199,0.35); font: 11px monospace; letter-spacing: 0.18em; }
@@ -1190,8 +1260,9 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
   .workspace-monitor-updated { display: none; }
   .workspace-monitor-metrics { grid-template-columns: repeat(2, 1fr); }
   .workspace-monitor-metrics > div { padding: 7px 12px; }
-  .workspace-workbench-body { grid-template-columns: minmax(145px, 0.7fr) minmax(0, 1.3fr); }
-  .workspace-monitor-detail { display: none; }
+  .workspace-workbench-body { grid-template-columns: minmax(125px, 0.65fr) minmax(0, 1.35fr); grid-template-rows: minmax(160px, 0.45fr) minmax(0, 1fr); }
+  .workspace-monitor-activity { display: none; }
+  .workspace-monitor-detail { display: block; grid-column: 1 / -1; border-top: 1px solid rgba(120,220,232,0.13); }
   .assets-view-header { padding: 12px 14px 9px; }
   .assets-view-header h1 { font-size: 19px; }
   .assets-view-updated { display: none; }

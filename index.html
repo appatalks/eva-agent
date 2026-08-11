@@ -11,30 +11,30 @@
   <!-- Optional local config override (prevents file:// fetch issues) -->
   <script src="config.local.js"></script>
   <!-- Scripts -->
-  <script src="core/js/dialogs.js?v=5.5.8"></script>
-  <script src="core/js/profiles.js?v=5.5.8"></script>
-  <script src="core/js/prompt-budget.js?v=5.5.8"></script>
-  <script src="core/js/learning.js?v=5.5.8"></script>
-  <script src="core/js/voice-endpoint.js?v=5.5.8"></script>
-  <script src="core/js/request-routing.js?v=5.5.8"></script>
-  <script src="core/js/options.js?v=5.5.8"></script>
+  <script src="core/js/dialogs.js?v=5.5.9"></script>
+  <script src="core/js/profiles.js?v=5.5.9"></script>
+  <script src="core/js/prompt-budget.js?v=5.5.9"></script>
+  <script src="core/js/learning.js?v=5.5.9"></script>
+  <script src="core/js/voice-endpoint.js?v=5.5.9"></script>
+  <script src="core/js/request-routing.js?v=5.5.9"></script>
+  <script src="core/js/options.js?v=5.5.9"></script>
   <script src="core/js/external.js"></script>
   <script src="core/js/gpt-core.js"></script>
   <script src="core/js/gl-google.js"></script>
   <script src="core/js/lm-studio.js"></script>
   <script src="core/js/copilot.js"></script>
-  <script src="core/js/cognition.js?v=5.5.8"></script>
-  <script src="core/js/skills.js?v=5.5.8"></script>
-  <script src="core/js/memory-inspector.js?v=5.5.8"></script>
+  <script src="core/js/cognition.js?v=5.5.9"></script>
+  <script src="core/js/skills.js?v=5.5.9"></script>
+  <script src="core/js/memory-inspector.js?v=5.5.9"></script>
   <script src="core/js/browser-agent.js"></script>
   <script src="core/js/camera.js"></script>
   <script src="core/js/aig.js"></script>
   <script src="core/js/dalle3.js"></script>
   <script src="core/js/idb-store.js"></script>
-  <script src="core/js/sessions.js?v=5.5.8"></script>
-  <script src="core/js/assets.js?v=5.5.8"></script>
-  <script src="core/js/workspaces.js?v=5.5.8"></script>
-  <script src="core/js/agents.js?v=5.5.8"></script>
+  <script src="core/js/sessions.js?v=5.5.9"></script>
+  <script src="core/js/assets.js?v=5.5.9"></script>
+  <script src="core/js/workspaces.js?v=5.5.9"></script>
+  <script src="core/js/agents.js?v=5.5.9"></script>
   <script src="core/js/voice.js"></script>
   <script src="core/js/aws-sdk-2.1304.0.min.js"></script>
   <script>
@@ -44,7 +44,7 @@
   </script>
 
   <!-- Original CSS -->
-  <link rel="stylesheet" type="text/css" href="core/style.css?v=5.5.8">
+  <link rel="stylesheet" type="text/css" href="core/style.css?v=5.5.9">
 
 </head>
 
@@ -90,29 +90,19 @@
       <button id="evaVoiceViewBtn" class="eva-nav-item eva-nav-eva" type="button" title="Eva Voice" onclick="toggleVoiceView()">
         <span class="eva-nav-icon">&#x25C9;</span> Eva
       </button>
-      <button id="evaAgentsBtn" class="eva-nav-item" type="button" title="Agent Operations" onclick="EvaAgents.toggle()">
-        <span class="eva-nav-icon">&#x25A6;</span> Agents
-        <span id="evaAgentsBadge" class="eva-agent-count" aria-label="Running agents">0</span>
-      </button>
       <button id="evaChatsBtn" class="eva-nav-item" type="button" title="Sessions" onclick="toggleSessionPanel()">
         <span class="eva-nav-icon">&#x1F4AC;</span> Sessions
       </button>
-      <button id="evaPromptsBtn" class="eva-nav-item" type="button" title="Prompts">
-        <span class="eva-nav-icon">&#x1F4DD;</span> Prompts
-      </button>
-      <button id="evaModelsBtn" class="eva-nav-item" type="button" title="Models">
-        <span class="eva-nav-icon">&#x1F916;</span> Models
-      </button>
-      <button id="evaSkillsBtn" class="eva-nav-item" type="button" title="Skills" onclick="toggleSkillsPanel()">
+      <button id="evaSkillsBtn" class="eva-nav-item" type="button" title="Skills" onclick="toggleSkillsPanel(event)">
         <span class="eva-nav-icon">&#x1F9E9;</span> Skills
       </button>
-      <button id="evaMemoryBtn" class="eva-nav-item" type="button" title="Memory" onclick="EvaMemoryInspector.open()">
+      <button id="evaMemoryBtn" class="eva-nav-item" type="button" title="Memory" onclick="EvaMemoryInspector.toggle(event)">
         <span class="eva-nav-icon">&#x25C8;</span> Memory
       </button>
       <button id="evaAssetsBtn" class="eva-nav-item" type="button" title="Assets" onclick="EvaAssets.open()">
         <span class="eva-nav-icon">&#x1F4C1;</span> Assets
       </button>
-      <button id="evaWorkspacesBtn" class="eva-nav-item" type="button" title="Workspaces" onclick="EvaWorkspaces.openWorkbench()">
+      <button id="evaWorkspacesBtn" class="eva-nav-item" type="button" title="Coding workspaces" onclick="EvaWorkspaces.openWorkbench()">
         <span class="eva-nav-icon">&#x25A3;</span> Workspaces
       </button>
       <button id="evaTerminalBtn" class="eva-nav-item" type="button" title="Terminal" onclick="toggleTerminalPanel()">
@@ -161,7 +151,7 @@
       <button id="sidebarSessionsBtn" type="button" title="Sessions">Sessions</button>
     </div>
     <div class="lcars-chip agents" id="lcarsChipAgents">
-      <button id="lcarsAgentsBtn" type="button" title="Agent Operations" onclick="EvaAgents.toggle()">Agents</button>
+      <button id="lcarsWorkspacesBtn" type="button" title="Coding workspaces" onclick="EvaWorkspaces.openWorkbench()">Workspaces</button>
     </div>
     <div class="lcars-chip memory" id="lcarsChipMemory">
       <button id="lcarsMemoryBtn" type="button" title="Memory" onclick="EvaMemoryInspector.open()">Memory</button>
@@ -271,7 +261,7 @@
     </div>
   </div>
 
-  <div id="memoryInspectorPanel" class="skills-panel memory-inspector-panel" aria-hidden="true">
+  <div id="memoryInspectorPanel" class="memory-inspector-panel" aria-hidden="true">
     <div class="session-panel-header">
       <span>Memory</span>
       <button id="memoryInspectorClose" aria-label="Close memory">&times;</button>
@@ -400,25 +390,31 @@
     <section id="workspaceWorkbench" class="workspace-workbench" aria-hidden="true" aria-label="Coding workspace monitor">
       <header class="workspace-workbench-header">
         <div>
-          <div class="workspace-kicker">DURABLE CODING RUNS</div>
-          <h1>Workspace Monitor</h1>
+          <div class="workspace-kicker">ISOLATED CLIENT WORK</div>
+          <h1>Workspaces</h1>
         </div>
         <div class="workspace-workbench-actions">
+          <span id="workspaceWorkbenchStatus" class="workspace-monitor-updated" aria-live="polite"></span>
           <span id="workspaceMonitorUpdated" class="workspace-monitor-updated">STANDBY</span>
-          <button id="workspaceMonitorNewBtn" class="workspace-monitor-btn" type="button" title="Create a coding run">New run</button>
+          <button id="workspaceAddProjectWorkbenchBtn" class="workspace-monitor-btn" type="button" title="Import a local Git project">Import workspace</button>
+          <button id="workspaceImportGitHubBtn" class="workspace-monitor-btn" type="button" title="Import a public GitHub repository">Import GitHub</button>
           <button id="workspaceMonitorRefreshBtn" class="workspace-monitor-icon" type="button" title="Refresh workspace activity" aria-label="Refresh workspace activity">&#x21BB;</button>
           <button id="workspaceMonitorCloseBtn" class="workspace-monitor-icon" type="button" title="Return to chat" aria-label="Return to chat">&times;</button>
         </div>
       </header>
       <div class="workspace-monitor-metrics" aria-label="Workspace monitor summary">
-        <div><span>CODING RUNS</span><strong id="workspaceMonitorActiveRuns">0</strong></div>
+        <div><span>WORKSPACES</span><strong id="workspaceMonitorProjectCount">0</strong></div>
+        <div><span>ACTIVE RUNS</span><strong id="workspaceMonitorActiveRuns">0</strong></div>
         <div><span>TERMINALS</span><strong id="workspaceMonitorTerminalCount">0</strong></div>
         <div><span>DIRTY FILES</span><strong id="workspaceMonitorDirtyCount">0</strong></div>
-        <div><span>LAST CHECK</span><strong id="workspaceMonitorLastCheck">--</strong></div>
       </div>
       <div class="workspace-workbench-body">
+        <nav class="workspace-monitor-nav workspace-monitor-projects" aria-label="Workspaces">
+          <div class="workspace-monitor-pane-header">WORKSPACES</div>
+          <div id="workspaceWorkbenchProjects" class="workspace-monitor-runs"></div>
+        </nav>
         <nav class="workspace-monitor-nav" aria-label="Coding runs">
-          <div class="workspace-monitor-pane-header">RUNS</div>
+          <div class="workspace-monitor-pane-header">CODING RUNS</div>
           <div id="workspaceWorkbenchRuns" class="workspace-monitor-runs"></div>
         </nav>
         <section class="workspace-monitor-activity" aria-labelledby="workspaceMonitorActivityTitle">
@@ -434,11 +430,11 @@
         </aside>
       </div>
     </section>
-    <section id="agentsView" class="agents-view" aria-hidden="true" aria-label="Agent operations">
+    <section id="agentsView" class="agents-view" aria-hidden="true" aria-label="Agentic sessions workspace">
       <header class="agents-view-header">
         <div>
-          <div class="agents-kicker">LIVE ORCHESTRATION</div>
-          <h1>Agent Operations</h1>
+          <div id="agentsViewKicker" class="agents-kicker">LIVE ORCHESTRATION</div>
+          <h1 id="agentsViewTitle">Agent Operations</h1>
         </div>
         <div class="agents-view-actions">
           <span id="agentsUpdatedAt" class="agents-updated">OFFLINE</span>
@@ -469,6 +465,7 @@
             <span><i class="legend-entity"></i>Entity</span>
             <span><i class="legend-fact"></i>Fact</span>
             <span><i class="legend-agent"></i>Agent</span>
+            <span><i class="legend-relation"></i>Focused relation</span>
             <span id="agentGraphEdgeCount">0 relations</span>
           </div>
         </div>
@@ -710,7 +707,7 @@
         <hr style="margin:14px 0;border:none;border-top:1px solid rgba(127,127,127,0.25)">
         <div class="auth-note" style="margin:0">
           <strong>About</strong><br>
-          Eva AI Assistant <span id="evaAppVersion">v5.5.8</span><br>
+          Eva AI Assistant <span id="evaAppVersion">v5.5.9</span><br>
           <span>Active goals: <span id="evaActiveGoalsCount">0</span></span><br>
           <span id="evaStandaloneVersion" style="display:none"></span>
         </div>
@@ -1463,6 +1460,8 @@
   <!-- Voice View — ambient, always-listening mode -->
   <div id="voiceView" class="voice-view" aria-hidden="true">
     <button id="voiceViewClose" class="voice-view-close" type="button" aria-label="Exit voice view">&times;</button>
+    <!-- Low-opacity live memory and agent relationships; visual context only. -->
+    <canvas id="vvMemoryGraph" class="vv-memory-graph" aria-hidden="true"></canvas>
     <!-- Faint background log feed (bridge stdout) -->
     <div id="vvLogStream" class="vv-log-stream" aria-hidden="true"></div>
     <!-- Faint embedded vision panel (what Eva is looking at), mirrors the log feed on the right -->

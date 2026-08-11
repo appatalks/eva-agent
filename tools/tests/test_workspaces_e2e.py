@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 from bridge import core as bridge
 
@@ -62,18 +62,26 @@ def main():
         git(repository, "config", "user.name", "Eva Test")
         git(repository, "config", "user.email", "eva-test@example.invalid")
         (repository / "README.md").write_text("# bridge workspace test\n", encoding="utf-8")
-        git(repository, "add", "README.md")
+        (repository / "mcp.json").write_text(
+            json.dumps({"mcpServers": {"project-docs": {
+                "command": "example-mcp", "args": ["--docs"], "env": {"EXAMPLE_TOKEN": "not-rendered"}
+            }}}),
+            encoding="utf-8",
+        )
+        git(repository, "add", "README.md", "mcp.json")
         git(repository, "commit", "-m", "Initial commit")
 
         bridge._cfg.EVA_CONFIG_DIR = str(sandbox / "eva-config")
         bridge._st.workspace_store = None
         bridge._st.subagent_tasks = {}
+        observed_workspace_mcp_configs = []
 
         def fake_workspace_worker(task_id, prompt, label, model="", *unused):
             with bridge._st.subagent_lock:
                 task = bridge._st.subagent_tasks[task_id]
                 task["status"] = "running"
                 assigned_cwd = Path(task["_cwd"])
+            observed_workspace_mcp_configs.append(task.get("_workspace_mcp_config"))
             bridge._st.workspace_store.update_agent_run(task_id, "running", "Creating requested file")
             (assigned_cwd / "workspace-agent-created.txt").write_text("created by workspace agent\n", encoding="utf-8")
             with bridge._st.subagent_lock:
@@ -99,6 +107,31 @@ def main():
         assert status == 201, payload
         project = payload["project"]
         assert project["path"] == str(repository.resolve())
+        server_metadata = project["mcp_servers"]["servers"][0]
+        assert server_metadata["name"] == "project-docs" and server_metadata["enabled"] is False
+        assert server_metadata["command"] == "example-mcp" and server_metadata["args"] == ["--docs"]
+        assert server_metadata["env_keys"] == ["EXAMPLE_TOKEN"] and "env" not in server_metadata
+        status, files_payload = request(
+            base_url, "GET", "/v1/workspaces/projects/" + project["id"] + "/files"
+        )
+        assert status == 200 and files_payload == {
+            "files": ["README.md", "mcp.json"], "truncated": False
+        }, files_payload
+        status, resolved_project_file = request(base_url, "POST", "/v1/workspaces/projects/files/resolve", {
+            "project_id": project["id"], "relative_path": "README.md"
+        })
+        assert status == 200 and resolved_project_file["path"] == str(repository / "README.md"), resolved_project_file
+        status, rejected_project_file = request(base_url, "POST", "/v1/workspaces/projects/files/resolve", {
+            "project_id": project["id"], "relative_path": "../README.md"
+        })
+        assert status == 404 and "invalid" in rejected_project_file["error"]["message"].lower(), rejected_project_file
+        status, payload = request(
+            base_url,
+            "POST",
+            "/v1/workspaces/projects/" + project["id"] + "/mcp-servers/project-docs",
+            {"enabled": True, "approved_digest": server_metadata["digest"]},
+        )
+        assert status == 200 and payload["project"]["mcp_servers"]["servers"][0]["enabled"] is True, payload
 
         swapped_run = bridge._st.workspace_store.create_run(project["id"], "Reject swapped dispatch root")
         swapped_path = Path(swapped_run["checkout"]["path"])
@@ -130,6 +163,11 @@ def main():
         assert run_payload["run"]["agent"]["status"] == "done", run_payload
         assert run_payload["run"]["status"] == "completed", run_payload
         assert (Path(checkout["path"]) / "workspace-agent-created.txt").is_file()
+        assert observed_workspace_mcp_configs == [{
+            "workspace-" + project["id"].replace("-", "")[:12] + "-project-docs": {
+                "command": "example-mcp", "args": ["--docs"], "env": {"EXAMPLE_TOKEN": "not-rendered"}
+            }
+        }]
         status, assets_payload = request(base_url, "GET", "/v1/workspaces/assets")
         workspace_assets = [asset for asset in assets_payload.get("assets", []) if asset.get("run_id") == run["id"]]
         assert status == 200 and any(asset["relative_path"] == "workspace-agent-created.txt" for asset in workspace_assets), assets_payload

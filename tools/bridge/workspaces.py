@@ -1,17 +1,30 @@
 """Durable local projects, Git worktrees, and coding-run records for Eva."""
 
 import datetime
+import hashlib
+import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import threading
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 3
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
+_MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
+_MCP_CONFIG_MAX_BYTES = 256 * 1024
+_MCP_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_MCP_RESERVED_ENV_KEYS = {
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "PYTHONPATH", "NODE_OPTIONS",
+    "ELECTRON_RUN_AS_NODE", "LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV", "KSH_ENV", "ZDOTDIR",
+    "PYTHONHOME", "PYTHONSTARTUP", "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+}
+_GITHUB_REPOSITORY_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
 class WorkspaceError(Exception):
@@ -144,6 +157,32 @@ class WorkspaceStore:
                 )
                 self.connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (1, _utc_now()),
+                )
+            if 2 not in applied:
+                self.connection.executescript(
+                    """
+                    CREATE TABLE project_mcp_preferences (
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        server_name TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(project_id, server_name)
+                    );
+                    CREATE INDEX project_mcp_preferences_project_index
+                    ON project_mcp_preferences(project_id, enabled);
+                    """
+                )
+                self.connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (2, _utc_now()),
+                )
+            if 3 not in applied:
+                self.connection.execute(
+                    "ALTER TABLE project_mcp_preferences ADD COLUMN approved_digest TEXT NOT NULL DEFAULT ''"
+                )
+                self.connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (_SCHEMA_VERSION, _utc_now()),
                 )
 
@@ -197,12 +236,51 @@ class WorkspaceStore:
                 self._git(str(project_path), ["commit", "-m", "Initialize Eva ready workspace"])
         return self.register_project(project_path, "Eva Ready Workspace")
 
+    def import_github_repository(self, repository_url):
+        """Clone a selected public github.com repository into Eva-owned workspace storage."""
+        normalized_url, owner, repository = self._normalize_github_repository_url(repository_url)
+        destination_name = owner + "-" + repository + "-" + hashlib.sha256(
+            normalized_url.encode("utf-8")
+        ).hexdigest()[:12]
+        import_root = self._prepare_managed_import_root()
+        destination = import_root / destination_name
+        if not self._is_within(destination, import_root) or not self._is_within(destination, self.config_dir):
+            raise WorkspaceError("Invalid GitHub workspace destination.")
+        with self.lock:
+            if destination.exists():
+                if destination.is_symlink() or not destination.is_dir():
+                    raise WorkspaceError("GitHub workspace destination is unavailable.")
+                return self.register_project(destination, owner + "/" + repository)
+            try:
+                self._clone_github_repository(normalized_url, destination)
+            except WorkspaceError:
+                shutil.rmtree(destination, ignore_errors=True)
+                raise
+        return self.register_project(destination, owner + "/" + repository)
+
     def list_projects(self):
         with self.lock:
             project_rows = self.connection.execute(
                 "SELECT id FROM projects ORDER BY updated_at DESC, display_name COLLATE NOCASE"
             ).fetchall()
         return [self.get_project(row["id"]) for row in project_rows]
+
+    def list_project_files(self, project_id, limit=1000):
+        root = self._validated_source_project(project_id)
+        code, output = self._git_status_output(
+            str(root), ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+        )
+        if code != 0:
+            raise WorkspaceError("Git operation failed.")
+        relative_paths = sorted(set(filter(None, output.split("\0"))))
+        bounded_limit = min(max(int(limit), 1), 1000)
+        return {
+            "files": relative_paths[:bounded_limit],
+            "truncated": len(relative_paths) > bounded_limit,
+        }
+
+    def resolve_project_file(self, project_id, relative_path):
+        return str(self._resolve_checkout_file(self._validated_source_project(project_id), relative_path))
 
     def get_project(self, project_id):
         with self.lock:
@@ -223,7 +301,130 @@ class WorkspaceStore:
             "updated_at": project_row["updated_at"],
             "active_run_count": run_count,
             "source_checkout": self._checkout_payload(source_checkout),
+            "mcp_servers": self.list_project_mcp_servers(project_id),
         }
+
+    def list_project_mcp_servers(self, project_id):
+        """Return safe workspace MCP metadata without commands or environment values."""
+        with self.lock:
+            preferences = {
+                row["server_name"]: {
+                    "enabled": bool(row["enabled"]),
+                    "approved_digest": row["approved_digest"],
+                }
+                for row in self.connection.execute(
+                    "SELECT server_name, enabled, approved_digest FROM project_mcp_preferences WHERE project_id = ?",
+                    (project_id,),
+                )
+            }
+        try:
+            servers = self._read_mcp_servers(self._validated_source_project(project_id))
+        except WorkspaceError as error:
+            self._revoke_project_mcp_preferences(project_id)
+            return {"source": "mcp.json", "state": "invalid", "message": str(error), "servers": []}
+        if servers is None:
+            self._revoke_project_mcp_preferences(project_id)
+            return {"source": "mcp.json", "state": "missing", "message": "", "servers": []}
+        preferences = self._revoke_stale_mcp_preferences(project_id, servers, preferences)
+        return {
+            "source": "mcp.json",
+            "state": "ready",
+            "message": "",
+            "servers": [
+                self._mcp_server_metadata(name, config, preferences.get(name, {}))
+                for name, config in sorted(servers.items(), key=lambda item: item[0].lower())
+            ],
+        }
+
+    def set_project_mcp_server_enabled(self, project_id, server_name, enabled, approved_digest=""):
+        name = _json_text(server_name).strip()
+        if not _MCP_SERVER_NAME_RE.fullmatch(name):
+            raise WorkspaceError("Invalid workspace MCP server.")
+        if not isinstance(enabled, bool):
+            raise WorkspaceError("Workspace MCP server state must be enabled or disabled.")
+        servers = self._read_mcp_servers(self._validated_source_project(project_id))
+        if not servers or name not in servers:
+            raise WorkspaceError("Workspace MCP server is not available from mcp.json.")
+        digest = self._mcp_config_digest(servers[name])
+        requested_digest = _json_text(approved_digest).strip()
+        if enabled and requested_digest != digest:
+            raise WorkspaceError("Workspace MCP configuration changed. Review it again before enabling.")
+        now = _utc_now()
+        with self.lock, self.connection:
+            self.connection.execute(
+                """INSERT INTO project_mcp_preferences(project_id, server_name, enabled, approved_digest, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(project_id, server_name)
+                   DO UPDATE SET enabled = excluded.enabled,
+                                 approved_digest = excluded.approved_digest,
+                                 updated_at = excluded.updated_at""",
+                (project_id, name, int(enabled), digest if enabled else requested_digest, now),
+            )
+            self.connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+        return self.get_project(project_id)
+
+    def mcp_config_for_run(self, run_id):
+        """Read enabled MCP definitions from the exact isolated worktree for a run."""
+        run = self.get_run(run_id)
+        checkout = run["checkout"]
+        if checkout["lifecycle"] != "active":
+            raise WorkspaceError("Coding workspace is unavailable.")
+        checkout_path = self._validated_managed_checkout(checkout)
+        with self.lock:
+            approvals = {
+                row["server_name"]: row["approved_digest"]
+                for row in self.connection.execute(
+                    "SELECT server_name, approved_digest FROM project_mcp_preferences WHERE project_id = ? AND enabled = 1",
+                    (run["project_id"],),
+                )
+            }
+        try:
+            servers = self._read_mcp_servers(checkout_path)
+        except WorkspaceError:
+            self._revoke_project_mcp_preferences(run["project_id"])
+            return {}
+        if not servers or not approvals:
+            if not servers:
+                self._revoke_project_mcp_preferences(run["project_id"])
+            return {}
+        stale_names = {
+            name for name, digest in approvals.items()
+            if name not in servers or digest != self._mcp_config_digest(servers[name])
+        }
+        if stale_names:
+            self._revoke_project_mcp_preferences(run["project_id"], stale_names)
+        return {name: config for name, config in servers.items() if name in approvals and name not in stale_names}
+
+    def _revoke_stale_mcp_preferences(self, project_id, servers, preferences):
+        stale_names = {
+            name for name, preference in preferences.items()
+            if preference.get("enabled") and (
+                name not in servers
+                or preference.get("approved_digest") != self._mcp_config_digest(servers[name])
+            )
+        }
+        if stale_names:
+            self._revoke_project_mcp_preferences(project_id, stale_names)
+            for name in stale_names:
+                preferences[name] = {"enabled": False, "approved_digest": ""}
+        return preferences
+
+    def _revoke_project_mcp_preferences(self, project_id, server_names=None):
+        now = _utc_now()
+        with self.lock, self.connection:
+            if server_names:
+                placeholders = ",".join("?" for _ in server_names)
+                self.connection.execute(
+                    "UPDATE project_mcp_preferences SET enabled = 0, approved_digest = '', updated_at = ? "
+                    "WHERE project_id = ? AND server_name IN (" + placeholders + ")",
+                    [now, project_id, *sorted(server_names)],
+                )
+            else:
+                self.connection.execute(
+                    "UPDATE project_mcp_preferences SET enabled = 0, approved_digest = '', updated_at = ? "
+                    "WHERE project_id = ? AND enabled = 1",
+                    (now, project_id),
+                )
 
     def create_run(self, project_id, objective, primary_session_id="", base_ref="HEAD", model_policy=""):
         clean_objective = _json_text(objective).strip()
@@ -501,9 +702,7 @@ class WorkspaceStore:
                 return self._checkout_payload(checkout_row)
             validated_root = self._validated_managed_checkout(self._checkout_payload(checkout_row))
         else:
-            if not checkout_path.is_dir() or checkout_path.is_symlink():
-                raise WorkspaceError("Source checkout is unavailable.")
-            validated_root = checkout_path.resolve(strict=True)
+            validated_root = self._validated_source_project(checkout_row["project_id"])
         status_output = self._git(str(validated_root), ["status", "--porcelain=v1", "-z"])
         dirty_count = self._dirty_file_count(status_output)
         now = _utc_now()
@@ -605,6 +804,191 @@ class WorkspaceStore:
             return str(Path(git_root).resolve(strict=True))
         except (OSError, RuntimeError):
             raise WorkspaceError("The selected Git repository is unavailable.")
+
+    def _validated_source_project(self, project_id):
+        with self.lock:
+            project_row = self.connection.execute(
+                "SELECT root_path FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+        if not project_row:
+            raise WorkspaceError("Unknown project.")
+        root = Path(os.path.abspath(project_row["root_path"]))
+        try:
+            canonical = root.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise WorkspaceError("Source workspace is unavailable.")
+        if root.is_symlink() or canonical != root or not canonical.is_dir():
+            raise WorkspaceError("Source workspace is unavailable.")
+        return canonical
+
+    def _normalize_github_repository_url(self, repository_url):
+        value = _json_text(repository_url).strip()
+        if len(value) > 2048:
+            raise WorkspaceError("GitHub repository URL is too long.")
+        parsed = urlparse(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname is None
+            or parsed.hostname.lower() != "github.com"
+            or parsed.netloc.lower() != "github.com"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.params
+        ):
+            raise WorkspaceError("Use a credential-free https://github.com/owner/repository URL.")
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) != 2:
+            raise WorkspaceError("Use a GitHub repository URL with an owner and repository name.")
+        owner, repository = parts
+        if repository.endswith(".git"):
+            repository = repository[:-4]
+        if not _GITHUB_REPOSITORY_PART_RE.fullmatch(owner) or not _GITHUB_REPOSITORY_PART_RE.fullmatch(repository):
+            raise WorkspaceError("GitHub repository URL contains an invalid owner or repository name.")
+        return "https://github.com/" + owner + "/" + repository + ".git", owner, repository
+
+    def _prepare_managed_import_root(self):
+        current = self.config_dir
+        if current.is_symlink() or not current.is_dir():
+            raise WorkspaceError("GitHub workspace destination is unavailable.")
+        for part in ("projects", "github"):
+            current = current / part
+            if current.exists() or current.is_symlink():
+                if current.is_symlink() or not current.is_dir():
+                    raise WorkspaceError("GitHub workspace destination is unavailable.")
+            else:
+                current.mkdir(mode=0o700)
+        return current
+
+    def _clone_github_repository(self, repository_url, destination):
+        git_home = self.config_dir / "git-import-home"
+        if git_home.exists() or git_home.is_symlink():
+            if git_home.is_symlink() or not git_home.is_dir():
+                raise WorkspaceError("GitHub import environment is unavailable.")
+        else:
+            git_home.mkdir(mode=0o700)
+        environment = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(git_home),
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+            "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GCM_INTERACTIVE": "Never",
+        }
+        try:
+            completed = subprocess.run(
+                ["git", "-c", "credential.helper=", "-c", "core.askPass=", "clone", "--origin", "origin", repository_url, str(destination)],
+                env=environment,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=180,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise WorkspaceError("GitHub repository import could not start.")
+        if completed.returncode != 0:
+            raise WorkspaceError("GitHub repository import failed. Confirm that the repository is public and available.")
+
+    def _read_mcp_servers(self, workspace_root):
+        config_path = Path(workspace_root) / "mcp.json"
+        try:
+            if not config_path.exists():
+                return None
+            if config_path.is_symlink() or not config_path.is_file():
+                raise WorkspaceError("Workspace mcp.json must be a regular file.")
+            if config_path.stat().st_size > _MCP_CONFIG_MAX_BYTES:
+                raise WorkspaceError("Workspace mcp.json is too large.")
+            with config_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError, json.JSONDecodeError):
+            raise WorkspaceError("Workspace mcp.json is not valid JSON.")
+        if not isinstance(payload, dict):
+            raise WorkspaceError("Workspace mcp.json must contain an object.")
+        candidates = payload.get("mcpServers", payload)
+        if not isinstance(candidates, dict):
+            raise WorkspaceError("Workspace mcp.json must define mcpServers.")
+        normalized = {}
+        for name, config in candidates.items():
+            if not isinstance(name, str) or not _MCP_SERVER_NAME_RE.fullmatch(name) or not isinstance(config, dict):
+                raise WorkspaceError("Workspace mcp.json contains an invalid server definition.")
+            normalized[name] = self._normalize_mcp_server_config(config)
+        return normalized
+
+    def _normalize_mcp_server_config(self, config):
+        command = config.get("command")
+        url = config.get("url")
+        if (command is None) == (url is None):
+            raise WorkspaceError("Each workspace MCP server must define exactly one command or URL.")
+        if command is not None:
+            if not isinstance(command, str) or not command.strip() or len(command) > 1024:
+                raise WorkspaceError("Workspace MCP server command is invalid.")
+            args = config.get("args", [])
+            if not isinstance(args, list) or len(args) > 128 or any(
+                not isinstance(argument, str) or len(argument) > 2048 for argument in args
+            ):
+                raise WorkspaceError("Workspace MCP server arguments are invalid.")
+            env = config.get("env", {})
+            if not isinstance(env, dict) or len(env) > 128:
+                raise WorkspaceError("Workspace MCP server environment is invalid.")
+            normalized_env = {}
+            for key, value in env.items():
+                if (
+                    not isinstance(key, str)
+                    or not _MCP_ENV_NAME_RE.fullmatch(key)
+                    or key in _MCP_RESERVED_ENV_KEYS
+                    or key.startswith("EVA_")
+                    or key.startswith("LD_")
+                    or key.startswith("DYLD_")
+                    or not isinstance(value, (str, int, float, bool))
+                    or len(str(value)) > 4096
+                ):
+                    raise WorkspaceError("Workspace MCP server environment contains a reserved or invalid entry.")
+                normalized_env[key] = value
+            return {"command": command, "args": args, "env": normalized_env}
+        if not isinstance(url, str) or not url.startswith("https://") or len(url) > 4096:
+            raise WorkspaceError("Workspace MCP server URL must use HTTPS.")
+        headers = config.get("headers", {})
+        if not isinstance(headers, dict) or len(headers) > 128 or any(
+            not isinstance(key, str) or not key.strip() or len(key) > 256
+            or not isinstance(value, str) or len(value) > 4096
+            for key, value in headers.items()
+        ):
+            raise WorkspaceError("Workspace MCP server headers are invalid.")
+        return {"url": url, "headers": headers}
+
+    @staticmethod
+    def _mcp_config_digest(config):
+        encoded = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _mcp_server_metadata(self, name, config, preference):
+        digest = self._mcp_config_digest(config)
+        enabled = bool(preference.get("enabled")) and preference.get("approved_digest") == digest
+        return {
+            "name": name,
+            "transport": self._mcp_transport(config),
+            "enabled": enabled,
+            "digest": digest,
+            "command": config.get("command", ""),
+            "args": list(config.get("args") or []),
+            "url": config.get("url", ""),
+            "env_keys": sorted((config.get("env") or {}).keys()),
+            "header_keys": sorted((config.get("headers") or {}).keys()),
+        }
+
+    @staticmethod
+    def _mcp_transport(config):
+        if isinstance(config.get("url"), str):
+            return "remote"
+        if isinstance(config.get("command"), str):
+            return "stdio"
+        return "configured"
 
     def _current_branch(self, root_path):
         result = self._git_status_output(root_path, ["symbolic-ref", "--quiet", "--short", "HEAD"])

@@ -6,7 +6,7 @@ description: Behavioral evaluation framework for Eva cognitive and style regress
 
 ## Purpose
 
-The Eva behavioral evaluation framework detects regressions in how Eva behaves, not whether an HTTP endpoint is alive. It complements `tools/test_eva.py` by checking stable cognitive contracts such as identity, writing style, memory recall, refusals, routing behavior, capability markers, and prompt-injection resistance.
+The Eva behavioral evaluation framework detects regressions in how Eva behaves, not whether an HTTP endpoint is alive. It complements `tools/tests/test_eva.py` by checking stable cognitive contracts such as identity, writing style, memory recall, refusals, routing behavior, capability markers, and prompt-injection resistance.
 
 ## Scope
 
@@ -22,7 +22,7 @@ The eval tests:
 
 The eval does not test:
 
-- Raw endpoint health, CORS, or OpenAI-compatible response shape. Use `tools/test_eva.py` for that.
+- Raw endpoint health, CORS, or OpenAI-compatible response shape. Use `tools/tests/test_eva.py` for that.
 - Latency, load, or throughput.
 - General model accuracy outside Eva-specific behavior.
 - Provider uptime or account configuration.
@@ -33,7 +33,7 @@ The eval does not test:
 - The runner lives in `tools/eval/run.py`.
 - Results are written to `tools/eval/results/<timestamp>.json` and `tools/eval/results/<timestamp>.md` by default.
 - Mock responses live in `tools/eval/mock_responses.json` and are synthetic ideal responses suitable for CI.
-- Live mode posts fixtures to `/v1/aig/chat`, matching the AIG flow in `tools/test_eva.py`.
+- Live mode posts fixtures to `/v1/aig/chat`, matching the AIG flow in `tools/tests/test_eva.py`.
 
 ## Bridge contract assumptions
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 const assert = require('assert');
-const { redactKnownPaths } = require('../standalone/workspace-projection');
+const { redactKnownPaths } = require('../../standalone/workspace-projection');
 
 const checkout = '/home/eva/.config/eva/worktrees/project/run';
 const project = '/home/eva/project';

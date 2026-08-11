@@ -608,12 +608,12 @@ function initSessions() {
   var termExpand = document.getElementById('terminalPanelExpand');
   if (termExpand) termExpand.addEventListener('click', toggleTerminalWidth);
 
-  // Agent Operations is a full workspace view. Any other sidebar destination
+  // Agent Operations and Workspace are full views. Any other sidebar destination
   // must first reveal the normal workspace so its panel/view is visible.
   var evaSidebar = document.getElementById('evaSidebar');
   if (evaSidebar) evaSidebar.addEventListener('click', function(event) {
     var target = event.target;
-    if (target && target.closest && !target.closest('#evaAgentsBtn')) {
+    if (target && target.closest && !target.closest('#evaAgentsBtn, #evaWorkspacesBtn')) {
       closeAgentOperationsForNavigation();
     }
     if (target && target.closest && !target.closest('#evaWorkspacesBtn') && !target.closest('#evaTerminalBtn') && window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {
@@ -629,10 +629,10 @@ function initSessions() {
   var lcarsSidebar = document.getElementById('lcarsSidebar');
   if (lcarsSidebar) lcarsSidebar.addEventListener('click', function(event) {
     var target = event.target;
-    if (target && target.closest && !target.closest('#lcarsAgentsBtn')) {
+    if (target && target.closest && !target.closest('#lcarsAgentsBtn, #lcarsWorkspacesBtn')) {
       closeAgentOperationsForNavigation();
     }
-    if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {
+    if (target && target.closest && !target.closest('#lcarsWorkspacesBtn') && window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {
       window.EvaWorkspaces.closeWorkbench();
     }
     if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();
@@ -877,7 +877,12 @@ function toggleTerminalPanel() {
     closeSidePanels('terminalPanel');
     panel.setAttribute('aria-hidden', 'false');
   }
-  if (!visible) initTerminal();
+  if (!visible) {
+    initTerminal();
+    if (document.body.classList.contains('workspace-workbench-open') && window.EvaTerminal && typeof window.EvaTerminal.open === 'function') {
+      window.EvaTerminal.open(_evaWorkspaceTerminalTarget);
+    }
+  }
 }
 
 function toggleTerminalWidth() {
@@ -895,9 +900,14 @@ function toggleTerminalWidth() {
 
 var _evaWorkspaceTerminalTarget = { rootId: 'app-root', label: 'Eva app root' };
 
-function openWorkspaceTerminal(rootId, label) {
+function setWorkspaceTerminalTarget(rootId, label) {
   if (typeof rootId !== 'string' || !rootId) return;
   _evaWorkspaceTerminalTarget = { rootId: rootId, label: String(label || 'Workspace') };
+}
+
+function openWorkspaceTerminal(rootId, label) {
+  if (typeof rootId !== 'string' || !rootId) return;
+  setWorkspaceTerminalTarget(rootId, label);
   var panel = document.getElementById('terminalPanel');
   if (panel) panel.classList.toggle('terminal-panel-docked', document.body.classList.contains('workspace-workbench-open'));
   var workspacePanel = document.getElementById('workspacePanel');

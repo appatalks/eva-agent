@@ -54,6 +54,14 @@ This project is a simple web UI for interacting with OpenAI, Google Generative m
 - Confirm Errors 400/404/429/500 are surfaced in `txtOutput`.
 - Validate localStorage message persistence and clear/reset.
 
+## Development Efficiency
+- Work autonomously through focused inspection, implementation, and the smallest relevant manual or executable check.
+- Product code lives under `tools/`; validation code lives under `tools/tests/`. Do not read or use the test suite as product context unless the current change needs a focused check or the user asks for test work.
+- Keep ad hoc regression scripts under `tools/tests/local/`, which is ignored. Promote a local regression into the committed suite only when the user explicitly asks for a CI contract.
+- CI runs an explicit curated set of scripts from `tools/tests/`; do not add broad test discovery or make the application package test files.
+- Invoke the `reviewer` agent only when the user asks for a review, a PR is being prepared, or a difficult design, security, data-integrity, or cross-provider question remains unresolved after local investigation.
+- Do not request reviewer approval for routine implementation, validation, version bumps, or usability work. Summarize residual risks directly when no escalation is needed.
+
 ## Developer Prompts
 - "Add a new provider/model; wire it into the selector and routing with minimal changes."
 - "Refactor to a fetch() wrapper but keep backward compatibility; don't change behavior."
@@ -75,12 +83,13 @@ This project is a simple web UI for interacting with OpenAI, Google Generative m
 - Update `README.md` Features list when adding models or user-visible features.
 
 ## Build
-- After every completed code iteration, deploy and rebuild so changes are testable immediately:
-  1. Pull the latest into the installed copy: `cd ~/.eva && git pull origin main`.
-  2. Rebuild the Electron AppImage: `cd ~/.eva/standalone && npm run dist`.
+- After every completed code change or update that will be tested manually, install the current workspace version system-wide before asking the user to test it. Do not treat a workspace AppImage as the manual-test target.
+- Preserve the installed runtime state and secrets while syncing the active workspace into `~/.eva`; never copy `config.json`, `config.local.js`, `.env*`, `.azure/`, token caches, `memory.db`, or backups from the workspace.
+- For feature branches or uncommitted work, do not pull `main` into the installed copy. Sync the current workspace, then run `cd ~/.eva && ./install.sh --yes --no-update --build`.
+- Refresh `~/.local/bin/eva` and the desktop launcher to point to the latest `~/.eva/standalone/dist/Eva Standalone-<version>.AppImage`, then launch `eva` for the independent manual test.
+- Before packaging a committed default-branch release, pull the latest into `~/.eva` first. The installed copy, not the git working tree, is always the manual-test target.
 - The AppImage bundles its own copy of `tools/` at a temporary mount path. Changes to `~/.eva/tools/` are **not** picked up until the AppImage is rebuilt.
 - The build command is `npm run dist` inside `standalone/`.
-- Do not skip the pull+rebuild step. If the user is testing, they are testing the installed copy, not the git working tree.
 
 ## ACP Infrastructure Roadmap
 - Keep ACP deployment assumptions aligned with `README-2.md` under **ACP Infrastructure Roadmap (tracking)**.

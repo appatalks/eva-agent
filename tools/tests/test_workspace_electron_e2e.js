@@ -5,9 +5,9 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const path = require('path');
-const { chromium } = require('../standalone/node_modules/playwright-core');
+const { chromium } = require('../../standalone/node_modules/playwright-core');
 
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(__dirname, '..', '..');
 const electronPath = process.env.EVA_ELECTRON_BINARY || path.join(root, 'standalone', 'dist', 'linux-unpacked', 'eva-standalone');
 
 function git(directory, args) {
@@ -108,23 +108,44 @@ async function main() {
     git(repository, ['config', 'user.name', 'Eva E2E']);
     git(repository, ['config', 'user.email', 'eva-e2e@example.invalid']);
     fs.writeFileSync(path.join(repository, 'README.md'), '# packaged workspace test\n');
-    git(repository, ['add', 'README.md']);
+    fs.mkdirSync(path.join(repository, 'src', 'features'), { recursive: true });
+    fs.writeFileSync(path.join(repository, 'src', 'features', 'index.js'), 'module.exports = {};\n');
+    const workspaceMcpConfig = JSON.stringify({
+      mcpServers: { 'project-docs': { command: 'example-mcp', args: ['--docs'] } }
+    });
+    fs.writeFileSync(path.join(repository, 'mcp.json'), workspaceMcpConfig);
+    git(repository, ['add', 'README.md', 'mcp.json', 'src/features/index.js']);
     git(repository, ['commit', '-m', 'Initial commit']);
-    execFileSync('python3', [path.join(root, 'tools', 'test_workspace_electron_setup.py'), configDirectory, repository], { encoding: 'utf8' });
+    execFileSync('python3', [path.join(root, 'tools', 'tests', 'test_workspace_electron_setup.py'), configDirectory, repository], { encoding: 'utf8' });
 
     const debuggingPort = await reservePort();
-    child = spawn(electronPath, ['--eva-workspace-terminal-v1', '--remote-debugging-port=' + debuggingPort], {
+    child = spawn(electronPath, [
+      '--eva-workspace-terminal-v1',
+      '--remote-debugging-port=' + debuggingPort,
+      '--user-data-dir=' + path.join(sandbox, 'electron-profile')
+    ], {
       env: Object.assign({}, process.env, { EVA_CONFIG_DIR: configDirectory, EVA_WORKSPACE_AGENT_AUTODISPATCH: '0' }),
       stdio: ['ignore', 'ignore', 'pipe']
     });
     child.stderr.on('data', function(chunk) { stderr = (stderr + chunk.toString()).slice(-4000); });
-    const attached = await waitForPage('http://127.0.0.1:' + debuggingPort);
+    let attached;
+    try {
+      attached = await waitForPage('http://127.0.0.1:' + debuggingPort);
+    } catch (error) {
+      throw new Error(error.message + (stderr ? '\nElectron stderr:\n' + stderr : ''));
+    }
     browser = attached.browser;
     const page = attached.page;
     await page.setViewportSize({ width: 1280, height: 900 });
 
     await page.locator('#evaWorkspacesBtn').click();
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
+    assert.strictEqual(await page.locator('#workspaceWorkbench h1').innerText(), 'Workspaces', 'Workspace tab did not open the coding workspace dashboard');
+    assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'Workspace dashboard is not active');
+    await page.evaluate(function() { window.EvaWorkspaces.closeWorkbench(); });
+    await page.evaluate(function() { document.getElementById('lcarsWorkspacesBtn').click(); });
+    await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
+    assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'LCARS Workspaces click was closed by sidebar bubbling');
     await page.waitForFunction(function() {
       const workbenchHeader = document.querySelector('#workspaceWorkbench .workspace-workbench-header').getBoundingClientRect();
       const titleBar = document.querySelector('#evaTitleBar').getBoundingClientRect();
@@ -137,22 +158,90 @@ async function main() {
     });
     assert.strictEqual(narrowOverflow, false, 'Workspace monitor overflows in the narrow layout');
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page.locator('#workspaceMonitorNewBtn').click();
-    await page.locator('#workspacePanel').waitFor({ state: 'visible' });
-    await page.waitForFunction(function() {
-      const workspaceHeader = document.querySelector('#workspacePanel .session-panel-header').getBoundingClientRect();
-      const titleBar = document.querySelector('#evaTitleBar').getBoundingClientRect();
-      return workspaceHeader.top >= titleBar.bottom;
+    const projectWorkspace = page.locator('#workspaceWorkbenchProjects .workspace-monitor-run').filter({ hasText: 'project' });
+    await projectWorkspace.waitFor();
+    await projectWorkspace.click();
+    await page.locator('#workspaceProjectFiles .workspace-project-file').filter({ hasText: 'README.md' }).waitFor();
+    let sourceFolder = page.locator('#workspaceProjectFiles > details.workspace-tree-folder').filter({ hasText: 'src' });
+    await sourceFolder.waitFor();
+    assert.strictEqual(await sourceFolder.evaluate(function(folder) { return folder.open; }), false, 'Project folders should start collapsed');
+    const nestedFile = page.locator('#workspaceProjectFiles .workspace-project-file').filter({ hasText: 'index.js' });
+    assert.strictEqual(await nestedFile.isVisible(), false, 'Nested file was visible before its folder expanded');
+    await sourceFolder.locator(':scope > summary').click();
+    let featuresFolder = sourceFolder.locator(':scope > .workspace-tree-children > details.workspace-tree-folder').filter({ hasText: 'features' });
+    await featuresFolder.waitFor({ state: 'visible' });
+    assert.strictEqual(await featuresFolder.evaluate(function(folder) { return folder.open; }), false, 'Nested folders should start collapsed');
+    await featuresFolder.locator(':scope > summary').click();
+    await nestedFile.waitFor({ state: 'visible' });
+    const readyWorkspace = page.locator('#workspaceWorkbenchProjects .workspace-monitor-run').filter({ hasText: 'Eva Ready Workspace' });
+    await readyWorkspace.click();
+    await projectWorkspace.click();
+    sourceFolder = page.locator('#workspaceProjectFiles > details.workspace-tree-folder').filter({ hasText: 'src' });
+    await sourceFolder.waitFor();
+    assert.strictEqual(await sourceFolder.evaluate(function(folder) { return folder.open; }), true, 'Project folder expansion was not preserved');
+    featuresFolder = sourceFolder.locator(':scope > .workspace-tree-children > details.workspace-tree-folder').filter({ hasText: 'features' });
+    assert.strictEqual(await featuresFolder.evaluate(function(folder) { return folder.open; }), true, 'Nested folder expansion was not preserved');
+    await nestedFile.waitFor({ state: 'visible' });
+    await page.locator('#workspaceImportGitHubBtn').click();
+    await page.locator('#evaTextPrompt[aria-hidden="false"]').waitFor({ state: 'visible' });
+    await page.locator('#evaTextPromptCancel').click();
+    const sourceCheckout = await page.evaluate(async function() {
+      const projects = await window.evaStandalone.workspaceListProjects();
+      return projects.find(function(project) { return project.name === 'project'; }).sourceCheckout;
     });
-    await page.locator('.workspace-project-item').filter({ hasText: 'project' }).waitFor();
-    assert.strictEqual(await page.locator('#workspaceProjectSelect option').filter({ hasText: 'Eva Ready Workspace' }).count(), 1, 'Automatic Eva-ready project is unavailable');
-    await page.locator('.workspace-project-item').filter({ hasText: 'project' }).click();
-    await page.locator('#workspaceObjective').fill('E2E workspace run');
-    await page.locator('#workspaceRunForm').evaluate(function(form) { form.requestSubmit(); });
-    await page.locator('.workspace-run-item').filter({ hasText: 'E2E workspace run' }).waitFor();
-    await page.locator('#workspaceOpenWorkbenchBtn').click();
-    await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
-    const monitoredRun = page.locator('.workspace-monitor-run').filter({ hasText: 'E2E workspace run' });
+    await page.locator('#workspaceWorkbenchDetail .workspace-monitor-detail-actions button', { hasText: 'Open project terminal' }).click();
+    await page.locator('.workspace-terminal-status').filter({ hasText: 'CONNECTED' }).waitFor();
+    const sourceTerminals = await page.evaluate(async function() { return window.evaStandalone.terminalList(); });
+    const sourceTerminal = sourceTerminals.find(function(terminal) { return terminal.rootId === sourceCheckout.id; });
+    assert.ok(sourceTerminal, 'Project terminal did not use the selected source checkout');
+    await page.evaluate(async function(terminalId) { await window.evaStandalone.terminalClose(terminalId); }, sourceTerminal.id);
+    await page.locator('#terminalPanelClose').click();
+    const mcpToggle = page.locator('#workspaceWorkbenchDetail .workspace-mcp-row input');
+    page.once('dialog', function(dialog) { return dialog.accept(); });
+    await mcpToggle.check();
+    await page.waitForFunction(async function() {
+      const projects = await window.evaStandalone.workspaceListProjects();
+      return projects.some(function(project) {
+        return project.name === 'project' && project.mcpServers.servers.some(function(server) {
+          return server.name === 'project-docs' && server.enabled;
+        });
+      });
+    });
+    const objectiveInput = page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form textarea');
+    await objectiveInput.fill('E2E workspace run');
+    const monitorChangeTerminal = await page.evaluate(async function(rootId) {
+      return window.evaStandalone.terminalCreate({ rootId: rootId, cols: 80, rows: 24 });
+    }, sourceCheckout.id);
+    fs.writeFileSync(path.join(repository, 'mcp.json'), JSON.stringify({
+      mcpServers: { 'project-docs': { command: 'changed-mcp', args: [] } }
+    }));
+    await page.waitForFunction(function() {
+      const toggle = document.querySelector('#workspaceWorkbenchDetail .workspace-mcp-row input');
+      return toggle && !toggle.checked;
+    }, null, { timeout: 20000 });
+    assert.strictEqual(await objectiveInput.inputValue(), 'E2E workspace run', 'Workspace monitor state change cleared the coding objective');
+    fs.writeFileSync(path.join(repository, 'mcp.json'), workspaceMcpConfig);
+    await page.waitForFunction(async function() {
+      const projects = await window.evaStandalone.workspaceListProjects();
+      const project = projects.find(function(item) { return item.name === 'project'; });
+      const server = project && project.mcpServers.servers.find(function(item) { return item.name === 'project-docs'; });
+      return server && server.command === 'example-mcp' && !server.enabled;
+    }, null, { timeout: 20000 });
+    assert.strictEqual(await mcpToggle.isChecked(), false, 'Restoring an old MCP digest silently restored approval');
+    assert.strictEqual(await objectiveInput.inputValue(), 'E2E workspace run', 'MCP revocation refresh cleared the coding objective');
+    page.once('dialog', function(dialog) { return dialog.accept(); });
+    await mcpToggle.check();
+    await page.waitForFunction(async function() {
+      const projects = await window.evaStandalone.workspaceListProjects();
+      return projects.some(function(project) {
+        return project.name === 'project' && project.mcpServers.servers.some(function(server) {
+          return server.name === 'project-docs' && server.enabled;
+        });
+      });
+    });
+    await page.evaluate(async function(terminalId) { await window.evaStandalone.terminalClose(terminalId); }, monitorChangeTerminal.id);
+    await page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form').evaluate(function(form) { form.requestSubmit(); });
+    const monitoredRun = page.locator('#workspaceWorkbenchRuns .workspace-monitor-run').filter({ hasText: 'E2E workspace run' });
     await monitoredRun.waitFor();
     await monitoredRun.click();
     await page.locator('#workspaceMonitorFeed').filter({ hasText: 'Eva monitor:' }).waitFor();

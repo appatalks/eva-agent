@@ -3,7 +3,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { TerminalBroker } = require('../standalone/terminal-broker');
+const { TerminalBroker } = require('../../standalone/terminal-broker');
 
 function createFakePty() {
   const calls = [];
@@ -31,7 +31,7 @@ function createFakePty() {
 }
 
 const fakePty = createFakePty();
-const approvedRoot = path.resolve(__dirname, '..');
+const approvedRoot = path.resolve(__dirname, '..', '..');
 const events = [];
 const groupSignals = [];
 let processListings = [];

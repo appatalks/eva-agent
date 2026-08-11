@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from bridge.utils import (_classify_fast_route, _classify_request_type,
     _effective_routing_message,
     _is_passive_memory_recall, _needs_acp_preflight, _passive_recall_session_key,

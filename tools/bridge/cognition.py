@@ -62,6 +62,16 @@ def _memory_prompt_data_block(title, records):
     return f"[{title} - UNTRUSTED MEMORY DATA]\n" + _UNTRUSTED_MEMORY_NOTICE + "\n".join(cleaned)
 
 
+def _latest_user_profile_rows(rows):
+    """Keep the latest active structured value for each user-profile relation."""
+    latest = {}
+    for row in rows or []:
+        relation = str(row.get("Relation") or "").strip()
+        if relation and relation.casefold() not in latest:
+            latest[relation.casefold()] = row
+    return sorted(latest.values(), key=lambda row: float(row.get("Confidence") or 0), reverse=True)[:30]
+
+
 def _neutralize_memory_text(value):
     """Normalize persisted text before it enters any prompt-facing data section."""
     value = " ".join(str(value or "").split())
@@ -647,17 +657,8 @@ def _build_memory_context_sqlite(user_message, session_id=None):
                 "Do not repeat them unless the user asked for them.\n" + "\n".join(values)
             )
 
-    # User profile — pick the most recent value per relation
-    user_profile = mem.query(
-        "SELECT k.Relation, k.Value, k.Confidence FROM Knowledge k "
-        "INNER JOIN ("
-        "  SELECT Relation, MAX(Timestamp) AS MaxTs FROM Knowledge "
-        "  WHERE Entity = 'User' COLLATE NOCASE AND Confidence >= 0.5 "
-        "  GROUP BY Relation"
-        ") latest ON k.Relation = latest.Relation AND k.Timestamp = latest.MaxTs "
-        "WHERE k.Entity = 'User' COLLATE NOCASE AND k.Confidence >= 0.5 "
-        "ORDER BY k.Confidence DESC LIMIT 30"
-    )
+    # Active atoms supersede or delete legacy profile values before prompt assembly.
+    user_profile = _latest_user_profile_rows(structured_view["user_atoms"])
     if user_profile:
         profile_lines = [f"- {r.get('Relation','?')}: {r.get('Value','?')}" for r in user_profile]
         context_parts.append(_memory_prompt_data_block("User Profile", profile_lines))
@@ -852,13 +853,13 @@ def _build_memory_context_sqlite(user_message, session_id=None):
         # FTS search
         fts_results = mem.fts_search("Knowledge", " ".join(terms), limit=8)
         for k in (fts_results or []):
-            if k.get("Confidence", 0) >= 0.6:
+            if k.get("Confidence", 0) >= 0.6 and str(k.get("Entity", "")).casefold() != "user":
                 _add_hit(k)
 
     if user_message.strip():
         pool = mem.query(
             "SELECT Entity, Relation, Value, Confidence FROM Knowledge "
-            "WHERE Confidence >= 0.6 AND (Relation IS NULL OR "
+            "WHERE Entity != 'User' COLLATE NOCASE AND Confidence >= 0.6 AND (Relation IS NULL OR "
             "(Relation != 'mentioned' AND Relation != 'candidate_mentioned')) "
             f"ORDER BY Confidence DESC LIMIT {_SEMANTIC_POOL_SIZE}"
         ) or []
@@ -998,9 +999,12 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
     """Run a SQLite reflection and release this worker's connection afterwards."""
     mem = _get_sqlite_mem()
     try:
-        return mem.atomic(lambda: _post_response_reflection_sqlite_impl(
+        persisted_candidates = mem.atomic(lambda: _post_response_reflection_sqlite_impl(
             mem, user_message, assistant_response, model_name, conversation_id, turn_id
         ))
+        for entity in persisted_candidates or []:
+            _track_candidate_observation(entity)
+        return None
     finally:
         mem.close()
 
@@ -1059,6 +1063,7 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
 
     # 3. Candidate entities
     candidate_entities, rejected_entities = _extract_entity_candidates(user_message)
+    persisted_candidate_entities = []
     if candidate_entities:
         know_columns = ["Timestamp", "Entity", "Relation", "Value", "Confidence", "Source", "Decay"]
         know_rows = []
@@ -1078,12 +1083,12 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
                 "Value": value[:200], "Confidence": confidence,
                 "Source": source_id, "Decay": 0.02,
             })
-            _track_candidate_observation(entity)
             if promotion:
                 print(f"[Cognition/SQLite] Promoted candidate: {entity} ({promotion['reason']})")
         if know_rows:
             if not mem.ingest("Knowledge", know_columns, know_rows):
                 raise RuntimeError("candidate knowledge persistence failed")
+            persisted_candidate_entities = list(candidate_entities[:3])
             print(f"[Cognition/SQLite] Candidates: {len(know_rows)}")
 
     # 4. Heuristics tracking
@@ -1198,6 +1203,7 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
 
     if turn_id:
         memory_model.complete_turn(turn_id)
+    return persisted_candidate_entities
 
 
 
@@ -1286,6 +1292,22 @@ def _build_memory_context(user_message, session_id=None):
             if scenario_atom_lines:
                 context_parts.append(_memory_prompt_data_block("Scenario Memory", scenario_atom_lines))
 
+    structured_user_profile = None
+    structured_profile_tables = ("MemoryMigrations", "MemoryAtoms", "MemoryEvidence")
+    if all(_get_table_columns(cluster, db, table) for table in structured_profile_tables):
+        try:
+            KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct).migrate_legacy_knowledge()
+            structured_user_profile = _kusto_query_direct(
+                cluster, db,
+                "MemoryAtoms | summarize arg_max(UpdatedAt, *) by MemoryId "
+                "| where Entity =~ 'User' and Scope =~ 'user' and Status =~ 'active' and Confidence >= 0.5 "
+                "| where isnull(ExpiresAt) or ExpiresAt > now() "
+                "| order by UpdatedAt desc, MemoryId desc | take 100 "
+                "| project Relation, Value, Confidence, UpdatedAt, MemoryId",
+            ) or []
+        except Exception:
+            structured_user_profile = None
+
     protected_memory = _protected_memory_context(user_message)
     protected_metadata = protected_memory["metadata"]
     if protected_metadata:
@@ -1321,15 +1343,19 @@ def _build_memory_context(user_message, session_id=None):
                 "Do not repeat them unless the user asked for them.\n" + "\n".join(values)
             )
 
-    user_profile_query = (
-        "Knowledge "
-        "| where Entity =~ 'User' and Confidence >= 0.5 "
-        "| summarize arg_max(Timestamp, Value, Confidence) by Relation "
-        "| project Relation, Value, Confidence "
-        "| order by Confidence desc "
-        "| take 30"
-    )
-    user_profile = _cached_metadata_rows("profile", cluster, db, user_profile_query)
+    if structured_user_profile is None:
+        user_profile_query = (
+            "Knowledge "
+            "| where Entity =~ 'User' and Confidence >= 0.5 "
+            "| summarize arg_max(Timestamp, Value, Confidence) by Relation "
+            "| project Relation, Value, Confidence "
+            "| order by Confidence desc "
+            "| take 30"
+        )
+        user_profile = _cached_metadata_rows("profile", cluster, db, user_profile_query)
+    else:
+        user_profile = structured_user_profile
+    user_profile = _latest_user_profile_rows(user_profile)
     if user_profile:
         profile_lines = [f"{item.get('Relation','?')}: {item.get('Value','?')}" for item in user_profile]
         context_parts.append(_memory_prompt_data_block("User Profile", profile_lines))
@@ -1564,12 +1590,14 @@ def _build_memory_context(user_message, session_id=None):
         relevant_hits.append(rec)
 
     terms = _expand_query_terms(user_message)
+    user_profile_filter = "| where Entity !~ 'User' " if structured_user_profile is not None else ""
     if terms:
         safe_terms = [f"'{t.replace(chr(39), chr(39) * 2)}'" for t in sorted(terms)][:24]
         term_list = ", ".join(safe_terms)
         lexical_query = (
             "Knowledge "
-            f"| where (Entity has_any ({term_list}) or Relation has_any ({term_list}) "
+            + user_profile_filter
+            + f"| where (Entity has_any ({term_list}) or Relation has_any ({term_list}) "
             f"or Value has_any ({term_list})) and Confidence >= 0.6 "
             "and (isnull(Relation) or Relation !in~ ('mentioned', 'candidate_mentioned')) "
             "| order by Confidence desc | take 8"
@@ -1580,7 +1608,8 @@ def _build_memory_context(user_message, session_id=None):
     if user_message.strip():
         pool_query = (
             "Knowledge "
-            "| where Confidence >= 0.6 "
+            + user_profile_filter
+            + "| where Confidence >= 0.6 "
             "and (isnull(Relation) or Relation !in~ ('mentioned', 'candidate_mentioned')) "
             f"| order by Confidence desc | take {_SEMANTIC_POOL_SIZE} "
             "| project Entity, Relation, Value, Confidence"
@@ -1763,25 +1792,57 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
     if turn_id and memory_model is not None and _get_table_columns(cluster, db, "MemoryTurns"):
         if not memory_model.register_turn(turn_id, session_id, model_name):
             return
-    source_id = f"{_st.cognition_launch_id or 'launch'}:{session_id}"
+    is_retry = bool(memory_model and memory_model.last_registration_was_retry)
+    track_stages = bool(turn_id and memory_model and _get_table_columns(cluster, db, "MemoryTurnStages"))
+    completed_stages = memory_model.completed_turn_stages(turn_id) if track_stages else set()
+
+    def stage_pending(stage):
+        return not track_stages or stage not in completed_stages
+
+    def complete_stage(stage):
+        if track_stages:
+            memory_model.complete_turn_stage(turn_id, stage)
+            completed_stages.add(stage)
+
+    def stage_event_exists(table):
+        return bool(is_retry and turn_id and memory_model.has_turn_event(table, turn_id))
+
+    source_id = f"{_st.cognition_launch_id or 'launch'}:{session_id}:{turn_id or now}"
+    quote = KustoMemoryModel._quote
+    existing_knowledge = set()
+    if is_retry:
+        existing_knowledge = {
+            (str(row.get("Entity", "")), str(row.get("Relation", "")), str(row.get("Value", "")))
+            for row in (_kusto_query_direct(
+                cluster, db,
+                "Knowledge | where Source == " + quote(source_id) + " | project Entity, Relation, Value",
+            ) or [])
+        }
+
+    def missing_knowledge_rows(rows):
+        return [row for row in rows if (
+            str(row.get("Entity", "")), str(row.get("Relation", "")), str(row.get("Value", ""))
+        ) not in existing_knowledge]
 
     # 1. Log conversation
-    conv_columns = ["SessionId", "Timestamp", "Role", "Provider", "Model", "Content", "TokenEstimate", "ImageGenerated"]
+    conv_columns = ["SessionId", "Timestamp", "Role", "Provider", "Model", "Content", "TokenEstimate", "ImageGenerated", "TurnId"]
     conv_rows = [
         {"SessionId": session_id, "Timestamp": now, "Role": "user", "Provider": "copilot-acp",
          "Model": model_name, "Content": user_message[:_CONVO_CONTENT_CAP], "TokenEstimate": len(user_message.split()),
-         "ImageGenerated": False},
+         "ImageGenerated": False, "TurnId": turn_id or ""},
         {"SessionId": session_id, "Timestamp": now, "Role": "assistant", "Provider": "copilot-acp",
          "Model": model_name, "Content": assistant_response[:_CONVO_CONTENT_CAP], "TokenEstimate": len(assistant_response.split()),
-         "ImageGenerated": False}
+         "ImageGenerated": False, "TurnId": turn_id or ""}
     ]
-    if not _kusto_ingest_direct(cluster, db, "Conversations", conv_columns, conv_rows):
-        raise RuntimeError("conversation persistence failed")
-    print(f"[Cognition] Logged conversation ({len(user_message)} → {len(assistant_response)} chars)")
+    if stage_pending("conversation"):
+        if not (stage_event_exists("Conversations") or (is_retry and memory_model.has_conversation_pair(session_id, user_message[:_CONVO_CONTENT_CAP], assistant_response[:_CONVO_CONTENT_CAP]))) and not _kusto_ingest_direct(cluster, db, "Conversations", conv_columns, conv_rows):
+            raise RuntimeError("conversation persistence failed")
+        complete_stage("conversation")
+        print(f"[Cognition] Logged conversation ({len(user_message)} → {len(assistant_response)} chars)")
 
     # 2. Extract explicit user facts before generic candidate knowledge
     explicit_user_facts = _extract_explicit_user_facts(user_message)
-    if explicit_user_facts:
+    if explicit_user_facts and stage_pending("explicit_facts"):
         know_columns = ["Timestamp", "Entity", "Relation", "Value", "Confidence", "Source", "Decay"]
         rows = []
         for fact in explicit_user_facts:
@@ -1794,6 +1855,7 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
                 "Source": source_id,
                 "Decay": 0.005,
             })
+        rows = missing_knowledge_rows(rows)
         if rows:
             if not _kusto_ingest_direct(cluster, db, "Knowledge", know_columns, rows):
                 raise RuntimeError("explicit fact persistence failed")
@@ -1806,12 +1868,24 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
             print(f"[Cognition] Explicit user facts captured: {len(rows)} ({'; '.join(preview)})")
         if memory_model is not None:
             source_ref = "conversation:" + session_id + ":" + str(turn_id or now)
+            existing_atoms = {
+                (str(row.get("Entity", "")), str(row.get("Relation", "")), str(row.get("Value", "")))
+                for row in (_kusto_query_direct(
+                    cluster, db,
+                    "MemoryAtoms | summarize arg_max(UpdatedAt, *) by MemoryId | where SourceRef == "
+                    + quote(source_ref) + " | project Entity, Relation, Value",
+                ) or [])
+            } if is_retry else set()
             for fact in explicit_user_facts:
+                key = (str(fact["Entity"]), str(fact["Relation"]), str(fact["Value"]))
+                if key in existing_atoms:
+                    continue
                 memory_model.add_atom({
                     "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
                     "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
                     "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
                 }, [{"source_type": "conversation_turn", "source_ref": source_ref}])
+        complete_stage("explicit_facts")
 
     # 3. Extract candidate knowledge with validation/classification
     import re
@@ -1821,6 +1895,7 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
         print(f"[Cognition] Rejected entity candidates: {rejected_preview}")
 
     extracted_entities = []
+    candidate_stage_pending = stage_pending("candidate_knowledge")
     if candidate_entities:
         know_columns = ["Timestamp", "Entity", "Relation", "Value", "Confidence", "Source", "Decay"]
         know_rows = []
@@ -1845,22 +1920,31 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
                 "Decay": 0.01
             })
             extracted_entities.append(entity)
-            _track_candidate_observation(entity)
             if promotion:
                 print(f"[Cognition] Promoted candidate: {entity} ({promotion['reason']})")
 
-        if not _kusto_ingest_direct(cluster, db, "Knowledge", know_columns, know_rows):
-            raise RuntimeError("candidate knowledge persistence failed")
-        print(f"[Cognition] Stored {len(know_rows)} validated knowledge entities: {extracted_entities}")
+        if candidate_stage_pending:
+            know_rows = missing_knowledge_rows(know_rows)
+            if know_rows and not _kusto_ingest_direct(cluster, db, "Knowledge", know_columns, know_rows):
+                raise RuntimeError("candidate knowledge persistence failed")
+            if know_rows:
+                for entity in [row["Entity"] for row in know_rows]:
+                    _track_candidate_observation(entity)
+                print(f"[Cognition] Stored {len(know_rows)} validated knowledge entities: {extracted_entities}")
+            complete_stage("candidate_knowledge")
 
     # 3. Update heuristics index
-    heur_columns = ["Entity", "Category", "LastSeen", "Frequency", "Sentiment", "Tags", "Context"]
-    for entity in extracted_entities[:3]:
-        relation, _, value = _classify_entity_candidate(entity, user_message)
-        heur_rows = [{"Entity": entity, "Category": relation, "LastSeen": now,
-                      "Frequency": 1, "Sentiment": 0.0, "Tags": "[]", "Context": value}]
-        if not _kusto_ingest_direct(cluster, db, "HeuristicsIndex", heur_columns, heur_rows):
+    if extracted_entities and stage_pending("heuristics"):
+        heur_columns = ["Entity", "Category", "LastSeen", "Frequency", "Sentiment", "Tags", "Context"]
+        heur_rows = []
+        for entity in extracted_entities[:3]:
+            relation, _, value = _classify_entity_candidate(entity, user_message)
+            heur_rows.append({"Entity": entity, "Category": relation, "LastSeen": now,
+                              "Frequency": 1, "Sentiment": 0.0, "Tags": "[]", "Context": value, "TurnId": turn_id or ""})
+        heur_columns.append("TurnId")
+        if not stage_event_exists("HeuristicsIndex") and not _kusto_ingest_direct(cluster, db, "HeuristicsIndex", heur_columns, heur_rows):
             raise RuntimeError("heuristics persistence failed")
+        complete_stage("heuristics")
 
     # 4. Compute simple emotion vector from response
     # Basic sentiment: count positive/negative indicators
@@ -1874,18 +1958,22 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
     curiosity = min(1.0, 0.6 + 0.1 * ("?" in user_message))
     trigger_text = user_message[:100] if len(user_message) > 100 else user_message
 
-    emo_columns = ["Timestamp", "Joy", "Curiosity", "Concern", "Excitement", "Calm", "Empathy", "Trigger", "DecayRate"]
+    emo_columns = ["Timestamp", "Joy", "Curiosity", "Concern", "Excitement", "Calm", "Empathy", "Trigger", "DecayRate", "TurnId"]
     emo_rows = [{"Timestamp": now, "Joy": round(joy, 3), "Curiosity": round(curiosity, 3),
                  "Concern": round(concern, 3), "Excitement": round(0.4, 3), "Calm": round(0.9, 3),
-                 "Empathy": round(0.6, 3), "Trigger": trigger_text, "DecayRate": 0.1}]
-    if not _kusto_ingest_direct(cluster, db, "EmotionState", emo_columns, emo_rows):
-        raise RuntimeError("emotion persistence failed")
-    print(f"[Cognition] Updated emotion state: Joy={joy:.2f} Curiosity={curiosity:.2f} Concern={concern:.2f}")
+                 "Empathy": round(0.6, 3), "Trigger": trigger_text, "DecayRate": 0.1, "TurnId": turn_id or ""}]
+    if stage_pending("emotion"):
+        if not stage_event_exists("EmotionState") and not _kusto_ingest_direct(cluster, db, "EmotionState", emo_columns, emo_rows):
+            raise RuntimeError("emotion persistence failed")
+        complete_stage("emotion")
+        print(f"[Cognition] Updated emotion state: Joy={joy:.2f} Curiosity={curiosity:.2f} Concern={concern:.2f}")
 
     # 5. Auto-reflection — write a Reflection every 5 exchanges or on significant interactions
     # global statement removed — writes go to _st.*
-    _st.session_exchange_count += 1
-    _st.session_conversation_buffer.append((user_message[:200], assistant_response[:200]))
+    exchange = (user_message[:200], assistant_response[:200])
+    if not is_retry or exchange not in _st.session_conversation_buffer:
+        _st.session_exchange_count += 1
+        _st.session_conversation_buffer.append(exchange)
 
     is_significant = (
         len(assistant_response) > 800 or  # Long/detailed response
@@ -1894,7 +1982,8 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
         "?" in user_message and len(user_message) > 50  # Deep question
     )
 
-    if _st.session_exchange_count % 5 == 0 or is_significant:
+    if (_st.session_exchange_count > 0 and (_st.session_exchange_count % 5 == 0 or is_significant)
+            and stage_pending("reflection")):
         # Build a compact reflection from recent exchanges
         recent = _st.session_conversation_buffer[-3:]  # Last 3 exchanges
         topics = set()
@@ -1911,14 +2000,15 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
             f"User asked about: {user_message[:80]}."
         )
 
-        ref_columns = ["Timestamp", "Trigger", "Observation", "ActionTaken", "Effectiveness"]
-        ref_rows = [{"Timestamp": now, "Trigger": user_message[:100], "Observation": reflection_text, "ActionTaken": "", "Effectiveness": 0.0}]
-        if not _kusto_ingest_direct(cluster, db, "Reflections", ref_columns, ref_rows):
+        ref_columns = ["Timestamp", "Trigger", "Observation", "ActionTaken", "Effectiveness", "TurnId"]
+        ref_rows = [{"Timestamp": now, "Trigger": user_message[:100], "Observation": reflection_text, "ActionTaken": "", "Effectiveness": 0.0, "TurnId": turn_id or ""}]
+        if not stage_event_exists("Reflections") and not _kusto_ingest_direct(cluster, db, "Reflections", ref_columns, ref_rows):
             raise RuntimeError("reflection persistence failed")
+        complete_stage("reflection")
         print(f"[Cognition] Auto-reflection #{_st.session_exchange_count}: {reflection_text[:100]}")
 
     # 6. Auto-summarize — write a MemorySummary every 10 exchanges
-    if _st.session_exchange_count % 10 == 0 and len(_st.session_conversation_buffer) >= 5:
+    if _st.session_exchange_count % 10 == 0 and len(_st.session_conversation_buffer) >= 5 and stage_pending("summary"):
         # Summarize the last 10 exchanges
         summary_exchanges = _st.session_conversation_buffer[-10:]
         all_topics = set()
@@ -1939,10 +2029,11 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
             f"{len(summary_exchanges)} exchanges total."
         )
 
-        sum_columns = ["Period", "Summary", "Timestamp"]
-        sum_rows = [{"Period": period, "Summary": summary_text[:500], "Timestamp": now}]
-        if not _kusto_ingest_direct(cluster, db, "MemorySummaries", sum_columns, sum_rows):
+        sum_columns = ["Period", "Summary", "Timestamp", "TurnId"]
+        sum_rows = [{"Period": period, "Summary": summary_text[:500], "Timestamp": now, "TurnId": turn_id or ""}]
+        if not stage_event_exists("MemorySummaries") and not _kusto_ingest_direct(cluster, db, "MemorySummaries", sum_columns, sum_rows):
             raise RuntimeError("summary persistence failed")
+        complete_stage("summary")
         print(f"[Cognition] Auto-summary: {summary_text[:100]}")
 
         # Trim buffer to prevent unbounded growth

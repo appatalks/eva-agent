@@ -146,14 +146,19 @@ if [ -f install.sh ]; then
   bash install.sh $INSTALL_ARGS
 fi
 
-# ── Create launcher symlink ───────────────────────────────────────────────
+# ── Create launcher ───────────────────────────────────────────────────────
 mkdir -p "$EVA_BIN"
 
 APPIMAGE="$(find "$EVA_DIR/standalone/dist" -name '*.AppImage' -type f 2>/dev/null | sort -V | tail -1)"
+rm -f "$EVA_BIN/eva"
 
 if [ -n "$APPIMAGE" ]; then
-  ln -sf "$APPIMAGE" "$EVA_BIN/eva"
-  ok "Symlinked: eva -> $APPIMAGE"
+  {
+    echo '#!/usr/bin/env bash'
+    printf 'exec %q --eva-workspace-terminal-v1 "$@"\n' "$APPIMAGE"
+  } > "$EVA_BIN/eva"
+  chmod +x "$EVA_BIN/eva"
+  ok "Created workspace-enabled launcher: eva -> $APPIMAGE"
 else
   # Fallback: create a launcher script that starts the bridge + opens browser
   cat > "$EVA_BIN/eva" <<'LAUNCHER'

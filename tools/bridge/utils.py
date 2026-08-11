@@ -292,6 +292,13 @@ _st.log_ring = _st.log_ring
 
 
 
+def _subagent_mcp_config(template, task):
+    workspace_config = task.get("_workspace_mcp_config")
+    if isinstance(workspace_config, dict):
+        return copy.deepcopy(workspace_config)
+    return copy.deepcopy(template.mcp_config)
+
+
 def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_start=None):
     """Run a single subagent task in its own thread using the existing ACP pool."""
     if start_gate is not None:
@@ -324,7 +331,7 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 copilot_path=template.copilot_path,
                 cwd=assigned_cwd,
                 model=selected_model,
-                mcp_config=copy.deepcopy(template.mcp_config),
+                mcp_config=_subagent_mcp_config(template, task),
                 reasoning_effort=template.reasoning_effort,
             )
         client.start()

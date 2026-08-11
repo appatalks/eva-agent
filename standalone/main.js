@@ -135,7 +135,7 @@ async function ensureTerminalRoot(rootId) {
   if (!validWorkspaceId(rootId)) throw new Error('Invalid workspace checkout ID.');
   const response = await requestWorkspaceBridge('/v1/workspaces/checkouts/' + encodeURIComponent(rootId) + '/status', 'GET');
   const checkout = response.checkout;
-  if (!checkout || checkout.id !== rootId || checkout.lifecycle !== 'active' || checkout.kind !== 'worktree' || typeof checkout.path !== 'string') {
+  if (!checkout || checkout.id !== rootId || checkout.lifecycle !== 'active' || !['source', 'worktree'].includes(checkout.kind) || typeof checkout.path !== 'string') {
     throw new Error('Workspace checkout is unavailable for a terminal.');
   }
   registerWorkspaceRoot(rootId, checkout.path);
@@ -180,13 +180,32 @@ function workspaceCheckoutForRenderer(checkout) {
 
 function workspaceProjectForRenderer(project) {
   if (!project || typeof project !== 'object') return null;
+  const mcp = project.mcp_servers && typeof project.mcp_servers === 'object' ? project.mcp_servers : {};
   return {
     id: project.id,
     name: project.name,
     createdAt: project.created_at,
     updatedAt: project.updated_at,
     activeRunCount: project.active_run_count,
-    sourceCheckout: workspaceCheckoutForRenderer(project.source_checkout)
+    sourceCheckout: workspaceCheckoutForRenderer(project.source_checkout),
+    mcpServers: {
+      source: typeof mcp.source === 'string' ? mcp.source : 'mcp.json',
+      state: typeof mcp.state === 'string' ? mcp.state : 'missing',
+      message: typeof mcp.message === 'string' ? mcp.message : '',
+      servers: Array.isArray(mcp.servers) ? mcp.servers.map(function(server) {
+        return {
+          name: server.name,
+          transport: server.transport,
+          enabled: server.enabled === true,
+          digest: typeof server.digest === 'string' ? server.digest : '',
+          command: typeof server.command === 'string' ? server.command : '',
+          args: Array.isArray(server.args) ? server.args.filter(function(argument) { return typeof argument === 'string'; }) : [],
+          url: typeof server.url === 'string' ? server.url : '',
+          envKeys: Array.isArray(server.env_keys) ? server.env_keys.filter(function(key) { return typeof key === 'string'; }) : [],
+          headerKeys: Array.isArray(server.header_keys) ? server.header_keys.filter(function(key) { return typeof key === 'string'; }) : []
+        };
+      }) : []
+    }
   };
 }
 
@@ -248,6 +267,33 @@ async function workspaceSelectProject(event) {
   return { canceled: false, project: workspaceProjectForRenderer(project) };
 }
 
+async function workspaceImportGitHub(event, repositoryUrl) {
+  requireWorkspaceFeature(event);
+  if (typeof repositoryUrl !== 'string' || repositoryUrl.length > 2048) {
+    throw new Error('A valid GitHub repository URL is required.');
+  }
+  const response = await requestWorkspaceBridge('/v1/workspaces/github-import', 'POST', { url: repositoryUrl });
+  const project = response.project;
+  if (!project || !validWorkspaceId(project.id)) throw new Error('Workspace bridge returned an invalid imported project.');
+  return workspaceProjectForRenderer(project);
+}
+
+async function workspaceSetMcpServer(event, projectId, serverName, enabled, approvedDigest) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(projectId) || typeof serverName !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(serverName)) {
+    throw new Error('Invalid workspace MCP server.');
+  }
+  if (typeof enabled !== 'boolean') throw new Error('Workspace MCP server state must be enabled or disabled.');
+  const response = await requestWorkspaceBridge(
+    '/v1/workspaces/projects/' + encodeURIComponent(projectId) + '/mcp-servers/' + encodeURIComponent(serverName),
+    'POST',
+    { enabled: enabled, approved_digest: typeof approvedDigest === 'string' ? approvedDigest : '' }
+  );
+  const project = response.project;
+  if (!project || !validWorkspaceId(project.id)) throw new Error('Workspace bridge returned an invalid project record.');
+  return workspaceProjectForRenderer(project);
+}
+
 async function workspaceCreateRun(event, request) {
   requireWorkspaceFeature(event);
   const input = request && typeof request === 'object' ? request : {};
@@ -274,6 +320,32 @@ async function workspaceListRuns(event, projectId) {
   const response = await requestWorkspaceBridge('/v1/workspaces/runs' + suffix, 'GET');
   const runs = Array.isArray(response.runs) ? response.runs : [];
   return runs.map(workspaceRunForRenderer).filter(Boolean);
+}
+
+async function workspaceListProjectFiles(event, projectId) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(projectId)) throw new Error('Invalid project ID.');
+  const response = await requestWorkspaceBridge(
+    '/v1/workspaces/projects/' + encodeURIComponent(projectId) + '/files', 'GET'
+  );
+  return {
+    files: Array.isArray(response.files) ? response.files.filter(function(file) { return typeof file === 'string'; }) : [],
+    truncated: response.truncated === true
+  };
+}
+
+async function workspaceOpenProjectFile(event, projectId, relativePath) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(projectId) || typeof relativePath !== 'string') throw new Error('Invalid workspace file.');
+  const response = await requestWorkspaceBridge('/v1/workspaces/projects/files/resolve', 'POST', {
+    project_id: projectId,
+    relative_path: relativePath
+  });
+  const pathValue = response.path;
+  if (typeof pathValue !== 'string' || !path.isAbsolute(pathValue)) throw new Error('Workspace file could not be resolved.');
+  const openError = await shell.openPath(pathValue);
+  if (openError) throw new Error(openError);
+  return { opened: true };
 }
 
 async function workspaceCheckoutStatus(event, checkoutId) {
@@ -1305,8 +1377,12 @@ ipcMain.handle('terminal-close-root', function(event, rootId) {
 });
 ipcMain.handle('workspace-list-projects', workspaceListProjects);
 ipcMain.handle('workspace-select-project', workspaceSelectProject);
+ipcMain.handle('workspace-import-github', workspaceImportGitHub);
+ipcMain.handle('workspace-set-mcp-server', workspaceSetMcpServer);
 ipcMain.handle('workspace-create-run', workspaceCreateRun);
 ipcMain.handle('workspace-list-runs', workspaceListRuns);
+ipcMain.handle('workspace-list-project-files', workspaceListProjectFiles);
+ipcMain.handle('workspace-open-project-file', workspaceOpenProjectFile);
 ipcMain.handle('workspace-checkout-status', workspaceCheckoutStatus);
 ipcMain.handle('workspace-list-assets', workspaceListAssets);
 ipcMain.handle('workspace-open-asset', workspaceOpenAsset);

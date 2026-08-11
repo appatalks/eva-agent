@@ -150,6 +150,7 @@ fi
 mkdir -p "$EVA_BIN"
 
 APPIMAGE="$(find "$EVA_DIR/standalone/dist" -name '*.AppImage' -type f 2>/dev/null | sort -V | tail -1)"
+rm -f "$EVA_BIN/eva"
 
 if [ -n "$APPIMAGE" ]; then
   {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 const assert = require('assert');
-const { buildContextMenuTemplate, isExternalUrl } = require('../standalone/context-menu');
+const { buildContextMenuTemplate, isExternalUrl } = require('../../standalone/context-menu');
 
 for (const value of ['https://example.com', 'http://example.com/path']) {
   assert.strictEqual(isExternalUrl(value), true, value + ' should be allowed');

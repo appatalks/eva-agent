@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current release:** Eva 5.5.8. This document describes the matching browser UI,
+> **Current release:** Eva 5.5.9. This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -280,16 +280,18 @@ tools/
   eva_seed.kql             Sanitized database seed (public-safe)
   acp_bridge.service       Systemd unit file
   acp_setup.sh             One-command installer
-  test_static.py           CI-safe static tests
-  test_eva.py              Live bridge integration suite
-  test_latency.py          Latency benchmarks
-  test_skills_e2e.py       Skill import end-to-end tests
-  test_terminal_broker.js  PTY confinement, replay, process-session cleanup
-  test_terminal_e2e.js     Packaged terminal, Sessions, and Skills UI workflow
-  test_workspace_electron_e2e.js
+  tests/                   Local and CI validation scripts; separate from runtime code
+    README.md               Test boundary, local experimentation, and CI contract
+    test_static.py          CI-safe static tests
+    test_eva.py             Live bridge integration suite
+    test_latency.py         Latency benchmarks
+    test_skills_e2e.py      Skill import end-to-end tests
+    test_terminal_broker.js PTY confinement, replay, process-session cleanup
+    test_terminal_e2e.js    Packaged terminal, Sessions, and Skills UI workflow
+    test_workspace_electron_e2e.js
                            Packaged Workspace/Assets/terminal workflow
-  test_workspaces.py       Git worktree and symlink-confinement lifecycle tests
-  test_workspaces_e2e.py   Workspace bridge, agent dispatch, Assets HTTP lifecycle
+    test_workspaces.py      Git worktree and symlink-confinement lifecycle tests
+    test_workspaces_e2e.py  Workspace bridge, agent dispatch, Assets HTTP lifecycle
   eval/                    Behavioral eval harness
 
 standalone/
@@ -298,7 +300,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.5.8)
+  package.json             Electron + electron-builder config (v5.5.9)
 ```
 
 ## Dependencies
@@ -1640,7 +1642,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.5.8.AppImage'
+./dist/'Eva Standalone-5.5.9.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace
@@ -1762,39 +1764,39 @@ Runs on every PR to `main`:
 | Job | Checks |
 |---|---|
 | **static-checks** | Secret scanning, HTML structure, JS syntax, Python syntax, model routing, config templates, .gitignore |
-| **python-tests** | `tools/test_static.py`: file integrity, config safety, CSV logic, model selector, seed validation |
+| **python-tests** | `tools/tests/test_static.py`: file integrity, config safety, CSV logic, model selector, seed validation |
 
 ### Test Files
 
 | File | Needs Bridge? | Description |
 |---|---|---|
-| `tools/test_static.py` | No | CI-safe static tests |
-| `tools/test_eva.py` | Yes | 64-check integration suite |
-| `tools/test_latency.py` | Yes | Production-shaped AIG latency probe with NDJSON TTFT/total timings, cold/warm repetitions, and optional thresholds |
-| `tools/test_latency_fake_server.py` | No | Fake HTTP-server coverage for fast, approval, and revision call paths |
-| `tools/test_skills_e2e.py` | Starts local test bridge | Skill import/edit/injection/delete lifecycle with stubbed ACP/Kusto |
-| `tools/test_workspaces.py` | No | Workspace schema, worktree isolation/recovery, dirty cleanup, symlink confinement |
-| `tools/test_workspaces_e2e.py` | No live model | Real HTTP workspace/AgentRun/Assets lifecycle with deterministic worker |
-| `tools/test_terminal_broker.js` | No | PTY root confinement, replay, resize, descendant cancellation, root swaps |
-| `tools/test_workspace_projection.js` | No | Report path redaction |
-| `tools/test_terminal_e2e.js` | Starts packaged app | Terminal, reconnect, mobile layout, Sessions, Skills main view |
-| `tools/test_workspace_electron_e2e.js` | Starts packaged app | Workspaces, terminal dock, Assets, process cleanup, root revocation |
+| `tools/tests/test_static.py` | No | CI-safe static tests |
+| `tools/tests/test_eva.py` | Yes | 64-check integration suite |
+| `tools/tests/test_latency.py` | Yes | Production-shaped AIG latency probe with NDJSON TTFT/total timings, cold/warm repetitions, and optional thresholds |
+| `tools/tests/test_latency_fake_server.py` | No | Fake HTTP-server coverage for fast, approval, and revision call paths |
+| `tools/tests/test_skills_e2e.py` | Starts local test bridge | Skill import/edit/injection/delete lifecycle with stubbed ACP/Kusto |
+| `tools/tests/test_workspaces.py` | No | Workspace schema, worktree isolation/recovery, dirty cleanup, symlink confinement |
+| `tools/tests/test_workspaces_e2e.py` | No live model | Real HTTP workspace/AgentRun/Assets lifecycle with deterministic worker |
+| `tools/tests/test_terminal_broker.js` | No | PTY root confinement, replay, resize, descendant cancellation, root swaps |
+| `tools/tests/test_workspace_projection.js` | No | Report path redaction |
+| `tools/tests/test_terminal_e2e.js` | Starts packaged app | Terminal, reconnect, mobile layout, Sessions, Skills main view |
+| `tools/tests/test_workspace_electron_e2e.js` | Starts packaged app | Workspaces, terminal dock, Assets, process cleanup, root revocation |
 | `tools/eval/run.py --mode mock` | No | Behavioral eval with synthetic responses |
 | `tools/eval/run.py --mode live` | Yes | Behavioral eval against live bridge |
 
 ```bash
-python3 tools/test_static.py                          # CI-safe
-python3 tools/test_skills_e2e.py                      # Skills HTTP lifecycle
-python3 tools/test_workspaces.py                      # Workspace/Git safety
-python3 tools/test_workspaces_e2e.py                  # Workspace HTTP + agent/Assets
-python3 tools/test_streaming.py                       # Streaming and ACP permission policy
-node tools/test_terminal_broker.js                    # PTY contract
-node tools/test_workspace_projection.js               # Report redaction
-node tools/test_terminal_e2e.js                       # Packaged terminal/session/Skills UI
-node tools/test_workspace_electron_e2e.js             # Packaged workspace/Assets UI
-python3 tools/test_latency_fake_server.py              # latency harness without a bridge
-python3 tools/test_latency.py --bridge http://localhost:8888 --mode both --repetitions 2
-python3 tools/test_eva.py --verbose                   # full integration
+python3 tools/tests/test_static.py                          # CI-safe
+python3 tools/tests/test_skills_e2e.py                      # Skills HTTP lifecycle
+python3 tools/tests/test_workspaces.py                      # Workspace/Git safety
+python3 tools/tests/test_workspaces_e2e.py                  # Workspace HTTP + agent/Assets
+python3 tools/tests/test_streaming.py                       # Streaming and ACP permission policy
+node tools/tests/test_terminal_broker.js                    # PTY contract
+node tools/tests/test_workspace_projection.js               # Report redaction
+node tools/tests/test_terminal_e2e.js                       # Packaged terminal/session/Skills UI
+node tools/tests/test_workspace_electron_e2e.js             # Packaged workspace/Assets UI
+python3 tools/tests/test_latency_fake_server.py              # latency harness without a bridge
+python3 tools/tests/test_latency.py --bridge http://localhost:8888 --mode both --repetitions 2
+python3 tools/tests/test_eva.py --verbose                   # full integration
 python3 tools/eval/run.py --mode mock                 # synthetic eval
 python3 tools/eval/run.py --mode live --bridge http://localhost:8888  # live eval
 ```

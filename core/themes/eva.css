@@ -9,6 +9,7 @@
 
 /* ── CSS Variables ─────────────────────────────────────────── */
 body.theme-eva {
+  --eva-sidebar-width: 240px;
   --eva-bg:          #0d1017;
   --eva-sidebar:     #151929;
   --eva-sidebar-item:#1c2240;
@@ -40,7 +41,7 @@ body.theme-eva {
   color: var(--eva-text);
   font-family: var(--eva-font);
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: var(--eva-sidebar-width) 1fr;
   grid-template-rows: 1fr;
   gap: 0;
   align-items: stretch;
@@ -74,6 +75,22 @@ body.theme-eva .eva-sidebar {
   height: 100%;
   overflow: hidden;
   font-family: var(--eva-font);
+}
+
+/* The Memory inspector is a sibling of the chat container. Keep the Eva
+  sidebar available while the inspector occupies only the content column. */
+body.theme-eva.memory-view-open .memory-inspector-panel {
+  left: var(--eva-sidebar-width) !important;
+  right: 0 !important;
+  width: auto !important;
+  display: grid !important;
+  visibility: visible !important;
+  transform: translateX(0) !important;
+}
+body.theme-eva.memory-view-open .memory-inspector-panel { display: flex !important; }
+body.eva-standalone.theme-eva.memory-view-open .memory-inspector-panel {
+  top: 32px !important;
+  height: calc(100vh - 32px) !important;
 }
 
 /* Sidebar header — avatar + title */
@@ -909,6 +926,7 @@ body.theme-eva .cog-badge[data-active="true"] {
 @media (max-width: 599px) {
   body.theme-eva { grid-template-columns: 1fr; padding: 0; }
   body.theme-eva .eva-sidebar { display: none !important; }
+  body.theme-eva.memory-view-open .memory-inspector-panel { left: 0 !important; width: 100vw !important; }
   body.theme-eva #idContainer { grid-column: 1; border-radius: 0; border: none; height: 100vh; }
   body.theme-eva #txtOutput { padding: 12px; font-size: 14px; border-radius: 0; }
   body.theme-eva .chat-input-container { padding: 8px 12px; border-radius: 0; }
@@ -919,7 +937,7 @@ body.theme-eva .cog-badge[data-active="true"] {
 }
 
 @media (min-width: 600px) and (max-width: 1023px) {
-  body.theme-eva { grid-template-columns: 200px 1fr; }
+  body.theme-eva { --eva-sidebar-width: 200px; grid-template-columns: var(--eva-sidebar-width) 1fr; }
   body.theme-eva #idContainer { width: 100%; }
 }
 
@@ -948,6 +966,21 @@ body.theme-eva .cog-badge[data-active="true"] {
 }
 .voice-view.open { display: flex; }
 
+/* Live memory topology stays behind Eva's voice orb as a subdued field. The
+  canvas renders only bridge-provided relationships and keeps foreground
+  controls legible. */
+.vv-memory-graph {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.15;
+  mix-blend-mode: screen;
+}
+body.theme-lcars .vv-memory-graph { opacity: 0.12; mix-blend-mode: normal; }
+
 /* Scanline overlay */
 .vv-scanline {
   position: absolute;
@@ -971,7 +1004,7 @@ body.theme-eva .cog-badge[data-active="true"] {
   width: 320px;
   max-width: 38vw;
   height: 150px;
-  z-index: 0;
+  z-index: 1;
   pointer-events: none;
   overflow: hidden;
   display: flex;

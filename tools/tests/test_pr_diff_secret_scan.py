@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Tests for the fork-safe pull-request credential diff scanner."""
 
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scan_pr_diff_secrets import scan_diff, scan_text
 
