@@ -242,18 +242,15 @@ class WorkspaceStore:
         destination_name = owner + "-" + repository + "-" + hashlib.sha256(
             normalized_url.encode("utf-8")
         ).hexdigest()[:12]
-        destination = (self.config_dir / "projects" / "github" / destination_name).resolve()
-        import_root = (self.config_dir / "projects" / "github").resolve()
-        if not self._is_within(destination, import_root):
+        import_root = self._prepare_managed_import_root()
+        destination = import_root / destination_name
+        if not self._is_within(destination, import_root) or not self._is_within(destination, self.config_dir):
             raise WorkspaceError("Invalid GitHub workspace destination.")
         with self.lock:
             if destination.exists():
                 if destination.is_symlink() or not destination.is_dir():
                     raise WorkspaceError("GitHub workspace destination is unavailable.")
                 return self.register_project(destination, owner + "/" + repository)
-            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            if destination.parent.is_symlink():
-                raise WorkspaceError("GitHub workspace destination is unavailable.")
             try:
                 self._clone_github_repository(normalized_url, destination)
             except WorkspaceError:
@@ -270,7 +267,11 @@ class WorkspaceStore:
 
     def list_project_files(self, project_id, limit=1000):
         root = self._validated_source_project(project_id)
-        output = self._git(str(root), ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        code, output = self._git_status_output(
+            str(root), ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]
+        )
+        if code != 0:
+            raise WorkspaceError("Git operation failed.")
         relative_paths = sorted(set(filter(None, output.split("\0"))))
         bounded_limit = min(max(int(limit), 1), 1000)
         return {
@@ -319,9 +320,12 @@ class WorkspaceStore:
         try:
             servers = self._read_mcp_servers(self._validated_source_project(project_id))
         except WorkspaceError as error:
+            self._revoke_project_mcp_preferences(project_id)
             return {"source": "mcp.json", "state": "invalid", "message": str(error), "servers": []}
         if servers is None:
+            self._revoke_project_mcp_preferences(project_id)
             return {"source": "mcp.json", "state": "missing", "message": "", "servers": []}
+        preferences = self._revoke_stale_mcp_preferences(project_id, servers, preferences)
         return {
             "source": "mcp.json",
             "state": "ready",
@@ -374,13 +378,53 @@ class WorkspaceStore:
                     (run["project_id"],),
                 )
             }
-        servers = self._read_mcp_servers(checkout_path)
-        if not servers or not approvals:
+        try:
+            servers = self._read_mcp_servers(checkout_path)
+        except WorkspaceError:
+            self._revoke_project_mcp_preferences(run["project_id"])
             return {}
-        return {
-            name: config for name, config in servers.items()
-            if approvals.get(name) == self._mcp_config_digest(config)
+        if not servers or not approvals:
+            if not servers:
+                self._revoke_project_mcp_preferences(run["project_id"])
+            return {}
+        stale_names = {
+            name for name, digest in approvals.items()
+            if name not in servers or digest != self._mcp_config_digest(servers[name])
         }
+        if stale_names:
+            self._revoke_project_mcp_preferences(run["project_id"], stale_names)
+        return {name: config for name, config in servers.items() if name in approvals and name not in stale_names}
+
+    def _revoke_stale_mcp_preferences(self, project_id, servers, preferences):
+        stale_names = {
+            name for name, preference in preferences.items()
+            if preference.get("enabled") and (
+                name not in servers
+                or preference.get("approved_digest") != self._mcp_config_digest(servers[name])
+            )
+        }
+        if stale_names:
+            self._revoke_project_mcp_preferences(project_id, stale_names)
+            for name in stale_names:
+                preferences[name] = {"enabled": False, "approved_digest": ""}
+        return preferences
+
+    def _revoke_project_mcp_preferences(self, project_id, server_names=None):
+        now = _utc_now()
+        with self.lock, self.connection:
+            if server_names:
+                placeholders = ",".join("?" for _ in server_names)
+                self.connection.execute(
+                    "UPDATE project_mcp_preferences SET enabled = 0, approved_digest = '', updated_at = ? "
+                    "WHERE project_id = ? AND server_name IN (" + placeholders + ")",
+                    [now, project_id, *sorted(server_names)],
+                )
+            else:
+                self.connection.execute(
+                    "UPDATE project_mcp_preferences SET enabled = 0, approved_digest = '', updated_at = ? "
+                    "WHERE project_id = ? AND enabled = 1",
+                    (now, project_id),
+                )
 
     def create_run(self, project_id, objective, primary_session_id="", base_ref="HEAD", model_policy=""):
         clean_objective = _json_text(objective).strip()
@@ -804,11 +848,40 @@ class WorkspaceStore:
             raise WorkspaceError("GitHub repository URL contains an invalid owner or repository name.")
         return "https://github.com/" + owner + "/" + repository + ".git", owner, repository
 
+    def _prepare_managed_import_root(self):
+        current = self.config_dir
+        if current.is_symlink() or not current.is_dir():
+            raise WorkspaceError("GitHub workspace destination is unavailable.")
+        for part in ("projects", "github"):
+            current = current / part
+            if current.exists() or current.is_symlink():
+                if current.is_symlink() or not current.is_dir():
+                    raise WorkspaceError("GitHub workspace destination is unavailable.")
+            else:
+                current.mkdir(mode=0o700)
+        return current
+
     def _clone_github_repository(self, repository_url, destination):
+        git_home = self.config_dir / "git-import-home"
+        if git_home.exists() or git_home.is_symlink():
+            if git_home.is_symlink() or not git_home.is_dir():
+                raise WorkspaceError("GitHub import environment is unavailable.")
+        else:
+            git_home.mkdir(mode=0o700)
+        environment = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(git_home),
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+            "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GCM_INTERACTIVE": "Never",
+        }
         try:
             completed = subprocess.run(
-                ["git", "clone", "--origin", "origin", repository_url, str(destination)],
-                env=self._git_environment(),
+                ["git", "-c", "credential.helper=", "-c", "core.askPass=", "clone", "--origin", "origin", repository_url, str(destination)],
+                env=environment,
                 text=True,
                 encoding="utf-8",
                 errors="replace",

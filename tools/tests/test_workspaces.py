@@ -31,7 +31,8 @@ def main():
         git(repository, "config", "user.name", "Eva Test")
         git(repository, "config", "user.email", "eva-test@example.invalid")
         (repository / "README.md").write_text("# workspace test\n", encoding="utf-8")
-        git(repository, "add", "README.md")
+        (repository / " leading.txt").write_text("leading space\n", encoding="utf-8")
+        git(repository, "add", "README.md", " leading.txt")
         git(repository, "commit", "-m", "Initial commit")
 
         store = WorkspaceStore(sandbox / "eva-config")
@@ -48,7 +49,8 @@ def main():
         assert project["path"] == str(repository.resolve())
         assert project["source_checkout"]["kind"] == "source"
         project_files = store.list_project_files(project["id"])
-        assert project_files == {"files": ["README.md"], "truncated": False}
+        assert project_files == {"files": [" leading.txt", "README.md"], "truncated": False}
+        assert store.resolve_project_file(project["id"], " leading.txt") == str(repository / " leading.txt")
         assert store.resolve_project_file(project["id"], "README.md") == str(repository / "README.md")
         try:
             store.resolve_project_file(project["id"], "../README.md")
@@ -139,6 +141,10 @@ def main():
         )
         assert restored.mcp_config_for_run(mcp_run["id"]) == {}
         mcp_run_config.write_text(original_run_config, encoding="utf-8")
+        assert restored.mcp_config_for_run(mcp_run["id"]) == {}
+        revoked_metadata = restored.get_project(project["id"])["mcp_servers"]["servers"][0]
+        assert revoked_metadata["enabled"] is False
+        restored.set_project_mcp_server_enabled(project["id"], "project-docs", True, revoked_metadata["digest"])
         assert restored.mcp_config_for_run(mcp_run["id"]) == {
             "project-docs": {
                 "command": "example-mcp",
@@ -195,6 +201,36 @@ def main():
                 raise AssertionError("unsafe GitHub repository URL should be rejected")
             except WorkspaceError:
                 pass
+
+        clone_destination = sandbox / "clone-environment-test"
+        with mock.patch("bridge.workspaces.subprocess.run") as clone_run:
+            clone_run.return_value = subprocess.CompletedProcess([], 1, stdout="", stderr="failed")
+            try:
+                restored._clone_github_repository("https://github.com/eva-test/demo.git", clone_destination)
+                raise AssertionError("failed clone should raise")
+            except WorkspaceError:
+                pass
+            clone_command = clone_run.call_args.args[0]
+            clone_environment = clone_run.call_args.kwargs["env"]
+            assert clone_command[:5] == ["git", "-c", "credential.helper=", "-c", "core.askPass="]
+            assert clone_environment["GIT_CONFIG_NOSYSTEM"] == "1"
+            assert clone_environment["GIT_CONFIG_GLOBAL"] == os.devnull
+            assert clone_environment["GIT_TERMINAL_PROMPT"] == "0"
+            assert clone_environment["GCM_INTERACTIVE"] == "Never"
+            assert clone_environment["HOME"].endswith("git-import-home")
+
+        symlink_import_store = WorkspaceStore(sandbox / "symlink-import-config")
+        symlink_import_external = sandbox / "symlink-import-external"
+        symlink_import_external.mkdir()
+        (symlink_import_store.config_dir / "projects").symlink_to(symlink_import_external, target_is_directory=True)
+        with mock.patch.object(symlink_import_store, "_clone_github_repository") as clone:
+            try:
+                symlink_import_store.import_github_repository("https://github.com/eva-test/escaped")
+                raise AssertionError("symlinked import ancestor should be rejected")
+            except WorkspaceError:
+                pass
+            clone.assert_not_called()
+        symlink_import_store.close()
 
         ready_project = restored.ensure_eva_ready_project()
         ready_path = Path(ready_project["path"])

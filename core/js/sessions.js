@@ -629,10 +629,10 @@ function initSessions() {
   var lcarsSidebar = document.getElementById('lcarsSidebar');
   if (lcarsSidebar) lcarsSidebar.addEventListener('click', function(event) {
     var target = event.target;
-    if (target && target.closest && !target.closest('#lcarsAgentsBtn')) {
+    if (target && target.closest && !target.closest('#lcarsAgentsBtn, #lcarsWorkspacesBtn')) {
       closeAgentOperationsForNavigation();
     }
-    if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {
+    if (target && target.closest && !target.closest('#lcarsWorkspacesBtn') && window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {
       window.EvaWorkspaces.closeWorkbench();
     }
     if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();

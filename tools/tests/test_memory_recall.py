@@ -19,6 +19,8 @@ from bridge.cognition import (
     _build_memory_context_sqlite,
     _extract_explicit_user_facts,
     _post_response_reflection_sqlite,
+    _post_response_reflection_sqlite_impl,
+    _post_response_reflection_impl,
 )
 
 
@@ -121,6 +123,88 @@ class MemoryRecallTests(unittest.TestCase):
         )
         self.assertIn("[Core Identity Charter]", context)
         self.assertIn("Lieutenant Commander Data", context)
+
+    def test_candidate_observation_waits_for_persistence(self):
+        class FailingCandidateMemory:
+            def __init__(self):
+                self.ingest_count = 0
+
+            def ingest(self, table, _columns, _rows):
+                self.ingest_count += 1
+                return table != "Knowledge"
+
+        old_counts = dict(state.cognition_candidate_counts)
+        state.cognition_candidate_counts.clear()
+        memory = FailingCandidateMemory()
+        try:
+            with patch("bridge.cognition._extract_explicit_user_facts", return_value=[]), \
+                    patch("bridge.cognition._extract_entity_candidates", return_value=(["Orion"], [])), \
+                    patch("bridge.cognition._classify_entity_candidate", return_value=("candidate_mentioned", 0.2, "candidate")), \
+                    patch("bridge.cognition._maybe_promote_candidate", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "candidate knowledge persistence failed"):
+                    _post_response_reflection_sqlite_impl(
+                        memory, "Orion appeared", "Acknowledged", "test-model", "candidate-session"
+                    )
+            self.assertEqual(state.cognition_candidate_counts.get("orion", 0), 0)
+        finally:
+            state.cognition_candidate_counts.clear()
+            state.cognition_candidate_counts.update(old_counts)
+
+    def test_candidate_observation_waits_for_sqlite_commit(self):
+        from bridge.memory import _get_sqlite_mem
+
+        memory = _get_sqlite_mem()
+        original_ingest = memory.ingest
+        old_counts = dict(state.cognition_candidate_counts)
+        state.cognition_candidate_counts.clear()
+
+        def fail_after_candidate(table, columns, rows):
+            if table == "HeuristicsIndex":
+                return False
+            return original_ingest(table, columns, rows)
+
+        try:
+            with patch("bridge.cognition._get_sqlite_mem", return_value=memory), \
+                    patch.object(memory, "ingest", side_effect=fail_after_candidate), \
+                    patch("bridge.cognition._extract_explicit_user_facts", return_value=[]), \
+                    patch("bridge.cognition._extract_entity_candidates", return_value=(["Orion"], [])), \
+                    patch("bridge.cognition._classify_entity_candidate", return_value=("candidate_mentioned", 0.2, "candidate")), \
+                    patch("bridge.cognition._maybe_promote_candidate", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "heuristics persistence failed"):
+                    _post_response_reflection_sqlite(
+                        "Orion appeared", "Acknowledged", "test-model", "rollback-session"
+                    )
+            self.assertEqual(state.cognition_candidate_counts.get("orion", 0), 0)
+            self.assertEqual(memory.query("SELECT Entity FROM Knowledge WHERE Entity = ?", ("Orion",)), [])
+        finally:
+            state.cognition_candidate_counts.clear()
+            state.cognition_candidate_counts.update(old_counts)
+
+    def test_kusto_candidate_observation_waits_for_ingest(self):
+        old_counts = dict(state.cognition_candidate_counts)
+        state.cognition_candidate_counts.clear()
+
+        def ingest(_cluster, _database, table, _columns, _rows):
+            return table != "Knowledge"
+
+        try:
+            with patch("bridge.cognition._resolve_memory_backend", return_value="kusto"), \
+                    patch("bridge.cognition._get_kusto_config", return_value=("cluster", "database")), \
+                    patch("bridge.cognition._get_table_columns", return_value=[]), \
+                    patch("bridge.cognition._kusto_query_direct", return_value=[]), \
+                    patch("bridge.cognition._kusto_ingest_direct", side_effect=ingest), \
+                    patch("bridge.cognition._extract_explicit_user_facts", return_value=[]), \
+                    patch("bridge.cognition._extract_entity_candidates", return_value=(["Orion"], [])), \
+                    patch("bridge.cognition._classify_entity_candidate", return_value=("candidate_mentioned", 0.2, "candidate")), \
+                    patch("bridge.cognition._maybe_promote_candidate", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "candidate knowledge persistence failed"):
+                    _post_response_reflection_impl(
+                        "Orion appeared", "Acknowledged", "test-model", "kusto-candidate-session"
+                    )
+            self.assertEqual(state.cognition_candidate_counts.get("orion", 0), 0)
+        finally:
+            state.cognition_candidate_counts.clear()
+            state.cognition_candidate_counts.update(old_counts)
 
     def test_durable_memory_is_framed_as_untrusted_data(self):
         mem = __import__("bridge.memory", fromlist=["_get_sqlite_mem"])._get_sqlite_mem()

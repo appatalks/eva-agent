@@ -999,9 +999,12 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
     """Run a SQLite reflection and release this worker's connection afterwards."""
     mem = _get_sqlite_mem()
     try:
-        return mem.atomic(lambda: _post_response_reflection_sqlite_impl(
+        persisted_candidates = mem.atomic(lambda: _post_response_reflection_sqlite_impl(
             mem, user_message, assistant_response, model_name, conversation_id, turn_id
         ))
+        for entity in persisted_candidates or []:
+            _track_candidate_observation(entity)
+        return None
     finally:
         mem.close()
 
@@ -1060,6 +1063,7 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
 
     # 3. Candidate entities
     candidate_entities, rejected_entities = _extract_entity_candidates(user_message)
+    persisted_candidate_entities = []
     if candidate_entities:
         know_columns = ["Timestamp", "Entity", "Relation", "Value", "Confidence", "Source", "Decay"]
         know_rows = []
@@ -1079,12 +1083,12 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
                 "Value": value[:200], "Confidence": confidence,
                 "Source": source_id, "Decay": 0.02,
             })
-            _track_candidate_observation(entity)
             if promotion:
                 print(f"[Cognition/SQLite] Promoted candidate: {entity} ({promotion['reason']})")
         if know_rows:
             if not mem.ingest("Knowledge", know_columns, know_rows):
                 raise RuntimeError("candidate knowledge persistence failed")
+            persisted_candidate_entities = list(candidate_entities[:3])
             print(f"[Cognition/SQLite] Candidates: {len(know_rows)}")
 
     # 4. Heuristics tracking
@@ -1199,6 +1203,7 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
 
     if turn_id:
         memory_model.complete_turn(turn_id)
+    return persisted_candidate_entities
 
 
 
@@ -1915,8 +1920,6 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
                 "Decay": 0.01
             })
             extracted_entities.append(entity)
-            if candidate_stage_pending:
-                _track_candidate_observation(entity)
             if promotion:
                 print(f"[Cognition] Promoted candidate: {entity} ({promotion['reason']})")
 
@@ -1925,6 +1928,8 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
             if know_rows and not _kusto_ingest_direct(cluster, db, "Knowledge", know_columns, know_rows):
                 raise RuntimeError("candidate knowledge persistence failed")
             if know_rows:
+                for entity in [row["Entity"] for row in know_rows]:
+                    _track_candidate_observation(entity)
                 print(f"[Cognition] Stored {len(know_rows)} validated knowledge entities: {extracted_entities}")
             complete_stage("candidate_knowledge")
 

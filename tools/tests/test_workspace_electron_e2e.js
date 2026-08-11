@@ -140,8 +140,12 @@ async function main() {
 
     await page.locator('#evaWorkspacesBtn').click();
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
-  assert.strictEqual(await page.locator('#workspaceWorkbench h1').innerText(), 'Workspaces', 'Workspace tab did not open the coding workspace dashboard');
-  assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'Workspace dashboard is not active');
+    assert.strictEqual(await page.locator('#workspaceWorkbench h1').innerText(), 'Workspaces', 'Workspace tab did not open the coding workspace dashboard');
+    assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'Workspace dashboard is not active');
+    await page.evaluate(function() { window.EvaWorkspaces.closeWorkbench(); });
+    await page.evaluate(function() { document.getElementById('lcarsWorkspacesBtn').click(); });
+    await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
+    assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'LCARS Workspaces click was closed by sidebar bubbling');
     await page.waitForFunction(function() {
       const workbenchHeader = document.querySelector('#workspaceWorkbench .workspace-workbench-header').getBoundingClientRect();
       const titleBar = document.querySelector('#evaTitleBar').getBoundingClientRect();
@@ -217,11 +221,24 @@ async function main() {
     }, null, { timeout: 20000 });
     assert.strictEqual(await objectiveInput.inputValue(), 'E2E workspace run', 'Workspace monitor state change cleared the coding objective');
     fs.writeFileSync(path.join(repository, 'mcp.json'), workspaceMcpConfig);
-    await page.waitForFunction(function() {
-      const toggle = document.querySelector('#workspaceWorkbenchDetail .workspace-mcp-row input');
-      return toggle && toggle.checked;
+    await page.waitForFunction(async function() {
+      const projects = await window.evaStandalone.workspaceListProjects();
+      const project = projects.find(function(item) { return item.name === 'project'; });
+      const server = project && project.mcpServers.servers.find(function(item) { return item.name === 'project-docs'; });
+      return server && server.command === 'example-mcp' && !server.enabled;
     }, null, { timeout: 20000 });
-    assert.strictEqual(await objectiveInput.inputValue(), 'E2E workspace run', 'MCP approval refresh cleared the coding objective');
+    assert.strictEqual(await mcpToggle.isChecked(), false, 'Restoring an old MCP digest silently restored approval');
+    assert.strictEqual(await objectiveInput.inputValue(), 'E2E workspace run', 'MCP revocation refresh cleared the coding objective');
+    page.once('dialog', function(dialog) { return dialog.accept(); });
+    await mcpToggle.check();
+    await page.waitForFunction(async function() {
+      const projects = await window.evaStandalone.workspaceListProjects();
+      return projects.some(function(project) {
+        return project.name === 'project' && project.mcpServers.servers.some(function(server) {
+          return server.name === 'project-docs' && server.enabled;
+        });
+      });
+    });
     await page.evaluate(async function(terminalId) { await window.evaStandalone.terminalClose(terminalId); }, monitorChangeTerminal.id);
     await page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form').evaluate(function(form) { form.requestSubmit(); });
     const monitoredRun = page.locator('#workspaceWorkbenchRuns .workspace-monitor-run').filter({ hasText: 'E2E workspace run' });
