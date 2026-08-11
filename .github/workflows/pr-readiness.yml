@@ -79,27 +79,45 @@ jobs:
               exit 0
             fi
             for attempt in 1 2 3; do
-              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$WORKFLOW_RUN_ID" --jq '.pull_requests' > workflow-run-prs.json; then
+              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$WORKFLOW_RUN_ID" > workflow-run.json; then
                 break
               fi
-              echo "::notice::Unable to read linked pull requests on attempt $attempt; retrying."
+              echo "::notice::Unable to read completed workflow metadata on attempt $attempt; retrying."
               if [[ "$attempt" == "3" ]]; then
                 echo "::notice::Unable to resolve the completed workflow to a PR; skipping readiness."
                 exit 0
               fi
               sleep 2
             done
+            jq '.pull_requests' workflow-run.json > workflow-run-prs.json
             matches="$(jq 'length' workflow-run-prs.json)"
             if [[ "$matches" == "0" ]]; then
-              echo "No pull request is linked to the completed workflow; skipping readiness."
-              exit 0
+              RUN_HEAD_SHA="$(jq -r '.head_sha // ""' workflow-run.json)"
+              if [[ ! "$RUN_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "No pull request is linked and the completed workflow has no commit SHA; skipping readiness."
+                exit 0
+              fi
+              gh api --paginate "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --jq '.[]' > open-prs.ndjson
+              jq -s --arg sha "$RUN_HEAD_SHA" '[.[] | select(.head.sha == $sha)]' open-prs.ndjson > matching-prs.json
+              matches="$(jq 'length' matching-prs.json)"
+              if [[ "$matches" == "0" ]]; then
+                echo "No current open PR matches completed workflow head $RUN_HEAD_SHA; skipping readiness."
+                exit 0
+              fi
+              if [[ "$matches" != "1" ]]; then
+                echo "::warning::Multiple open PRs match completed workflow head $RUN_HEAD_SHA; skipping ambiguous readiness."
+                exit 0
+              fi
+              PR_NUMBER="$(jq -r '.[0].number' matching-prs.json)"
+              EXPECTED_HEAD_SHA="$RUN_HEAD_SHA"
+            else
+              if [[ "$matches" != "1" ]]; then
+                echo "::warning::Multiple pull requests are linked to the completed workflow; skipping ambiguous readiness."
+                exit 0
+              fi
+              PR_NUMBER="$(jq -r '.[0].number' workflow-run-prs.json)"
+              EXPECTED_HEAD_SHA="$(jq -r '.[0].head.sha' workflow-run-prs.json)"
             fi
-            if [[ "$matches" != "1" ]]; then
-              echo "::warning::Multiple pull requests are linked to the completed workflow; skipping ambiguous readiness."
-              exit 0
-            fi
-            PR_NUMBER="$(jq -r '.[0].number' workflow-run-prs.json)"
-            EXPECTED_HEAD_SHA="$(jq -r '.[0].head.sha' workflow-run-prs.json)"
             if ! fetch_pr_metadata "$PR_NUMBER"; then
               echo "::notice::Unable to read resolved PR metadata; skipping readiness."
               printf 'metadata_ready=false\n' >> "$GITHUB_OUTPUT"
