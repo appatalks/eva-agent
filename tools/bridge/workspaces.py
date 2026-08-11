@@ -786,6 +786,7 @@ class WorkspaceStore:
             parsed.scheme != "https"
             or parsed.hostname is None
             or parsed.hostname.lower() != "github.com"
+            or parsed.netloc.lower() != "github.com"
             or parsed.username is not None
             or parsed.password is not None
             or parsed.query

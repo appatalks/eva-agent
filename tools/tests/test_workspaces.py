@@ -182,6 +182,12 @@ def main():
         for invalid_url in (
             "git@github.com:eva-test/demo.git",
             "https://github.com/eva-test/demo?token=not-allowed",
+            "https://github.com/eva-test/demo#fragment",
+            "https://github.com/eva-test/demo/extra",
+            "https://github.com:443/eva-test/demo",
+            "https://github.com.evil.example/eva-test/demo",
+            "https://evil.example/https://github.com/eva-test/demo",
+            "https://attacker@example.com@github.com/eva-test/demo",
             "https://example.com/eva-test/demo",
         ):
             try:
