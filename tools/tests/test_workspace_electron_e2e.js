@@ -108,27 +108,37 @@ async function main() {
     git(repository, ['config', 'user.name', 'Eva E2E']);
     git(repository, ['config', 'user.email', 'eva-e2e@example.invalid']);
     fs.writeFileSync(path.join(repository, 'README.md'), '# packaged workspace test\n');
-    git(repository, ['add', 'README.md']);
+    fs.writeFileSync(path.join(repository, 'mcp.json'), JSON.stringify({
+      mcpServers: { 'project-docs': { command: 'example-mcp', args: ['--docs'] } }
+    }));
+    git(repository, ['add', 'README.md', 'mcp.json']);
     git(repository, ['commit', '-m', 'Initial commit']);
     execFileSync('python3', [path.join(root, 'tools', 'tests', 'test_workspace_electron_setup.py'), configDirectory, repository], { encoding: 'utf8' });
 
     const debuggingPort = await reservePort();
-    child = spawn(electronPath, ['--eva-workspace-terminal-v1', '--remote-debugging-port=' + debuggingPort], {
+    child = spawn(electronPath, [
+      '--eva-workspace-terminal-v1',
+      '--remote-debugging-port=' + debuggingPort,
+      '--user-data-dir=' + path.join(sandbox, 'electron-profile')
+    ], {
       env: Object.assign({}, process.env, { EVA_CONFIG_DIR: configDirectory, EVA_WORKSPACE_AGENT_AUTODISPATCH: '0' }),
       stdio: ['ignore', 'ignore', 'pipe']
     });
     child.stderr.on('data', function(chunk) { stderr = (stderr + chunk.toString()).slice(-4000); });
-    const attached = await waitForPage('http://127.0.0.1:' + debuggingPort);
+    let attached;
+    try {
+      attached = await waitForPage('http://127.0.0.1:' + debuggingPort);
+    } catch (error) {
+      throw new Error(error.message + (stderr ? '\nElectron stderr:\n' + stderr : ''));
+    }
     browser = attached.browser;
     const page = attached.page;
     await page.setViewportSize({ width: 1280, height: 900 });
 
     await page.locator('#evaWorkspacesBtn').click();
-    await page.locator('#agentsView').waitFor({ state: 'visible' });
-    assert.strictEqual(await page.locator('#agentsViewTitle').innerText(), 'Workspace', 'Workspace tab did not open the agentic-session workspace');
-    assert.strictEqual(await page.locator('#evaWorkspacesBtn').evaluate(function(button) { return button.classList.contains('active'); }), true, 'Workspace tab is not active for the agentic-session workspace');
-    await page.evaluate(function() { window.EvaWorkspaces.openWorkbench(); });
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
+  assert.strictEqual(await page.locator('#workspaceWorkbench h1').innerText(), 'Workspaces', 'Workspace tab did not open the coding workspace dashboard');
+  assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'Workspace dashboard is not active');
     await page.waitForFunction(function() {
       const workbenchHeader = document.querySelector('#workspaceWorkbench .workspace-workbench-header').getBoundingClientRect();
       const titleBar = document.querySelector('#evaTitleBar').getBoundingClientRect();
@@ -141,22 +151,22 @@ async function main() {
     });
     assert.strictEqual(narrowOverflow, false, 'Workspace monitor overflows in the narrow layout');
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page.locator('#workspaceMonitorNewBtn').click();
-    await page.locator('#workspacePanel').waitFor({ state: 'visible' });
-    await page.waitForFunction(function() {
-      const workspaceHeader = document.querySelector('#workspacePanel .session-panel-header').getBoundingClientRect();
-      const titleBar = document.querySelector('#evaTitleBar').getBoundingClientRect();
-      return workspaceHeader.top >= titleBar.bottom;
+    const projectWorkspace = page.locator('#workspaceWorkbenchProjects .workspace-monitor-run').filter({ hasText: 'project' });
+    await projectWorkspace.waitFor();
+    await projectWorkspace.click();
+    const mcpToggle = page.locator('#workspaceWorkbenchDetail .workspace-mcp-row input');
+    await mcpToggle.check();
+    await page.waitForFunction(async function() {
+      const projects = await window.evaStandalone.workspaceListProjects();
+      return projects.some(function(project) {
+        return project.name === 'project' && project.mcpServers.servers.some(function(server) {
+          return server.name === 'project-docs' && server.enabled;
+        });
+      });
     });
-    await page.locator('.workspace-project-item').filter({ hasText: 'project' }).waitFor();
-    assert.strictEqual(await page.locator('#workspaceProjectSelect option').filter({ hasText: 'Eva Ready Workspace' }).count(), 1, 'Automatic Eva-ready project is unavailable');
-    await page.locator('.workspace-project-item').filter({ hasText: 'project' }).click();
-    await page.locator('#workspaceObjective').fill('E2E workspace run');
-    await page.locator('#workspaceRunForm').evaluate(function(form) { form.requestSubmit(); });
-    await page.locator('.workspace-run-item').filter({ hasText: 'E2E workspace run' }).waitFor();
-    await page.locator('#workspaceOpenWorkbenchBtn').click();
-    await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
-    const monitoredRun = page.locator('.workspace-monitor-run').filter({ hasText: 'E2E workspace run' });
+    await page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form textarea').fill('E2E workspace run');
+    await page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form').evaluate(function(form) { form.requestSubmit(); });
+    const monitoredRun = page.locator('#workspaceWorkbenchRuns .workspace-monitor-run').filter({ hasText: 'E2E workspace run' });
     await monitoredRun.waitFor();
     await monitoredRun.click();
     await page.locator('#workspaceMonitorFeed').filter({ hasText: 'Eva monitor:' }).waitFor();
@@ -219,9 +229,6 @@ async function main() {
     await page.locator('#assetsViewDetail').filter({ hasText: 'E2E workspace run' }).waitFor();
     assert.strictEqual(await page.locator('#workspaceWorkbench').isVisible(), false, 'Assets did not become the primary main view');
     await page.locator('#evaWorkspacesBtn').click();
-    await page.locator('#agentsView').waitFor({ state: 'visible' });
-    assert.strictEqual(await page.locator('#agentsViewTitle').innerText(), 'Workspace', 'Workspace tab did not restore the agentic-session workspace');
-    await page.evaluate(function() { window.EvaWorkspaces.openWorkbench(); });
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
     await page.locator('#evaTerminalBtn').click();
     await page.locator('#terminalPanel[aria-hidden="false"]').waitFor();

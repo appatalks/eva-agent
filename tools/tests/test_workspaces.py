@@ -88,6 +88,60 @@ def main():
         except WorkspaceError:
             pass
 
+        (repository / "mcp.json").write_text(
+            '{"mcpServers":{"project-docs":{"command":"example-mcp","args":["--docs"],"env":{"EXAMPLE_TOKEN":"not-rendered"}}}}',
+            encoding="utf-8",
+        )
+        git(repository, "add", "mcp.json")
+        git(repository, "commit", "-m", "Add workspace MCP configuration")
+        mcp_metadata = restored.get_project(project["id"])["mcp_servers"]
+        assert mcp_metadata["source"] == "mcp.json" and mcp_metadata["state"] == "ready"
+        assert mcp_metadata["servers"] == [{"name": "project-docs", "transport": "stdio", "enabled": False}]
+        assert "command" not in mcp_metadata["servers"][0] and "env" not in mcp_metadata["servers"][0]
+        enabled_project = restored.set_project_mcp_server_enabled(project["id"], "project-docs", True)
+        assert enabled_project["mcp_servers"]["servers"][0]["enabled"] is True
+        mcp_run = restored.create_run(project["id"], "Use the project documentation server")
+        assert restored.mcp_config_for_run(mcp_run["id"]) == {
+            "project-docs": {
+                "command": "example-mcp",
+                "args": ["--docs"],
+                "env": {"EXAMPLE_TOKEN": "not-rendered"},
+            }
+        }
+        assert restored.discard_run(mcp_run["id"])["status"] == "discarded"
+        try:
+            restored.set_project_mcp_server_enabled(project["id"], "unknown-server", True)
+            raise AssertionError("unknown workspace MCP server should be rejected")
+        except WorkspaceError:
+            pass
+
+        def fake_github_clone(source_url, destination):
+            assert source_url == "https://github.com/eva-test/demo.git"
+            destination.mkdir(parents=True)
+            git(destination, "init", "-b", "main")
+            git(destination, "config", "user.name", "Eva Test")
+            git(destination, "config", "user.email", "eva-test@example.invalid")
+            (destination / "README.md").write_text("# imported workspace\n", encoding="utf-8")
+            git(destination, "add", "README.md")
+            git(destination, "commit", "-m", "Initial import")
+
+        with mock.patch.object(restored, "_clone_github_repository", side_effect=fake_github_clone) as clone:
+            imported = restored.import_github_repository("https://github.com/eva-test/demo")
+            assert imported["name"] == "eva-test/demo"
+            assert imported["mcp_servers"]["state"] == "missing"
+            assert restored.import_github_repository("https://github.com/eva-test/demo.git")["id"] == imported["id"]
+            clone.assert_called_once()
+        for invalid_url in (
+            "git@github.com:eva-test/demo.git",
+            "https://github.com/eva-test/demo?token=not-allowed",
+            "https://example.com/eva-test/demo",
+        ):
+            try:
+                restored.import_github_repository(invalid_url)
+                raise AssertionError("unsafe GitHub repository URL should be rejected")
+            except WorkspaceError:
+                pass
+
         ready_project = restored.ensure_eva_ready_project()
         ready_path = Path(ready_project["path"])
         assert ready_project["name"] == "Eva Ready Workspace"

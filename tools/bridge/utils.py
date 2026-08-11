@@ -320,11 +320,15 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 raise RuntimeError("ACP not available")
             selected_model = model or template.model
             assigned_cwd = str(task.get("_cwd") or template.cwd)
+            workspace_mcp_config = task.get("_workspace_mcp_config")
+            client_mcp_config = copy.deepcopy(template.mcp_config)
+            if isinstance(workspace_mcp_config, dict):
+                client_mcp_config.update(copy.deepcopy(workspace_mcp_config))
             client = ACPClient(
                 copilot_path=template.copilot_path,
                 cwd=assigned_cwd,
                 model=selected_model,
-                mcp_config=copy.deepcopy(template.mcp_config),
+                mcp_config=client_mcp_config,
                 reasoning_effort=template.reasoning_effort,
             )
         client.start()

@@ -980,11 +980,12 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .workspace-monitor-metrics > div { display: flex; align-items: baseline; gap: 10px; padding: 10px 24px; border-right: 1px solid rgba(120,220,232,0.1); }
 .workspace-monitor-metrics span { color: #73979c; font: 9px monospace; letter-spacing: 0.1em; }
 .workspace-monitor-metrics strong { color: #ffcf85; font: 600 16px monospace; }
-.workspace-workbench-body { display: grid; grid-template-columns: minmax(210px, 0.75fr) minmax(300px, 1.2fr) minmax(260px, 0.9fr); min-height: 0; overflow: hidden; }
+.workspace-workbench-body { display: grid; grid-template-columns: minmax(180px, 0.62fr) minmax(210px, 0.75fr) minmax(300px, 1.2fr) minmax(300px, 1fr); min-height: 0; overflow: hidden; }
 .workspace-monitor-nav,
 .workspace-monitor-activity,
 .workspace-monitor-detail { min-width: 0; min-height: 0; overflow: auto; }
 .workspace-monitor-nav { border-right: 1px solid rgba(120,220,232,0.13); background: rgba(4,16,19,0.62); }
+.workspace-monitor-projects { background: rgba(4,13,17,0.82); }
 .workspace-monitor-activity { border-right: 1px solid rgba(120,220,232,0.13); background: rgba(5,17,20,0.4); }
 .workspace-monitor-detail { background: rgba(7,20,24,0.82); }
 .workspace-monitor-pane-header { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 0 14px; border-bottom: 1px solid rgba(120,220,232,0.11); color: #82b7bd; font: 700 9px monospace; letter-spacing: 0.12em; }
@@ -1013,6 +1014,23 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .workspace-monitor-detail-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
 .workspace-monitor-empty { padding: 16px; color: #70969b; font: 11px monospace; }
 .workspace-monitor-report { max-height: 220px; margin: 16px 0 0; padding: 10px; overflow: auto; border-left: 2px solid #78dce8; background: rgba(0,0,0,0.28); color: #d7f3f6; white-space: pre-wrap; font: 11px/1.45 monospace; text-align: left; }
+.workspace-workbench-section { display: grid; gap: 9px; margin: 0 0 20px; padding: 0 0 18px; border-bottom: 1px solid rgba(120,220,232,0.13); }
+.workspace-workbench-section:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
+.workspace-workbench-section h2 { margin: 0; color: #d9fbff; font: 700 10px monospace; letter-spacing: 0.1em; }
+.workspace-workbench-section p { margin: 0; color: #84aab0; font-size: 11px; line-height: 1.45; }
+.workspace-workbench-run-form { display: grid; gap: 8px; }
+.workspace-workbench-run-form label { color: #7fa3a9; font: 700 9px monospace; letter-spacing: 0.08em; }
+.workspace-workbench-run-form textarea,
+.workspace-workbench-run-form input { box-sizing: border-box; width: 100%; margin: 0; border: 1px solid rgba(120,220,232,0.22); border-radius: 3px; background: rgba(2,11,14,0.72); color: #e7fbff; font: 12px/1.4 monospace; }
+.workspace-workbench-run-form textarea { min-height: 88px; padding: 8px; resize: vertical; }
+.workspace-workbench-run-form input { height: 32px; padding: 0 8px; }
+.workspace-workbench-run-form button { min-height: 34px; border: 1px solid rgba(120,220,232,0.32); border-radius: 3px; background: rgba(120,220,232,0.08); color: #dcfbff; font: 700 10px monospace; cursor: pointer; }
+.workspace-workbench-run-form button:hover:not(:disabled) { border-color: #78dce8; background: rgba(120,220,232,0.15); }
+.workspace-mcp-list { display: grid; gap: 2px; }
+.workspace-mcp-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 38px; padding: 7px 0; border-bottom: 1px solid rgba(120,220,232,0.08); cursor: pointer; }
+.workspace-mcp-row input { width: 15px; height: 15px; margin: 0; accent-color: #78dce8; }
+.workspace-mcp-row strong { min-width: 0; color: #e5f9fb; font: 600 11px monospace; overflow-wrap: anywhere; }
+.workspace-mcp-row span { color: #72989e; font: 9px monospace; text-transform: uppercase; }
 .agents-view::before {
   content: '';
   position: absolute;
@@ -1227,8 +1245,9 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
   .workspace-monitor-updated { display: none; }
   .workspace-monitor-metrics { grid-template-columns: repeat(2, 1fr); }
   .workspace-monitor-metrics > div { padding: 7px 12px; }
-  .workspace-workbench-body { grid-template-columns: minmax(145px, 0.7fr) minmax(0, 1.3fr); }
-  .workspace-monitor-detail { display: none; }
+  .workspace-workbench-body { grid-template-columns: minmax(125px, 0.65fr) minmax(0, 1.35fr); grid-template-rows: minmax(160px, 0.45fr) minmax(0, 1fr); }
+  .workspace-monitor-activity { display: none; }
+  .workspace-monitor-detail { display: block; grid-column: 1 / -1; border-top: 1px solid rgba(120,220,232,0.13); }
   .assets-view-header { padding: 12px 14px 9px; }
   .assets-view-header h1 { font-size: 19px; }
   .assets-view-updated { display: none; }

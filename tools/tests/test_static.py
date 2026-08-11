@@ -1183,7 +1183,7 @@ def test_sidebar_workflow_contract():
     report("workflow_new_session_on_launch", "idbMigrateFromLocalStorage().then(function() {\n    newSession();" in sessions_js)
     report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "newSession();\n      else" in options_js)
     report("workflow_side_panels_click_outside", "function closeSidePanels" in sessions_js and "EVA_SIDE_PANEL_IDS" in sessions_js and "document.addEventListener('click'" in sessions_js)
-    report("workflow_agent_view_navigation", "function closeAgentOperationsForNavigation" in sessions_js and "#evaAgentsBtn" in sessions_js and "#lcarsAgentsBtn" in sessions_js)
+    report("workflow_workspace_navigation", "function closeAgentOperationsForNavigation" in sessions_js and "#evaWorkspacesBtn" in sessions_js and 'id="lcarsWorkspacesBtn"' in html and "EvaWorkspaces.openWorkbench()" in html)
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
     report("workflow_skills_main_view", "_buildSkillsWorkspace" in skills_js and "skills-view-open" in skills_js and "window.EvaSkills" in skills_js and "body.skills-view-open" in open("core/style.css").read())
     report("workflow_skills_organization", all(value in skills_js for value in ("skillsSearch", "skillsStatusFilter", 'value=\"draft\"', "skillsSourceFilter", "skillsSort", "_filteredSkills", "_skillSourceKind", "skillsViewSummary")))
@@ -1257,7 +1257,7 @@ def test_coding_workspace_contract():
     report("coding_workspace_canonical_paths", "resolve(strict=True)" in workspaces and "_is_within(checkout_path, self.runtime_root)" in workspaces)
     report("coding_workspace_dirty_confirmation", "Confirm dirty cleanup" in workspaces and "confirm_dirty" in workspaces)
     report("coding_workspace_missing_worktree_recovery", '"worktree", "prune"' in workspaces and "_worktree_registered" in workspaces)
-    report("coding_workspace_bridge_routes", all(value in bridge_core for value in ("/v1/workspaces/projects", "/v1/workspaces/eva-ready", "/v1/workspaces/runs", "/v1/workspaces/assets", "_workspace_checkout_status")))
+    report("coding_workspace_bridge_routes", all(value in bridge_core for value in ("/v1/workspaces/projects", "/v1/workspaces/eva-ready", "/v1/workspaces/runs", "/v1/workspaces/assets", "/v1/workspaces/github-import", "_workspace_checkout_status")))
     report("coding_workspace_eva_ready_bootstrap", "ensure_eva_ready_project" in workspaces and "Eva Ready Workspace" in workspaces and "ensureEvaReadyWorkspace" in standalone_main)
     report("coding_workspace_agent_autodispatch", "_dispatch_workspace_run" in bridge_core and "create_agent_run" in workspaces and "dispatchPendingWorkspaceRuns" in standalone_main and "EVA_WORKSPACE_AGENT_AUTODISPATCH" in bridge_core)
     workspace_utils = open("tools/bridge/utils.py").read()
@@ -1267,17 +1267,18 @@ def test_coding_workspace_contract():
     report("coding_workspace_agent_durable_completion", "status = 'completed'" in workspaces and "agent_completed" in workspaces and '"agent": self._agent_payload' in workspaces)
     report("coding_workspace_agent_no_private_path", "_public_subagent_task" in bridge_core and 'not key.startswith("_")' in bridge_core)
     report("coding_workspace_bridge_capability", "_require_workspace_capability" in bridge_core and "EVA_WORKSPACE_CAPABILITY" in bridge_core and "workspaceCapabilityToken" in standalone_main and "workspaceCapabilityToken" not in standalone_preload)
-    report("coding_workspace_electron_picker", "dialog.showOpenDialog" in standalone_main and "workspace-select-project" in standalone_main)
+    report("coding_workspace_imports", "dialog.showOpenDialog" in standalone_main and "workspace-select-project" in standalone_main and "workspace-import-github" in standalone_main and "import_github_repository" in workspaces and "https://github.com/" in workspaces)
     report("coding_workspace_renderer_opaque", "path:" not in renderer_project and "path:" not in renderer_run and "workspaceCheckoutForRenderer" in standalone_main and "redactKnownPaths" in renderer_run)
     broker = open("standalone/terminal-broker.js").read()
     report("coding_workspace_ptys_close_before_discard", "await terminalBroker.terminateByRoot(checkoutId)" in standalone_main and "terminalBroker.unregisterRoot(checkoutId)" in standalone_main and "terminalCloseRoot" in workspace_ui and "terminateByRoot(rootId)" in broker and "scope: this._terminationScope(child.pid)" in broker and "this.signalProcess(-session.child.pid, signal)" in broker)
-    report("coding_workspace_preload_allowlist", all(value in standalone_preload for value in ("terminalCloseRoot", "workspaceListProjects", "workspaceSelectProject", "workspaceCreateRun", "workspaceCheckoutStatus", "workspaceRunAction")))
+    report("coding_workspace_preload_allowlist", all(value in standalone_preload for value in ("terminalCloseRoot", "workspaceListProjects", "workspaceSelectProject", "workspaceImportGitHub", "workspaceSetMcpServer", "workspaceCreateRun", "workspaceCheckoutStatus", "workspaceRunAction")))
     report("coding_workspace_completed_actions", "(run.status === 'active' || run.status === 'completed') && !agentActive" in workspace_ui and "['active', 'completed'].indexOf(actionRun.status)" in workspace_ui)
     report("coding_workspace_current_monitor_snapshot", workspace_ui.find("state.runs = runs;") < workspace_ui.find("narrateRunChanges(state.runs);") and "workspaceCheckoutStatus(selected.checkout.id)" in workspace_ui)
     report("coding_workspace_ui_wired", "core/js/workspaces.js" in html and "workspacePanel" in html and "workspaceWorkbench" in html and "openWorkspaceTerminal" in workspace_ui and "_evaWorkspaceTerminalTarget" in sessions_js and "body.eva-standalone .workspace-panel" in style_css)
     report("coding_workspace_monitor_observation_only", "setInterval(monitor, 10000)" in workspace_ui and "api().terminalList()" in workspace_ui and "terminalCreate" not in workspace_ui.split("async function monitor()", 1)[1].split("function openWorkbench", 1)[0] and "registerWorkspaceRoot" not in list_projects_handler and "registerWorkspaceRoot" not in list_runs_handler and "ensureTerminalRoot(rootId)" in standalone_main)
     report("coding_workspace_monitor_text_voice_updates", "addMonitorActivity" in workspace_ui and "autoSpeak.checked" in workspace_ui and "speakText(message)" in workspace_ui and "lastPeriodicNoteAt" in workspace_ui)
     report("coding_workspace_main_navigation", "openWorkbench" in workspace_ui and "workspace-workbench-open" in style_css and "closeWorkbench" in sessions_js and "closeWorkbench" in open("core/js/agents.js").read())
+    report("coding_workspace_mcp_isolation", "project_mcp_preferences" in workspaces and "mcp_config_for_run" in workspaces and "_workspace_mcp_config" in bridge_core and "workspace_mcp_prefix" in bridge_core and "workspaceSetMcpServer" in workspace_ui and "workspace-mcp-row" in style_css and "command:" not in renderer_project and "env:" not in renderer_project)
     report("coding_workspace_monitor_responsive", "workspace-workbench-body" in style_css and "@media (max-width: 760px)" in style_css and "resize: horizontal" in style_css and "terminal-panel-expanded" in style_css and "terminal-panel-docked" in style_css and "text-align: left !important" in style_css and "toggleTerminalWidth" in sessions_js)
     report("coding_workspace_assets_index", "list_workspace_assets" in workspaces and "resolve_workspace_asset" in workspaces and "_resolve_checkout_file" in workspaces and "_validated_managed_checkout" in workspaces and "../README.md" in open("tools/tests/test_workspaces_e2e.py").read())
     report("coding_workspace_assets_main_view", "assetsView" in html and "assets-view-open" in style_css and "workspaceListAssets" in assets_ui and "workspaceOpenAsset" in assets_ui)
@@ -1413,7 +1414,7 @@ def test_agent_operations_contract():
     for endpoint in ("/v1/agents/overview", "/v1/subagent/steer"):
         report(f"agent_operations_endpoint:{endpoint}", endpoint in bridge,
                f"missing {endpoint}" if endpoint not in bridge else "")
-    for element_id in ("evaAgentsBtn", "agentsView", "agentsGrid", "agentGraphCanvas"):
+    for element_id in ("agentsMobileBtn", "agentsView", "agentsGrid", "agentGraphCanvas"):
         report(f"agent_operations_element:{element_id}", f'id="{element_id}"' in html,
                f"missing #{element_id}" if f'id="{element_id}"' not in html else "")
     report("agent_operations_script", re.search(r'src="core/js/agents\.js(?:\?[^" ]+)?"', html) is not None)

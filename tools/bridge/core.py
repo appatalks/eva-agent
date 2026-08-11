@@ -507,6 +507,11 @@ def _dispatch_workspace_run(run):
         )
     checkout = run.get("checkout") or {}
     checkout_path = _workspace_store().validated_checkout_path(checkout.get("id"))
+    workspace_mcp_config = _workspace_store().mcp_config_for_run(run["id"])
+    workspace_mcp_prefix = "workspace-" + str(run.get("project_id") or "workspace").replace("-", "")[:12] + "-"
+    workspace_mcp_config = {
+        workspace_mcp_prefix + name: config for name, config in workspace_mcp_config.items()
+    }
     task_id = "sub-" + uuid.uuid4().hex[:8]
     objective = str(run.get("objective") or "").strip()
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -537,6 +542,7 @@ def _dispatch_workspace_run(run):
         "checkout_id": checkout["id"],
         "capability_policy": "workspace_write",
         "_cwd": checkout_path,
+        "_workspace_mcp_config": workspace_mcp_config,
     }
     if not _reserve_subagent_task(task):
         raise WorkspaceError(f"Agent capacity is full ({_SUBAGENT_MAX} active agents).")
@@ -1206,6 +1212,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._notifications_mark_seen()
         elif parsed_path == "/v1/workspaces/projects":
             self._workspace_project_register()
+        elif parsed_path == "/v1/workspaces/github-import":
+            self._workspace_github_import()
+        elif re.fullmatch(r"/v1/workspaces/projects/[^/]+/mcp-servers/[^/]+", parsed_path):
+            self._workspace_project_mcp_server_update(parsed_path)
         elif parsed_path == "/v1/workspaces/eva-ready":
             self._workspace_eva_ready()
         elif parsed_path == "/v1/workspaces/runs":
@@ -1323,6 +1333,40 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             project = _workspace_store().register_project(path_value, name_value)
             self._json_response(201, {"project": project})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_github_import(self):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        repository_url = data.get("url")
+        if not isinstance(repository_url, str):
+            self._json_response(400, {"error": {"message": "A GitHub repository URL is required."}})
+            return
+        try:
+            project = _workspace_store().import_github_repository(repository_url)
+            self._json_response(201, {"project": project})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_project_mcp_server_update(self, parsed_path):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        enabled = data.get("enabled")
+        if not isinstance(enabled, bool):
+            self._json_response(400, {"error": {"message": "Workspace MCP server state must be enabled or disabled."}})
+            return
+        suffix = parsed_path.split("/v1/workspaces/projects/", 1)[1]
+        project_id, server_name = suffix.split("/mcp-servers/", 1)
+        try:
+            project = _workspace_store().set_project_mcp_server_enabled(
+                urllib.parse.unquote(project_id), urllib.parse.unquote(server_name), enabled
+            )
+            self._json_response(200, {"project": project})
         except WorkspaceError as error:
             self._json_response(400, {"error": {"message": str(error)}})
 

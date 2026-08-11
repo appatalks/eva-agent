@@ -90,18 +90,8 @@
       <button id="evaVoiceViewBtn" class="eva-nav-item eva-nav-eva" type="button" title="Eva Voice" onclick="toggleVoiceView()">
         <span class="eva-nav-icon">&#x25C9;</span> Eva
       </button>
-      <button id="evaAgentsBtn" class="eva-nav-item" type="button" title="Agent Operations" onclick="EvaAgents.toggle()">
-        <span class="eva-nav-icon">&#x25A6;</span> Agents
-        <span id="evaAgentsBadge" class="eva-agent-count" aria-label="Running agents">0</span>
-      </button>
       <button id="evaChatsBtn" class="eva-nav-item" type="button" title="Sessions" onclick="toggleSessionPanel()">
         <span class="eva-nav-icon">&#x1F4AC;</span> Sessions
-      </button>
-      <button id="evaPromptsBtn" class="eva-nav-item" type="button" title="Prompts">
-        <span class="eva-nav-icon">&#x1F4DD;</span> Prompts
-      </button>
-      <button id="evaModelsBtn" class="eva-nav-item" type="button" title="Models">
-        <span class="eva-nav-icon">&#x1F916;</span> Models
       </button>
       <button id="evaSkillsBtn" class="eva-nav-item" type="button" title="Skills" onclick="toggleSkillsPanel(event)">
         <span class="eva-nav-icon">&#x1F9E9;</span> Skills
@@ -112,7 +102,7 @@
       <button id="evaAssetsBtn" class="eva-nav-item" type="button" title="Assets" onclick="EvaAssets.open()">
         <span class="eva-nav-icon">&#x1F4C1;</span> Assets
       </button>
-      <button id="evaWorkspacesBtn" class="eva-nav-item" type="button" title="Workspace: running agentic sessions" onclick="EvaAgents.openWorkspace()">
+      <button id="evaWorkspacesBtn" class="eva-nav-item" type="button" title="Coding workspaces" onclick="EvaWorkspaces.openWorkbench()">
         <span class="eva-nav-icon">&#x25A3;</span> Workspaces
       </button>
       <button id="evaTerminalBtn" class="eva-nav-item" type="button" title="Terminal" onclick="toggleTerminalPanel()">
@@ -161,7 +151,7 @@
       <button id="sidebarSessionsBtn" type="button" title="Sessions">Sessions</button>
     </div>
     <div class="lcars-chip agents" id="lcarsChipAgents">
-      <button id="lcarsAgentsBtn" type="button" title="Agent Operations" onclick="EvaAgents.toggle()">Agents</button>
+      <button id="lcarsWorkspacesBtn" type="button" title="Coding workspaces" onclick="EvaWorkspaces.openWorkbench()">Workspaces</button>
     </div>
     <div class="lcars-chip memory" id="lcarsChipMemory">
       <button id="lcarsMemoryBtn" type="button" title="Memory" onclick="EvaMemoryInspector.open()">Memory</button>
@@ -400,25 +390,31 @@
     <section id="workspaceWorkbench" class="workspace-workbench" aria-hidden="true" aria-label="Coding workspace monitor">
       <header class="workspace-workbench-header">
         <div>
-          <div class="workspace-kicker">DURABLE CODING RUNS</div>
-          <h1>Workspace Monitor</h1>
+          <div class="workspace-kicker">ISOLATED CLIENT WORK</div>
+          <h1>Workspaces</h1>
         </div>
         <div class="workspace-workbench-actions">
+          <span id="workspaceWorkbenchStatus" class="workspace-monitor-updated" aria-live="polite"></span>
           <span id="workspaceMonitorUpdated" class="workspace-monitor-updated">STANDBY</span>
-          <button id="workspaceMonitorNewBtn" class="workspace-monitor-btn" type="button" title="Create a coding run">New run</button>
+          <button id="workspaceAddProjectWorkbenchBtn" class="workspace-monitor-btn" type="button" title="Import a local Git project">Import workspace</button>
+          <button id="workspaceImportGitHubBtn" class="workspace-monitor-btn" type="button" title="Import a public GitHub repository">Import GitHub</button>
           <button id="workspaceMonitorRefreshBtn" class="workspace-monitor-icon" type="button" title="Refresh workspace activity" aria-label="Refresh workspace activity">&#x21BB;</button>
           <button id="workspaceMonitorCloseBtn" class="workspace-monitor-icon" type="button" title="Return to chat" aria-label="Return to chat">&times;</button>
         </div>
       </header>
       <div class="workspace-monitor-metrics" aria-label="Workspace monitor summary">
-        <div><span>CODING RUNS</span><strong id="workspaceMonitorActiveRuns">0</strong></div>
+        <div><span>WORKSPACES</span><strong id="workspaceMonitorProjectCount">0</strong></div>
+        <div><span>ACTIVE RUNS</span><strong id="workspaceMonitorActiveRuns">0</strong></div>
         <div><span>TERMINALS</span><strong id="workspaceMonitorTerminalCount">0</strong></div>
         <div><span>DIRTY FILES</span><strong id="workspaceMonitorDirtyCount">0</strong></div>
-        <div><span>LAST CHECK</span><strong id="workspaceMonitorLastCheck">--</strong></div>
       </div>
       <div class="workspace-workbench-body">
+        <nav class="workspace-monitor-nav workspace-monitor-projects" aria-label="Workspaces">
+          <div class="workspace-monitor-pane-header">WORKSPACES</div>
+          <div id="workspaceWorkbenchProjects" class="workspace-monitor-runs"></div>
+        </nav>
         <nav class="workspace-monitor-nav" aria-label="Coding runs">
-          <div class="workspace-monitor-pane-header">RUNS</div>
+          <div class="workspace-monitor-pane-header">CODING RUNS</div>
           <div id="workspaceWorkbenchRuns" class="workspace-monitor-runs"></div>
         </nav>
         <section class="workspace-monitor-activity" aria-labelledby="workspaceMonitorActivityTitle">

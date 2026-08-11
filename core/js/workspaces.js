@@ -6,6 +6,7 @@ var EvaWorkspaces = (function() {
     selectedRunId: '',
     pendingDiscardRunId: '',
     loading: false,
+    mcpUpdating: false,
     workbenchOpen: false,
     monitorInFlight: false,
     monitorTimer: null,
@@ -31,15 +32,17 @@ var EvaWorkspaces = (function() {
   }
 
   function status(message, kind) {
-    var element = document.getElementById('workspaceStatus');
-    if (!element) return;
-    element.textContent = message || '';
-    element.dataset.state = kind || '';
+    ['workspaceStatus', 'workspaceWorkbenchStatus'].forEach(function(id) {
+      var element = document.getElementById(id);
+      if (!element) return;
+      element.textContent = message || '';
+      element.dataset.state = kind || '';
+    });
   }
 
   function setBusy(busy) {
     state.loading = busy;
-    ['workspaceAddProjectBtn', 'workspaceRefreshBtn', 'workspaceCreateRunBtn'].forEach(function(id) {
+    ['workspaceAddProjectBtn', 'workspaceRefreshBtn', 'workspaceCreateRunBtn', 'workspaceAddProjectWorkbenchBtn', 'workspaceImportGitHubBtn'].forEach(function(id) {
       var element = document.getElementById(id);
       if (!element) return;
       var needsProject = id === 'workspaceCreateRunBtn';
@@ -70,10 +73,13 @@ var EvaWorkspaces = (function() {
 
   function selectProject(projectId) {
     state.selectedProjectId = projectId || '';
+    var selectedRun = state.runs.find(function(run) { return run.id === state.selectedRunId; });
+    if (selectedRun && selectedRun.projectId !== state.selectedProjectId) state.selectedRunId = '';
     var select = document.getElementById('workspaceProjectSelect');
     if (select) select.value = state.selectedProjectId;
     renderProjects();
     renderRuns();
+    if (state.workbenchOpen) renderWorkbench();
   }
 
   function selectRun(runId) {
@@ -83,6 +89,7 @@ var EvaWorkspaces = (function() {
     renderProjects();
     renderRuns();
     renderDetail();
+    if (state.workbenchOpen) renderWorkbench();
   }
 
   function renderProjects() {
@@ -332,17 +339,154 @@ var EvaWorkspaces = (function() {
     }
   }
 
+  function projectById(projectId) {
+    return state.projects.find(function(project) { return project.id === projectId; }) || null;
+  }
+
+  function replaceProject(project) {
+    var index = state.projects.findIndex(function(item) { return item.id === project.id; });
+    if (index >= 0) state.projects[index] = project;
+  }
+
+  function appendWorkbenchRunComposer(detail, project) {
+    var section = document.createElement('section');
+    section.className = 'workspace-workbench-section';
+    var heading = document.createElement('h2');
+    heading.textContent = 'NEW CODING RUN';
+    var form = document.createElement('form');
+    form.className = 'workspace-workbench-run-form';
+    var objectiveLabel = document.createElement('label');
+    objectiveLabel.textContent = 'OBJECTIVE';
+    var objective = document.createElement('textarea');
+    objective.rows = 4;
+    objective.maxLength = 4000;
+    objective.placeholder = 'Describe the change Eva should make';
+    objective.required = true;
+    var baseLabel = document.createElement('label');
+    baseLabel.textContent = 'BASE REF';
+    var baseRef = document.createElement('input');
+    baseRef.type = 'text';
+    baseRef.maxLength = 256;
+    baseRef.value = 'HEAD';
+    baseRef.autocomplete = 'off';
+    var submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.textContent = 'Start isolated run';
+    submit.disabled = state.loading || !supported();
+    form.append(objectiveLabel, objective, baseLabel, baseRef, submit);
+    form.addEventListener('submit', async function(event) {
+      event.preventDefault();
+      submit.disabled = true;
+      var created = await createWorkspaceRun(project.id, objective.value, baseRef.value);
+      if (created) objective.value = '';
+      if (!state.loading) submit.disabled = !supported();
+    });
+    section.append(heading, form);
+    detail.appendChild(section);
+  }
+
+  async function setWorkbenchMcpServer(project, server, checkbox) {
+    var standalone = api();
+    if (!standalone || typeof standalone.workspaceSetMcpServer !== 'function') return;
+    var previous = !checkbox.checked;
+    state.mcpUpdating = true;
+    checkbox.disabled = true;
+    status('Updating workspace tools...', 'loading');
+    try {
+      var updated = await standalone.workspaceSetMcpServer(project.id, server.name, checkbox.checked);
+      replaceProject(updated);
+      renderProjects();
+      renderRuns();
+      renderWorkbench();
+      status('Workspace tools updated.', 'success');
+    } catch (error) {
+      checkbox.checked = previous;
+      status(error.message || 'Workspace tool update failed.', 'error');
+    } finally {
+      state.mcpUpdating = false;
+      if (state.workbenchOpen) renderWorkbench();
+    }
+  }
+
+  function appendWorkbenchMcpSettings(detail, project) {
+    var section = document.createElement('section');
+    section.className = 'workspace-workbench-section';
+    var heading = document.createElement('h2');
+    heading.textContent = 'MCP SERVERS';
+    var mcp = project.mcpServers || { source: 'mcp.json', state: 'missing', servers: [] };
+    var source = document.createElement('p');
+    source.textContent = 'Source: ' + (mcp.source || 'mcp.json') + ' | workspace-local selection';
+    section.append(heading, source);
+    if (mcp.state === 'invalid') {
+      var invalid = document.createElement('p');
+      invalid.textContent = mcp.message || 'The workspace mcp.json is invalid.';
+      section.appendChild(invalid);
+    } else if (!mcp.servers || !mcp.servers.length) {
+      var empty = document.createElement('p');
+      empty.textContent = mcp.state === 'missing' ? 'No workspace mcp.json found.' : 'No MCP servers are defined.';
+      section.appendChild(empty);
+    } else {
+      var list = document.createElement('div');
+      list.className = 'workspace-mcp-list';
+      mcp.servers.forEach(function(server) {
+        var row = document.createElement('label');
+        row.className = 'workspace-mcp-row';
+        var checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = server.enabled === true;
+        checkbox.disabled = state.loading || state.mcpUpdating || !api() || typeof api().workspaceSetMcpServer !== 'function';
+        var name = document.createElement('strong');
+        name.textContent = server.name;
+        var transport = document.createElement('span');
+        transport.textContent = server.transport || 'configured';
+        checkbox.addEventListener('change', function() { setWorkbenchMcpServer(project, server, checkbox); });
+        row.append(checkbox, name, transport);
+        list.appendChild(row);
+      });
+      section.appendChild(list);
+    }
+    detail.appendChild(section);
+  }
+
   function renderWorkbench() {
+    var projectList = document.getElementById('workspaceWorkbenchProjects');
     var runList = document.getElementById('workspaceWorkbenchRuns');
     var feed = document.getElementById('workspaceMonitorFeed');
     var detail = document.getElementById('workspaceWorkbenchDetail');
-    if (!runList || !feed || !detail) return;
+    if (!projectList || !runList || !feed || !detail) return;
+    projectList.replaceChildren();
+    if (!state.projects.length) {
+      var emptyProject = document.createElement('p');
+      emptyProject.className = 'workspace-monitor-empty';
+      emptyProject.textContent = 'No workspaces';
+      projectList.appendChild(emptyProject);
+    }
+    if (!state.selectedProjectId || !projectById(state.selectedProjectId)) {
+      state.selectedProjectId = state.projects.length ? state.projects[0].id : '';
+    }
+    state.projects.forEach(function(project) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'workspace-monitor-run';
+      if (project.id === state.selectedProjectId) button.classList.add('active');
+      var title = document.createElement('strong');
+      title.textContent = project.name;
+      var enabled = ((project.mcpServers || {}).servers || []).filter(function(server) { return server.enabled; }).length;
+      var meta = document.createElement('span');
+      meta.textContent = (project.activeRunCount || 0) + ' active | ' + enabled + ' MCP enabled';
+      button.append(title, meta);
+      button.addEventListener('click', function() { selectProject(project.id); });
+      projectList.appendChild(button);
+    });
+
     runList.replaceChildren();
-    var orderedRuns = state.runs.filter(function(run) { return run.status !== 'discarded'; });
+    var orderedRuns = state.runs.filter(function(run) {
+      return run.status !== 'discarded' && run.projectId === state.selectedProjectId;
+    });
     if (!orderedRuns.length) {
       var empty = document.createElement('p');
       empty.className = 'workspace-monitor-empty';
-      empty.textContent = 'No coding runs';
+      empty.textContent = state.selectedProjectId ? 'No coding runs' : 'Select a workspace';
       runList.appendChild(empty);
     }
     orderedRuns.forEach(function(run) {
@@ -378,13 +522,18 @@ var EvaWorkspaces = (function() {
     });
 
     detail.replaceChildren();
-    var selected = state.runs.find(function(run) { return run.id === state.selectedRunId; }) || activeRuns()[0] || orderedRuns[0];
-    if (!selected) {
+    var project = projectById(state.selectedProjectId);
+    if (!project) {
       var unavailable = document.createElement('p');
       unavailable.className = 'workspace-monitor-empty';
-      unavailable.textContent = 'Select a run to inspect its context.';
+      unavailable.textContent = 'Import a local Git workspace to begin.';
       detail.appendChild(unavailable);
     } else {
+      appendWorkbenchRunComposer(detail, project);
+      appendWorkbenchMcpSettings(detail, project);
+    }
+    var selected = orderedRuns.find(function(run) { return run.id === state.selectedRunId; }) || orderedRuns[0];
+    if (selected) {
       state.selectedRunId = selected.id;
       var heading = document.createElement('h2');
       heading.textContent = selected.objective;
@@ -416,23 +565,26 @@ var EvaWorkspaces = (function() {
         chatButton.addEventListener('click', function() { loadSession(selected.primarySessionId); closeWorkbench(); });
         actions.appendChild(chatButton);
       }
-      detail.append(heading, branch, facts, actions);
+      var runSection = document.createElement('section');
+      runSection.className = 'workspace-workbench-section';
+      runSection.append(heading, branch, facts, actions);
       if (selected.agent && selected.agent.report) {
         var report = document.createElement('pre');
         report.className = 'workspace-monitor-report';
         report.textContent = selected.agent.report;
-        detail.appendChild(report);
+        runSection.appendChild(report);
       }
+      detail.appendChild(runSection);
     }
 
     var active = activeRuns();
     var terminals = state.lastTerminals || [];
     var dirty = active.reduce(function(total, run) { return total + Number(run.checkout && run.checkout.dirtyFileCount || 0); }, 0);
     var values = {
+      workspaceMonitorProjectCount: state.projects.length,
       workspaceMonitorActiveRuns: active.length,
       workspaceMonitorTerminalCount: terminals.filter(function(item) { return !item.exited; }).length,
-      workspaceMonitorDirtyCount: dirty,
-      workspaceMonitorLastCheck: state.lastCheckedAt ? new Date(state.lastCheckedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--'
+      workspaceMonitorDirtyCount: dirty
     };
     Object.keys(values).forEach(function(id) {
       var element = document.getElementById(id);
@@ -481,10 +633,6 @@ var EvaWorkspaces = (function() {
   }
 
   function openWorkbench() {
-    if (!supported()) {
-      toggle();
-      return;
-    }
     if (typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
     if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();
     if (window.EvaSkills && typeof window.EvaSkills.close === 'function') window.EvaSkills.close();
@@ -493,6 +641,11 @@ var EvaWorkspaces = (function() {
     document.body.classList.add('workspace-workbench-open');
     var view = document.getElementById('workspaceWorkbench');
     if (view) view.setAttribute('aria-hidden', 'false');
+    if (!supported()) {
+      status('Coding workspaces are unavailable in this Eva launch.', 'error');
+      renderWorkbench();
+      return;
+    }
     monitor();
     renderWorkbench();
   }
@@ -560,41 +713,75 @@ var EvaWorkspaces = (function() {
     }
   }
 
-  async function createRun(event) {
-    event.preventDefault();
+  async function importGitHubProject() {
     if (!supported() || state.loading) return;
-    var projectSelect = document.getElementById('workspaceProjectSelect');
-    var objective = document.getElementById('workspaceObjective');
-    var baseRef = document.getElementById('workspaceBaseRef');
-    var project = projectSelect && state.projects.find(function(item) { return item.id === projectSelect.value; });
-    if (!project) {
-      status('Eva is preparing the ready workspace. Refresh in a moment.', 'error');
+    if (!api() || typeof api().workspaceImportGitHub !== 'function' || typeof evaTextPrompt !== 'function') {
+      status('GitHub workspace import is unavailable in this Eva build.', 'error');
       return;
     }
-    if (!objective || !objective.value.trim()) {
+    var repositoryUrl = await evaTextPrompt('GitHub repository URL', '', {
+      maxLength: 2048,
+      placeholder: 'https://github.com/owner/repository'
+    });
+    if (repositoryUrl === null || !String(repositoryUrl).trim()) return;
+    setBusy(true);
+    status('Importing GitHub workspace...', 'loading');
+    try {
+      var project = await api().workspaceImportGitHub(String(repositoryUrl).trim());
+      if (project) state.selectedProjectId = project.id;
+      await refresh();
+      status('GitHub workspace imported.', 'success');
+    } catch (error) {
+      status(error.message || 'GitHub workspace import failed.', 'error');
+      setBusy(false);
+    }
+  }
+
+  async function createWorkspaceRun(projectId, objectiveValue, baseRefValue) {
+    if (!supported() || state.loading) return;
+    var project = projectById(projectId);
+    if (!project) {
+      status('Eva is preparing the ready workspace. Refresh in a moment.', 'error');
+      return false;
+    }
+    var objective = String(objectiveValue || '').trim();
+    if (!objective) {
       status('Describe the coding run first.', 'error');
-      objective.focus();
-      return;
+      return false;
     }
     setBusy(true);
     status('Creating isolated worktree...', 'loading');
     try {
       var primarySessionId = typeof _activeSessionId === 'function' ? _activeSessionId() : '';
       var run = await api().workspaceCreateRun({
-        projectId: projectSelect.value,
-        objective: objective.value.trim(),
+        projectId: project.id,
+        objective: objective,
         primarySessionId: primarySessionId,
-        baseRef: baseRef ? baseRef.value.trim() || 'HEAD' : 'HEAD'
+        baseRef: String(baseRefValue || '').trim() || 'HEAD'
       });
-      objective.value = '';
       state.selectedProjectId = run.projectId;
       state.selectedRunId = run.id;
       await refresh();
       status(run.dispatchError ? 'Workspace ready; agent dispatch delayed: ' + run.dispatchError : 'Workspace agent dispatched.', run.dispatchError ? 'error' : 'success');
+      return true;
     } catch (error) {
       status(error.message || 'Could not create coding run.', 'error');
       setBusy(false);
+      return false;
     }
+  }
+
+  async function createRun(event) {
+    event.preventDefault();
+    var projectSelect = document.getElementById('workspaceProjectSelect');
+    var objective = document.getElementById('workspaceObjective');
+    var baseRef = document.getElementById('workspaceBaseRef');
+    var created = await createWorkspaceRun(
+      projectSelect ? projectSelect.value : '',
+      objective ? objective.value : '',
+      baseRef ? baseRef.value : 'HEAD'
+    );
+    if (created && objective) objective.value = '';
   }
 
   async function applyRunAction(run, action) {
@@ -657,6 +844,8 @@ var EvaWorkspaces = (function() {
     var form = document.getElementById('workspaceRunForm');
     var projectSelect = document.getElementById('workspaceProjectSelect');
     var openWorkbenchButton = document.getElementById('workspaceOpenWorkbenchBtn');
+    var workbenchAddProject = document.getElementById('workspaceAddProjectWorkbenchBtn');
+    var workbenchGitHubImport = document.getElementById('workspaceImportGitHubBtn');
     var monitorRefresh = document.getElementById('workspaceMonitorRefreshBtn');
     var monitorClose = document.getElementById('workspaceMonitorCloseBtn');
     var monitorNew = document.getElementById('workspaceMonitorNewBtn');
@@ -666,6 +855,8 @@ var EvaWorkspaces = (function() {
     if (form) form.addEventListener('submit', createRun);
     if (projectSelect) projectSelect.addEventListener('change', function() { selectProject(projectSelect.value); });
     if (openWorkbenchButton) openWorkbenchButton.addEventListener('click', openWorkbench);
+    if (workbenchAddProject) workbenchAddProject.addEventListener('click', addProject);
+    if (workbenchGitHubImport) workbenchGitHubImport.addEventListener('click', importGitHubProject);
     if (monitorRefresh) monitorRefresh.addEventListener('click', monitor);
     if (monitorClose) monitorClose.addEventListener('click', closeWorkbench);
     if (monitorNew) monitorNew.addEventListener('click', async function() {

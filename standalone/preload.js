@@ -40,6 +40,8 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   },
   workspaceListProjects: function() { return ipcRenderer.invoke('workspace-list-projects'); },
   workspaceSelectProject: function() { return ipcRenderer.invoke('workspace-select-project'); },
+  workspaceImportGitHub: function(repositoryUrl) { return ipcRenderer.invoke('workspace-import-github', repositoryUrl); },
+  workspaceSetMcpServer: function(projectId, serverName, enabled) { return ipcRenderer.invoke('workspace-set-mcp-server', projectId, serverName, enabled); },
   workspaceCreateRun: function(request) { return ipcRenderer.invoke('workspace-create-run', request); },
   workspaceListRuns: function(projectId) { return ipcRenderer.invoke('workspace-list-runs', projectId); },
   workspaceCheckoutStatus: function(checkoutId) { return ipcRenderer.invoke('workspace-checkout-status', checkoutId); },

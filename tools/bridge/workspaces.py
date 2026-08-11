@@ -1,17 +1,24 @@
 """Durable local projects, Git worktrees, and coding-run records for Eva."""
 
 import datetime
+import hashlib
+import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import threading
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
+_MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
+_MCP_CONFIG_MAX_BYTES = 256 * 1024
+_GITHUB_REPOSITORY_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
 class WorkspaceError(Exception):
@@ -144,6 +151,24 @@ class WorkspaceStore:
                 )
                 self.connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (1, _utc_now()),
+                )
+            if 2 not in applied:
+                self.connection.executescript(
+                    """
+                    CREATE TABLE project_mcp_preferences (
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        server_name TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(project_id, server_name)
+                    );
+                    CREATE INDEX project_mcp_preferences_project_index
+                    ON project_mcp_preferences(project_id, enabled);
+                    """
+                )
+                self.connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (_SCHEMA_VERSION, _utc_now()),
                 )
 
@@ -197,6 +222,31 @@ class WorkspaceStore:
                 self._git(str(project_path), ["commit", "-m", "Initialize Eva ready workspace"])
         return self.register_project(project_path, "Eva Ready Workspace")
 
+    def import_github_repository(self, repository_url):
+        """Clone a selected public github.com repository into Eva-owned workspace storage."""
+        normalized_url, owner, repository = self._normalize_github_repository_url(repository_url)
+        destination_name = owner + "-" + repository + "-" + hashlib.sha256(
+            normalized_url.encode("utf-8")
+        ).hexdigest()[:12]
+        destination = (self.config_dir / "projects" / "github" / destination_name).resolve()
+        import_root = (self.config_dir / "projects" / "github").resolve()
+        if not self._is_within(destination, import_root):
+            raise WorkspaceError("Invalid GitHub workspace destination.")
+        with self.lock:
+            if destination.exists():
+                if destination.is_symlink() or not destination.is_dir():
+                    raise WorkspaceError("GitHub workspace destination is unavailable.")
+                return self.register_project(destination, owner + "/" + repository)
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if destination.parent.is_symlink():
+                raise WorkspaceError("GitHub workspace destination is unavailable.")
+            try:
+                self._clone_github_repository(normalized_url, destination)
+            except WorkspaceError:
+                shutil.rmtree(destination, ignore_errors=True)
+                raise
+        return self.register_project(destination, owner + "/" + repository)
+
     def list_projects(self):
         with self.lock:
             project_rows = self.connection.execute(
@@ -223,7 +273,89 @@ class WorkspaceStore:
             "updated_at": project_row["updated_at"],
             "active_run_count": run_count,
             "source_checkout": self._checkout_payload(source_checkout),
+            "mcp_servers": self.list_project_mcp_servers(project_id),
         }
+
+    def list_project_mcp_servers(self, project_id):
+        """Return safe workspace MCP metadata without commands or environment values."""
+        with self.lock:
+            project_row = self.connection.execute(
+                "SELECT root_path FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if not project_row:
+                raise WorkspaceError("Unknown project.")
+            preferences = {
+                row["server_name"]: bool(row["enabled"])
+                for row in self.connection.execute(
+                    "SELECT server_name, enabled FROM project_mcp_preferences WHERE project_id = ?", (project_id,)
+                )
+            }
+        try:
+            servers = self._read_mcp_servers(Path(project_row["root_path"]))
+        except WorkspaceError as error:
+            return {"source": "mcp.json", "state": "invalid", "message": str(error), "servers": []}
+        if servers is None:
+            return {"source": "mcp.json", "state": "missing", "message": "", "servers": []}
+        return {
+            "source": "mcp.json",
+            "state": "ready",
+            "message": "",
+            "servers": [
+                {
+                    "name": name,
+                    "transport": self._mcp_transport(config),
+                    "enabled": preferences.get(name, False),
+                }
+                for name, config in sorted(servers.items(), key=lambda item: item[0].lower())
+            ],
+        }
+
+    def set_project_mcp_server_enabled(self, project_id, server_name, enabled):
+        name = _json_text(server_name).strip()
+        if not _MCP_SERVER_NAME_RE.fullmatch(name):
+            raise WorkspaceError("Invalid workspace MCP server.")
+        if not isinstance(enabled, bool):
+            raise WorkspaceError("Workspace MCP server state must be enabled or disabled.")
+        with self.lock:
+            project_row = self.connection.execute(
+                "SELECT root_path FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+        if not project_row:
+            raise WorkspaceError("Unknown project.")
+        servers = self._read_mcp_servers(Path(project_row["root_path"]))
+        if not servers or name not in servers:
+            raise WorkspaceError("Workspace MCP server is not available from mcp.json.")
+        now = _utc_now()
+        with self.lock, self.connection:
+            self.connection.execute(
+                """INSERT INTO project_mcp_preferences(project_id, server_name, enabled, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(project_id, server_name)
+                   DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at""",
+                (project_id, name, int(enabled), now),
+            )
+            self.connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
+        return self.get_project(project_id)
+
+    def mcp_config_for_run(self, run_id):
+        """Read enabled MCP definitions from the exact isolated worktree for a run."""
+        run = self.get_run(run_id)
+        checkout = run["checkout"]
+        if checkout["lifecycle"] != "active":
+            raise WorkspaceError("Coding workspace is unavailable.")
+        checkout_path = self._validated_managed_checkout(checkout)
+        with self.lock:
+            enabled_names = {
+                row["server_name"]
+                for row in self.connection.execute(
+                    "SELECT server_name FROM project_mcp_preferences WHERE project_id = ? AND enabled = 1",
+                    (run["project_id"],),
+                )
+            }
+        servers = self._read_mcp_servers(checkout_path)
+        if not servers or not enabled_names:
+            return {}
+        return {name: config for name, config in servers.items() if name in enabled_names}
 
     def create_run(self, project_id, objective, primary_session_id="", base_ref="HEAD", model_policy=""):
         clean_objective = _json_text(objective).strip()
@@ -605,6 +737,81 @@ class WorkspaceStore:
             return str(Path(git_root).resolve(strict=True))
         except (OSError, RuntimeError):
             raise WorkspaceError("The selected Git repository is unavailable.")
+
+    def _normalize_github_repository_url(self, repository_url):
+        value = _json_text(repository_url).strip()
+        if len(value) > 2048:
+            raise WorkspaceError("GitHub repository URL is too long.")
+        parsed = urlparse(value)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname is None
+            or parsed.hostname.lower() != "github.com"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.params
+        ):
+            raise WorkspaceError("Use a credential-free https://github.com/owner/repository URL.")
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) != 2:
+            raise WorkspaceError("Use a GitHub repository URL with an owner and repository name.")
+        owner, repository = parts
+        if repository.endswith(".git"):
+            repository = repository[:-4]
+        if not _GITHUB_REPOSITORY_PART_RE.fullmatch(owner) or not _GITHUB_REPOSITORY_PART_RE.fullmatch(repository):
+            raise WorkspaceError("GitHub repository URL contains an invalid owner or repository name.")
+        return "https://github.com/" + owner + "/" + repository + ".git", owner, repository
+
+    def _clone_github_repository(self, repository_url, destination):
+        try:
+            completed = subprocess.run(
+                ["git", "clone", "--origin", "origin", repository_url, str(destination)],
+                env=self._git_environment(),
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=180,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise WorkspaceError("GitHub repository import could not start.")
+        if completed.returncode != 0:
+            raise WorkspaceError("GitHub repository import failed. Confirm that the repository is public and available.")
+
+    def _read_mcp_servers(self, workspace_root):
+        config_path = Path(workspace_root) / "mcp.json"
+        try:
+            if not config_path.exists():
+                return None
+            if config_path.is_symlink() or not config_path.is_file():
+                raise WorkspaceError("Workspace mcp.json must be a regular file.")
+            if config_path.stat().st_size > _MCP_CONFIG_MAX_BYTES:
+                raise WorkspaceError("Workspace mcp.json is too large.")
+            with config_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError, json.JSONDecodeError):
+            raise WorkspaceError("Workspace mcp.json is not valid JSON.")
+        if not isinstance(payload, dict):
+            raise WorkspaceError("Workspace mcp.json must contain an object.")
+        candidates = payload.get("mcpServers", payload)
+        if not isinstance(candidates, dict):
+            raise WorkspaceError("Workspace mcp.json must define mcpServers.")
+        return {
+            name: config for name, config in candidates.items()
+            if isinstance(name, str) and _MCP_SERVER_NAME_RE.fullmatch(name) and isinstance(config, dict)
+        }
+
+    @staticmethod
+    def _mcp_transport(config):
+        if isinstance(config.get("url"), str):
+            return "remote"
+        if isinstance(config.get("command"), str):
+            return "stdio"
+        return "configured"
 
     def _current_branch(self, root_path):
         result = self._git_status_output(root_path, ["symbolic-ref", "--quiet", "--short", "HEAD"])
