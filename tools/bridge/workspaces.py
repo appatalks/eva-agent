@@ -14,10 +14,15 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 _MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
 _MCP_CONFIG_MAX_BYTES = 256 * 1024
+_MCP_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_MCP_RESERVED_ENV_KEYS = {
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "PYTHONPATH", "NODE_OPTIONS",
+    "ELECTRON_RUN_AS_NODE", "LD_PRELOAD", "LD_LIBRARY_PATH",
+}
 _GITHUB_REPOSITORY_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
@@ -169,6 +174,14 @@ class WorkspaceStore:
                 )
                 self.connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (2, _utc_now()),
+                )
+            if 3 not in applied:
+                self.connection.execute(
+                    "ALTER TABLE project_mcp_preferences ADD COLUMN approved_digest TEXT NOT NULL DEFAULT ''"
+                )
+                self.connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (_SCHEMA_VERSION, _utc_now()),
                 )
 
@@ -292,19 +305,18 @@ class WorkspaceStore:
     def list_project_mcp_servers(self, project_id):
         """Return safe workspace MCP metadata without commands or environment values."""
         with self.lock:
-            project_row = self.connection.execute(
-                "SELECT root_path FROM projects WHERE id = ?", (project_id,)
-            ).fetchone()
-            if not project_row:
-                raise WorkspaceError("Unknown project.")
             preferences = {
-                row["server_name"]: bool(row["enabled"])
+                row["server_name"]: {
+                    "enabled": bool(row["enabled"]),
+                    "approved_digest": row["approved_digest"],
+                }
                 for row in self.connection.execute(
-                    "SELECT server_name, enabled FROM project_mcp_preferences WHERE project_id = ?", (project_id,)
+                    "SELECT server_name, enabled, approved_digest FROM project_mcp_preferences WHERE project_id = ?",
+                    (project_id,),
                 )
             }
         try:
-            servers = self._read_mcp_servers(Path(project_row["root_path"]))
+            servers = self._read_mcp_servers(self._validated_source_project(project_id))
         except WorkspaceError as error:
             return {"source": "mcp.json", "state": "invalid", "message": str(error), "servers": []}
         if servers is None:
@@ -314,38 +326,34 @@ class WorkspaceStore:
             "state": "ready",
             "message": "",
             "servers": [
-                {
-                    "name": name,
-                    "transport": self._mcp_transport(config),
-                    "enabled": preferences.get(name, False),
-                }
+                self._mcp_server_metadata(name, config, preferences.get(name, {}))
                 for name, config in sorted(servers.items(), key=lambda item: item[0].lower())
             ],
         }
 
-    def set_project_mcp_server_enabled(self, project_id, server_name, enabled):
+    def set_project_mcp_server_enabled(self, project_id, server_name, enabled, approved_digest=""):
         name = _json_text(server_name).strip()
         if not _MCP_SERVER_NAME_RE.fullmatch(name):
             raise WorkspaceError("Invalid workspace MCP server.")
         if not isinstance(enabled, bool):
             raise WorkspaceError("Workspace MCP server state must be enabled or disabled.")
-        with self.lock:
-            project_row = self.connection.execute(
-                "SELECT root_path FROM projects WHERE id = ?", (project_id,)
-            ).fetchone()
-        if not project_row:
-            raise WorkspaceError("Unknown project.")
-        servers = self._read_mcp_servers(Path(project_row["root_path"]))
+        servers = self._read_mcp_servers(self._validated_source_project(project_id))
         if not servers or name not in servers:
             raise WorkspaceError("Workspace MCP server is not available from mcp.json.")
+        digest = self._mcp_config_digest(servers[name])
+        requested_digest = _json_text(approved_digest).strip()
+        if enabled and requested_digest != digest:
+            raise WorkspaceError("Workspace MCP configuration changed. Review it again before enabling.")
         now = _utc_now()
         with self.lock, self.connection:
             self.connection.execute(
-                """INSERT INTO project_mcp_preferences(project_id, server_name, enabled, updated_at)
-                   VALUES (?, ?, ?, ?)
+                """INSERT INTO project_mcp_preferences(project_id, server_name, enabled, approved_digest, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(project_id, server_name)
-                   DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at""",
-                (project_id, name, int(enabled), now),
+                   DO UPDATE SET enabled = excluded.enabled,
+                                 approved_digest = excluded.approved_digest,
+                                 updated_at = excluded.updated_at""",
+                (project_id, name, int(enabled), digest if enabled else requested_digest, now),
             )
             self.connection.execute("UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id))
         return self.get_project(project_id)
@@ -358,17 +366,20 @@ class WorkspaceStore:
             raise WorkspaceError("Coding workspace is unavailable.")
         checkout_path = self._validated_managed_checkout(checkout)
         with self.lock:
-            enabled_names = {
-                row["server_name"]
+            approvals = {
+                row["server_name"]: row["approved_digest"]
                 for row in self.connection.execute(
-                    "SELECT server_name FROM project_mcp_preferences WHERE project_id = ? AND enabled = 1",
+                    "SELECT server_name, approved_digest FROM project_mcp_preferences WHERE project_id = ? AND enabled = 1",
                     (run["project_id"],),
                 )
             }
         servers = self._read_mcp_servers(checkout_path)
-        if not servers or not enabled_names:
+        if not servers or not approvals:
             return {}
-        return {name: config for name, config in servers.items() if name in enabled_names}
+        return {
+            name: config for name, config in servers.items()
+            if approvals.get(name) == self._mcp_config_digest(config)
+        }
 
     def create_run(self, project_id, objective, primary_session_id="", base_ref="HEAD", model_policy=""):
         clean_objective = _json_text(objective).strip()
@@ -646,9 +657,7 @@ class WorkspaceStore:
                 return self._checkout_payload(checkout_row)
             validated_root = self._validated_managed_checkout(self._checkout_payload(checkout_row))
         else:
-            if not checkout_path.is_dir() or checkout_path.is_symlink():
-                raise WorkspaceError("Source checkout is unavailable.")
-            validated_root = checkout_path.resolve(strict=True)
+            validated_root = self._validated_source_project(checkout_row["project_id"])
         status_output = self._git(str(validated_root), ["status", "--porcelain=v1", "-z"])
         dirty_count = self._dirty_file_count(status_output)
         now = _utc_now()
@@ -829,9 +838,71 @@ class WorkspaceStore:
         candidates = payload.get("mcpServers", payload)
         if not isinstance(candidates, dict):
             raise WorkspaceError("Workspace mcp.json must define mcpServers.")
+        normalized = {}
+        for name, config in candidates.items():
+            if not isinstance(name, str) or not _MCP_SERVER_NAME_RE.fullmatch(name) or not isinstance(config, dict):
+                raise WorkspaceError("Workspace mcp.json contains an invalid server definition.")
+            normalized[name] = self._normalize_mcp_server_config(config)
+        return normalized
+
+    def _normalize_mcp_server_config(self, config):
+        command = config.get("command")
+        url = config.get("url")
+        if (command is None) == (url is None):
+            raise WorkspaceError("Each workspace MCP server must define exactly one command or URL.")
+        if command is not None:
+            if not isinstance(command, str) or not command.strip() or len(command) > 1024:
+                raise WorkspaceError("Workspace MCP server command is invalid.")
+            args = config.get("args", [])
+            if not isinstance(args, list) or len(args) > 128 or any(
+                not isinstance(argument, str) or len(argument) > 2048 for argument in args
+            ):
+                raise WorkspaceError("Workspace MCP server arguments are invalid.")
+            env = config.get("env", {})
+            if not isinstance(env, dict) or len(env) > 128:
+                raise WorkspaceError("Workspace MCP server environment is invalid.")
+            normalized_env = {}
+            for key, value in env.items():
+                if (
+                    not isinstance(key, str)
+                    or not _MCP_ENV_NAME_RE.fullmatch(key)
+                    or key in _MCP_RESERVED_ENV_KEYS
+                    or key.startswith("EVA_")
+                    or not isinstance(value, (str, int, float, bool))
+                    or len(str(value)) > 4096
+                ):
+                    raise WorkspaceError("Workspace MCP server environment contains a reserved or invalid entry.")
+                normalized_env[key] = value
+            return {"command": command, "args": args, "env": normalized_env}
+        if not isinstance(url, str) or not url.startswith("https://") or len(url) > 4096:
+            raise WorkspaceError("Workspace MCP server URL must use HTTPS.")
+        headers = config.get("headers", {})
+        if not isinstance(headers, dict) or len(headers) > 128 or any(
+            not isinstance(key, str) or not key.strip() or len(key) > 256
+            or not isinstance(value, str) or len(value) > 4096
+            for key, value in headers.items()
+        ):
+            raise WorkspaceError("Workspace MCP server headers are invalid.")
+        return {"url": url, "headers": headers}
+
+    @staticmethod
+    def _mcp_config_digest(config):
+        encoded = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _mcp_server_metadata(self, name, config, preference):
+        digest = self._mcp_config_digest(config)
+        enabled = bool(preference.get("enabled")) and preference.get("approved_digest") == digest
         return {
-            name: config for name, config in candidates.items()
-            if isinstance(name, str) and _MCP_SERVER_NAME_RE.fullmatch(name) and isinstance(config, dict)
+            "name": name,
+            "transport": self._mcp_transport(config),
+            "enabled": enabled,
+            "digest": digest,
+            "command": config.get("command", ""),
+            "args": list(config.get("args") or []),
+            "url": config.get("url", ""),
+            "env_keys": sorted((config.get("env") or {}).keys()),
+            "header_keys": sorted((config.get("headers") or {}).keys()),
         }
 
     @staticmethod

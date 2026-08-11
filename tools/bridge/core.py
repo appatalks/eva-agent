@@ -1375,7 +1375,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         project_id, server_name = suffix.split("/mcp-servers/", 1)
         try:
             project = _workspace_store().set_project_mcp_server_enabled(
-                urllib.parse.unquote(project_id), urllib.parse.unquote(server_name), enabled
+                urllib.parse.unquote(project_id),
+                urllib.parse.unquote(server_name),
+                enabled,
+                data.get("approved_digest", ""),
             )
             self._json_response(200, {"project": project})
         except WorkspaceError as error:

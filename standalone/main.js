@@ -196,7 +196,13 @@ function workspaceProjectForRenderer(project) {
         return {
           name: server.name,
           transport: server.transport,
-          enabled: server.enabled === true
+          enabled: server.enabled === true,
+          digest: typeof server.digest === 'string' ? server.digest : '',
+          command: typeof server.command === 'string' ? server.command : '',
+          args: Array.isArray(server.args) ? server.args.filter(function(argument) { return typeof argument === 'string'; }) : [],
+          url: typeof server.url === 'string' ? server.url : '',
+          envKeys: Array.isArray(server.env_keys) ? server.env_keys.filter(function(key) { return typeof key === 'string'; }) : [],
+          headerKeys: Array.isArray(server.header_keys) ? server.header_keys.filter(function(key) { return typeof key === 'string'; }) : []
         };
       }) : []
     }
@@ -272,7 +278,7 @@ async function workspaceImportGitHub(event, repositoryUrl) {
   return workspaceProjectForRenderer(project);
 }
 
-async function workspaceSetMcpServer(event, projectId, serverName, enabled) {
+async function workspaceSetMcpServer(event, projectId, serverName, enabled, approvedDigest) {
   requireWorkspaceFeature(event);
   if (!validWorkspaceId(projectId) || typeof serverName !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(serverName)) {
     throw new Error('Invalid workspace MCP server.');
@@ -281,7 +287,7 @@ async function workspaceSetMcpServer(event, projectId, serverName, enabled) {
   const response = await requestWorkspaceBridge(
     '/v1/workspaces/projects/' + encodeURIComponent(projectId) + '/mcp-servers/' + encodeURIComponent(serverName),
     'POST',
-    { enabled: enabled }
+    { enabled: enabled, approved_digest: typeof approvedDigest === 'string' ? approvedDigest : '' }
   );
   const project = response.project;
   if (!project || !validWorkspaceId(project.id)) throw new Error('Workspace bridge returned an invalid project record.');

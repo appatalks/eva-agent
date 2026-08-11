@@ -107,10 +107,10 @@ def main():
         assert status == 201, payload
         project = payload["project"]
         assert project["path"] == str(repository.resolve())
-        assert project["mcp_servers"]["servers"] == [{
-            "name": "project-docs", "transport": "stdio", "enabled": False
-        }]
-        assert "command" not in project["mcp_servers"]["servers"][0]
+        server_metadata = project["mcp_servers"]["servers"][0]
+        assert server_metadata["name"] == "project-docs" and server_metadata["enabled"] is False
+        assert server_metadata["command"] == "example-mcp" and server_metadata["args"] == ["--docs"]
+        assert server_metadata["env_keys"] == ["EXAMPLE_TOKEN"] and "env" not in server_metadata
         status, files_payload = request(
             base_url, "GET", "/v1/workspaces/projects/" + project["id"] + "/files"
         )
@@ -129,7 +129,7 @@ def main():
             base_url,
             "POST",
             "/v1/workspaces/projects/" + project["id"] + "/mcp-servers/project-docs",
-            {"enabled": True},
+            {"enabled": True, "approved_digest": server_metadata["digest"]},
         )
         assert status == 200 and payload["project"]["mcp_servers"]["servers"][0]["enabled"] is True, payload
 

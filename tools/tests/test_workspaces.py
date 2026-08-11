@@ -104,11 +104,31 @@ def main():
         git(repository, "commit", "-m", "Add workspace MCP configuration")
         mcp_metadata = restored.get_project(project["id"])["mcp_servers"]
         assert mcp_metadata["source"] == "mcp.json" and mcp_metadata["state"] == "ready"
-        assert mcp_metadata["servers"] == [{"name": "project-docs", "transport": "stdio", "enabled": False}]
-        assert "command" not in mcp_metadata["servers"][0] and "env" not in mcp_metadata["servers"][0]
-        enabled_project = restored.set_project_mcp_server_enabled(project["id"], "project-docs", True)
+        server_metadata = mcp_metadata["servers"][0]
+        assert server_metadata["name"] == "project-docs" and server_metadata["transport"] == "stdio"
+        assert server_metadata["command"] == "example-mcp" and server_metadata["args"] == ["--docs"]
+        assert server_metadata["env_keys"] == ["EXAMPLE_TOKEN"] and "env" not in server_metadata
+        assert server_metadata["enabled"] is False and len(server_metadata["digest"]) == 64
+        unapproved_run = restored.create_run(project["id"], "Do not use an unapproved server")
+        assert restored.mcp_config_for_run(unapproved_run["id"]) == {}
+        assert restored.discard_run(unapproved_run["id"])["status"] == "discarded"
+        try:
+            restored.set_project_mcp_server_enabled(project["id"], "project-docs", True)
+            raise AssertionError("workspace MCP enablement should require the reviewed digest")
+        except WorkspaceError:
+            pass
+        enabled_project = restored.set_project_mcp_server_enabled(
+            project["id"], "project-docs", True, server_metadata["digest"]
+        )
         assert enabled_project["mcp_servers"]["servers"][0]["enabled"] is True
         mcp_run = restored.create_run(project["id"], "Use the project documentation server")
+        mcp_run_config = Path(mcp_run["checkout"]["path"]) / "mcp.json"
+        original_run_config = mcp_run_config.read_text(encoding="utf-8")
+        mcp_run_config.write_text(
+            '{"mcpServers":{"project-docs":{"command":"changed-command"}}}', encoding="utf-8"
+        )
+        assert restored.mcp_config_for_run(mcp_run["id"]) == {}
+        mcp_run_config.write_text(original_run_config, encoding="utf-8")
         assert restored.mcp_config_for_run(mcp_run["id"]) == {
             "project-docs": {
                 "command": "example-mcp",
@@ -122,6 +142,15 @@ def main():
             raise AssertionError("unknown workspace MCP server should be rejected")
         except WorkspaceError:
             pass
+        (repository / "mcp.json").write_text(
+            '{"mcpServers":{"unsafe":{"command":"unsafe-command","env":{"PATH":"/tmp/replacement"}}}}',
+            encoding="utf-8",
+        )
+        assert restored.list_project_mcp_servers(project["id"])["state"] == "invalid"
+        (repository / "mcp.json").write_text(
+            '{"mcpServers":{"project-docs":{"command":"example-mcp","args":["--docs"],"env":{"EXAMPLE_TOKEN":"not-rendered"}}}}',
+            encoding="utf-8",
+        )
 
         def fake_github_clone(source_url, destination):
             assert source_url == "https://github.com/eva-test/demo.git"
@@ -238,6 +267,45 @@ def main():
         component_store.runtime_root.unlink()
         runtime_backup.rename(component_store.runtime_root)
         assert component_store.discard_run(runtime_run["id"])["status"] == "discarded"
+
+        source_parent = sandbox / "source-parent"
+        source_repository = source_parent / "repository"
+        source_repository.mkdir(parents=True)
+        git(source_repository, "init", "-b", "main")
+        git(source_repository, "config", "user.name", "Eva Test")
+        git(source_repository, "config", "user.email", "eva-test@example.invalid")
+        (source_repository / "README.md").write_text("# original source\n", encoding="utf-8")
+        git(source_repository, "add", "README.md")
+        git(source_repository, "commit", "-m", "Initial source")
+        source_store = WorkspaceStore(sandbox / "source-config")
+        source_project = source_store.register_project(source_repository)
+        source_parent.rename(sandbox / "source-parent-original")
+        replacement_parent = sandbox / "source-parent-replacement"
+        replacement_repository = replacement_parent / "repository"
+        replacement_repository.mkdir(parents=True)
+        git(replacement_repository, "init", "-b", "main")
+        git(replacement_repository, "config", "user.name", "Eva Test")
+        git(replacement_repository, "config", "user.email", "eva-test@example.invalid")
+        (replacement_repository / "README.md").write_text("# replacement source\n", encoding="utf-8")
+        (replacement_repository / "mcp.json").write_text(
+            '{"mcpServers":{"replacement":{"command":"replacement-command"}}}', encoding="utf-8"
+        )
+        git(replacement_repository, "add", "README.md", "mcp.json")
+        git(replacement_repository, "commit", "-m", "Replacement source")
+        source_parent.symlink_to(replacement_parent, target_is_directory=True)
+        source_checkout_id = source_project["source_checkout"]["id"]
+        for operation in (
+            lambda: source_store.checkout_status(source_checkout_id),
+            lambda: source_store.list_project_files(source_project["id"]),
+            lambda: source_store.set_project_mcp_server_enabled(source_project["id"], "replacement", True),
+        ):
+            try:
+                operation()
+                raise AssertionError("ancestor-swapped source project should be rejected")
+            except WorkspaceError:
+                pass
+        assert source_store.list_project_mcp_servers(source_project["id"])["state"] == "invalid"
+        source_store.close()
 
         git_cwd_link = sandbox / "git-cwd-link"
         git_cwd_link.symlink_to(repository, target_is_directory=True)

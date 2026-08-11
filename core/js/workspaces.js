@@ -5,6 +5,7 @@ var EvaWorkspaces = (function() {
     projectFiles: {},
     projectFilesLoading: {},
     projectTreeExpanded: {},
+    runDrafts: {},
     selectedProjectId: '',
     selectedRunId: '',
     pendingDiscardRunId: '',
@@ -521,6 +522,7 @@ var EvaWorkspaces = (function() {
   }
 
   function appendWorkbenchRunComposer(detail, project) {
+    var draft = state.runDrafts[project.id] || (state.runDrafts[project.id] = { objective: '', baseRef: 'HEAD' });
     var section = document.createElement('section');
     section.className = 'workspace-workbench-section';
     var heading = document.createElement('h2');
@@ -534,13 +536,16 @@ var EvaWorkspaces = (function() {
     objective.maxLength = 4000;
     objective.placeholder = 'Describe the change Eva should make';
     objective.required = true;
+    objective.value = draft.objective;
     var baseLabel = document.createElement('label');
     baseLabel.textContent = 'BASE REF';
     var baseRef = document.createElement('input');
     baseRef.type = 'text';
     baseRef.maxLength = 256;
-    baseRef.value = 'HEAD';
+    baseRef.value = draft.baseRef || 'HEAD';
     baseRef.autocomplete = 'off';
+    objective.addEventListener('input', function() { draft.objective = objective.value; });
+    baseRef.addEventListener('input', function() { draft.baseRef = baseRef.value; });
     var submit = document.createElement('button');
     submit.type = 'submit';
     submit.textContent = 'Start isolated run';
@@ -550,7 +555,12 @@ var EvaWorkspaces = (function() {
       event.preventDefault();
       submit.disabled = true;
       var created = await createWorkspaceRun(project.id, objective.value, baseRef.value);
-      if (created) objective.value = '';
+      if (created) {
+        draft.objective = '';
+        draft.baseRef = 'HEAD';
+        objective.value = '';
+        baseRef.value = 'HEAD';
+      }
       if (!state.loading) submit.disabled = !supported();
     });
     section.append(heading, form);
@@ -561,11 +571,33 @@ var EvaWorkspaces = (function() {
     var standalone = api();
     if (!standalone || typeof standalone.workspaceSetMcpServer !== 'function') return;
     var previous = !checkbox.checked;
+    if (checkbox.checked) {
+      var launch = server.command
+        ? 'Command: ' + [server.command].concat(server.args || []).join(' ')
+        : 'URL: ' + server.url;
+      var environment = server.envKeys && server.envKeys.length
+        ? '\nEnvironment keys: ' + server.envKeys.join(', ')
+        : '';
+      var headers = server.headerKeys && server.headerKeys.length
+        ? '\nHeader keys: ' + server.headerKeys.join(', ')
+        : '';
+      var approved = confirm(
+        'Trust this workspace MCP server and allow it to run for coding agents?\n\n' +
+        'Server: ' + server.name + '\n' + launch + environment + headers +
+        '\n\nEnvironment and header values stay hidden. Any configuration change will revoke this approval.'
+      );
+      if (!approved) {
+        checkbox.checked = false;
+        return;
+      }
+    }
     state.mcpUpdating = true;
     checkbox.disabled = true;
     status('Updating workspace tools...', 'loading');
     try {
-      var updated = await standalone.workspaceSetMcpServer(project.id, server.name, checkbox.checked);
+      var updated = await standalone.workspaceSetMcpServer(
+        project.id, server.name, checkbox.checked, checkbox.checked ? server.digest : ''
+      );
       replaceProject(updated);
       renderProjects();
       renderRuns();
@@ -611,6 +643,9 @@ var EvaWorkspaces = (function() {
         name.textContent = server.name;
         var transport = document.createElement('span');
         transport.textContent = server.transport || 'configured';
+        row.title = server.command
+          ? [server.command].concat(server.args || []).join(' ')
+          : server.url || server.name;
         checkbox.addEventListener('change', function() { setWorkbenchMcpServer(project, server, checkbox); });
         row.append(checkbox, name, transport);
         list.appendChild(row);

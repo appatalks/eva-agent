@@ -192,6 +192,7 @@ async function main() {
     await page.evaluate(async function(terminalId) { await window.evaStandalone.terminalClose(terminalId); }, sourceTerminal.id);
     await page.locator('#terminalPanelClose').click();
     const mcpToggle = page.locator('#workspaceWorkbenchDetail .workspace-mcp-row input');
+    page.once('dialog', function(dialog) { return dialog.accept(); });
     await mcpToggle.check();
     await page.waitForFunction(async function() {
       const projects = await window.evaStandalone.workspaceListProjects();
@@ -203,8 +204,12 @@ async function main() {
     });
     const objectiveInput = page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form textarea');
     await objectiveInput.fill('E2E workspace run');
+    const monitorChangeTerminal = await page.evaluate(async function(rootId) {
+      return window.evaStandalone.terminalCreate({ rootId: rootId, cols: 80, rows: 24 });
+    }, sourceCheckout.id);
     await page.waitForTimeout(11000);
-    assert.strictEqual(await objectiveInput.inputValue(), 'E2E workspace run', 'Workspace monitor refresh cleared the coding objective');
+    assert.strictEqual(await objectiveInput.inputValue(), 'E2E workspace run', 'Workspace monitor state change cleared the coding objective');
+    await page.evaluate(async function(terminalId) { await window.evaStandalone.terminalClose(terminalId); }, monitorChangeTerminal.id);
     await page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form').evaluate(function(form) { form.requestSubmit(); });
     const monitoredRun = page.locator('#workspaceWorkbenchRuns .workspace-monitor-run').filter({ hasText: 'E2E workspace run' });
     await monitoredRun.waitFor();
