@@ -12,7 +12,7 @@ _VERDICT = re.compile(r"VERDICT: (APPROVE|REQUEST_CHANGES|NEEDS_MAINTAINER)")
 
 
 def parse_verdict(review_bytes):
-    """Return the one valid leading verdict, or a non-trusting failure kind."""
+    """Return one exact verdict line, or a non-trusting failure kind."""
     try:
         review = bytes(review_bytes).decode("utf-8")
     except UnicodeDecodeError:
@@ -22,12 +22,11 @@ def parse_verdict(review_bytes):
         return {"valid": False, "kind": "empty"}
 
     lines = review.splitlines()
-    first_verdict = _VERDICT.fullmatch(lines[0]) if lines else None
-    verdict_count = sum(bool(_VERDICT.fullmatch(line)) for line in lines)
-    if not first_verdict or verdict_count != 1:
+    verdicts = [match for line in lines if (match := _VERDICT.fullmatch(line))]
+    if len(verdicts) != 1:
         return {"valid": False, "kind": "malformed"}
 
-    return {"valid": True, "kind": "valid", "verdict": first_verdict.group(1)}
+    return {"valid": True, "kind": "valid", "verdict": verdicts[0].group(1)}
 
 
 def write_diagnostic(review_bytes, result, output_path):
