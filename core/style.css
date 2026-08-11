@@ -783,7 +783,9 @@ body.agents-view-open .agents-view {
   background-size: 32px 32px, 32px 32px, auto, auto;
   overflow: hidden;
 }
-body.workspace-workbench-open #idContainer > :not(#workspaceWorkbench) { display: none !important; }
+body.workspace-workbench-open #idContainer > :not(#workspaceWorkbench):not(#textToSynth) { display: none !important; }
+body.workspace-workbench-open #textToSynth { display: contents !important; }
+body.workspace-workbench-open #textToSynth > :not(#evaTextPrompt) { display: none !important; }
 body.workspace-workbench-open #idContainer { max-width: none; width: 100%; }
 body.workspace-workbench-open .eva-status-footer,
 body.workspace-workbench-open .eva-disclaimer,
@@ -1031,6 +1033,10 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .workspace-mcp-row input { width: 15px; height: 15px; margin: 0; accent-color: #78dce8; }
 .workspace-mcp-row strong { min-width: 0; color: #e5f9fb; font: 600 11px monospace; overflow-wrap: anywhere; }
 .workspace-mcp-row span { color: #72989e; font: 9px monospace; text-transform: uppercase; }
+.workspace-project-files { display: grid; max-height: 260px; overflow: auto; border: 1px solid rgba(120,220,232,0.12); background: rgba(2,11,14,0.45); }
+.workspace-project-file { min-height: 30px; padding: 6px 8px; border: 0; border-bottom: 1px solid rgba(120,220,232,0.07); background: transparent; color: #b8d8dc; font: 10px/1.35 monospace; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.workspace-project-file:hover { background: rgba(120,220,232,0.09); color: #ecfdff; }
+.workspace-project-files-note { padding: 7px 8px; color: #73979c !important; font: 9px monospace !important; }
 .agents-view::before {
   content: '';
   position: absolute;

@@ -254,6 +254,19 @@ class WorkspaceStore:
             ).fetchall()
         return [self.get_project(row["id"]) for row in project_rows]
 
+    def list_project_files(self, project_id, limit=1000):
+        root = self._validated_source_project(project_id)
+        output = self._git(str(root), ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        relative_paths = sorted(set(filter(None, output.split("\0"))))
+        bounded_limit = min(max(int(limit), 1), 1000)
+        return {
+            "files": relative_paths[:bounded_limit],
+            "truncated": len(relative_paths) > bounded_limit,
+        }
+
+    def resolve_project_file(self, project_id, relative_path):
+        return str(self._resolve_checkout_file(self._validated_source_project(project_id), relative_path))
+
     def get_project(self, project_id):
         with self.lock:
             project_row = self.connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
@@ -737,6 +750,22 @@ class WorkspaceStore:
             return str(Path(git_root).resolve(strict=True))
         except (OSError, RuntimeError):
             raise WorkspaceError("The selected Git repository is unavailable.")
+
+    def _validated_source_project(self, project_id):
+        with self.lock:
+            project_row = self.connection.execute(
+                "SELECT root_path FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+        if not project_row:
+            raise WorkspaceError("Unknown project.")
+        root = Path(os.path.abspath(project_row["root_path"]))
+        try:
+            canonical = root.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise WorkspaceError("Source workspace is unavailable.")
+        if root.is_symlink() or canonical != root or not canonical.is_dir():
+            raise WorkspaceError("Source workspace is unavailable.")
+        return canonical
 
     def _normalize_github_repository_url(self, repository_url):
         value = _json_text(repository_url).strip()

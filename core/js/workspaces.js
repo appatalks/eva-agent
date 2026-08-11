@@ -2,6 +2,8 @@ var EvaWorkspaces = (function() {
   var state = {
     projects: [],
     runs: [],
+    projectFiles: {},
+    projectFilesLoading: {},
     selectedProjectId: '',
     selectedRunId: '',
     pendingDiscardRunId: '',
@@ -348,6 +350,109 @@ var EvaWorkspaces = (function() {
     if (index >= 0) state.projects[index] = project;
   }
 
+  function setProjectTerminalTarget(project) {
+    var checkout = project && project.sourceCheckout;
+    if (!checkout || !checkout.id || typeof setWorkspaceTerminalTarget !== 'function') return;
+    setWorkspaceTerminalTarget(checkout.id, project.name + ' | source');
+  }
+
+  function renderProjectFiles(container, project) {
+    container.replaceChildren();
+    if (state.projectFilesLoading[project.id]) {
+      var loading = document.createElement('p');
+      loading.className = 'workspace-monitor-empty';
+      loading.textContent = 'Loading project files...';
+      container.appendChild(loading);
+      return;
+    }
+    var result = state.projectFiles[project.id];
+    if (!result) {
+      var pending = document.createElement('p');
+      pending.className = 'workspace-monitor-empty';
+      pending.textContent = 'Loading project files...';
+      container.appendChild(pending);
+      loadProjectFiles(project);
+      return;
+    }
+    if (result.error) {
+      var error = document.createElement('p');
+      error.className = 'workspace-monitor-empty';
+      error.textContent = result.error;
+      container.appendChild(error);
+      return;
+    }
+    if (!result.files.length) {
+      var empty = document.createElement('p');
+      empty.className = 'workspace-monitor-empty';
+      empty.textContent = 'No tracked or unignored files.';
+      container.appendChild(empty);
+      return;
+    }
+    result.files.forEach(function(relativePath) {
+      var file = document.createElement('button');
+      file.type = 'button';
+      file.className = 'workspace-project-file';
+      file.textContent = relativePath;
+      file.title = 'Open ' + relativePath;
+      file.addEventListener('click', async function() {
+        try {
+          await api().workspaceOpenProjectFile(project.id, relativePath);
+          status('Opened ' + relativePath + '.', 'success');
+        } catch (openError) {
+          status(openError.message || 'Workspace file could not be opened.', 'error');
+        }
+      });
+      container.appendChild(file);
+    });
+    if (result.truncated) {
+      var truncated = document.createElement('p');
+      truncated.className = 'workspace-project-files-note';
+      truncated.textContent = 'Showing the first 1,000 files.';
+      container.appendChild(truncated);
+    }
+  }
+
+  async function loadProjectFiles(project) {
+    if (!project || state.projectFilesLoading[project.id]) return;
+    if (!api() || typeof api().workspaceListProjectFiles !== 'function') return;
+    state.projectFilesLoading[project.id] = true;
+    var container = document.getElementById('workspaceProjectFiles');
+    if (container && container.dataset.projectId === project.id) renderProjectFiles(container, project);
+    try {
+      state.projectFiles[project.id] = await api().workspaceListProjectFiles(project.id);
+    } catch (error) {
+      state.projectFiles[project.id] = { files: [], truncated: false, error: error.message || 'Project files could not be loaded.' };
+    } finally {
+      state.projectFilesLoading[project.id] = false;
+      container = document.getElementById('workspaceProjectFiles');
+      if (container && container.dataset.projectId === project.id) renderProjectFiles(container, project);
+    }
+  }
+
+  function appendWorkbenchProjectBrowser(detail, project) {
+    var section = document.createElement('section');
+    section.className = 'workspace-workbench-section';
+    var heading = document.createElement('h2');
+    heading.textContent = 'PROJECT FILES';
+    var actions = document.createElement('div');
+    actions.className = 'workspace-monitor-detail-actions';
+    var terminal = document.createElement('button');
+    terminal.type = 'button';
+    terminal.textContent = 'Open project terminal';
+    terminal.disabled = !project.sourceCheckout || project.sourceCheckout.lifecycle !== 'active';
+    terminal.addEventListener('click', function() {
+      openWorkspaceTerminal(project.sourceCheckout.id, project.name + ' | source');
+    });
+    actions.appendChild(terminal);
+    var files = document.createElement('div');
+    files.id = 'workspaceProjectFiles';
+    files.className = 'workspace-project-files';
+    files.dataset.projectId = project.id;
+    section.append(heading, actions, files);
+    detail.appendChild(section);
+    renderProjectFiles(files, project);
+  }
+
   function appendWorkbenchRunComposer(detail, project) {
     var section = document.createElement('section');
     section.className = 'workspace-workbench-section';
@@ -529,6 +634,8 @@ var EvaWorkspaces = (function() {
       unavailable.textContent = 'Import a local Git workspace to begin.';
       detail.appendChild(unavailable);
     } else {
+      setProjectTerminalTarget(project);
+      appendWorkbenchProjectBrowser(detail, project);
       appendWorkbenchRunComposer(detail, project);
       appendWorkbenchMcpSettings(detail, project);
     }
@@ -607,6 +714,7 @@ var EvaWorkspaces = (function() {
       var terminals = await api().terminalList();
       var signature = monitorSignature(runs, terminals);
       var changed = signature !== state.monitorSignature;
+      var shouldRender = changed;
       state.runs = runs;
       state.lastTerminals = terminals;
       state.lastCheckedAt = Date.now();
@@ -617,8 +725,9 @@ var EvaWorkspaces = (function() {
       } else if (activeRuns().length && Date.now() - state.lastPeriodicNoteAt >= 300000) {
         state.lastPeriodicNoteAt = Date.now();
         addMonitorActivity(monitorSummary(), 'heartbeat', true);
+        shouldRender = true;
       }
-      if (state.workbenchOpen) renderWorkbench();
+      if (state.workbenchOpen && shouldRender) renderWorkbench();
       var quickPanel = panel();
       if (quickPanel && quickPanel.getAttribute('aria-hidden') === 'false') {
         renderProjects();

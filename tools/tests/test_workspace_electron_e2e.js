@@ -154,6 +154,21 @@ async function main() {
     const projectWorkspace = page.locator('#workspaceWorkbenchProjects .workspace-monitor-run').filter({ hasText: 'project' });
     await projectWorkspace.waitFor();
     await projectWorkspace.click();
+    await page.locator('#workspaceProjectFiles .workspace-project-file').filter({ hasText: 'README.md' }).waitFor();
+    await page.locator('#workspaceImportGitHubBtn').click();
+    await page.locator('#evaTextPrompt[aria-hidden="false"]').waitFor({ state: 'visible' });
+    await page.locator('#evaTextPromptCancel').click();
+    const sourceCheckout = await page.evaluate(async function() {
+      const projects = await window.evaStandalone.workspaceListProjects();
+      return projects.find(function(project) { return project.name === 'project'; }).sourceCheckout;
+    });
+    await page.locator('#workspaceWorkbenchDetail .workspace-monitor-detail-actions button', { hasText: 'Open project terminal' }).click();
+    await page.locator('.workspace-terminal-status').filter({ hasText: 'CONNECTED' }).waitFor();
+    const sourceTerminals = await page.evaluate(async function() { return window.evaStandalone.terminalList(); });
+    const sourceTerminal = sourceTerminals.find(function(terminal) { return terminal.rootId === sourceCheckout.id; });
+    assert.ok(sourceTerminal, 'Project terminal did not use the selected source checkout');
+    await page.evaluate(async function(terminalId) { await window.evaStandalone.terminalClose(terminalId); }, sourceTerminal.id);
+    await page.locator('#terminalPanelClose').click();
     const mcpToggle = page.locator('#workspaceWorkbenchDetail .workspace-mcp-row input');
     await mcpToggle.check();
     await page.waitForFunction(async function() {
@@ -164,7 +179,10 @@ async function main() {
         });
       });
     });
-    await page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form textarea').fill('E2E workspace run');
+    const objectiveInput = page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form textarea');
+    await objectiveInput.fill('E2E workspace run');
+    await page.waitForTimeout(11000);
+    assert.strictEqual(await objectiveInput.inputValue(), 'E2E workspace run', 'Workspace monitor refresh cleared the coding objective');
     await page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form').evaluate(function(form) { form.requestSubmit(); });
     const monitoredRun = page.locator('#workspaceWorkbenchRuns .workspace-monitor-run').filter({ hasText: 'E2E workspace run' });
     await monitoredRun.waitFor();

@@ -111,6 +111,20 @@ def main():
             "name": "project-docs", "transport": "stdio", "enabled": False
         }]
         assert "command" not in project["mcp_servers"]["servers"][0]
+        status, files_payload = request(
+            base_url, "GET", "/v1/workspaces/projects/" + project["id"] + "/files"
+        )
+        assert status == 200 and files_payload == {
+            "files": ["README.md", "mcp.json"], "truncated": False
+        }, files_payload
+        status, resolved_project_file = request(base_url, "POST", "/v1/workspaces/projects/files/resolve", {
+            "project_id": project["id"], "relative_path": "README.md"
+        })
+        assert status == 200 and resolved_project_file["path"] == str(repository / "README.md"), resolved_project_file
+        status, rejected_project_file = request(base_url, "POST", "/v1/workspaces/projects/files/resolve", {
+            "project_id": project["id"], "relative_path": "../README.md"
+        })
+        assert status == 404 and "invalid" in rejected_project_file["error"]["message"].lower(), rejected_project_file
         status, payload = request(
             base_url,
             "POST",

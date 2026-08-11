@@ -1063,6 +1063,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._notifications_list()
         elif parsed_path == "/v1/workspaces/projects":
             self._workspace_projects_list()
+        elif re.fullmatch(r"/v1/workspaces/projects/[^/]+/files", parsed_path):
+            self._workspace_project_files_list(urllib.parse.unquote(parsed_path.split("/v1/workspaces/projects/", 1)[1].rsplit("/files", 1)[0]))
         elif parsed_path == "/v1/workspaces/runs":
             self._workspace_runs_list()
         elif parsed_path == "/v1/workspaces/assets":
@@ -1222,6 +1224,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._workspace_run_create()
         elif parsed_path == "/v1/workspaces/assets/resolve":
             self._workspace_asset_resolve()
+        elif parsed_path == "/v1/workspaces/projects/files/resolve":
+            self._workspace_project_file_resolve()
         elif re.fullmatch(r"/v1/workspaces/runs/[^/]+/(archive|discard)", parsed_path):
             self._workspace_run_disposition(parsed_path)
         elif re.fullmatch(r"/v1/workspaces/runs/[^/]+/dispatch", parsed_path):
@@ -1316,6 +1320,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"projects": _workspace_store().list_projects()})
         except WorkspaceError as error:
             self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_project_files_list(self, project_id):
+        try:
+            payload = _workspace_store().list_project_files(project_id)
+            self._json_response(200, payload)
+        except WorkspaceError as error:
+            self._json_response(404, {"error": {"message": str(error)}})
 
     def _workspace_project_register(self):
         data, error = self._workspace_body()
@@ -1412,6 +1423,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         relative_path = data.get("relative_path")
         try:
             path_value = _workspace_store().resolve_workspace_asset(run_id, relative_path)
+            self._json_response(200, {"path": path_value})
+        except WorkspaceError as error:
+            self._json_response(404, {"error": {"message": str(error)}})
+
+    def _workspace_project_file_resolve(self):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        project_id = str(data.get("project_id") or "")
+        relative_path = data.get("relative_path")
+        try:
+            path_value = _workspace_store().resolve_project_file(project_id, relative_path)
             self._json_response(200, {"path": path_value})
         except WorkspaceError as error:
             self._json_response(404, {"error": {"message": str(error)}})

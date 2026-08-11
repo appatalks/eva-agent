@@ -37,6 +37,14 @@ def main():
         project = store.register_project(repository)
         assert project["path"] == str(repository.resolve())
         assert project["source_checkout"]["kind"] == "source"
+        project_files = store.list_project_files(project["id"])
+        assert project_files == {"files": ["README.md"], "truncated": False}
+        assert store.resolve_project_file(project["id"], "README.md") == str(repository / "README.md")
+        try:
+            store.resolve_project_file(project["id"], "../README.md")
+            raise AssertionError("project file traversal should be rejected")
+        except WorkspaceError:
+            pass
 
         run = store.create_run(project["id"], "Add durable workspace behavior", primary_session_id="sess_test")
         checkout = run["checkout"]

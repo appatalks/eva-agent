@@ -44,6 +44,8 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   workspaceSetMcpServer: function(projectId, serverName, enabled) { return ipcRenderer.invoke('workspace-set-mcp-server', projectId, serverName, enabled); },
   workspaceCreateRun: function(request) { return ipcRenderer.invoke('workspace-create-run', request); },
   workspaceListRuns: function(projectId) { return ipcRenderer.invoke('workspace-list-runs', projectId); },
+  workspaceListProjectFiles: function(projectId) { return ipcRenderer.invoke('workspace-list-project-files', projectId); },
+  workspaceOpenProjectFile: function(projectId, relativePath) { return ipcRenderer.invoke('workspace-open-project-file', projectId, relativePath); },
   workspaceCheckoutStatus: function(checkoutId) { return ipcRenderer.invoke('workspace-checkout-status', checkoutId); },
   workspaceListAssets: function() { return ipcRenderer.invoke('workspace-list-assets'); },
   workspaceOpenAsset: function(runId, relativePath) { return ipcRenderer.invoke('workspace-open-asset', runId, relativePath); },

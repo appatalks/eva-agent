@@ -135,7 +135,7 @@ async function ensureTerminalRoot(rootId) {
   if (!validWorkspaceId(rootId)) throw new Error('Invalid workspace checkout ID.');
   const response = await requestWorkspaceBridge('/v1/workspaces/checkouts/' + encodeURIComponent(rootId) + '/status', 'GET');
   const checkout = response.checkout;
-  if (!checkout || checkout.id !== rootId || checkout.lifecycle !== 'active' || checkout.kind !== 'worktree' || typeof checkout.path !== 'string') {
+  if (!checkout || checkout.id !== rootId || checkout.lifecycle !== 'active' || !['source', 'worktree'].includes(checkout.kind) || typeof checkout.path !== 'string') {
     throw new Error('Workspace checkout is unavailable for a terminal.');
   }
   registerWorkspaceRoot(rootId, checkout.path);
@@ -314,6 +314,32 @@ async function workspaceListRuns(event, projectId) {
   const response = await requestWorkspaceBridge('/v1/workspaces/runs' + suffix, 'GET');
   const runs = Array.isArray(response.runs) ? response.runs : [];
   return runs.map(workspaceRunForRenderer).filter(Boolean);
+}
+
+async function workspaceListProjectFiles(event, projectId) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(projectId)) throw new Error('Invalid project ID.');
+  const response = await requestWorkspaceBridge(
+    '/v1/workspaces/projects/' + encodeURIComponent(projectId) + '/files', 'GET'
+  );
+  return {
+    files: Array.isArray(response.files) ? response.files.filter(function(file) { return typeof file === 'string'; }) : [],
+    truncated: response.truncated === true
+  };
+}
+
+async function workspaceOpenProjectFile(event, projectId, relativePath) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(projectId) || typeof relativePath !== 'string') throw new Error('Invalid workspace file.');
+  const response = await requestWorkspaceBridge('/v1/workspaces/projects/files/resolve', 'POST', {
+    project_id: projectId,
+    relative_path: relativePath
+  });
+  const pathValue = response.path;
+  if (typeof pathValue !== 'string' || !path.isAbsolute(pathValue)) throw new Error('Workspace file could not be resolved.');
+  const openError = await shell.openPath(pathValue);
+  if (openError) throw new Error(openError);
+  return { opened: true };
 }
 
 async function workspaceCheckoutStatus(event, checkoutId) {
@@ -1349,6 +1375,8 @@ ipcMain.handle('workspace-import-github', workspaceImportGitHub);
 ipcMain.handle('workspace-set-mcp-server', workspaceSetMcpServer);
 ipcMain.handle('workspace-create-run', workspaceCreateRun);
 ipcMain.handle('workspace-list-runs', workspaceListRuns);
+ipcMain.handle('workspace-list-project-files', workspaceListProjectFiles);
+ipcMain.handle('workspace-open-project-file', workspaceOpenProjectFile);
 ipcMain.handle('workspace-checkout-status', workspaceCheckoutStatus);
 ipcMain.handle('workspace-list-assets', workspaceListAssets);
 ipcMain.handle('workspace-open-asset', workspaceOpenAsset);
