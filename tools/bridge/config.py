@@ -76,6 +76,9 @@ MEMORY_TABLES = [
     "Knowledge", "Conversations", "EmotionState", "MemorySummaries",
     "Reflections", "Goals", "SelfState", "HeuristicsIndex",
     "EmotionBaseline", "BackgroundProposals", "BackgroundActivity", "Skills",
+    "MemoryMigrations", "CoreIdentity", "IdentityClaims", "MemoryAtoms",
+    "MemoryEvidence", "MemoryScenarios", "ScenarioMembers", "UserPersonaTraits",
+    "MemoryTurns", "AutonomyPolicy", "SkillVersions", "SkillEvaluations", "GrowthProposals",
 ]
 
 # ── Goals ───────────────────────────────────────────────────────────
@@ -92,7 +95,7 @@ GOALS_LATEST_QUERY = (
 )
 
 # ── Skills ──────────────────────────────────────────────────────────
-SKILL_STATUSES = {"active", "disabled", "deleted"}
+SKILL_STATUSES = {"active", "draft", "provisional", "disabled", "deleted"}
 SKILL_COLUMNS = [
     "SkillId", "Name", "Description", "Instructions", "Tools",
     "Tags", "Source", "Status", "CreatedAt", "UpdatedAt",

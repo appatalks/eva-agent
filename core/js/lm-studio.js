@@ -199,7 +199,8 @@ function lmsSend() {
                               user_message: sQuestion.substring(0, 500),
                               assistant_message: candidate.substring(0, 500),
                               model: 'lm-studio',
-                              session_id: sessionId
+                              session_id: sessionId,
+                              turn_id: (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : ''
                             }),
                             signal: AbortSignal.timeout(5000)
                           }).catch(function() {});

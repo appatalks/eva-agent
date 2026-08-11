@@ -25,6 +25,7 @@
   <script src="core/js/copilot.js"></script>
   <script src="core/js/cognition.js?v=5.5.8"></script>
   <script src="core/js/skills.js?v=5.5.8"></script>
+  <script src="core/js/memory-inspector.js?v=5.5.8"></script>
   <script src="core/js/browser-agent.js"></script>
   <script src="core/js/camera.js"></script>
   <script src="core/js/aig.js"></script>
@@ -105,6 +106,9 @@
       <button id="evaSkillsBtn" class="eva-nav-item" type="button" title="Skills" onclick="toggleSkillsPanel()">
         <span class="eva-nav-icon">&#x1F9E9;</span> Skills
       </button>
+      <button id="evaMemoryBtn" class="eva-nav-item" type="button" title="Memory" onclick="EvaMemoryInspector.open()">
+        <span class="eva-nav-icon">&#x25C8;</span> Memory
+      </button>
       <button id="evaAssetsBtn" class="eva-nav-item" type="button" title="Assets" onclick="EvaAssets.open()">
         <span class="eva-nav-icon">&#x1F4C1;</span> Assets
       </button>
@@ -158,6 +162,9 @@
     </div>
     <div class="lcars-chip agents" id="lcarsChipAgents">
       <button id="lcarsAgentsBtn" type="button" title="Agent Operations" onclick="EvaAgents.toggle()">Agents</button>
+    </div>
+    <div class="lcars-chip memory" id="lcarsChipMemory">
+      <button id="lcarsMemoryBtn" type="button" title="Memory" onclick="EvaMemoryInspector.open()">Memory</button>
     </div>
 
     <div class="lcars-label" aria-hidden="true">Access • 49204.3</div>
@@ -261,6 +268,31 @@
 
       <h4 class="settings-subhead">My skills</h4>
       <div id="skillsList" class="background-list"></div>
+    </div>
+  </div>
+
+  <div id="memoryInspectorPanel" class="skills-panel memory-inspector-panel" aria-hidden="true">
+    <div class="session-panel-header">
+      <span>Memory</span>
+      <button id="memoryInspectorClose" aria-label="Close memory">&times;</button>
+    </div>
+    <div class="memory-inspector-toolbar">
+      <button id="memoryInspectorRefresh" class="auth-save" type="button">Refresh</button>
+      <span id="memoryInspectorStatus" class="auth-note" aria-live="polite"></span>
+    </div>
+    <div class="memory-inspector-body">
+      <section class="memory-inspector-section">
+        <div class="skills-column-heading"><span>ACTIVE CONTEXT</span><strong id="memoryScenarioTitle">No active scenario</strong></div>
+        <div id="memoryTraitsList" class="memory-inspector-list"></div>
+      </section>
+      <section class="memory-inspector-section memory-inspector-atoms">
+        <div class="skills-column-heading"><span>MEMORY ATOMS</span><strong>Traceable records</strong></div>
+        <div id="memoryAtomsList" class="memory-inspector-list"></div>
+      </section>
+      <section class="memory-inspector-section">
+        <div class="skills-column-heading"><span>GROWTH PROPOSALS</span><strong>Maintainer decisions</strong></div>
+        <div id="memoryGrowthList" class="memory-inspector-list"></div>
+      </section>
     </div>
   </div>
 
@@ -718,7 +750,7 @@
             <option value="aig" title="Eva AIG — Intelligent orchestration across all available models">Eva (AIG)</option>
           </optgroup>
           <optgroup label="Google">
-            <option value="gemini" title="Google Gemini">Gemini 2.0 Flash</option>
+            <option value="gemini" title="Deprecated compatibility provider">Gemini 2.0 Flash (deprecated)</option>
           </optgroup>
           <optgroup label="Local">
             <option value="lm-studio" title="lm-studio">lm-studio</option>
@@ -891,7 +923,7 @@
         </div>
 
         <div class="auth-field">
-          <label for="authGemini">Google Gemini Key:</label>
+          <label for="authGemini">Google Gemini Key (deprecated):</label>
           <div class="auth-input-wrap">
             <input type="password" id="authGemini" placeholder="AI..." autocomplete="off">
             <button type="button" class="auth-toggle" onclick="toggleAuthVis(this)" aria-label="Show/hide key">Show</button>

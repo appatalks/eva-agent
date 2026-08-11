@@ -1,7 +1,7 @@
 // JavaScript
 // For Google Generative Language API
 
-// Google Gemini
+// Google Gemini compatibility provider (deprecated; retained for existing users).
 
 function geminiSend() {
     // Remove occurrences of specific syntax from the txtMsg element
@@ -161,7 +161,8 @@ function geminiSend() {
                                         user_message: sQuestion.substring(0, 500),
                                         assistant_message: mainResponse.substring(0, 500),
                                         model: 'gemini-2.0-flash-thinking-exp',
-                                        session_id: sessionId
+                                        session_id: sessionId,
+                                        turn_id: (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : ''
                                     }),
                                     signal: AbortSignal.timeout(5000)
                                 }).catch(() => {});

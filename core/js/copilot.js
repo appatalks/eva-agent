@@ -382,7 +382,8 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, 
           assistant_message: content.substring(0, 500),
           model: modelLabel,
                   session_id: reflectionSessionId || ((typeof ensureActiveSessionId === 'function')
-                    ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : ''))
+                    ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')),
+                  turn_id: (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : ''
         }),
         signal: AbortSignal.timeout(5000)
       }).catch(function() {}); // fire-and-forget

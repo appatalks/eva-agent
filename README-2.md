@@ -18,7 +18,7 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 | OpenAI | GPT-4o, GPT-4o Mini, o1, o1-preview, o1-mini, o3-mini, latest |
 | GitHub Copilot (PAT) | GPT-4o, GPT-4o Mini, o3-mini, GPT-5.6 Sol/Terra/Luna, GPT-5, o4-mini, DeepSeek-R1, Llama 4 Maverick |
 | GitHub Copilot (ACP) | Claude, GPT-5.x, GPT-4.1 via Copilot CLI |
-| Google Gemini | Gemini 2.0 Flash (Thinking Exp) |
+| Google Gemini | Gemini 2.0 Flash (Thinking Exp), deprecated compatibility route |
 | LM Studio | Any local OpenAI-compatible model (fully offline) |
 | gpt-image-1 | Image generation |
 
@@ -711,6 +711,13 @@ Eva supports two memory backends, switchable at runtime via Settings or the
 | `BackgroundProposals` | ProposalId, JobType, TargetTable, Payload, Status, ... | Applied/failed proposal audit records; pending records remain API-compatible |
 | `BackgroundActivity` | TickId, Status, ProposalCount, Timestamp | Background loop ticks |
 | `Skills` | SkillId, Name, Description, Instructions, Tools, Tags, Source, Status, CreatedAt, UpdatedAt | Imported reusable skills |
+| `CoreIdentity` / `IdentityClaims` | Versioned charter and reviewable identity candidates | Operator-approved identity separate from ordinary recall |
+| `MemoryAtoms` / `MemoryEvidence` | Attributed memory claims and bounded source references | Trust, scope, expiration, and correction lifecycle |
+| `MemoryScenarios` / `ScenarioMembers` | Continuing project or session context | Prioritized task continuity without global-memory overload |
+| `UserPersonaTraits` | Trait, source atom IDs, status, scope, expiration | Compact, inspectable preferences derived from confirmed evidence |
+| `MemoryTurns` | Turn ID, session, provider, status | Exactly-once reflection lifecycle for direct providers |
+| `AutonomyPolicy` / `GrowthProposals` | Approved autonomy limits and reviewable proposals | Bounded self-directed improvement with maintainers in control |
+| `SkillVersions` / `SkillEvaluations` | Risk, validation, lifecycle, outcome | Draft-first skills and evidence-gated provisional use |
 
 ### Memory Context Injection
 
@@ -1680,6 +1687,8 @@ their runtime.
 
 | Project or standard | What Eva is studying or adapting | Current status |
 |---|---|---|
+| Lieutenant Commander Data / *Star Trek: The Next Generation* | Curiosity, precision, ethical judgment, candid uncertainty, and care in understanding people. | Aspirational identity material only; Eva is independently implemented, does not imitate a character, and claims no fictional abilities. |
+| TencentDB Agent Memory | Layered memory concepts: evidence, atoms, scenarios, persona traits, and progressive disclosure. | Architecture reference only; Eva retains its local-first SQLite/Kusto design and does not adopt TencentDB's deployment stack. |
 | [Traycer](https://github.com/traycerai/traycer) | Durable agent identity separate from PTY scrollback, terminal stream replay/backpressure, worktree ownership facts, typed evidence, and capability-based A2A handoffs. | Durable run identity, bounded PTY replay, worktree ownership, and stable monitor IDs are implemented; collaboration canvas and cross-device sync remain deferred. |
 | [OpenCode](https://github.com/anomalyco/opencode) | Explicit plan versus build modes, local coding-agent ergonomics, and subagent patterns. | Research candidate; evaluate a structured adapter surface before integration. |
 | [Cline](https://github.com/cline/cline) | Plan/Act UX, checkpoints, approval-first execution, SDK extensibility, agent teams, and worktree-based task boards. | Priority adapter research spike. |

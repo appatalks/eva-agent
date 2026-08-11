@@ -125,7 +125,8 @@ async function trboSend() {
                   user_message: sQuestion.substring(0, 500),
                   assistant_message: s.content.substring(0, 500),
                   model: sModel,
-                  session_id: _gptSessionId
+                  session_id: _gptSessionId,
+                  turn_id: (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : ''
                 }),
                 signal: AbortSignal.timeout(5000)
               }).catch(function() {});

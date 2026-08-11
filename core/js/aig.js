@@ -140,7 +140,8 @@ async function aigSend() {
               user_message: sQuestion,
               assistant_message: cogContent,
               model: cogTag,
-              session_id: sessionId
+              session_id: sessionId,
+              turn_id: (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : ''
             }),
             signal: AbortSignal.timeout(5000)
           }).catch(function () {});

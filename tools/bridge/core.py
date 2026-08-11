@@ -410,6 +410,7 @@ from bridge.learning import (  # noqa: F401
     mark_applied as _mark_learning_applied,
     update_consent as _update_learning_consent,
 )
+from bridge.memory_model import KustoMemoryModel, MemoryModel
 from bridge.workspaces import WorkspaceError, WorkspaceStore
 
 # Constants needed by BridgeHandler (imported from config)
@@ -828,6 +829,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
 
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            # ThreadingHTTPServer creates short-lived request threads. Close
+            # only this thread's SQLite connection; bridge/background threads
+            # retain their own independent connections.
+            if _st.sqlite_mem is not None:
+                _st.sqlite_mem.close()
+
     def _new_stream_state(self, route, model):
         return {
             "request_start": _to_utc_iso(_utc_now()),
@@ -1056,6 +1067,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._workspace_checkout_status(urllib.parse.unquote(parsed_path.split("/v1/workspaces/checkouts/", 1)[1].rsplit("/status", 1)[0]))
         elif parsed_path == "/v1/memory/context":
             self._memory_context()
+        elif parsed_path == "/v1/memory/inspector":
+            self._memory_inspector()
         elif parsed_path == "/v1/protected-memory/status":
             self._protected_memory_status()
         elif re.fullmatch(r"/v1/protected-memory/(records|artifacts)/[^/]+", parsed_path):
@@ -1109,6 +1122,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._mcp_configure()
         elif parsed_path == "/v1/memory/reflect":
             self._memory_reflect()
+        elif parsed_path == "/v1/memory/atoms":
+            self._memory_atom_create()
+        elif parsed_path == "/v1/memory/traits":
+            self._memory_trait_create()
+        elif parsed_path == "/v1/memory/growth-proposals":
+            self._growth_proposal_create()
+        elif re.fullmatch(r"/v1/memory/growth-proposals/[^/]+/(approve|reject)", parsed_path):
+            self._growth_proposal_review(parsed_path)
         elif parsed_path == "/v1/memory/backend":
             self._memory_backend_set()
         elif parsed_path == "/v1/protected-memory/enroll":
@@ -1210,6 +1231,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         if parsed_path.startswith("/v1/goals/"):
             self._goals_patch(urllib.parse.unquote(parsed_path.split("/v1/goals/", 1)[1]))
+        elif parsed_path.startswith("/v1/memory/atoms/"):
+            self._memory_atom_patch(urllib.parse.unquote(parsed_path.split("/v1/memory/atoms/", 1)[1]))
         elif parsed_path.startswith("/v1/skills/"):
             self._skills_patch(urllib.parse.unquote(parsed_path.split("/v1/skills/", 1)[1]))
         elif parsed_path.startswith("/v1/cron/"):
@@ -1223,6 +1246,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         if parsed_path.startswith("/v1/goals/"):
             self._goals_delete(urllib.parse.unquote(parsed_path.split("/v1/goals/", 1)[1]))
+        elif parsed_path.startswith("/v1/memory/atoms/"):
+            self._memory_atom_delete(urllib.parse.unquote(parsed_path.split("/v1/memory/atoms/", 1)[1]))
         elif parsed_path.startswith("/v1/alerts/"):
             self._alerts_delete(urllib.parse.unquote(parsed_path.split("/v1/alerts/", 1)[1]))
         elif parsed_path.startswith("/v1/skills/"):
@@ -2146,6 +2171,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             fields["Status"] = status
         if creating and not fields.get("Instructions"):
             return None, "instructions are required"
+        if fields.get("Status") == "provisional":
+            return None, "provisional status is assigned only by validated low-risk promotion"
         return fields, ""
 
     def _skills_list(self):
@@ -2195,6 +2222,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not ok:
             return
         cluster, db = handle if backend == "kusto" else (None, None)
+        if backend == "kusto" and not _get_table_columns(cluster, db, "SkillVersions"):
+            self._json_response(409, {"error": {"message": "SkillVersions is unavailable; apply the current Kusto seed before creating governed skills"}})
+            return
         data, error = self._read_json_body()
         if error:
             self._json_response(400, {"error": {"message": error}})
@@ -2212,14 +2242,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "Tools": fields.get("Tools", ""),
             "Tags": fields.get("Tags", ""),
             "Source": fields.get("Source", ""),
-            "Status": fields.get("Status", "active"),
+            "Status": fields.get("Status", "draft"),
             "CreatedAt": now,
             "UpdatedAt": now,
         }
         if not self._write_skill_row(cluster, db, row):
             self._json_response(500, {"error": {"message": "Skill write failed"}})
             return
-        self._json_response(201, {"skill": row})
+        version = None
+        if backend == "sqlite":
+            version = MemoryModel(handle).register_skill_version(row["SkillId"], row["Tools"], "Two successful bounded evaluations are required for provisional use.")
+        else:
+            version = KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct).register_skill_version(
+                row["SkillId"], row["Tools"], "Two successful bounded evaluations are required for provisional use."
+            )
+        self._json_response(201, {"skill": row, "version": version})
 
     def _skills_patch(self, raw_skill_id):
         if not _is_loopback_bind():
@@ -3070,7 +3107,65 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             draft["Source"] = "auto-learned"
             draft["Status"] = "draft"
-            self._json_response(200, {"draft": draft})
+            backend, handle, ok = self._memory_context_required()
+            if not ok:
+                return
+            cluster, db = handle if backend == "kusto" else (None, None)
+            if backend == "kusto" and not _get_table_columns(cluster, db, "SkillVersions"):
+                self._json_response(409, {"error": {"message": "SkillVersions is unavailable; apply the current Kusto seed before auto-learning governed skills"}})
+                return
+            now = self._goal_now()
+            row = {
+                "SkillId": "sk-" + uuid.uuid4().hex[:12],
+                "Name": str(draft.get("Name") or draft.get("name") or "Untitled Skill")[:60],
+                "Description": str(draft.get("Description") or draft.get("description") or "")[:400],
+                "Instructions": str(draft.get("Instructions") or draft.get("instructions") or "")[:8000],
+                "Tools": str(draft.get("Tools") or draft.get("tools") or "")[:200],
+                "Tags": str(draft.get("Tags") or draft.get("tags") or "")[:200],
+                "Source": "auto-learned", "Status": "draft", "CreatedAt": now, "UpdatedAt": now,
+            }
+            if not row["Instructions"]:
+                self._json_response(500, {"error": {"message": "could not persist auto-learned draft"}})
+                return
+            version = None
+            promoted = False
+            if backend == "sqlite":
+                existing = handle.query(
+                    "SELECT * FROM Skills WHERE Source = 'auto-learned' AND lower(Name) = lower(?) AND Status != 'deleted' ORDER BY UpdatedAt DESC LIMIT 1",
+                    (row["Name"],),
+                ) or []
+                if existing:
+                    row = existing[0]
+                elif not self._write_skill_row(cluster, db, row):
+                    self._json_response(500, {"error": {"message": "could not persist auto-learned draft"}})
+                    return
+                memory_model = MemoryModel(handle)
+                versions = handle.query(
+                    "SELECT * FROM SkillVersions WHERE SkillId = ? ORDER BY Version DESC LIMIT 1", (row["SkillId"],)
+                ) or []
+                version = versions[0] if versions else memory_model.register_skill_version(
+                    row["SkillId"], row["Tools"], "Two successful bounded evaluations are required for provisional use."
+                )
+            else:
+                memory_model = KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct)
+                safe_name = row["Name"].replace("'", "''")
+                existing = _kusto_query_direct(
+                    cluster, db,
+                    _SKILLS_LATEST_QUERY + " | where Source == 'auto-learned' and Name =~ '" + safe_name + "' | take 1",
+                ) or []
+                if existing:
+                    row = existing[0]
+                elif not self._write_skill_row(cluster, db, row):
+                    self._json_response(500, {"error": {"message": "could not persist auto-learned draft"}})
+                    return
+                safe_skill_id = str(row["SkillId"]).replace("'", "''")
+                versions = _kusto_query_direct(
+                    cluster, db, "SkillVersions | where SkillId == '" + safe_skill_id + "' | top 1 by Version desc"
+                ) or []
+                version = versions[0] if versions else memory_model.register_skill_version(
+                    row["SkillId"], row["Tools"], "Two successful bounded evaluations are required for provisional use."
+                )
+            self._json_response(201, {"skill": row, "version": version, "provisional": promoted})
         except Exception as e:
             self._json_response(502, {"error": {"message": f"skill extraction failed: {e}"}})
 
@@ -4720,6 +4815,121 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "cognition_enabled": True
         })
 
+    def _structured_memory_model(self):
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "structured memory is restricted to loopback"}})
+            return None
+        if _resolve_memory_backend() == "sqlite":
+            return MemoryModel(_get_sqlite_mem())
+        cluster, db, ok = self._kusto_context()
+        if not ok:
+            return None
+        required = {"IdentityClaims", "MemoryAtoms", "MemoryEvidence", "MemoryScenarios", "ScenarioMembers", "UserPersonaTraits", "MemoryTurns", "GrowthProposals"}
+        missing = sorted(table for table in required if not _get_table_columns(cluster, db, table))
+        if missing:
+            self._json_response(409, {"error": {"message": "structured memory tables are unavailable; apply the current Kusto seed", "missing_tables": missing}})
+            return None
+        return KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct)
+
+    def _memory_inspector(self):
+        model = self._structured_memory_model()
+        if model is None:
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        session_id = str((urllib.parse.parse_qs(parsed.query).get("session_id") or [""])[0])[:120]
+        self._json_response(200, model.inspector(session_id))
+
+    def _memory_atom_create(self):
+        model = self._structured_memory_model()
+        if model is None:
+            return
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            record = (data or {}).get("atom", data or {})
+            atom = model.add_atom(record, (data or {}).get("evidence"))
+            scope = str(record.get("scope", "") or "").lower()
+            scope_id = str(record.get("scope_id", "") or "")[:160]
+            if scope in {"session", "project"} and scope_id:
+                scenario = model.ensure_scenario(scope, scope_id)
+                model.add_scenario_member(scenario["ScenarioId"], atom["MemoryId"], record.get("scenario_role", "context"))
+        except ValueError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        self._json_response(201, {"atom": atom})
+
+    def _memory_atom_patch(self, memory_id):
+        model = self._structured_memory_model()
+        if model is None:
+            return
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            atom = model.supersede_atom(memory_id, (data or {}).get("replacement", data or {}))
+        except ValueError as exc:
+            self._json_response(404, {"error": {"message": str(exc)}})
+            return
+        self._json_response(200, {"atom": atom, "superseded": memory_id})
+
+    def _memory_atom_delete(self, memory_id):
+        model = self._structured_memory_model()
+        if model is None:
+            return
+        if not model.delete_atom(memory_id):
+            self._json_response(404, {"error": {"message": "active memory atom not found"}})
+            return
+        self._json_response(200, {"status": "deleted", "memory_id": memory_id})
+
+    def _memory_trait_create(self):
+        model = self._structured_memory_model()
+        if model is None:
+            return
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        data = data or {}
+        try:
+            trait = model.derive_trait(data.get("trait"), data.get("value"), data.get("source_memory_ids"), data.get("scope", "user"), data.get("scope_id", ""))
+        except ValueError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        self._json_response(201, {"trait": trait})
+
+    def _growth_proposal_create(self):
+        model = self._structured_memory_model()
+        if model is None:
+            return
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        data = data or {}
+        try:
+            proposal = model.create_growth_proposal(data.get("kind"), data.get("payload"), data.get("risk_level"), data.get("evidence_refs"))
+        except ValueError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        self._json_response(201, {"proposal": proposal})
+
+    def _growth_proposal_review(self, parsed_path):
+        model = self._structured_memory_model()
+        if model is None:
+            return
+        match = re.fullmatch(r"/v1/memory/growth-proposals/([^/]+)/(approve|reject)", parsed_path)
+        if not match:
+            self._json_response(404, {"error": {"message": "proposal path not found"}})
+            return
+        proposal = model.review_growth_proposal(urllib.parse.unquote(match.group(1)), match.group(2))
+        if proposal is None:
+            self._json_response(404, {"error": {"message": "pending growth proposal not found"}})
+            return
+        self._json_response(200, {"proposal": proposal})
+
     def _memory_reflect(self):
         """Trigger post-response reflection for non-ACP models (browser calls this after getting a response)."""
         if not _st.cognition_enabled:
@@ -4742,6 +4952,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         assistant_msg = data.get("assistant_message", "")
         model = data.get("model", "unknown")
         conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
+        turn_id = str(data.get("turn_id") or "").strip()[:120]
+        if turn_id and not re.fullmatch(r"turn-[A-Za-z0-9-]{8,115}", turn_id):
+            self._json_response(400, {"error": {"message": "turn_id is invalid"}})
+            return
         if user_msg:
             _mark_user_activity()
 
@@ -4750,7 +4964,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._json_response(200, {"status": "skipped_protected_release"})
                 return
             threading.Thread(target=_post_response_reflection,
-                             args=(user_msg, assistant_msg, model, conversation_id),
+                             args=(user_msg, assistant_msg, model, conversation_id, turn_id or None),
                              daemon=True).start()
 
         self._json_response(200, {"status": "ok"})

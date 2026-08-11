@@ -66,7 +66,7 @@ supported on Windows.
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |
 | **Agent operations** | Live subagent output and sanitized activity updates, browser/desktop runs, steering, and animated memory topology |
 | **Coding workspaces (experimental)** | Eva Standalone can register local Git projects, create isolated durable worktrees, open real PTY terminals, and monitor coding runs in the main workspace; worktree discard is explicit and terminates attached terminal processes first |
-| **Multi-provider** | Eva AIG via direct OpenAI API, GitHub Copilot ACP, or LM Studio; direct Gemini and provider routes remain available in the browser UI |
+| **Multi-provider** | Eva AIG via direct OpenAI API, GitHub Copilot ACP, or LM Studio; direct Gemini remains available only as a deprecated browser compatibility route |
 | **Prompt budgets** | Bounded provider payloads with pinned instructions, recent turns, rolling summaries, and privacy-safe estimates |
 | **Reasoning controls** | Model-specific effort levels for OpenAI, GitHub Models, and Copilot CLI ACP |
 | **Streaming responses** | AIG and direct Copilot ACP show safe incremental text with TTFT telemetry; final actions run once |

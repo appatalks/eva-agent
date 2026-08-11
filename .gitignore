@@ -65,3 +65,7 @@ standalone/out/
 # and easy to clean up. Never commit the contents.
 tmp/
 tools/eval/results/
+
+# Core-maintainer local validation. New phase tests and their fixtures remain
+# local-only; generated results belong under this directory as well.
+tools/local-tests/
