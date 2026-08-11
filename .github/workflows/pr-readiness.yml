@@ -353,6 +353,7 @@ jobs:
               -f context='PR Readiness / Terra verdict' \
               -f description="$2" \
               -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            touch readiness/status-published
           }
               verdict_json="$(python3 tools/readiness_verdict.py readiness/copilot-review.md)"
               verdict="$(jq -r '.verdict // ""' <<< "$verdict_json")"
@@ -425,12 +426,16 @@ jobs:
           fi
 
       - name: Publish unexpected readiness failure
-        if: failure() && steps.credential_scan.outcome != 'failure' && steps.verdict.outputs.status_published != 'true'
+        if: failure() && steps.credential_scan.outcome != 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
           HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
         run: |
+          if [[ -f readiness/status-published ]]; then
+            echo "::notice::An authoritative Terra status was already published; preserving that verdict."
+            exit 0
+          fi
           current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
           if [[ "$current_head" != "$HEAD_SHA" ]]; then
             echo "::notice::PR head advanced to $current_head; skipping stale readiness status for $HEAD_SHA."
@@ -446,7 +451,10 @@ jobs:
         if: always() && steps.credential_scan.outcome != 'failure'
         with:
           name: pr-readiness-${{ needs.prepare.outputs.pr_number }}
-          path: readiness/credential-scan.json
+          path: |
+            readiness/credential-scan.json
+            readiness/copilot-review.md
+            readiness/terra-verdict-diagnostic.json
           retention-days: 14
 
       - name: Upload Terra verdict diagnostic
