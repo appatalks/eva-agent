@@ -1033,9 +1033,18 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .workspace-mcp-row input { width: 15px; height: 15px; margin: 0; accent-color: #78dce8; }
 .workspace-mcp-row strong { min-width: 0; color: #e5f9fb; font: 600 11px monospace; overflow-wrap: anywhere; }
 .workspace-mcp-row span { color: #72989e; font: 9px monospace; text-transform: uppercase; }
-.workspace-project-files { display: grid; max-height: 260px; overflow: auto; border: 1px solid rgba(120,220,232,0.12); background: rgba(2,11,14,0.45); }
-.workspace-project-file { min-height: 30px; padding: 6px 8px; border: 0; border-bottom: 1px solid rgba(120,220,232,0.07); background: transparent; color: #b8d8dc; font: 10px/1.35 monospace; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
-.workspace-project-file:hover { background: rgba(120,220,232,0.09); color: #ecfdff; }
+.workspace-project-files { display: block; max-height: 320px; overflow: auto; border: 1px solid rgba(120,220,232,0.12); background: rgba(2,11,14,0.45); }
+.workspace-tree-folder { margin: 0; }
+.workspace-tree-folder > summary { list-style: none; }
+.workspace-tree-folder > summary::-webkit-details-marker { display: none; }
+.workspace-tree-row { box-sizing: border-box; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: center; gap: 5px; width: 100%; min-height: 29px; margin: 0; padding: 5px 8px 5px calc(8px + var(--workspace-tree-depth, 0) * 15px); border: 0; border-bottom: 1px solid rgba(120,220,232,0.055); background: transparent; color: #b8d8dc; font: 10px/1.35 monospace; text-align: left; cursor: pointer; }
+.workspace-tree-row:hover { background: rgba(120,220,232,0.09); color: #ecfdff; }
+.workspace-tree-folder-row { color: #d4eef1; user-select: none; }
+.workspace-tree-chevron { display: inline-block; color: #78dce8; transform: rotate(0deg); transition: transform 100ms ease; }
+.workspace-tree-folder[open] > .workspace-tree-folder-row .workspace-tree-chevron { transform: rotate(90deg); }
+.workspace-tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-tree-count { color: #63868b; font-size: 9px; }
+.workspace-tree-file-marker { width: 8px; height: 10px; margin-left: 2px; border: 1px solid rgba(120,220,232,0.35); border-radius: 1px; }
 .workspace-project-files-note { padding: 7px 8px; color: #73979c !important; font: 9px monospace !important; }
 .agents-view::before {
   content: '';

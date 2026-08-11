@@ -108,10 +108,12 @@ async function main() {
     git(repository, ['config', 'user.name', 'Eva E2E']);
     git(repository, ['config', 'user.email', 'eva-e2e@example.invalid']);
     fs.writeFileSync(path.join(repository, 'README.md'), '# packaged workspace test\n');
+    fs.mkdirSync(path.join(repository, 'src', 'features'), { recursive: true });
+    fs.writeFileSync(path.join(repository, 'src', 'features', 'index.js'), 'module.exports = {};\n');
     fs.writeFileSync(path.join(repository, 'mcp.json'), JSON.stringify({
       mcpServers: { 'project-docs': { command: 'example-mcp', args: ['--docs'] } }
     }));
-    git(repository, ['add', 'README.md', 'mcp.json']);
+    git(repository, ['add', 'README.md', 'mcp.json', 'src/features/index.js']);
     git(repository, ['commit', '-m', 'Initial commit']);
     execFileSync('python3', [path.join(root, 'tools', 'tests', 'test_workspace_electron_setup.py'), configDirectory, repository], { encoding: 'utf8' });
 
@@ -155,6 +157,26 @@ async function main() {
     await projectWorkspace.waitFor();
     await projectWorkspace.click();
     await page.locator('#workspaceProjectFiles .workspace-project-file').filter({ hasText: 'README.md' }).waitFor();
+    let sourceFolder = page.locator('#workspaceProjectFiles > details.workspace-tree-folder').filter({ hasText: 'src' });
+    await sourceFolder.waitFor();
+    assert.strictEqual(await sourceFolder.evaluate(function(folder) { return folder.open; }), false, 'Project folders should start collapsed');
+    const nestedFile = page.locator('#workspaceProjectFiles .workspace-project-file').filter({ hasText: 'index.js' });
+    assert.strictEqual(await nestedFile.isVisible(), false, 'Nested file was visible before its folder expanded');
+    await sourceFolder.locator(':scope > summary').click();
+    let featuresFolder = sourceFolder.locator(':scope > .workspace-tree-children > details.workspace-tree-folder').filter({ hasText: 'features' });
+    await featuresFolder.waitFor({ state: 'visible' });
+    assert.strictEqual(await featuresFolder.evaluate(function(folder) { return folder.open; }), false, 'Nested folders should start collapsed');
+    await featuresFolder.locator(':scope > summary').click();
+    await nestedFile.waitFor({ state: 'visible' });
+    const readyWorkspace = page.locator('#workspaceWorkbenchProjects .workspace-monitor-run').filter({ hasText: 'Eva Ready Workspace' });
+    await readyWorkspace.click();
+    await projectWorkspace.click();
+    sourceFolder = page.locator('#workspaceProjectFiles > details.workspace-tree-folder').filter({ hasText: 'src' });
+    await sourceFolder.waitFor();
+    assert.strictEqual(await sourceFolder.evaluate(function(folder) { return folder.open; }), true, 'Project folder expansion was not preserved');
+    featuresFolder = sourceFolder.locator(':scope > .workspace-tree-children > details.workspace-tree-folder').filter({ hasText: 'features' });
+    assert.strictEqual(await featuresFolder.evaluate(function(folder) { return folder.open; }), true, 'Nested folder expansion was not preserved');
+    await nestedFile.waitFor({ state: 'visible' });
     await page.locator('#workspaceImportGitHubBtn').click();
     await page.locator('#evaTextPrompt[aria-hidden="false"]').waitFor({ state: 'visible' });
     await page.locator('#evaTextPromptCancel').click();

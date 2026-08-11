@@ -4,6 +4,7 @@ var EvaWorkspaces = (function() {
     runs: [],
     projectFiles: {},
     projectFilesLoading: {},
+    projectTreeExpanded: {},
     selectedProjectId: '',
     selectedRunId: '',
     pendingDiscardRunId: '',
@@ -356,6 +357,87 @@ var EvaWorkspaces = (function() {
     setWorkspaceTerminalTarget(checkout.id, project.name + ' | source');
   }
 
+  function buildProjectFileTree(files) {
+    var root = { folders: Object.create(null), files: [], fileCount: 0 };
+    files.forEach(function(relativePath) {
+      var parts = relativePath.split('/').filter(Boolean);
+      if (!parts.length) return;
+      var node = root;
+      node.fileCount += 1;
+      parts.slice(0, -1).forEach(function(folderName) {
+        if (!node.folders[folderName]) {
+          node.folders[folderName] = { folders: Object.create(null), files: [], fileCount: 0 };
+        }
+        node = node.folders[folderName];
+        node.fileCount += 1;
+      });
+      node.files.push({ name: parts[parts.length - 1], path: relativePath });
+    });
+    return root;
+  }
+
+  function treeNameCompare(left, right) {
+    return left.localeCompare(right, undefined, { sensitivity: 'base', numeric: true });
+  }
+
+  function renderProjectTreeNode(container, node, project, parentPath, depth) {
+    var expanded = state.projectTreeExpanded[project.id] || (state.projectTreeExpanded[project.id] = {});
+    Object.keys(node.folders).sort(treeNameCompare).forEach(function(folderName) {
+      var folderPath = parentPath ? parentPath + '/' + folderName : folderName;
+      var folderNode = node.folders[folderName];
+      var details = document.createElement('details');
+      details.className = 'workspace-tree-folder';
+      details.open = expanded[folderPath] === true;
+      var summary = document.createElement('summary');
+      summary.className = 'workspace-tree-row workspace-tree-folder-row';
+      summary.style.setProperty('--workspace-tree-depth', depth);
+      summary.title = folderPath;
+      var chevron = document.createElement('span');
+      chevron.className = 'workspace-tree-chevron';
+      chevron.setAttribute('aria-hidden', 'true');
+      chevron.textContent = '>';
+      var name = document.createElement('span');
+      name.className = 'workspace-tree-name';
+      name.textContent = folderName;
+      var count = document.createElement('span');
+      count.className = 'workspace-tree-count';
+      count.textContent = folderNode.fileCount;
+      summary.append(chevron, name, count);
+      details.appendChild(summary);
+      var children = document.createElement('div');
+      children.className = 'workspace-tree-children';
+      renderProjectTreeNode(children, folderNode, project, folderPath, depth + 1);
+      details.appendChild(children);
+      details.addEventListener('toggle', function() {
+        expanded[folderPath] = details.open;
+      });
+      container.appendChild(details);
+    });
+    node.files.sort(function(left, right) { return treeNameCompare(left.name, right.name); }).forEach(function(fileEntry) {
+      var file = document.createElement('button');
+      file.type = 'button';
+      file.className = 'workspace-project-file workspace-tree-row';
+      file.style.setProperty('--workspace-tree-depth', depth);
+      file.title = 'Open ' + fileEntry.path;
+      var marker = document.createElement('span');
+      marker.className = 'workspace-tree-file-marker';
+      marker.setAttribute('aria-hidden', 'true');
+      var name = document.createElement('span');
+      name.className = 'workspace-tree-name';
+      name.textContent = fileEntry.name;
+      file.append(marker, name);
+      file.addEventListener('click', async function() {
+        try {
+          await api().workspaceOpenProjectFile(project.id, fileEntry.path);
+          status('Opened ' + fileEntry.path + '.', 'success');
+        } catch (openError) {
+          status(openError.message || 'Workspace file could not be opened.', 'error');
+        }
+      });
+      container.appendChild(file);
+    });
+  }
+
   function renderProjectFiles(container, project) {
     container.replaceChildren();
     if (state.projectFilesLoading[project.id]) {
@@ -388,22 +470,7 @@ var EvaWorkspaces = (function() {
       container.appendChild(empty);
       return;
     }
-    result.files.forEach(function(relativePath) {
-      var file = document.createElement('button');
-      file.type = 'button';
-      file.className = 'workspace-project-file';
-      file.textContent = relativePath;
-      file.title = 'Open ' + relativePath;
-      file.addEventListener('click', async function() {
-        try {
-          await api().workspaceOpenProjectFile(project.id, relativePath);
-          status('Opened ' + relativePath + '.', 'success');
-        } catch (openError) {
-          status(openError.message || 'Workspace file could not be opened.', 'error');
-        }
-      });
-      container.appendChild(file);
-    });
+    renderProjectTreeNode(container, buildProjectFileTree(result.files), project, '', 0);
     if (result.truncated) {
       var truncated = document.createElement('p');
       truncated.className = 'workspace-project-files-note';
