@@ -115,43 +115,50 @@ def _workspace_read_only_execute(tool_call, cwd=None):
     return False
 
 
-def _workspace_sensitive_execute(tool_call, cwd=None):
-    """Return true when a workspace command needs an explicit user decision."""
+def _workspace_execute_category(tool_call, cwd=None):
+    """Classify workspace execution without retaining or emitting command content."""
     command = _tool_call_command(tool_call)
-    if not command or re.search(r"[\n\r;|&><`] |\$\(|\$\{", command, re.VERBOSE):
-        return True
+    if not command:
+        return "missing_command"
+    if re.search(r"[\n\r;|&><`] |\$\(|\$\{", command, re.VERBOSE):
+        return "shell_composition"
     try:
         parts = shlex.split(command, posix=True)
     except ValueError:
-        return True
+        return "parse_error"
     if not parts:
-        return True
+        return "missing_command"
     executable = os.path.basename(parts[0]).lower()
     arguments = parts[1:]
     if executable in {"node", "nodejs", "python", "python3", "ruby", "perl", "php"} and any(
         argument in {"-c", "-e", "--eval"} for argument in arguments
     ):
-        return True
+        return "inline_script"
     if executable in _WORKSPACE_SENSITIVE_COMMANDS:
         if executable not in {"npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "poetry", "gem", "cargo"}:
-            return True
+            return "sensitive_executable"
         if any(argument in {"install", "add", "remove", "uninstall", "publish", "login", "logout"} for argument in arguments):
-            return True
+            return "package_or_auth_mutation"
     if executable in {"bash", "sh", "zsh", "fish", "env", "eval", "source"}:
-        return True
+        return "shell_interpreter"
     if executable == "git":
         if len(arguments) < 1:
-            return True
+            return "git_incomplete"
         if arguments[0] in {"push", "fetch", "pull", "clone", "remote", "submodule", "clean", "reset", "rebase", "filter-repo"}:
-            return True
+            return "git_remote_or_destructive"
         if any(argument == "--hard" or argument.startswith("--force") for argument in arguments[1:]):
-            return True
+            return "git_force"
     for argument in arguments:
         if any(marker in argument.upper() for marker in _SECRET_MARKERS) or _WORKSPACE_SENSITIVE_PATH_RE.search(argument):
-            return True
+            return "secret_or_sensitive_path"
         if not argument.startswith("-") and not _workspace_local_path(argument, cwd):
-            return True
-    return False
+            return "outside_workspace"
+    return "trusted_local"
+
+
+def _workspace_sensitive_execute(tool_call, cwd=None):
+    """Return true when a workspace command needs an explicit user decision."""
+    return _workspace_execute_category(tool_call, cwd) != "trusted_local"
 
 
 def _hidden_subprocess_options():
@@ -531,7 +538,7 @@ class ACPClient:
         elif update_type == "plan":
             entries = update.get("entries", [])
             if entries:
-                print(f"[ACP] Agent plan: {', '.join(e.get('content','') for e in entries[:5])}")
+                print(f"[ACP] Agent plan received: entries={len(entries)}")
                 self._dispatch_prompt_event(params, {
                     "kind": "plan",
                     "label": "Planning next steps",
@@ -604,7 +611,12 @@ class ACPClient:
             ]
         permission_mode = prompt_states[0].get("permission_mode", "interactive") \
             if len(prompt_states) == 1 else "interactive"
-        _verbose_debug_emit("permission_request", tool_kind=tool_kind, permission_mode=permission_mode, option_count=len(options))
+        execute_category = _workspace_execute_category(tool_call, self.cwd) \
+            if permission_mode == "workspace_write" and tool_kind == "execute" else ""
+        _verbose_debug_emit(
+            "permission_request", tool_kind=tool_kind, permission_mode=permission_mode,
+            option_count=len(options), execute_category=execute_category,
+        )
         if permission_mode == "passive_recall":
             reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
             if reject_option is None:

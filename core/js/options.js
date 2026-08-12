@@ -1527,6 +1527,24 @@ function injectProactiveBubble(notif) {
   txtOutput.scrollTop = txtOutput.scrollHeight;
 }
 
+function injectWorkspaceStatusBubble(message, kind) {
+  message = String(message || '').trim();
+  if (!message) return;
+  var txtOutput = document.getElementById('txtOutput');
+  if (txtOutput) {
+    if (typeof hideEvaWelcome === 'function') hideEvaWelcome();
+    var safe = escapeHtml(message).replace(/\n/g, '<br>');
+    var badge = kind === 'working' ? '<span class="eva-proactive-badge">working</span> ' : '';
+    txtOutput.innerHTML += '<div class="chat-bubble eva-bubble eva-proactive"><span class="eva">Eva:</span> ' + badge + '<div class="md">' + safe + '</div></div>';
+    txtOutput.scrollTop = txtOutput.scrollHeight;
+  }
+  try {
+    var autoSpeakEl = document.getElementById('autoSpeak');
+    var voiceOpen = typeof _vv !== 'undefined' && _vvIsActive();
+    if ((voiceOpen || (autoSpeakEl && autoSpeakEl.checked)) && typeof speakText === 'function') speakText(message);
+  } catch (_) {}
+}
+
 // ---------------------------------------------------------------------------
 // Agent feedback loop — make Eva cognisant of what the browser/desktop agent
 // actually did. Fired once when a run reaches a terminal state. It (1) renders
@@ -5967,6 +5985,9 @@ async function sendData() {
           if (protectedInput) protectedInput.innerHTML = '';
           if (typeof setStatus === 'function') {
             setStatus(nativeResult.ok ? 'info' : 'error', nativeResult.message);
+          }
+          if (nativeRoute.action === 'run_workspace_check') {
+            injectWorkspaceStatusBubble(nativeResult.message, nativeResult.ok ? 'working' : 'error');
           }
           evaAuditEvent('native_action', evaAuditOutcome(nativeResult && nativeResult.data && nativeResult.data.outcome, nativeResult.ok), {
             correlation_id: auditTurnId,

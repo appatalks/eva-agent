@@ -15,7 +15,7 @@ REPO_DIR = os.path.dirname(TOOLS_DIR)
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
-from bridge.acp_client import ACPClient
+from bridge.acp_client import ACPClient, _workspace_execute_category
 from bridge import state
 from bridge.core import BridgeHandler
 from bridge.telemetry import _telemetry_summarize
@@ -437,6 +437,17 @@ class StreamingContractTests(unittest.TestCase):
                 self.assertEqual(responses, [(90 + index, {"outcome": {"outcome": "selected", "optionId": "allow-once"}})])
                 self.assertEqual(client.list_pending_permissions(), [])
                 self.assertEqual(emit.call_args.kwargs["decision"], "workspace-auto-allow-execute")
+
+    def test_workspace_execute_telemetry_uses_content_free_categories(self):
+        cases = (
+            ({"rawInput": {"command": "npm", "args": ["test"]}}, "trusted_local"),
+            ({"rawInput": {"command": "npm test && npm run lint"}}, "shell_composition"),
+            ({"rawInput": {"command": "npm", "args": ["install"]}}, "package_or_auth_mutation"),
+            ({"rawInput": {"command": "git", "args": ["push", "origin", "main"]}}, "git_remote_or_destructive"),
+        )
+        for tool_call, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(_workspace_execute_category(tool_call, "/tmp/workspace"), expected)
 
     def test_passive_recall_rejects_tool_immediately(self):
         client = CallbackACPClient()

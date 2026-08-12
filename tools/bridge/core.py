@@ -523,7 +523,9 @@ def _dispatch_workspace_run(run):
     full_prompt = (
         "You are Eva's coding implementation agent. Work autonomously in the assigned Git worktree. "
         "Do not wait for further approval. Inspect the repository, implement the objective, run focused tests, "
-        "and leave all requested files in the worktree. Do not access or modify paths outside the assigned "
+        "and issue ordinary local test, build, lint, typecheck, and diagnostic commands as one direct executable "
+        "per tool call without shell operators or command chaining. Do not install dependencies unless explicitly requested. "
+        "Leave all requested files in the worktree. Do not access or modify paths outside the assigned "
         "worktree. Do not launch a browser, desktop, camera, external application, or new window, and do not "
         "emit Eva browser, desktop, camera, or renderer action markers. For a GitHub issue or other remote "
         "operation, use only an explicitly enabled workspace MCP tool. If that tool is unavailable or requires "
@@ -1489,6 +1491,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 task = _dispatch_workspace_run(run)
             except WorkspaceError as error:
                 dispatch_error = str(error)
+        _verbose_debug_emit(
+            "workspace_run", stage="created",
+            dispatch_state="delayed" if dispatch_error else ("started" if task else "disabled"),
+        )
         self._json_response(201, {
             "run": _workspace_store().get_run(run["id"]),
             "task": task,
@@ -1524,8 +1530,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             run = _workspace_store().get_run(run_id)
             task = _dispatch_workspace_run(run)
+            _verbose_debug_emit("workspace_run", stage="redispatch", dispatch_state="started")
             self._json_response(202, {"run": _workspace_store().get_run(run_id), "task": task})
         except WorkspaceError as error:
+            _verbose_debug_emit("workspace_run", stage="redispatch", dispatch_state="failed")
             self._json_response(400, {"error": {"message": str(error)}})
 
     def _learning_authorized(self):
@@ -4002,7 +4010,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
             )
 
-        print(f"[AIG] Processing: {user_message[:80]}...")
+        print(f"[AIG] Processing request: type={_request_type} chars={len(user_message)}")
 
         # Step 1: Build memory context. Timings stay privacy-safe: no prompt or
         # response content is emitted into telemetry.
@@ -4452,7 +4460,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
             print(f"[AIG] LM Studio response: {len(response_text)} chars from {lms_model}")
             # Log the first 500 chars of the response for debugging
-            print(f"[AIG] LM Studio content: {response_text[:500]}")
 
             # Camera fallback: local models often ignore the [[EVA_LOOK]]
             # instruction.  If the user clearly asked about the camera/webcam
@@ -5036,7 +5043,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         _request_type = _classify_request_type(msg_lower)
         _tool_profile = _select_acp_tool_profile(user_message, _request_type)
-        print(f"[DataRetrieve] ACP query ({_request_type}): {user_message[:80]}")
+        print(f"[DataRetrieve] ACP query: type={_request_type} chars={len(user_message)}")
 
         if _request_type in ("news-search", "weather-search", "financial-data", "web-search"):
             acp_prompt = (
@@ -5104,7 +5111,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         prefs = _load_client_prefs()
         lms_base = prefs.get("lmstudio_base_url", "http://localhost:1234/v1")
         lms_model = prefs.get("lmstudio_model", "")
-        print(f"[DataRetrieve] Local mode query: {user_message[:80]}")
+        print(f"[DataRetrieve] Local mode query: chars={len(user_message)}")
         data, model = local_agent_query(
             user_message, _st.local_mcp_manager,
             lms_base_url=lms_base, lms_model=lms_model,

@@ -478,6 +478,15 @@ async function workspaceCreateRun(event, request) {
   return projected;
 }
 
+async function workspaceDispatchRun(event, runId) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(runId)) throw new Error('Invalid workspace run ID.');
+  const response = await requestWorkspaceBridge('/v1/workspaces/runs/' + encodeURIComponent(runId) + '/dispatch', 'POST', {});
+  const run = response.run;
+  if (!run || !run.checkout || !validWorkspaceId(run.checkout.id)) throw new Error('Workspace bridge returned an invalid coding run.');
+  return workspaceRunForRenderer(run);
+}
+
 async function workspaceListRuns(event, projectId) {
   requireWorkspaceFeature(event);
   const suffix = projectId ? '?project_id=' + encodeURIComponent(projectId) : '';
@@ -1547,6 +1556,7 @@ ipcMain.handle('workspace-github-auth-start', workspaceGitHubAuthStart);
 ipcMain.handle('workspace-github-auth-status', workspaceGitHubAuthStatus);
 ipcMain.handle('workspace-set-mcp-server', workspaceSetMcpServer);
 ipcMain.handle('workspace-create-run', workspaceCreateRun);
+ipcMain.handle('workspace-dispatch-run', workspaceDispatchRun);
 ipcMain.handle('workspace-list-runs', workspaceListRuns);
 ipcMain.handle('workspace-list-project-files', workspaceListProjectFiles);
 ipcMain.handle('workspace-open-project-file', workspaceOpenProjectFile);

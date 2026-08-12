@@ -18,6 +18,7 @@ let repositoryContinuationCalls = 0;
 let githubAuthorizationCalls = 0;
 let mcpModuleRequest = null;
 let mcpVerificationRequest = null;
+let workspaceCheckObjective = '';
 const window = {
   EvaWorkspaces: {
     openWorkbench() {},
@@ -41,6 +42,10 @@ const window = {
           mcpVerificationRequest = { serverName, projectName };
           return Promise.resolve('Started an isolated workspace run to verify MCP server project-docs for example/repository.');
         },
+    runSelectedCheck(objective) {
+      workspaceCheckObjective = objective;
+      return Promise.resolve({ outcome: 'started', runId: 'run-check', message: 'Started a workspace-scoped agent run for example/repository. Progress and results will appear in Workspaces.' });
+    },
     importGitHub(url) {
       importedUrl = url;
       return Promise.resolve(importResult);
@@ -125,6 +130,16 @@ async function main() {
   assert.strictEqual(naturalVerifyMcpRoute.action, 'verify_workspace_mcp_server');
   assert.strictEqual(naturalVerifyMcpRoute.serverName, 'Work IQ');
   assert.strictEqual(harness.resolveNavigationRequest('Do not authorize GitHub.', { directUser: true }), null);
+  const smokeTestRoute = harness.resolveNavigationRequest('run a smoketest', { directUser: true });
+  assert.strictEqual(smokeTestRoute.action, 'run_workspace_check');
+  assert.strictEqual(smokeTestRoute.objective, 'run a smoketest');
+  const smokeTestResult = await harness.execute(smokeTestRoute, { source: 'voice', userRequest: 'run a smoketest' });
+  assert.strictEqual(smokeTestResult.ok, true);
+  assert.strictEqual(smokeTestResult.data.outcome, 'started');
+  assert.strictEqual(workspaceCheckObjective, 'run a smoketest');
+  assert.strictEqual(harness.resolveNavigationRequest('Please run the tests for the selected workspace.', { directUser: true }).action, 'run_workspace_check');
+  assert.strictEqual(harness.resolveNavigationRequest('Run diagnostics.', { directUser: true }).action, 'run_workspace_check');
+  assert.notStrictEqual(harness.resolveNavigationRequest('Build a website.', { directUser: true }).action, 'run_workspace_check');
   const accountVoiceRoute = harness.resolveNavigationRequest('List accounts under list github repositories enter my account.', { directUser: true });
   assert.strictEqual(accountVoiceRoute.action, 'list_github_repositories');
   assert.strictEqual(harness.resolveNavigationRequest('List GitHub repositories under my account.', { directUser: true }).action, 'list_github_repositories');

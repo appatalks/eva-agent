@@ -338,16 +338,23 @@ var EvaWorkspaces = (function() {
       var prior = state.monitorRunStates[run.id];
       var name = run.project ? run.project.name : run.objective;
       if (!prior && current.status) {
-        addMonitorActivity('Eva dispatched ' + (agent.id || 'a workspace agent') + ' for ' + name + '.', 'change', true);
+        if (current.status === 'done') {
+          narrateTerminalRun(run, current);
+        } else if (current.status === 'error' || current.status === 'cancelled') {
+          narrateFailedRun(run);
+        } else {
+          var dispatchedMessage = 'Eva dispatched ' + (agent.id || 'a workspace agent') + ' for ' + name + '.';
+          addMonitorActivity(dispatchedMessage, 'change', true);
+        }
       } else if (prior && prior.status !== current.status) {
         if (current.status === 'done') {
-          addMonitorActivity('Eva completed "' + run.objective + '" with ' + current.changes + ' changed file' + (current.changes === 1 ? '.' : 's.'), 'change', true, true);
-        } else if (current.status === 'error') {
-          addMonitorActivity('Eva could not complete "' + run.objective + '". The run remains available for retry.', 'error', true, true);
-        } else if (current.status === 'cancelled') {
-          addMonitorActivity('Eva stopped "' + run.objective + '" because a required execution permission was not approved.', 'error', true, true);
+          narrateTerminalRun(run, current);
+        } else if (current.status === 'error' || current.status === 'cancelled') {
+          narrateFailedRun(run);
         } else {
-          addMonitorActivity('Eva moved "' + run.objective + '" to ' + current.status + '.', 'change', true);
+          var progressMessage = 'Eva moved "' + run.objective + '" to ' + current.status + '.';
+          addMonitorActivity(progressMessage, 'change', true);
+          publishRunChat(run, progressMessage, 'working');
         }
       }
       if (prior && current.status === 'running' && current.report && current.report !== prior.report) {
@@ -356,6 +363,52 @@ var EvaWorkspaces = (function() {
       }
     });
     state.monitorRunStates = nextStates;
+  }
+
+  function narrateTerminalRun(run, current) {
+    if (categorizeRunOutcome(run) === 'test_failure') {
+      var failedCheckMessage = 'Eva completed "' + run.objective + '", but the project checks reported a failure. Review the run report for details.';
+      addMonitorActivity(failedCheckMessage, 'error', true, true);
+      publishRunChat(run, failedCheckMessage, 'error');
+      return;
+    }
+    var completedMessage = 'Eva completed "' + run.objective + '" with ' + current.changes + ' changed file' + (current.changes === 1 ? '.' : 's.');
+    addMonitorActivity(completedMessage, 'change', true, true);
+    publishRunChat(run, completedMessage, 'completed');
+  }
+
+  function narrateFailedRun(run) {
+    var category = categorizeRunOutcome(run);
+    var message = runFailureMessage(run.objective, category);
+    addMonitorActivity(message, 'error', true, true);
+    publishRunChat(run, message, 'error');
+  }
+
+  function publishRunChat(run, message, kind) {
+    if (!run || !run.primarySessionId || typeof _activeSessionId !== 'function') return;
+    if (run.primarySessionId !== _activeSessionId()) return;
+    if (typeof injectWorkspaceStatusBubble === 'function') injectWorkspaceStatusBubble(message, kind);
+  }
+
+  function categorizeRunOutcome(run) {
+    var agent = run && run.agent || {};
+    var report = String(agent.report || '').toLowerCase();
+    if (/required execution permission|permission (?:was )?not approved|permission denied|access denied/.test(report)) return 'permission_denied';
+    if (/cancelled by (?:the )?user|user cancel/.test(report)) return 'user_cancelled';
+    if (agent.status === 'cancelled') return 'agent_cancelled';
+    if (/acp not available|runner.{0,24}unavailable|agent capacity is full|not connected|offline|disabled/.test(report)) return 'runner_unavailable';
+    if (/(?:test|tests|build|lint|typecheck|diagnostic|check).{0,48}(?:failed|failure|failing)|(?:failed|failure|failing).{0,48}(?:test|tests|build|lint|typecheck|diagnostic|check)|non[- ]zero exit|exit (?:code|status)\s*[1-9]/.test(report)) return 'test_failure';
+    return 'bridge_failure';
+  }
+
+  function runFailureMessage(objective, category) {
+    var prefix = 'Eva could not complete "' + objective + '". ';
+    if (category === 'user_cancelled') return prefix + 'The run was cancelled by the user.';
+    if (category === 'agent_cancelled') return prefix + 'The workspace agent cancelled the run.';
+    if (category === 'permission_denied') return prefix + 'A sensitive action required permission and was not approved.';
+    if (category === 'runner_unavailable') return prefix + 'The local workspace runner is unavailable. The run remains available for retry.';
+    if (category === 'test_failure') return prefix + 'The project checks ran and reported a failure. Review the run report for details.';
+    return prefix + 'The workspace bridge failed unexpectedly. The run remains available for retry.';
   }
 
   function activeRuns() {
@@ -872,6 +925,7 @@ var EvaWorkspaces = (function() {
         selected.checkout = await api().workspaceCheckoutStatus(selected.checkout.id);
       }
       var terminals = await api().terminalList();
+      var previousPermissionIds = state.pendingPermissions.map(function(permission) { return permission.id; });
       var workspacePermissionRelevant = runs.some(function(run) { return run.status === 'active'; }) || state.pendingPermissions.length > 0;
       if (workspacePermissionRelevant && typeof backgroundBridgeRequest === 'function' && typeof getBridgeCapabilityHeaders === 'function') {
         try {
@@ -893,6 +947,14 @@ var EvaWorkspaces = (function() {
       }));
       var permissionsChanged = permissionSignature !== state.permissionSignature;
       if (permissionsChanged) state.permissionSignature = permissionSignature;
+      state.pendingPermissions.forEach(function(permission) {
+        if (previousPermissionIds.indexOf(permission.id) >= 0) return;
+        var permissionRun = runs.find(function(run) { return run.id === permission.workspaceRunId; });
+        if (!permissionRun) return;
+        var permissionMessage = 'Eva paused "' + permissionRun.objective + '" because a sensitive or composed action needs approval. Review it in Workspaces.';
+        addMonitorActivity(permissionMessage, 'error', true, true);
+        publishRunChat(permissionRun, permissionMessage, 'error');
+      });
       var signature = monitorSignature(runs, terminals, state.projects);
       var changed = signature !== state.monitorSignature;
       var shouldRender = changed || permissionsChanged;
@@ -1319,7 +1381,7 @@ var EvaWorkspaces = (function() {
     if (collapse) collapse.hidden = false;
   }
 
-  async function createWorkspaceRun(projectId, objectiveValue, baseRefValue) {
+  async function createWorkspaceRun(projectId, objectiveValue, baseRefValue, options) {
     if (!supported() || state.loading) return;
     var project = projectById(projectId);
     if (!project) {
@@ -1345,12 +1407,42 @@ var EvaWorkspaces = (function() {
       state.selectedRunId = run.id;
       await refresh();
       status(run.dispatchError ? 'Workspace ready; agent dispatch delayed: ' + run.dispatchError : 'Workspace agent dispatched.', run.dispatchError ? 'error' : 'success');
-      return true;
+      return run;
     } catch (error) {
       status(error.message || 'Could not create coding run.', 'error');
       setBusy(false);
+      if (options && options.throwOnError) throw error;
       return false;
     }
+  }
+
+  async function runSelectedCheck(objectiveValue) {
+    if (!supported()) throw new Error('Workspace agent execution is unavailable in this Eva launch.');
+    if (!state.projects.length) await refresh();
+    var project = projectById(state.selectedProjectId);
+    if (!project) throw new Error('Select an imported workspace before running project checks.');
+    var objective = String(objectiveValue || '').trim();
+    if (!objective) throw new Error('Describe the project check to run.');
+    var run = await createWorkspaceRun(project.id, objective, 'HEAD', { throwOnError: true });
+    if (run.dispatchError) {
+      if (typeof api().workspaceDispatchRun === 'function') {
+        try {
+          await new Promise(function(resolve) { setTimeout(resolve, 500); });
+          run = await api().workspaceDispatchRun(run.id);
+          await refresh();
+        } catch (_) {}
+      }
+    }
+    if (!run.agent || ['starting', 'running'].indexOf(run.agent.status) === -1) {
+      return {
+        outcome: 'delayed', reason: 'runner_unavailable', runId: run.id,
+        message: 'Created a workspace-scoped run for ' + project.name + ', but the local agent is temporarily unavailable. The run is ready to retry in Workspaces.'
+      };
+    }
+    return {
+      outcome: 'started', reason: '', runId: run.id,
+      message: 'Started a workspace-scoped agent run for ' + project.name + '. Progress and results will appear in Workspaces.'
+    };
   }
 
   async function createRun(event) {
@@ -1479,6 +1571,7 @@ var EvaWorkspaces = (function() {
     authorizeGitHub: authorizeGitHub,
     setProjectMcpServerByName: setProjectMcpServerByName,
     verifyProjectMcpServerByName: verifyProjectMcpServerByName,
+    runSelectedCheck: runSelectedCheck,
     importGitHubSelection: importGitHubSelection,
     promptGitHubImport: function(repositoryUrl) { return importGitHubProject(repositoryUrl, true); }
   };

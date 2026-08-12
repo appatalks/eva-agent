@@ -108,6 +108,13 @@ var EvaHarness = (function() {
       return { action: 'list_github_repositories', target: 'workspaces', label: 'GitHub Repositories' };
     }
     if (directUser) {
+      var workspaceCheckRequest = rawPhrase.match(/^(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+)?(?:run|rerun|execute|start|perform|do)\s+(?:the\s+|a\s+|our\s+)?((?:smoke\s*tests?|test\s*suite|tests?|build|diagnostics?|checks?|lint|typecheck)(?:\s+checks?)?)(?:\s+(?:for|in|on)\s+(?:the\s+)?(?:selected|current|this)\s+(?:workspace|project|repository|repo))?[.!?]*$/i);
+      if (workspaceCheckRequest) {
+        return {
+          action: 'run_workspace_check', target: 'workspaces', label: 'Workspace Check',
+          objective: rawPhrase.replace(/[.!?]+$/g, '').trim()
+        };
+      }
       var githubContinuation = /^(?:please\s+)?(?:continue|proceed|go ahead)\b/i.test(rawPhrase) &&
         /\b(?:github|repositories|repos|repository|repo|import|clone)\b/i.test(rawPhrase) &&
         !/\b(?:don'?t|do not|never|without|unless|only after|wait|confirmation|if i consent|when i say)\b/.test(phrase);
@@ -345,6 +352,20 @@ var EvaHarness = (function() {
         return result(true, 'verify_workspace_mcp_server', message, { outcome: 'started' });
       }).catch(function(error) {
         return result(false, 'verify_workspace_mcp_server', error && error.message ? error.message : 'Workspace MCP verification failed.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'run_workspace_check') {
+      if (!window.EvaWorkspaces || typeof EvaWorkspaces.runSelectedCheck !== 'function') return Promise.resolve(result(false, 'run_workspace_check', 'Workspace agent execution is unavailable.', { outcome: 'failed', reason: 'unavailable' }));
+      var openedCheckWorkspaces = navigate('workspaces');
+      if (!openedCheckWorkspaces.ok) return Promise.resolve(openedCheckWorkspaces);
+      return Promise.resolve(EvaWorkspaces.runSelectedCheck(request.objective)).then(function(runResult) {
+        return result(true, 'run_workspace_check', runResult.message, {
+          outcome: runResult.outcome || 'started',
+          reason: runResult.reason || '',
+          runId: runResult.runId || ''
+        });
+      }).catch(function(error) {
+        return result(false, 'run_workspace_check', error && error.message ? error.message : 'Workspace check could not start.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
     if (action === 'import_github_selection') {
