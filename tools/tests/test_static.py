@@ -1185,7 +1185,7 @@ def test_sidebar_workflow_contract():
     report("workflow_new_session_on_launch", "idbMigrateFromLocalStorage().then(function() {\n    newSession();" in sessions_js)
     report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "newSession();\n      else" in options_js)
     report("workflow_side_panels_click_outside", "function closeSidePanels" in sessions_js and "EVA_SIDE_PANEL_IDS" in sessions_js and "document.addEventListener('click'" in sessions_js)
-    report("workflow_workspace_navigation", "function closeAgentOperationsForNavigation" in sessions_js and "#evaWorkspacesBtn" in sessions_js and 'id="lcarsWorkspacesBtn"' in html and "EvaWorkspaces.openWorkbench()" in html and "!target.closest('#lcarsWorkspacesBtn')" in sessions_js)
+    report("workflow_workspace_navigation", "function closeAgentOperationsForNavigation" in sessions_js and "#evaAgentsBtn, #evaWorkspacesBtn" in sessions_js and 'id="evaAgentsBtn"' in html and 'id="lcarsWorkspacesBtn"' in html and "EvaAgents.open()" in html and "EvaWorkspaces.openWorkbench()" in html and "!target.closest('#lcarsWorkspacesBtn')" in sessions_js)
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
     report("workflow_skills_main_view", "_buildSkillsWorkspace" in skills_js and "skills-view-open" in skills_js and "window.EvaSkills" in skills_js and "body.skills-view-open" in open("core/style.css").read())
     report("workflow_skills_organization", all(value in skills_js for value in ("skillsSearch", "skillsStatusFilter", 'value=\"draft\"', "skillsSourceFilter", "skillsSort", "_filteredSkills", "_skillSourceKind", "skillsViewSummary")))
