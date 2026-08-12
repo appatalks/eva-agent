@@ -39,7 +39,7 @@ var EvaAgents = (function() {
   }
 
   function kindLabel(kind) {
-    var labels = { subagent: 'ACP SUBAGENT', browser: 'BROWSER', desktop: 'DESKTOP', background: 'BACKGROUND' };
+    var labels = { eva: 'PRIMARY AGENT', subagent: 'ACP SUBAGENT', browser: 'BROWSER', desktop: 'DESKTOP', background: 'BACKGROUND' };
     return labels[kind] || String(kind || 'AGENT').toUpperCase();
   }
 
@@ -135,7 +135,8 @@ var EvaAgents = (function() {
     state.refreshController = new AbortController();
     try {
       var includeGraph = forceGraph === true || !state.data || !state.data.graph || Date.now() - state.graphFetchedAt >= 30000;
-      var response = await fetch(bridgeUrl() + '/v1/agents/overview?include_graph=' + (includeGraph ? '1' : '0'), { signal: state.refreshController.signal });
+      var sessionId = typeof ensureActiveSessionId === 'function' ? ensureActiveSessionId() : '';
+      var response = await fetch(bridgeUrl() + '/v1/agents/overview?include_graph=' + (includeGraph ? '1' : '0') + '&session_id=' + encodeURIComponent(sessionId), { signal: state.refreshController.signal });
       if (!response.ok) throw new Error('Bridge returned ' + response.status);
       var data = await response.json();
       if (sequence !== state.refreshSequence) return;

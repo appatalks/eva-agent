@@ -108,6 +108,13 @@ var EvaHarness = (function() {
       return { action: 'list_github_repositories', target: 'workspaces', label: 'GitHub Repositories' };
     }
     if (directUser) {
+      var workspaceRemoval = rawPhrase.match(/^(?:please\s+)?(?:remove|delete|forget)\s+(?:the\s+)?(?:workspace|project|repository|repo)\s+(.+?)[.!?]*$/i);
+      if (workspaceRemoval) {
+        return {
+          action: 'remove_workspace', target: 'workspaces', label: 'Workspace Removal',
+          projectName: String(workspaceRemoval[1] || '').replace(/[.!?]+$/g, '').trim()
+        };
+      }
       var prefixedWorkspaceTools = rawPhrase.match(/^for\s+(?:the\s+)?(.+?)[,;:]?\s+(?:what(?:'s|\s+is)|which)\s+(?:is\s+|are\s+)?(?:the\s+)?enabled\s+(?:(?:workspace\s+)?(?:mcp\s+)?)?(?:tools?|servers?)[.!?]*$/i);
       var suffixedWorkspaceTools = rawPhrase.match(/^(?:what|which)\s+(?:(?:workspace\s+)?(?:mcp\s+)?)?(?:tools?|servers?)\s+(?:is|are)\s+enabled(?:\s+(?:for|in|on)\s+(?:the\s+)?(.+?))?[.!?]*$/i);
       if (prefixedWorkspaceTools || suffixedWorkspaceTools) {
@@ -321,6 +328,14 @@ var EvaHarness = (function() {
         return result(false, 'describe_workspace_tools', error && error.message ? error.message : 'Workspace tools could not be described.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
+    if (action === 'remove_workspace') {
+      if (!window.EvaWorkspaces || typeof EvaWorkspaces.removeProjectByName !== 'function') return Promise.resolve(result(false, 'remove_workspace', 'Workspace removal is unavailable.'));
+      return Promise.resolve(EvaWorkspaces.removeProjectByName(request.projectName)).then(function(message) {
+        return result(!/cancelled/i.test(message), 'remove_workspace', message, { outcome: /cancelled/i.test(message) ? 'cancelled' : 'completed' });
+      }).catch(function(error) {
+        return result(false, 'remove_workspace', error && error.message ? error.message : 'Workspace removal failed.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
     if (action === 'list_github_repositories') {
       if (!window.EvaWorkspaces || typeof EvaWorkspaces.listGitHubRepositories !== 'function') return Promise.resolve(result(false, 'list_github_repositories', 'GitHub repository listing API is unavailable.'));
       var openedWorkspaces = navigate('workspaces');
@@ -483,7 +498,7 @@ var EvaHarness = (function() {
 
   function capabilities() {
     return {
-      actions: ['navigate', 'refresh', 'describe_workspaces', 'describe_workspace_tools', 'list_github_repositories', 'continue_github_repositories', 'authorize_github', 'set_workspace_mcp_server', 'verify_workspace_mcp_server', 'import_github', 'run_terminal_command', 'type_terminal_command', 'plan_terminal_task', 'consider_terminal_task', 'inspect_form', 'set_field', 'submit_form', 'cancel_form', 'new_chat', 'voice_control'],
+      actions: ['navigate', 'refresh', 'describe_workspaces', 'describe_workspace_tools', 'remove_workspace', 'list_github_repositories', 'continue_github_repositories', 'authorize_github', 'set_workspace_mcp_server', 'verify_workspace_mcp_server', 'import_github', 'run_terminal_command', 'type_terminal_command', 'plan_terminal_task', 'consider_terminal_task', 'inspect_form', 'set_field', 'submit_form', 'cancel_form', 'new_chat', 'voice_control'],
       surfaces: Object.keys(navigation),
       aliases: Object.keys(aliases),
       nativeOnly: true

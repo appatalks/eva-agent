@@ -179,8 +179,6 @@ function idbMigrateFromLocalStorage() {
     try {
       var data = JSON.parse(raw);
       promises.push(idbSaveSession(entry.id, data).then(function() {
-        // Remove from localStorage after successful migration
-        localStorage.removeItem('session_' + entry.id);
       }));
     } catch(e) {}
   });

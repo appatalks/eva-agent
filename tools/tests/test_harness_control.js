@@ -20,6 +20,7 @@ let mcpModuleRequest = null;
 let mcpVerificationRequest = null;
 let workspaceCheckObjective = '';
 let workspaceToolsProject = '';
+let removedWorkspace = '';
 const window = {
   EvaWorkspaces: {
     openWorkbench() {},
@@ -38,6 +39,10 @@ const window = {
     describeProjectTools(projectName) {
       workspaceToolsProject = projectName;
       return Promise.resolve('LLM Assist Private has 1 enabled workspace MCP tool: work-iq.');
+    },
+    removeProjectByName(projectName) {
+      removedWorkspace = projectName;
+      return Promise.resolve('Removed LLM Assist Private from Eva. The source repository was preserved.');
     },
         setProjectMcpServerByName(serverName, enabled, projectName) {
       mcpModuleRequest = { serverName, enabled, projectName };
@@ -136,6 +141,13 @@ async function main() {
   const selectedWorkspaceToolsRoute = harness.resolveNavigationRequest('Which MCP tools are enabled?', { directUser: true });
   assert.strictEqual(selectedWorkspaceToolsRoute.action, 'describe_workspace_tools');
   assert.strictEqual(selectedWorkspaceToolsRoute.projectName, '');
+  const removeWorkspaceRoute = harness.resolveNavigationRequest('Remove workspace LLM Assist Private.', { directUser: true });
+  assert.strictEqual(removeWorkspaceRoute.action, 'remove_workspace');
+  assert.strictEqual(removeWorkspaceRoute.projectName, 'LLM Assist Private');
+  const removeWorkspaceResult = await harness.execute(removeWorkspaceRoute, { source: 'voice', userRequest: 'Remove workspace LLM Assist Private.' });
+  assert.strictEqual(removeWorkspaceResult.ok, true);
+  assert.strictEqual(removedWorkspace, 'LLM Assist Private');
+  assert.match(removeWorkspaceResult.message, /source repository was preserved/i);
   const verifyMcpRoute = harness.resolveNavigationRequest('Verify MCP server project-docs for example/repository is working.', { directUser: true });
   assert.strictEqual(verifyMcpRoute.action, 'verify_workspace_mcp_server');
   const verifyMcpResult = await harness.execute(verifyMcpRoute, { source: 'voice', userRequest: 'Verify MCP server project-docs for example/repository is working.' });

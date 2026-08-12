@@ -344,7 +344,7 @@ var EvaWorkspaces = (function() {
           narrateFailedRun(run);
         } else {
           var dispatchedMessage = 'Eva dispatched ' + (agent.id || 'a workspace agent') + ' for ' + name + '.';
-          addMonitorActivity(dispatchedMessage, 'change', true);
+          addMonitorActivity(dispatchedMessage, 'change', true, false, run);
         }
       } else if (prior && prior.status !== current.status) {
         if (current.status === 'done') {
@@ -353,13 +353,13 @@ var EvaWorkspaces = (function() {
           narrateFailedRun(run);
         } else {
           var progressMessage = 'Eva moved "' + run.objective + '" to ' + current.status + '.';
-          addMonitorActivity(progressMessage, 'change', true);
+          addMonitorActivity(progressMessage, 'change', true, false, run);
           publishRunChat(run, progressMessage, 'working');
         }
       }
       if (prior && current.status === 'running' && current.report && current.report !== prior.report) {
         var update = current.report.replace(/\s+/g, ' ').trim();
-        if (update) addMonitorActivity('Eva update: ' + update.slice(-240), 'info', false);
+        if (update) addMonitorActivity('Eva update: ' + update.slice(-240), 'info', false, false, run);
       }
     });
     state.monitorRunStates = nextStates;
@@ -368,19 +368,19 @@ var EvaWorkspaces = (function() {
   function narrateTerminalRun(run, current) {
     if (categorizeRunOutcome(run) === 'test_failure') {
       var failedCheckMessage = 'Eva completed "' + run.objective + '", but the project checks reported a failure. Review the run report for details.';
-      addMonitorActivity(failedCheckMessage, 'error', true, true);
+      addMonitorActivity(failedCheckMessage, 'error', true, true, run);
       publishRunChat(run, failedCheckMessage, 'error');
       return;
     }
     var completedMessage = 'Eva completed "' + run.objective + '" with ' + current.changes + ' changed file' + (current.changes === 1 ? '.' : 's.');
-    addMonitorActivity(completedMessage, 'change', true, true);
+    addMonitorActivity(completedMessage, 'change', true, true, run);
     publishRunChat(run, completedMessage, 'completed');
   }
 
   function narrateFailedRun(run) {
     var category = categorizeRunOutcome(run);
     var message = runFailureMessage(run.objective, category);
-    addMonitorActivity(message, 'error', true, true);
+    addMonitorActivity(message, 'error', true, true, run);
     publishRunChat(run, message, 'error');
   }
 
@@ -427,12 +427,15 @@ var EvaWorkspaces = (function() {
       (agentStatus === 'done' ? ' Review the result when ready.' : ' Eva is monitoring progress.');
   }
 
-  function addMonitorActivity(message, kind, allowVoice, forceVoice) {
+  function addMonitorActivity(message, kind, allowVoice, forceVoice, run) {
+    run = run || state.runs.find(function(item) { return item.id === state.selectedRunId; });
     var entry = {
       id: Date.now() + '-' + Math.random().toString(36).slice(2, 7),
       message: message,
       kind: kind || 'info',
-      at: new Date()
+      at: new Date(),
+      projectId: run && run.projectId || state.selectedProjectId || '',
+      runId: run && run.id || state.selectedRunId || ''
     };
     state.monitorActivity.unshift(entry);
     state.monitorActivity = state.monitorActivity.slice(0, 60);
@@ -620,7 +623,11 @@ var EvaWorkspaces = (function() {
     terminal.addEventListener('click', function() {
       openWorkspaceTerminal(project.sourceCheckout.id, project.name + ' | source');
     });
-    actions.appendChild(terminal);
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = 'Remove workspace';
+    remove.addEventListener('click', function() { removeProject(project); });
+    actions.append(terminal, remove);
     var files = document.createElement('div');
     files.id = 'workspaceProjectFiles';
     files.className = 'workspace-project-files';
@@ -768,8 +775,9 @@ var EvaWorkspaces = (function() {
     var projectList = document.getElementById('workspaceWorkbenchProjects');
     var runList = document.getElementById('workspaceWorkbenchRuns');
     var feed = document.getElementById('workspaceMonitorFeed');
+    var results = document.getElementById('workspaceWorkbenchResults');
     var detail = document.getElementById('workspaceWorkbenchDetail');
-    if (!projectList || !runList || !feed || !detail) return;
+    if (!projectList || !runList || !feed || !results || !detail) return;
     projectList.replaceChildren();
     if (!state.projects.length) {
       var emptyProject = document.createElement('p');
@@ -824,8 +832,19 @@ var EvaWorkspaces = (function() {
     });
 
     feed.replaceChildren();
-    if (!state.monitorActivity.length) addMonitorActivity(monitorSummary(), 'info', false);
-    state.monitorActivity.forEach(function(entry) {
+    var selectedProject = projectById(state.selectedProjectId);
+    var activityTitle = document.getElementById('workspaceMonitorActivityTitle');
+    if (activityTitle) activityTitle.textContent = selectedProject ? 'EVA ACTIVITY: ' + selectedProject.name : 'EVA ACTIVITY';
+    var projectActivity = state.monitorActivity.filter(function(entry) {
+      return entry.projectId === state.selectedProjectId;
+    });
+    if (!projectActivity.length) {
+      var emptyActivity = document.createElement('li');
+      emptyActivity.className = 'workspace-monitor-empty';
+      emptyActivity.textContent = selectedProject ? 'No Eva activity recorded for this workspace.' : 'Select a workspace to view Eva activity.';
+      feed.appendChild(emptyActivity);
+    }
+    projectActivity.forEach(function(entry) {
       var item = document.createElement('li');
       item.className = 'workspace-monitor-event';
       item.dataset.kind = entry.kind;
@@ -839,7 +858,7 @@ var EvaWorkspaces = (function() {
     });
 
     detail.replaceChildren();
-    var project = projectById(state.selectedProjectId);
+    var project = selectedProject;
     if (!project) {
       var unavailable = document.createElement('p');
       unavailable.className = 'workspace-monitor-empty';
@@ -852,6 +871,7 @@ var EvaWorkspaces = (function() {
       appendWorkbenchMcpSettings(detail, project);
     }
     var selected = orderedRuns.find(function(run) { return run.id === state.selectedRunId; }) || orderedRuns[0];
+    results.replaceChildren();
     if (selected) {
       state.selectedRunId = selected.id;
       var heading = document.createElement('h2');
@@ -893,8 +913,13 @@ var EvaWorkspaces = (function() {
         report.textContent = selected.agent.report;
         runSection.appendChild(report);
       }
-      detail.appendChild(runSection);
-      appendWorkspacePermissions(detail, selected);
+      results.appendChild(runSection);
+      appendWorkspacePermissions(results, selected);
+    } else {
+      var emptyResults = document.createElement('p');
+      emptyResults.className = 'workspace-monitor-empty';
+      emptyResults.textContent = 'Select a coding run to view its result.';
+      results.appendChild(emptyResults);
     }
 
     var active = activeRuns();
@@ -952,7 +977,7 @@ var EvaWorkspaces = (function() {
         var permissionRun = runs.find(function(run) { return run.id === permission.workspaceRunId; });
         if (!permissionRun) return;
         var permissionMessage = 'Eva paused "' + permissionRun.objective + '" because a sensitive or composed action needs approval. Review it in Workspaces.';
-        addMonitorActivity(permissionMessage, 'error', true, true);
+        addMonitorActivity(permissionMessage, 'error', true, true, permissionRun);
         publishRunChat(permissionRun, permissionMessage, 'error');
       });
       var signature = monitorSignature(runs, terminals, state.projects);
@@ -1312,6 +1337,45 @@ var EvaWorkspaces = (function() {
     return importGitHubProject(matches[0].url);
   }
 
+  async function removeProject(project) {
+    if (!project || !api() || typeof api().workspaceDeleteProject !== 'function') throw new Error('Workspace removal is unavailable in this Eva build.');
+    var approved = confirm('Remove ' + project.name + ' from Eva?\n\nEva will remove managed coding-run worktrees and history. The source repository will remain on disk.');
+    if (!approved) return null;
+    setBusy(true);
+    status('Removing workspace...', 'loading');
+    try {
+      var removed;
+      try {
+        removed = await api().workspaceDeleteProject(project.id, false);
+      } catch (error) {
+        if (!/local changes|dirty cleanup/i.test(String(error && error.message || ''))) throw error;
+        var force = confirm('Managed run worktrees contain local changes. Remove those managed worktrees anyway?\n\nThe source repository will still be preserved.');
+        if (!force) return null;
+        removed = await api().workspaceDeleteProject(project.id, true);
+      }
+      delete state.projectFiles[project.id];
+      delete state.runDrafts[project.id];
+      state.selectedProjectId = '';
+      state.selectedRunId = '';
+      await refresh();
+      status('Workspace removed. Source repository preserved.', 'success');
+      return removed;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeProjectByName(projectName) {
+    if (!state.projects.length) await refresh();
+    var query = String(projectName || '').trim().toLowerCase();
+    var project = query
+      ? state.projects.filter(function(item) { return String(item.name || '').trim().toLowerCase() === query; })[0]
+      : projectById(state.selectedProjectId);
+    if (!project) throw new Error(query ? 'No imported workspace matched "' + projectName + '".' : 'Select an imported workspace before removing it.');
+    var removed = await removeProject(project);
+    return removed ? 'Removed ' + project.name + ' from Eva. The source repository was preserved.' : 'Workspace removal was cancelled.';
+  }
+
   async function setProjectMcpServerByName(serverName, enabled, projectName) {
     var standalone = api();
     if (!standalone || typeof standalone.workspaceSetMcpServer !== 'function') throw new Error('Workspace MCP controls are unavailable in this Eva build.');
@@ -1589,6 +1653,7 @@ var EvaWorkspaces = (function() {
     listGitHubRepositories: listGitHubRepositories,
     continueGitHubRepositories: continueGitHubRepositories,
     authorizeGitHub: authorizeGitHub,
+    removeProjectByName: removeProjectByName,
     setProjectMcpServerByName: setProjectMcpServerByName,
     verifyProjectMcpServerByName: verifyProjectMcpServerByName,
     runSelectedCheck: runSelectedCheck,

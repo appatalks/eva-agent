@@ -447,6 +447,42 @@ def main():
         assert source_store.list_project_mcp_servers(source_project["id"])["state"] == "invalid"
         source_store.close()
 
+        delete_repository = sandbox / "delete-workspace-source"
+        delete_repository.mkdir()
+        git(delete_repository, "init", "-b", "main")
+        git(delete_repository, "config", "user.name", "Eva Test")
+        git(delete_repository, "config", "user.email", "eva-test@example.invalid")
+        (delete_repository / "README.md").write_text("# preserve source\n", encoding="utf-8")
+        git(delete_repository, "add", "README.md")
+        git(delete_repository, "commit", "-m", "Initial source")
+        delete_store = WorkspaceStore(sandbox / "delete-config")
+        delete_project = delete_store.register_project(delete_repository)
+        delete_run = delete_store.create_run(delete_project["id"], "Remove this workspace safely")
+        delete_checkout = Path(delete_run["checkout"]["path"])
+        delete_agent_id = "33333333-3333-4333-8333-333333333333"
+        delete_store.create_agent_run(
+            delete_agent_id, delete_run["id"], delete_run["checkout"]["id"], "delete-test"
+        )
+        delete_store.update_agent_run(delete_agent_id, "running")
+        try:
+            delete_store.delete_project(delete_project["id"])
+            raise AssertionError("active workspace agents should block project removal")
+        except WorkspaceError as error:
+            assert "active" in str(error).lower()
+        delete_store.update_agent_run(delete_agent_id, "done")
+        (delete_checkout / "dirty.txt").write_text("managed change\n", encoding="utf-8")
+        try:
+            delete_store.delete_project(delete_project["id"])
+            raise AssertionError("dirty managed worktrees should require confirmation")
+        except WorkspaceError as error:
+            assert "local changes" in str(error).lower()
+        removed = delete_store.delete_project(delete_project["id"], confirm_dirty=True)
+        assert removed["source_preserved"] is True and removed["removed_worktrees"] == 1
+        assert delete_repository.is_dir() and (delete_repository / "README.md").is_file()
+        assert not delete_checkout.exists()
+        assert delete_store.list_projects() == []
+        delete_store.close()
+
         git_cwd_link = sandbox / "git-cwd-link"
         git_cwd_link.symlink_to(repository, target_is_directory=True)
         git_cwd_parent_link = sandbox / "git-cwd-parent-link"

@@ -987,13 +987,15 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .workspace-monitor-metrics > div { display: flex; align-items: baseline; gap: 10px; padding: 10px 24px; border-right: 1px solid rgba(120,220,232,0.1); }
 .workspace-monitor-metrics span { color: #73979c; font: 9px monospace; letter-spacing: 0.1em; }
 .workspace-monitor-metrics strong { color: #ffcf85; font: 600 16px monospace; }
-.workspace-workbench-body { display: grid; grid-template-columns: minmax(180px, 0.62fr) minmax(210px, 0.75fr) minmax(300px, 1.2fr) minmax(300px, 1fr); min-height: 0; overflow: hidden; }
+.workspace-workbench-body { display: grid; grid-template-columns: minmax(180px, 0.56fr) minmax(210px, 0.7fr) minmax(280px, 0.95fr) minmax(300px, 1.1fr) minmax(280px, 0.9fr); min-height: 0; overflow: hidden; }
 .workspace-monitor-nav,
 .workspace-monitor-activity,
+.workspace-monitor-results,
 .workspace-monitor-detail { min-width: 0; min-height: 0; overflow: auto; }
 .workspace-monitor-nav { border-right: 1px solid rgba(120,220,232,0.13); background: rgba(4,16,19,0.62); }
 .workspace-monitor-projects { background: rgba(4,13,17,0.82); }
 .workspace-monitor-activity { border-right: 1px solid rgba(120,220,232,0.13); background: rgba(5,17,20,0.4); }
+.workspace-monitor-results { border-right: 1px solid rgba(120,220,232,0.13); background: rgba(7,20,24,0.62); }
 .workspace-monitor-detail { background: rgba(7,20,24,0.82); }
 .workspace-monitor-pane-header { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 0 14px; border-bottom: 1px solid rgba(120,220,232,0.11); color: #82b7bd; font: 700 9px monospace; letter-spacing: 0.12em; }
 #workspaceMonitorMode { color: #78dce8; }
@@ -1268,8 +1270,9 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
   .workspace-monitor-updated { display: none; }
   .workspace-monitor-metrics { grid-template-columns: repeat(2, 1fr); }
   .workspace-monitor-metrics > div { padding: 7px 12px; }
-  .workspace-workbench-body { grid-template-columns: minmax(125px, 0.65fr) minmax(0, 1.35fr); grid-template-rows: minmax(160px, 0.45fr) minmax(0, 1fr); }
+  .workspace-workbench-body { grid-template-columns: minmax(125px, 0.65fr) minmax(0, 1.35fr); grid-template-rows: minmax(160px, 0.45fr) minmax(180px, 0.55fr) minmax(0, 1fr); }
   .workspace-monitor-activity { display: none; }
+  .workspace-monitor-results { display: block; grid-column: 1 / -1; border-top: 1px solid rgba(120,220,232,0.13); }
   .workspace-monitor-detail { display: block; grid-column: 1 / -1; border-top: 1px solid rgba(120,220,232,0.13); }
   .assets-view-header { padding: 12px 14px 9px; }
   .assets-view-header h1 { font-size: 19px; }

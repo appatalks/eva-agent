@@ -5995,6 +5995,7 @@ async function sendData() {
           if (nativeRoute.action === 'run_workspace_check' || nativeRoute.action === 'describe_workspace_tools') {
             injectWorkspaceStatusBubble(nativeResult.message, nativeResult.ok ? 'working' : 'error');
           }
+          if (typeof recordConversationTurn === 'function') recordConversationTurn(protectedRawText, nativeResult.message);
           evaAuditEvent('native_action', evaAuditOutcome(nativeResult && nativeResult.data && nativeResult.data.outcome, nativeResult.ok), {
             correlation_id: auditTurnId,
             action: nativeRoute.action || 'navigate',
@@ -7134,6 +7135,7 @@ function speakText() {
   // directly. Resolve it BEFORE the empty-transcript guard so voice alerts work
   // on first load or before any chat output exists.
   var overrideText = (typeof arguments[0] === 'string' && arguments[0].trim()) ? arguments[0] : '';
+  if (overrideText && typeof recordSpokenEvaText === 'function') recordSpokenEvaText(overrideText);
 
   var txtOutputEl = document.getElementById('txtOutput');
   var sText = txtOutputEl ? txtOutputEl.innerHTML : '';

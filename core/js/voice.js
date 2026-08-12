@@ -217,13 +217,14 @@ function _runVoiceNavigationCommand(command, turnId) {
       ? navigationResult.message
       : route.action === 'authorize_github'
       ? 'I started GitHub device authorization in Workspaces.'
-      : route.action === 'describe_workspaces' || route.action === 'import_github'
+      : route.action && route.action !== 'navigate'
       ? navigationResult.message
       : route.target === 'workspaces'
       ? 'I opened Workspaces. I can review imported projects and their files, Git status and diffs, active coding runs, generated assets, and workspace-scoped MCP configuration. I can inspect read-only workspace commands autonomously. Changes, deletions, external actions, and unclassified commands still require your approval.'
       : 'Opening ' + route.label + '.';
     if (typeof setStatus === 'function') setStatus('info', navigationResult.message || 'Opened ' + route.label + '.');
     if (typeof evaAuditEvent === 'function') evaAuditEvent('native_action', typeof evaAuditOutcome === 'function' ? evaAuditOutcome(navigationResult.data && navigationResult.data.outcome, true) : 'completed', { correlation_id: turnId || '', action: route.action || 'navigate', label: route.target || '' });
+    if (typeof recordConversationTurn === 'function') recordConversationTurn(command, reply);
     if (typeof speakText === 'function') speakText(reply);
   }).catch(function(error) {
     if (typeof setStatus === 'function') setStatus('error', error && error.message ? error.message : 'Voice navigation failed.');

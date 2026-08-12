@@ -458,6 +458,42 @@ async function workspaceSetMcpServer(event, projectId, serverName, enabled, appr
   return workspaceProjectForRenderer(project);
 }
 
+async function workspaceDeleteProject(event, projectId, confirmDirty) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(projectId)) throw new Error('Invalid project ID.');
+  const checkoutIds = [];
+  if (terminalBroker) {
+    const projectsResponse = await requestWorkspaceBridge('/v1/workspaces/projects', 'GET');
+    const project = (projectsResponse.projects || []).find(function(item) { return item.id === projectId; });
+    if (!project) throw new Error('Workspace is no longer registered.');
+    if (project.source_checkout && validWorkspaceId(project.source_checkout.id)) checkoutIds.push(project.source_checkout.id);
+    const runsResponse = await requestWorkspaceBridge('/v1/workspaces/runs?project_id=' + encodeURIComponent(projectId), 'GET');
+    (runsResponse.runs || []).forEach(function(run) {
+      if (run.checkout && validWorkspaceId(run.checkout.id)) checkoutIds.push(run.checkout.id);
+    });
+    for (const checkoutId of Array.from(new Set(checkoutIds))) {
+      await terminalBroker.terminateByRoot(checkoutId);
+      if (terminalBroker.list().some(function(session) { return session.rootId === checkoutId; })) {
+        throw new Error('A workspace terminal did not terminate; removal was cancelled.');
+      }
+    }
+  }
+  const response = await requestWorkspaceBridge(
+    '/v1/workspaces/projects/' + encodeURIComponent(projectId),
+    'DELETE',
+    { confirm_dirty: confirmDirty === true }
+  );
+  const removed = response.removed;
+  if (!removed || !validWorkspaceId(removed.id)) throw new Error('Workspace bridge returned an invalid removal result.');
+  if (terminalBroker) checkoutIds.forEach(function(checkoutId) { terminalBroker.unregisterRoot(checkoutId); });
+  return {
+    id: removed.id,
+    name: typeof removed.name === 'string' ? removed.name : 'Workspace',
+    sourcePreserved: removed.source_preserved === true,
+    removedWorktrees: Number(removed.removed_worktrees || 0)
+  };
+}
+
 async function workspaceCreateRun(event, request) {
   requireWorkspaceFeature(event);
   const input = request && typeof request === 'object' ? request : {};
@@ -1555,6 +1591,7 @@ ipcMain.handle('workspace-list-github-repositories', workspaceListGitHubReposito
 ipcMain.handle('workspace-github-auth-start', workspaceGitHubAuthStart);
 ipcMain.handle('workspace-github-auth-status', workspaceGitHubAuthStatus);
 ipcMain.handle('workspace-set-mcp-server', workspaceSetMcpServer);
+ipcMain.handle('workspace-delete-project', workspaceDeleteProject);
 ipcMain.handle('workspace-create-run', workspaceCreateRun);
 ipcMain.handle('workspace-dispatch-run', workspaceDispatchRun);
 ipcMain.handle('workspace-list-runs', workspaceListRuns);
@@ -1586,8 +1623,10 @@ function createWindow(acpBaseUrl) {
   });
 
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 900,
+    width: 1728,
+    height: 1215,
+    minWidth: 1280,
+    minHeight: 900,
     show: false,
     frame: false,
     transparent: true,

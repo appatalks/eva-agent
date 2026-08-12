@@ -665,15 +665,22 @@ def _select_active_history(items, active_statuses, limit):
 
 def _select_agent_payload(items, limit=30):
     """Keep every active agent, then fill the payload with recent completions."""
-    active_items = [item for item in items if item.get("status") in _AGENT_ACTIVE_STATUSES]
-    inactive_items = [item for item in items if item.get("status") not in _AGENT_ACTIVE_STATUSES]
+    pinned_items = [item for item in items if item.get("kind") == "eva"]
+    active_items = [
+        item for item in items
+        if item.get("kind") != "eva" and item.get("status") in _AGENT_ACTIVE_STATUSES
+    ]
+    inactive_items = [
+        item for item in items
+        if item.get("kind") != "eva" and item.get("status") not in _AGENT_ACTIVE_STATUSES
+    ]
     active_items.sort(key=lambda item: str(item.get("started_at") or ""), reverse=True)
     inactive_items.sort(
         key=lambda item: str(item.get("ended_at") or item.get("started_at") or ""),
         reverse=True,
     )
-    remaining = max(0, limit - len(active_items))
-    return active_items + inactive_items[:remaining]
+    remaining = max(0, limit - len(pinned_items) - len(active_items))
+    return pinned_items + active_items + inactive_items[:remaining]
 
 
 def _dismiss_subagent_task(task_id):
@@ -1288,7 +1295,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         parsed_path = urllib.parse.urlparse(self.path).path
         if not self._require_private_route():
             return
-        if parsed_path.startswith("/v1/goals/"):
+        if parsed_path.startswith("/v1/workspaces/") and not self._require_workspace_capability():
+            return
+        if re.fullmatch(r"/v1/workspaces/projects/[^/]+", parsed_path):
+            self._workspace_project_delete(urllib.parse.unquote(parsed_path.rsplit("/", 1)[1]))
+        elif parsed_path.startswith("/v1/goals/"):
             self._goals_delete(urllib.parse.unquote(parsed_path.split("/v1/goals/", 1)[1]))
         elif parsed_path.startswith("/v1/memory/atoms/"):
             self._memory_atom_delete(urllib.parse.unquote(parsed_path.split("/v1/memory/atoms/", 1)[1]))
@@ -1350,6 +1361,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"projects": _workspace_store().list_projects()})
         except WorkspaceError as error:
             self._json_response(400, {"error": {"message": str(error)}})
+
+    def _workspace_project_delete(self, project_id):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            result = _workspace_store().delete_project(project_id, bool(data.get("confirm_dirty", False)))
+            self._json_response(200, {"removed": result})
+        except WorkspaceError as workspace_error:
+            self._json_response(409, {"error": {"message": str(workspace_error)}})
 
     def _workspace_project_files_list(self, project_id):
         try:
@@ -3312,7 +3334,26 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "agent overview restricted to loopback"}})
             return
-        agents = []
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        active_session_id = str((params.get("session_id") or [""])[0])[:120]
+        active_model = getattr(_st.acp_client, "model", "") if _st.acp_client else ""
+        agents = [{
+            "id": "eva",
+            "kind": "eva",
+            "label": "Eva",
+            "model": active_model or "adaptive routing",
+            "status": "online" if _st.acp_client and _st.acp_client.alive else "local_only",
+            "detail": "Primary assistant and cognitive orchestrator",
+            "activity": "Ready for conversation and agent orchestration",
+            "result": None,
+            "started_at": getattr(_st, "cognition_launch_since", None),
+            "ended_at": None,
+            "session_id": active_session_id,
+            "group_id": "eva-core",
+            "depends_on": [],
+            "signal_status": "",
+            "capability_policy": "adaptive",
+        }]
         with _st.subagent_lock:
             subagents_active, visible_tasks = _select_subagent_overview_tasks(_st.subagent_tasks)
             for task in visible_tasks:
@@ -3388,7 +3429,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "session_id": "",
             })
 
-        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         include_graph = (params.get("include_graph", ["1"])[0] or "1") != "0"
         graph = None
         if include_graph:

@@ -267,6 +267,42 @@ class WorkspaceStore:
             ).fetchall()
         return [self.get_project(row["id"]) for row in project_rows]
 
+    def delete_project(self, project_id, confirm_dirty=False):
+        """Remove Eva's project record and managed run worktrees, preserving the source repository."""
+        project = self.get_project(project_id)
+        with self.lock:
+            active_agent = self.connection.execute(
+                """SELECT agent_runs.id FROM agent_runs
+                   JOIN coding_runs ON coding_runs.id = agent_runs.coding_run_id
+                   WHERE coding_runs.project_id = ? AND agent_runs.status IN ('starting', 'running', 'steering')
+                   LIMIT 1""",
+                (project_id,),
+            ).fetchone()
+            worktree_rows = self.connection.execute(
+                "SELECT * FROM checkouts WHERE project_id = ? AND kind = 'worktree' AND lifecycle != 'disposed'",
+                (project_id,),
+            ).fetchall()
+        if active_agent:
+            raise WorkspaceError("A workspace agent is still active. Wait for it to finish before removing this workspace.")
+        worktrees = []
+        for row in worktree_rows:
+            checkout = self.checkout_status(row["id"])
+            if checkout["dirty_file_count"] and not confirm_dirty:
+                raise WorkspaceError("A managed workspace run has local changes. Confirm dirty cleanup before removing this workspace.")
+            worktrees.append(checkout)
+        for checkout in worktrees:
+            self._remove_worktree(
+                project["path"], Path(checkout["path"]), checkout["branch"], bool(confirm_dirty)
+            )
+        with self.lock, self.connection:
+            self.connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        return {
+            "id": project["id"],
+            "name": project["name"],
+            "source_preserved": True,
+            "removed_worktrees": len(worktrees),
+        }
+
     def list_project_files(self, project_id, limit=1000):
         root = self._validated_source_project(project_id)
         code, output = self._git_status_output(

@@ -1182,6 +1182,8 @@ def test_sidebar_workflow_contract():
     report("workflow_session_legacy_fallback", "localStorage.getItem('session_' + id)" in sessions_js and "idbSaveSession(id, data)" in sessions_js)
     report("workflow_session_legacy_visible_restore", "function _restoreLegacySessionOutput" in sessions_js and "Restorable transcript" not in sessions_js and "closeWorkbench" in sessions_js)
     report("workflow_session_reveals_chat", "EvaAgents.close" in sessions_js and "Session loaded." in sessions_js)
+    report("workflow_session_recovery_copy", "_saveSessionRecoveryCopy" in sessions_js and "session_' + id" in sessions_js and "IDB load failed" in sessions_js and "localStorage.removeItem('session_' + entry.id)" not in open("core/js/idb-store.js").read())
+    report("workflow_voice_conversation_record", "voiceMessages" in sessions_js and "function recordConversationTurn" in sessions_js and "function recordSpokenEvaText" in sessions_js and "recordConversationTurn(command, reply)" in open("core/js/voice.js").read() and "recordConversationTurn(protectedRawText, nativeResult.message)" in options_js)
     report("workflow_sidebar_session_provider", "function getAllSessions" in sessions_js and "updatedAt:" in sessions_js)
     report("workflow_new_session_on_launch", "idbMigrateFromLocalStorage().then(function() {\n    newSession();" in sessions_js)
     report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "newSession();\n      else" in options_js)
@@ -1298,6 +1300,7 @@ def test_coding_workspace_contract():
     broker = open("standalone/terminal-broker.js").read()
     report("coding_workspace_ptys_close_before_discard", "await terminalBroker.terminateByRoot(checkoutId)" in standalone_main and "terminalBroker.unregisterRoot(checkoutId)" in standalone_main and "terminalCloseRoot" in workspace_ui and "terminateByRoot(rootId)" in broker and "scope: this._terminationScope(child.pid)" in broker and "this.signalProcess(-session.child.pid, signal)" in broker)
     report("coding_workspace_preload_allowlist", all(value in standalone_preload for value in ("terminalCloseRoot", "workspaceListProjects", "workspaceSelectProject", "workspaceImportGitHub", "workspaceGitHubAuthStart", "workspaceGitHubAuthStatus", "workspaceSetMcpServer", "workspaceCreateRun", "workspaceDispatchRun", "workspaceCheckoutStatus", "workspaceRunAction")))
+    report("coding_workspace_safe_removal", "def delete_project" in workspaces and "source_preserved" in workspaces and "workspace agent is still active" in workspaces.lower() and "workspace-delete-project" in standalone_main and "workspaceDeleteProject" in standalone_preload and "Remove workspace" in workspace_ui and "remove_workspace" in open("core/js/harness-control.js").read())
     report("coding_workspace_completed_actions", "(run.status === 'active' || run.status === 'completed') && !agentActive" in workspace_ui and "['active', 'completed'].indexOf(actionRun.status)" in workspace_ui)
     report("coding_workspace_current_monitor_snapshot", workspace_ui.find("state.runs = runs;") < workspace_ui.find("narrateRunChanges(state.runs);") and "workspaceCheckoutStatus(selected.checkout.id)" in workspace_ui)
     report("coding_workspace_ui_wired", "core/js/workspaces.js" in html and "workspacePanel" in html and "workspaceWorkbench" in html and "openWorkspaceTerminal" in workspace_ui and "_evaWorkspaceTerminalTarget" in sessions_js and "body.eva-standalone .workspace-panel" in style_css)
@@ -1308,6 +1311,8 @@ def test_coding_workspace_contract():
     report("coding_workspace_runner_recovery", "workspaceDispatchRun" in workspace_ui and "workspace-dispatch-run" in standalone_main and "/dispatch" in standalone_main and 'stage="redispatch"' in bridge_core)
     report("coding_workspace_failure_categories", all(value in workspace_ui for value in ("user_cancelled", "agent_cancelled", "permission_denied", "runner_unavailable", "test_failure", "bridge_failure")))
     report("coding_workspace_fast_terminal_narration", "!prior && current.status" in workspace_ui and "narrateTerminalRun(run, current)" in workspace_ui and "narrateFailedRun(run)" in workspace_ui)
+    report("coding_workspace_scoped_activity_results", "projectId: run && run.projectId" in workspace_ui and "entry.projectId === state.selectedProjectId" in workspace_ui and "workspaceWorkbenchResults" in workspace_ui and "RUN RESULTS" in html and "workspace-monitor-results" in style_css)
+    report("standalone_workspace_real_estate", "width: 1728" in standalone_main and "height: 1215" in standalone_main and "minWidth: 1280" in standalone_main and "minHeight: 900" in standalone_main)
     report("coding_workspace_main_navigation", "openWorkbench" in workspace_ui and "workspace-workbench-open" in style_css and "closeWorkbench" in sessions_js and "closeWorkbench" in open("core/js/agents.js").read())
     report("coding_workspace_mcp_isolation", "project_mcp_preferences" in workspaces and "approved_digest" in workspaces and "_mcp_config_digest" in workspaces and "_MCP_RESERVED_ENV_KEYS" in workspaces and "BASH_ENV" in workspaces and "key.startswith(\"LD_\")" in workspaces and "mcp_config_for_run" in workspaces and "_workspace_mcp_config" in bridge_core and "workspace_mcp_prefix" in bridge_core and "_subagent_mcp_config(template, task)" in workspace_utils and "return copy.deepcopy(workspace_config)" in workspace_utils and "workspaceSetMcpServer" in workspace_ui and "Any configuration change will revoke this approval" in workspace_ui and "envKeys" in renderer_project and "headerKeys" in renderer_project and "env:" not in renderer_project and "headers:" not in renderer_project)
     report("coding_workspace_github_prompt_visible", ":not(#workspaceWorkbench):not(#textToSynth)" in style_css and "#textToSynth > :not(#evaTextPrompt)" in style_css and "workspaceImportGitHub" in workspace_ui and "evaTextPrompt('GitHub repository URL'" in workspace_ui)
@@ -1519,6 +1524,7 @@ def test_agent_operations_contract():
     report("agent_operations_agent_graph", '"type": "agent"' in bridge and '"label": "feeds"' in bridge)
     report("agent_operations_agent_nodes_prioritized", "selectGraphNodes(sourceNodes, 90)" in ui and "node.type === 'agent'" in ui)
     report("agent_operations_eva_fixed_root", "node.id === 'eva-root'" in ui and "existing.x = 0.5" in ui)
+    report("agent_operations_eva_self_entry", '"id": "eva"' in bridge and '"kind": "eva"' in bridge and '"session_id": active_session_id' in bridge and "eva: 'PRIMARY AGENT'" in ui and "session_id=" in ui)
     report("agent_operations_rich_tooltip", "function graphTooltipText" in ui and "Orchestrates:" in ui and "Receives from:" in ui and "Confidence:" in ui)
     report("agent_operations_live_graph_status", "agentById['agent-' + agent.id]" in ui and "node.status = liveAgent.status" in ui)
     report("agent_operations_done_graph_state", "doneAgent" in ui and "statusLabel(node.status)" in ui)
@@ -1690,7 +1696,10 @@ def test_agent_operations_behavior():
            "older-running" in {task["id"] for task in completed_overview} and
            "older-running" in {task["id"] for task in completed_topology},
            "recently completed older task disappeared before showing done")
-    mixed_agents = [
+    mixed_agents = [{
+        "id": "eva", "kind": "eva", "status": "online",
+        "started_at": "2026-01-01T00:00:00+00:00", "ended_at": None,
+    },
         {
             "id": "transitioned", "kind": "subagent", "status": "done",
             "started_at": "2000-01-01T00:00:00+00:00", "ended_at": "2099-01-01T00:00:00+00:00",
@@ -1714,6 +1723,9 @@ def test_agent_operations_behavior():
     report("agent_operations_payload_retains_transition",
            "transitioned" in {item["id"] for item in mixed_visible},
            "final mixed-agent payload dropped recent completion transition")
+    report("agent_operations_payload_pins_eva",
+           mixed_visible[0]["id"] == "eva" and len(mixed_visible) == 30,
+           "Eva self-agent was displaced from the bounded payload")
 
     agent_runs = [{"id": "older-active-run", "status": "running"}] + [
         {"id": f"finished-run-{index}", "status": "done"}

@@ -8,7 +8,7 @@ var SESSION_PANEL_TAB_KEY = 'eva_session_panel_tab';
 var SESSION_TITLE_MAX_LENGTH = 140;
 
 // All provider message keys
-var SESSION_MSG_KEYS = ['messages', 'copilotMessages', 'copilotACPMessages', 'geminiMessages', 'openLLMessages', 'aigMessages'];
+var SESSION_MSG_KEYS = ['messages', 'copilotMessages', 'copilotACPMessages', 'geminiMessages', 'openLLMessages', 'aigMessages', 'voiceMessages'];
 
 function closeAgentOperationsForNavigation() {
   if (typeof EvaAgents !== 'undefined' && EvaAgents.close) EvaAgents.close();
@@ -182,6 +182,86 @@ function _sessionMsgCount(data) {
   return count;
 }
 
+function _appendVoiceSessionMessage(role, content) {
+  var text = String(content || '').trim();
+  if (!text) return;
+  var messages = [];
+  try { messages = JSON.parse(localStorage.getItem('voiceMessages') || '[]'); } catch (_) {}
+  if (!Array.isArray(messages)) messages = [];
+  var previous = messages.length ? messages[messages.length - 1] : null;
+  if (!previous || previous.role !== role || previous.content !== text) {
+    messages.push({ role: role, content: text });
+    localStorage.setItem('voiceMessages', JSON.stringify(messages.slice(-200)));
+  }
+}
+
+function _appendVoiceChatBubble(role, content) {
+  var output = document.getElementById('txtOutput');
+  var text = String(content || '').trim();
+  if (!output || !text) return;
+  var className = role === 'user' ? 'user-bubble' : 'eva-bubble';
+  var bubbles = output.querySelectorAll('.chat-bubble.' + className);
+  var latest = bubbles.length ? bubbles[bubbles.length - 1] : null;
+  var latestText = latest ? String(latest.textContent || '').replace(/^(?:You|Eva):\s*/, '').trim() : '';
+  if (latestText === text) return;
+  var bubble = document.createElement('div');
+  bubble.className = 'chat-bubble ' + className;
+  var label = document.createElement('span');
+  label.className = role === 'user' ? 'user' : 'eva';
+  label.textContent = role === 'user' ? 'You:' : 'Eva:';
+  bubble.append(label, document.createTextNode(' ' + text));
+  output.appendChild(bubble);
+  output.scrollTop = output.scrollHeight;
+}
+
+function recordConversationTurn(userText, assistantText) {
+  var user = String(userText || '').trim();
+  var assistant = String(assistantText || '').trim();
+  if (user) {
+    _appendVoiceSessionMessage('user', user);
+    _appendVoiceChatBubble('user', user);
+  }
+  if (assistant) {
+    _appendVoiceSessionMessage('assistant', assistant);
+    _appendVoiceChatBubble('assistant', assistant);
+  }
+  return saveCurrentSession();
+}
+
+function recordSpokenEvaText(text) {
+  var assistant = String(text || '').trim();
+  if (!assistant) return Promise.resolve();
+  _appendVoiceSessionMessage('assistant', assistant);
+  _appendVoiceChatBubble('assistant', assistant);
+  return saveCurrentSession();
+}
+
+function _saveSessionRecoveryCopy(id, snapshot) {
+  try {
+    localStorage.setItem('session_' + id, JSON.stringify(snapshot));
+  } catch (error) {
+    console.warn('[Sessions] Local recovery copy could not be saved:', error && error.name ? error.name : 'storage unavailable');
+  }
+}
+
+function _showSessionRestoreUnavailable(id) {
+  var indexEntry = _getSessionIndex().find(function(entry) { return entry.id === id; });
+  var output = document.getElementById('txtOutput');
+  if (output) {
+    output.replaceChildren();
+    var notice = document.createElement('div');
+    notice.className = 'session-restore-unavailable';
+    var heading = document.createElement('strong');
+    heading.textContent = indexEntry && indexEntry.title ? indexEntry.title : 'Saved session';
+    var message = document.createElement('span');
+    message.textContent = 'The session name is still indexed, but its transcript snapshot is unavailable on this installation.';
+    notice.append(heading, message);
+    output.appendChild(notice);
+  }
+  if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
+  if (typeof setStatus === 'function') setStatus('error', 'This saved session is unavailable. Its index entry was preserved.');
+}
+
 /** Auto-save the current session (call on every send and periodically) */
 function saveCurrentSession() {
   var snapshot = _snapshotSession();
@@ -212,7 +292,9 @@ function saveCurrentSession() {
     }
   }
 
-  // Save to IndexedDB (async, non-blocking)
+  // IndexedDB is the primary store; retain the legacy key as a recovery copy
+  // because packaged file origins can change across AppImage rebuilds.
+  _saveSessionRecoveryCopy(id, snapshot);
   var savePromise = idbSaveSession(id, snapshot).catch(function(e) {
     console.error('[Sessions] IDB save failed:', e);
   });
@@ -251,6 +333,9 @@ function loadSession(id) {
   // avoids a read/restore race when users switch sessions quickly.
   return Promise.resolve(saveCurrentSession()).then(function() {
     return idbLoadSession(id);
+  }).catch(function(error) {
+    console.warn('[Sessions] IDB load failed:', error && error.name ? error.name : 'storage unavailable');
+    return null;
   }).then(function(data) {
     if (!data) {
       var legacy = localStorage.getItem('session_' + id);
@@ -258,7 +343,6 @@ function loadSession(id) {
         try {
           data = JSON.parse(legacy);
           idbSaveSession(id, data).then(function() {
-            localStorage.removeItem('session_' + id);
           }).catch(function() {});
         } catch (error) {
           data = null;
@@ -266,23 +350,7 @@ function loadSession(id) {
       }
     }
     if (!data) {
-      var indexEntry = _getSessionIndex().find(function(entry) { return entry.id === id; });
-      var output = document.getElementById('txtOutput');
-      if (output) {
-        output.replaceChildren();
-        var notice = document.createElement('div');
-        notice.className = 'session-restore-unavailable';
-        var heading = document.createElement('strong');
-        heading.textContent = indexEntry && indexEntry.title ? indexEntry.title : 'Saved session';
-        var message = document.createElement('span');
-        message.textContent = 'The session name is still indexed, but its transcript snapshot is unavailable on this installation.';
-        notice.append(heading, message);
-        output.appendChild(notice);
-      }
-      var unavailablePanel = document.getElementById('sessionPanel');
-      if (unavailablePanel) unavailablePanel.setAttribute('aria-hidden', 'true');
-      if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
-      if (typeof setStatus === 'function') setStatus('error', 'This saved session is unavailable. Its index entry was preserved.');
+      _showSessionRestoreUnavailable(id);
       return false;
     }
     _restoreSession(data);
@@ -297,6 +365,7 @@ function loadSession(id) {
     return true;
   }).catch(function(e) {
     console.error('Failed to load session:', e);
+    _showSessionRestoreUnavailable(id);
     return false;
   });
 }
