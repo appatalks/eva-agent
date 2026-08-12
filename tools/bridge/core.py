@@ -584,6 +584,21 @@ def _dispatch_workspace_run(run):
         raise WorkspaceError("Workspace agent could not start: " + str(error))
 
 
+def _revoke_missing_local_mcp_servers(config, manager):
+    """Forget selections that cannot start because their executable is absent."""
+    missing = {
+        name for name, reason in getattr(manager, "start_failures", {}).items()
+        if reason == "command_not_found" and name in config
+    }
+    if not missing:
+        return dict(config)
+    retained = {name: value for name, value in config.items() if name not in missing}
+    _persist_mcp_config(retained)
+    _st.configured_mcp_config = copy.deepcopy(retained)
+    print(f"[LocalMCP] Disabled unavailable servers: {', '.join(sorted(missing))}")
+    return retained
+
+
 def _reserve_subagent_batch(tasks):
     """Atomically reserve every task in a batch or none of them."""
     with _st.subagent_lock:
@@ -1611,8 +1626,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": {"message": error}})
             return
         option_id = str((data or {}).get("option_id") or "")[:120]
-        resolved = any(client.resolve_permission(permission_id, option_id or None) for client in self._acp_clients())
-        self._json_response(200 if resolved else 404, {"resolved": resolved})
+        decision = str((data or {}).get("decision") or "").strip().lower()
+        if decision and decision not in {"allow", "reject"}:
+            self._json_response(400, {"error": {"message": "Permission decision must be allow or reject."}})
+            return
+        resolved = any(
+            client.resolve_permission(permission_id, option_id or None, decision or None)
+            for client in self._acp_clients()
+        )
+        if not resolved:
+            self._json_response(409, {
+                "resolved": False,
+                "decision": "invalid_or_stale",
+                "error": {"message": "Permission approval was stale or unavailable; the action was not cancelled."},
+            })
+            return
+        self._json_response(200, {"resolved": True, "decision": decision or "legacy_option"})
 
     def _learning_signals_list(self):
         if not self._learning_authorized():
@@ -3854,6 +3883,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _mcp_status(self):
         """Return current MCP server configuration status."""
         config = _st.configured_mcp_config
+        local_manager = _st.local_mcp_manager if _st.local_mode else None
+        active_servers = [
+            name for name, server in (local_manager.servers.items() if local_manager else [])
+            if server.alive
+        ]
+        unavailable_servers = dict(getattr(local_manager, "start_failures", {})) if local_manager else {}
         # Redact sensitive env vars (tokens, keys, secrets) before sending to browser
         safe_config = {}
         for srv_name, srv_cfg in config.items():
@@ -3869,7 +3904,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             safe_config[srv_name] = safe_srv
         self._json_response(200, {
             "mcp_servers": safe_config,
-            "active": list(config.keys()) if config else [],
+            "configured": list(config.keys()) if config else [],
+            "active": active_servers if local_manager else (list(config.keys()) if config else []),
+            "unavailable": unavailable_servers,
             "presets": {
                 "azure": {
                     "description": "Azure MCP Server — 42+ Azure services including Kusto/ADX",
@@ -4878,10 +4915,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             else:
                                 self._json_response(502, {"error": {"message": message}})
                             return
+                        response_text = acp_result.get("text", "I'm having trouble processing that right now.")
                         if acp_result.get("permission_cancelled"):
                             response_outcome = "cancelled"
-                            response_reason = "permission-cancelled"
-                        response_text = acp_result.get("text", "I'm having trouble processing that right now.")
+                            permission_reason = str(acp_result.get("permission_reason") or "permission_cancelled")
+                            response_reason = permission_reason.replace("_", "-")
+                            if permission_reason == "user_rejected":
+                                response_text = "The execute action was rejected. No command was run."
+                            elif permission_reason == "permission_timeout":
+                                response_text = "The execute approval expired before a valid decision was received. No command was run."
+                            else:
+                                response_text = "The execute action could not continue because permission resolution was cancelled. No command was run."
                         if acp_result.get("stop_reason") in ("max_tokens", "length"):
                             response_finish_reason = "length"
                         active_model = response_client.model or "acp-default"
@@ -5499,6 +5543,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # clients built with the new server set.
             _reset_acp_pool(_st.acp_client)
             if _st.local_mode:
+                active_servers = []
+                unavailable_servers = {}
                 try:
                     from bridge.local_mcp import LocalMCPManager
                     local_config = dict(mcp_servers)
@@ -5511,13 +5557,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             local_config["eva-web-search"] = {"command": sys.executable, "args": [web_search_path]}
                     replacement_manager = LocalMCPManager()
                     replacement_manager.start_servers(local_config)
+                    mcp_servers = _revoke_missing_local_mcp_servers(mcp_servers, replacement_manager)
                     previous_manager = _st.local_mcp_manager
                     _st.local_mcp_manager = replacement_manager
                     if previous_manager:
                         previous_manager.stop_all()
+                    active_servers = [name for name, server in replacement_manager.servers.items() if server.alive]
+                    unavailable_servers = dict(replacement_manager.start_failures)
                     print(f"[Mode] Refreshed LOCAL mode: {replacement_manager.tool_count} tools")
                 except Exception as local_error:
+                    unavailable_servers = {name: "refresh_failed" for name in mcp_servers}
                     print(f"[Mode] Could not refresh local MCP servers: {local_error}")
+            else:
+                active_servers = list(mcp_servers.keys())
+                unavailable_servers = {}
             if not _st.cognition_enabled:
                 _reload_backend = _resolve_memory_backend()
                 if _reload_backend == "sqlite":
@@ -5529,7 +5582,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(200, {
                 "status": "ok",
                 "message": f"MCP servers configured: {list(mcp_servers.keys())}",
-                "active_servers": list(mcp_servers.keys())
+                "configured_servers": list(mcp_servers.keys()),
+                "active_servers": active_servers,
+                "unavailable_servers": unavailable_servers
             })
         except RuntimeError as e:
             self._json_response(503, {"error": {"message": str(e)}})
@@ -6072,6 +6127,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         mcp_config = dict(_st.configured_mcp_config)
                     if not mcp_config:
                         mcp_config = _load_persisted_mcp_config()
+                    configured_local_mcp = dict(mcp_config)
                     # Always include the web search MCP server for local mode
                     # (replaces Copilot CLI's built-in Bing search)
                     if "eva-web-search" not in mcp_config:
@@ -6095,6 +6151,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         print("[Mode] Warning: no MCP servers configured for local mode")
                     _st.local_mcp_manager = LocalMCPManager()
                     _st.local_mcp_manager.start_servers(mcp_config)
+                    _revoke_missing_local_mcp_servers(configured_local_mcp, _st.local_mcp_manager)
                     print(f"[Mode] Local MCP started: {_st.local_mcp_manager.tool_count} tools from {list(mcp_config.keys())}")
                 except Exception as e:
                     import traceback
@@ -6347,7 +6404,8 @@ def main():
         def _restore_local_mode():
             try:
                 from bridge.local_mcp import LocalMCPManager
-                _local_cfg = dict(mcp_config) if mcp_config else _load_persisted_mcp_config()
+                _configured_local_cfg = dict(mcp_config) if mcp_config else _load_persisted_mcp_config()
+                _local_cfg = dict(_configured_local_cfg)
                 if "eva-web-search" not in _local_cfg:
                     _ws_candidates = [
                         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web_search_mcp.py"),
@@ -6359,6 +6417,7 @@ def main():
                             break
                 _st.local_mcp_manager = LocalMCPManager()
                 _st.local_mcp_manager.start_servers(_local_cfg)
+                _revoke_missing_local_mcp_servers(_configured_local_cfg, _st.local_mcp_manager)
                 print(f"[Mode] Restored LOCAL mode: {_st.local_mcp_manager.tool_count} tools")
             except Exception as e:
                 print(f"[Mode] Failed to restore local mode: {e}")

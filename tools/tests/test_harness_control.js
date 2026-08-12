@@ -19,6 +19,7 @@ let githubAuthorizationCalls = 0;
 let mcpModuleRequest = null;
 let mcpVerificationRequest = null;
 let workspaceCheckObjective = '';
+let workspaceToolsProject = '';
 const window = {
   EvaWorkspaces: {
     openWorkbench() {},
@@ -33,6 +34,10 @@ const window = {
     authorizeGitHub() {
       githubAuthorizationCalls += 1;
       return Promise.resolve();
+    },
+    describeProjectTools(projectName) {
+      workspaceToolsProject = projectName;
+      return Promise.resolve('LLM Assist Private has 1 enabled workspace MCP tool: work-iq.');
     },
         setProjectMcpServerByName(serverName, enabled, projectName) {
       mcpModuleRequest = { serverName, enabled, projectName };
@@ -121,6 +126,16 @@ async function main() {
   assert.strictEqual(enableMcpResult.ok, true);
   assert.deepStrictEqual(mcpModuleRequest, { serverName: 'project-docs', enabled: true, projectName: 'example/repository' });
   assert.strictEqual(harness.resolveNavigationRequest('Disable MCP server project-docs.', { directUser: true }).enabled, false);
+  const workspaceToolsRoute = harness.resolveNavigationRequest("for the LLM Assist Private, what's the enabled tool?", { directUser: true });
+  assert.strictEqual(workspaceToolsRoute.action, 'describe_workspace_tools');
+  assert.strictEqual(workspaceToolsRoute.projectName, 'LLM Assist Private');
+  const workspaceToolsResult = await harness.execute(workspaceToolsRoute, { source: 'voice', userRequest: "for the LLM Assist Private, what's the enabled tool?" });
+  assert.strictEqual(workspaceToolsResult.ok, true);
+  assert.strictEqual(workspaceToolsProject, 'LLM Assist Private');
+  assert.match(workspaceToolsResult.message, /work-iq/);
+  const selectedWorkspaceToolsRoute = harness.resolveNavigationRequest('Which MCP tools are enabled?', { directUser: true });
+  assert.strictEqual(selectedWorkspaceToolsRoute.action, 'describe_workspace_tools');
+  assert.strictEqual(selectedWorkspaceToolsRoute.projectName, '');
   const verifyMcpRoute = harness.resolveNavigationRequest('Verify MCP server project-docs for example/repository is working.', { directUser: true });
   assert.strictEqual(verifyMcpRoute.action, 'verify_workspace_mcp_server');
   const verifyMcpResult = await harness.execute(verifyMcpRoute, { source: 'voice', userRequest: 'Verify MCP server project-docs for example/repository is working.' });

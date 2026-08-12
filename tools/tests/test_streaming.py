@@ -261,11 +261,31 @@ class StreamingContractTests(unittest.TestCase):
                 },
             })
         permission_id = client.list_pending_permissions()[0]["id"]
-        self.assertTrue(client.resolve_permission(permission_id, "reject"))
+        self.assertTrue(client.resolve_permission(permission_id, decision="reject"))
         _, metrics = client._finish_prompt(207)
         self.assertEqual(wire[0], ("notification", "session/cancel", {"sessionId": "workspace-session"}))
         self.assertEqual(wire[1], ("response", 69, {"outcome": {"outcome": "cancelled"}}))
         self.assertTrue(metrics["permission_cancelled"])
+        self.assertEqual(metrics["permission_reason"], "user_rejected")
+
+    def test_semantic_allow_selects_current_allow_once_option(self):
+        client = CallbackACPClient()
+        wire = []
+        client._send_response = lambda request_id, result: wire.append((request_id, result))
+        with patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 70,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-1",
+                    "toolCall": {"toolCallId": "call-semantic-allow", "kind": "execute", "rawInput": {"command": "node", "args": ["-e", "process.exit(0)"]}},
+                    "options": [{"optionId": "current-allow", "kind": "allow_once"}],
+                },
+            })
+        permission_id = client.list_pending_permissions()[0]["id"]
+        self.assertTrue(client.resolve_permission(permission_id, decision="allow"))
+        self.assertEqual(wire, [(70, {"outcome": {"outcome": "selected", "optionId": "current-allow"}})])
+        self.assertEqual(client.list_pending_permissions(), [])
 
     def test_interactive_agent_requires_decision_for_node_transform(self):
         client = CallbackACPClient()
@@ -559,9 +579,9 @@ class StreamingContractTests(unittest.TestCase):
         pending = client.list_pending_permissions()
         self.assertNotIn(sensitive_title, json.dumps(pending))
         self.assertNotIn(sensitive_title, str(emit.call_args_list))
-        self.assertTrue(client.resolve_permission(pending[0]["id"], "forever"))
-        self.assertEqual(wire[0], ("notification", "session/cancel", {"sessionId": "session-1"}))
-        self.assertEqual(wire[1], ("response", 58, {"outcome": {"outcome": "cancelled"}}))
+        self.assertFalse(client.resolve_permission(pending[0]["id"], "forever"))
+        self.assertEqual(wire, [])
+        self.assertEqual(len(client.list_pending_permissions()), 1)
 
     def test_direct_terminal_request_is_rejected_without_execution(self):
         client = CallbackACPClient()

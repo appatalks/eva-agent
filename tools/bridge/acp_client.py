@@ -695,33 +695,56 @@ class ACPClient:
                 "created_at": entry["created_at"],
             } for entry in self.pending_permissions.values()]
 
-    def resolve_permission(self, permission_id, option_id=None):
+    def resolve_permission(self, permission_id, option_id=None, decision=None):
         with self.permission_lock:
-            entry = self.pending_permissions.pop(str(permission_id), None)
+            entry = self.pending_permissions.get(str(permission_id))
         if not entry:
             return False
-        selected = next((
-            option for option in entry["options"]
-            if option["option_id"] == str(option_id or "")
-            and option["kind"] in {"allow_once", "reject_once"}
-        ), None)
-        workspace_rejection = selected and selected["kind"] == "reject_once" and bool(getattr(self, "workspace_run_id", ""))
-        if selected and entry.get("approval_allowed", True) and not workspace_rejection:
+        normalized_decision = str(decision or "").strip().lower()
+        if normalized_decision in {"allow", "reject"}:
+            requested_kind = "allow_once" if normalized_decision == "allow" else "reject_once"
+            selected = next((option for option in entry["options"] if option["kind"] == requested_kind), None)
+        else:
+            selected = next((
+                option for option in entry["options"]
+                if option["option_id"] == str(option_id or "")
+                and option["kind"] in {"allow_once", "reject_once"}
+            ), None)
+        if not selected or (selected["kind"] == "allow_once" and not entry.get("approval_allowed", True)):
+            _telemetry_emit("acp_permission", decision="invalid-decision",
+                            tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
+            return False
+        with self.permission_lock:
+            if self.pending_permissions.pop(str(permission_id), None) is None:
+                return False
+        if selected["kind"] == "allow_once":
             self._send_response(entry["rpc_id"], {"outcome": {"outcome": "selected", "optionId": selected["option_id"]}})
-            decision = selected["kind"] or "selected"
+            resolved_decision = "allow_once"
         else:
             with self._prompt_state_lock:
                 for state in self._active_prompts.values():
                     if state.get("session_id") == entry["session_id"]:
                         state["permission_cancelled"] = True
+                        state["permission_reason"] = "user_rejected"
             self._send_notification("session/cancel", {"sessionId": entry["session_id"]})
             self._send_response(entry["rpc_id"], {"outcome": {"outcome": "cancelled"}})
-            decision = "cancelled"
-        _telemetry_emit("acp_permission", decision=decision, tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
+            resolved_decision = "user-rejected"
+        _telemetry_emit("acp_permission", decision=resolved_decision, tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
         return True
 
     def _expire_permission(self, permission_id):
-        self.resolve_permission(permission_id, None)
+        with self.permission_lock:
+            entry = self.pending_permissions.pop(str(permission_id), None)
+        if not entry:
+            return
+        with self._prompt_state_lock:
+            for state in self._active_prompts.values():
+                if state.get("session_id") == entry["session_id"]:
+                    state["permission_cancelled"] = True
+                    state["permission_reason"] = "permission_timeout"
+        self._send_notification("session/cancel", {"sessionId": entry["session_id"]})
+        self._send_response(entry["rpc_id"], {"outcome": {"outcome": "cancelled"}})
+        _telemetry_emit("acp_permission", decision="expired", tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
 
     # --- Terminal handlers (for ACP tool execution) ---
 
@@ -842,6 +865,7 @@ class ACPClient:
                 "on_event": on_event,
                 "permission_mode": permission_mode,
                 "permission_cancelled": False,
+                "permission_reason": "",
                 "chunk_count": 0,
                 "first_chunk_at": None,
                 "started_at": time.perf_counter(),
@@ -856,6 +880,7 @@ class ACPClient:
         return response_text, {
             "chunk_count": state.get("chunk_count", 0),
             "permission_cancelled": bool(state.get("permission_cancelled")),
+            "permission_reason": str(state.get("permission_reason") or "")[:32],
             "first_chunk_ms": round((first_chunk_at - started_at) * 1000.0, 1)
             if first_chunk_at is not None and started_at is not None else None,
         }
@@ -888,7 +913,8 @@ class ACPClient:
                                 chunk_count=prompt_metrics["chunk_count"],
                                 first_chunk_ms=prompt_metrics["first_chunk_ms"])
                 return {"error": result["error"],
-                    "permission_cancelled": prompt_metrics["permission_cancelled"]}
+                    "permission_cancelled": prompt_metrics["permission_cancelled"],
+                    "permission_reason": prompt_metrics["permission_reason"]}
             stop_reason = result.get("stopReason", "end_turn")
             _telemetry_emit("acp_prompt", model=self.model or "default",
                             prompt_chars=len(text or ""), response_chars=len(response_text or ""),
@@ -899,6 +925,7 @@ class ACPClient:
                 "text": response_text,
                 "stop_reason": stop_reason,
                 "permission_cancelled": prompt_metrics["permission_cancelled"],
+                "permission_reason": prompt_metrics["permission_reason"],
             }
 
         _telemetry_emit("acp_prompt", model=self.model or "default",
@@ -907,7 +934,8 @@ class ACPClient:
                         chunk_count=prompt_metrics["chunk_count"],
                         first_chunk_ms=prompt_metrics["first_chunk_ms"])
         return {"text": response_text, "stop_reason": "end_turn",
-            "permission_cancelled": prompt_metrics["permission_cancelled"]}
+            "permission_cancelled": prompt_metrics["permission_cancelled"],
+            "permission_reason": prompt_metrics["permission_reason"]}
 
     def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None):
         with _pin_acp_client(self) as acquired:

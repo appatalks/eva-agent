@@ -1902,15 +1902,21 @@ function watchACPPermissions(durationMs) {
   _scheduleACPPermissionPoll(0);
 }
 
-function _resolveACPPermission(permissionId, optionId, bubble) {
+function _resolveACPPermission(permissionId, decision, bubble) {
   backgroundBridgeRequest('/v1/acp/permissions/' + encodeURIComponent(permissionId), {
     method: 'POST',
     headers: getBridgeCapabilityHeaders(),
-    body: JSON.stringify({ option_id: optionId || '' })
+    body: JSON.stringify({ decision: decision })
   }).then(function() {
     if (bubble && bubble.parentNode) bubble.parentNode.removeChild(bubble);
     _scheduleACPPermissionPoll(0);
-  }).catch(function() {});
+  }).catch(function(error) {
+    var message = document.createElement('div');
+    message.className = 'error';
+    message.textContent = error.message || 'Permission could not be resolved; no command was run.';
+    if (bubble) bubble.appendChild(message);
+    setStatus('error', message.textContent);
+  });
 }
 
 function _renderACPPermission(permission) {
@@ -1934,12 +1940,12 @@ function _renderACPPermission(permission) {
   allowButton.className = 'auth-toggle';
   allowButton.textContent = 'Allow once';
   allowButton.disabled = !allow || permission.approval_allowed === false;
-  allowButton.addEventListener('click', function() { _resolveACPPermission(permission.id, allow && allow.option_id, bubble); });
+  allowButton.addEventListener('click', function() { _resolveACPPermission(permission.id, 'allow', bubble); });
   var rejectButton = document.createElement('button');
   rejectButton.type = 'button';
   rejectButton.className = 'auth-toggle';
   rejectButton.textContent = 'Reject';
-  rejectButton.addEventListener('click', function() { _resolveACPPermission(permission.id, reject && reject.option_id, bubble); });
+  rejectButton.addEventListener('click', function() { _resolveACPPermission(permission.id, 'reject', bubble); });
   actions.appendChild(allowButton);
   actions.appendChild(rejectButton);
   bubble.appendChild(actions);
@@ -5986,7 +5992,7 @@ async function sendData() {
           if (typeof setStatus === 'function') {
             setStatus(nativeResult.ok ? 'info' : 'error', nativeResult.message);
           }
-          if (nativeRoute.action === 'run_workspace_check') {
+          if (nativeRoute.action === 'run_workspace_check' || nativeRoute.action === 'describe_workspace_tools') {
             injectWorkspaceStatusBubble(nativeResult.message, nativeResult.ok ? 'working' : 'error');
           }
           evaAuditEvent('native_action', evaAuditOutcome(nativeResult && nativeResult.data && nativeResult.data.outcome, nativeResult.ok), {
@@ -5994,7 +6000,7 @@ async function sendData() {
             action: nativeRoute.action || 'navigate',
             label: nativeRoute.target || ''
           });
-          if ((nativeRoute.action === 'describe_workspaces' || nativeRoute.action === 'consider_terminal_task' || nativeRoute.action === 'continue_github_repositories') && nativeResult.ok && typeof speakText === 'function') speakText(nativeResult.message);
+          if ((nativeRoute.action === 'describe_workspaces' || nativeRoute.action === 'describe_workspace_tools' || nativeRoute.action === 'consider_terminal_task' || nativeRoute.action === 'continue_github_repositories') && nativeResult.ok && typeof speakText === 'function') speakText(nativeResult.message);
           return;
         }
       }

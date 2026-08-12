@@ -457,6 +457,22 @@ function populateMCPForm(cfg) {
   if (cuCheck) cuCheck.checked = !!cfg['computer-use-linux'];
 }
 
+function forgetMissingMCPSelections(config, unavailable) {
+  var retained = Object.assign({}, config || {});
+  var changed = false;
+  Object.keys(unavailable || {}).forEach(function(name) {
+    if (unavailable[name] === 'command_not_found' && retained[name]) {
+      delete retained[name];
+      changed = true;
+    }
+  });
+  if (changed) {
+    localStorage.setItem('mcp_config', JSON.stringify(retained));
+    populateMCPForm(retained);
+  }
+  return retained;
+}
+
 // Re-apply the saved MCP config to a freshly started bridge.
 // The bridge is a new process on every launch with no MCP servers configured,
 // so without this the user would have to re-Configure Kusto/Azure/GitHub MCP
@@ -530,7 +546,9 @@ async function _applySavedMCPConfig(githubPat) {
       if (resp.ok) {
         _lastAutoAppliedMCPPat = githubPat;
         var data = await resp.json();
-        setStatus('info', 'MCP restored: ' + ((data.active_servers || []).join(', ') || 'none'));
+        saved = forgetMissingMCPSelections(saved, data.unavailable_servers);
+        var unavailable = Object.keys(data.unavailable_servers || {});
+        setStatus(unavailable.length ? 'error' : 'info', 'MCP restored: ' + ((data.active_servers || []).join(', ') || 'none') + (unavailable.length ? '. Unavailable: ' + unavailable.join(', ') : ''));
         if (typeof refreshMCPStatus === 'function') refreshMCPStatus();
         return;
       }
@@ -608,7 +626,9 @@ async function applyMCPConfig() {
     });
     var data = await resp.json();
     if (resp.ok) {
-      setStatus('info', 'MCP configured: ' + (data.active_servers || []).join(', '));
+      mcpServers = forgetMissingMCPSelections(mcpServers, data.unavailable_servers);
+      var unavailable = Object.keys(data.unavailable_servers || {});
+      setStatus(unavailable.length ? 'error' : 'info', 'MCP configured: ' + ((data.active_servers || []).join(', ') || 'none') + (unavailable.length ? '. Unavailable: ' + unavailable.join(', ') : ''));
       refreshMCPStatus();
       return { ok: true, data: data, bridgeUrl: bridgeUrl, mcpServers: mcpServers };
     } else {
@@ -785,19 +805,23 @@ async function refreshMCPStatus() {
     if (resp.ok) {
       var data = await resp.json();
       var active = data.active || [];
+      var unavailable = Object.keys(data.unavailable || {});
       if (active.length > 0) {
         statusEl.innerHTML = '<strong>Active MCP Servers:</strong> ' + active.map(function(s) { return '<span class="mcp-badge">' + escapeHtml(s) + '</span>'; }).join(' ');
-        // Sync checkboxes
-        var azureCheck = document.getElementById('mcpAzure');
-        var githubCheck = document.getElementById('mcpGitHub');
-      if (azureCheck) azureCheck.checked = active.indexOf('azure-mcp-server') >= 0;
-      if (githubCheck) githubCheck.checked = active.indexOf('github-mcp-server') >= 0;
-        // Kusto
-        var kustoCheckS = document.getElementById('mcpKusto');
-        if (kustoCheckS) kustoCheckS.checked = active.indexOf('kusto-mcp-server') >= 0;
       } else {
         statusEl.innerHTML = '<em>No MCP servers active</em>';
       }
+      if (unavailable.length) statusEl.innerHTML += '<div><strong>Unavailable:</strong> ' + unavailable.map(escapeHtml).join(', ') + '</div>';
+      var presetStates = {
+        mcpAzure: 'azure-mcp-server',
+        mcpGitHub: 'github-mcp-server',
+        mcpKusto: 'kusto-mcp-server',
+        mcpComputerUse: 'computer-use-linux'
+      };
+      Object.keys(presetStates).forEach(function(id) {
+        var checkbox = document.getElementById(id);
+        if (checkbox) checkbox.checked = active.indexOf(presetStates[id]) >= 0;
+      });
     } else {
       statusEl.innerHTML = '<em>Bridge unreachable</em>';
     }

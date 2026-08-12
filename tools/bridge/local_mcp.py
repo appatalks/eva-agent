@@ -417,6 +417,7 @@ class LocalMCPManager:
     def __init__(self):
         self.servers = {}         # name -> MCPServer
         self._tool_map = {}       # tool_name -> server_name
+        self.start_failures = {}  # name -> content-free reason
 
     def start_servers(self, mcp_config):
         """Start MCP servers from config dict (same format as mcp.json mcpServers)."""
@@ -426,6 +427,7 @@ class LocalMCPManager:
             env = cfg.get("env", {})
             unresolved_flags = [key for key in env if str(key).startswith("_")]
             if unresolved_flags:
+                self.start_failures[name] = "credentials_unresolved"
                 print(f"[LocalMCP] Skipping {name}: credentials are not resolved yet")
                 continue
             try:
@@ -437,6 +439,7 @@ class LocalMCPManager:
                     if tname:
                         self._tool_map[tname] = name
             except Exception as e:
+                self.start_failures[name] = "command_not_found" if "command not found" in str(e).lower() else "start_failed"
                 print(f"[LocalMCP] Failed to start {name}: {e}")
 
     def list_tools(self):

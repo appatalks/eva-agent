@@ -5,7 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / ".github" / "scripts"))
 
 from readiness_maintainer_comment import category_from_review, comment_body, trusted_marker_comment
 

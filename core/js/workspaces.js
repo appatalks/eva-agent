@@ -203,16 +203,16 @@ var EvaWorkspaces = (function() {
     return button;
   }
 
-  async function resolveWorkspacePermission(permission, option) {
+  async function resolveWorkspacePermission(permission, decision) {
     if (typeof backgroundBridgeRequest !== 'function' || typeof getBridgeCapabilityHeaders !== 'function') return;
     try {
       await backgroundBridgeRequest('/v1/acp/permissions/' + encodeURIComponent(permission.id), {
         method: 'POST',
         headers: getBridgeCapabilityHeaders(),
-        body: JSON.stringify({ option_id: option ? option.option_id : '' })
+        body: JSON.stringify({ decision: decision })
       });
       state.pendingPermissions = state.pendingPermissions.filter(function(item) { return item.id !== permission.id; });
-      status(option ? 'Workspace execution approved once.' : 'Workspace execution rejected.', option ? 'success' : 'error');
+      status(decision === 'allow' ? 'Workspace execution approved once.' : 'Workspace execution rejected.', decision === 'allow' ? 'success' : 'error');
       if (state.workbenchOpen) renderWorkbench();
     } catch (error) {
       status(error.message || 'Workspace permission could not be resolved.', 'error');
@@ -235,8 +235,8 @@ var EvaWorkspaces = (function() {
       actions.className = 'workspace-monitor-detail-actions';
       var allow = (permission.options || []).find(function(option) { return option.kind === 'allow_once'; });
       actions.append(
-        actionButton('Allow once', 'Allow this workspace action once', function() { resolveWorkspacePermission(permission, allow); }, !allow || permission.approvalAllowed === false),
-        actionButton('Reject', 'Reject this workspace action', function() { resolveWorkspacePermission(permission, null); })
+        actionButton('Allow once', 'Allow this workspace action once', function() { resolveWorkspacePermission(permission, 'allow'); }, !allow || permission.approvalAllowed === false),
+        actionButton('Reject', 'Reject this workspace action', function() { resolveWorkspacePermission(permission, 'reject'); })
       );
       section.append(message, actions);
     });
@@ -1053,6 +1053,25 @@ var EvaWorkspaces = (function() {
     return 'I can access ' + state.projects.length + ' coding workspace' + (state.projects.length === 1 ? '' : 's') + ': ' + names.join(', ') + (remaining > 0 ? ', and ' + remaining + ' more' : '') + '. There ' + (activeRuns === 1 ? 'is 1 active coding run' : 'are ' + activeRuns + ' active coding runs') + '.';
   }
 
+  async function describeProjectTools(projectName) {
+    if (!supported()) throw new Error('Coding workspaces are unavailable in this Eva launch.');
+    var projects = await api().workspaceListProjects();
+    state.projects = Array.isArray(projects) ? projects : [];
+    var query = String(projectName || '').trim().toLowerCase();
+    var project = query
+      ? state.projects.filter(function(item) { return String(item.name || '').trim().toLowerCase() === query; })[0]
+      : projectById(state.selectedProjectId);
+    if (!project) throw new Error(query ? 'No imported workspace matched "' + projectName + '".' : 'Select an imported workspace before checking its enabled tools.');
+    state.selectedProjectId = project.id;
+    var enabled = ((project.mcpServers || {}).servers || []).filter(function(server) {
+      return server.enabled === true;
+    }).map(function(server) {
+      return String(server.name || '').trim();
+    }).filter(Boolean);
+    if (!enabled.length) return 'No workspace MCP tools are enabled for ' + project.name + '.';
+    return project.name + ' has ' + enabled.length + ' enabled workspace MCP tool' + (enabled.length === 1 ? ': ' : 's: ') + enabled.join(', ') + '.';
+  }
+
   function mcpContext() {
     var modules = [];
     state.projects.forEach(function(project) {
@@ -1561,6 +1580,7 @@ var EvaWorkspaces = (function() {
     toggle: toggle,
     refresh: refresh,
     describe: describeCurrent,
+    describeProjectTools: describeProjectTools,
     mcpContext: mcpContext,
     openWorkbench: openWorkbench,
     closeWorkbench: closeWorkbench,
