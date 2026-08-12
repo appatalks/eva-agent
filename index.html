@@ -416,10 +416,12 @@
           <span id="workspaceMonitorUpdated" class="workspace-monitor-updated">STANDBY</span>
           <button id="workspaceAddProjectWorkbenchBtn" class="workspace-monitor-btn" type="button" title="Import a local Git project">Import workspace</button>
           <button id="workspaceImportGitHubBtn" class="workspace-monitor-btn" type="button" title="Import a public GitHub repository">Import GitHub</button>
+          <button id="workspaceCollapseGitHubBtn" class="workspace-monitor-icon" type="button" title="Hide listed GitHub repositories" aria-label="Hide listed GitHub repositories" hidden>&times;</button>
           <button id="workspaceMonitorRefreshBtn" class="workspace-monitor-icon" type="button" title="Refresh workspace activity" aria-label="Refresh workspace activity">&#x21BB;</button>
           <button id="workspaceMonitorCloseBtn" class="workspace-monitor-icon" type="button" title="Return to chat" aria-label="Return to chat">&times;</button>
         </div>
       </header>
+      <div id="workspaceGitHubRepositories" class="workspace-github-repositories" hidden aria-live="polite"></div>
       <div class="workspace-monitor-metrics" aria-label="Workspace monitor summary">
         <div><span>WORKSPACES</span><strong id="workspaceMonitorProjectCount">0</strong></div>
         <div><span>ACTIVE RUNS</span><strong id="workspaceMonitorActiveRuns">0</strong></div>
@@ -428,7 +430,7 @@
       </div>
       <div class="workspace-workbench-body">
         <nav class="workspace-monitor-nav workspace-monitor-projects" aria-label="Workspaces">
-          <div class="workspace-monitor-pane-header">WORKSPACES</div>
+          <div class="workspace-monitor-pane-header"><span>WORKSPACES</span><button id="workspaceListGitHubBtn" class="workspace-monitor-icon" type="button" title="List repositories available from your GitHub account" aria-label="List GitHub repositories">&#x2261;</button></div>
           <div id="workspaceWorkbenchProjects" class="workspace-monitor-runs"></div>
         </nav>
         <nav class="workspace-monitor-nav" aria-label="Coding runs">
@@ -723,6 +725,13 @@
         <div id="memoryBackendGeneralStatus" style="margin:4px 0;font-size:11px;opacity:0.7"></div>
 
         <hr style="margin:14px 0;border:none;border-top:1px solid rgba(127,127,127,0.25)">
+        <label for="verboseDiagnostics">Verbose diagnostics:</label>
+        <input type="checkbox" id="verboseDiagnostics">
+        <div class="auth-note" style="margin:4px 0 10px;font-size:11px;opacity:0.75">
+          Adds local route, provider, MCP source/count, permission, and timing events to diagnostics. Prompts, responses, commands, credentials, and configuration values are excluded.
+        </div>
+
+        <hr style="margin:14px 0;border:none;border-top:1px solid rgba(127,127,127,0.25)">
         <div class="auth-note" style="margin:0">
           <strong>About</strong><br>
           Eva AI Assistant <span id="evaAppVersion">v5.5.10</span><br>
@@ -850,13 +859,20 @@
                 <dd id="aigModelOutputCost">$1.20</dd>
               </div>
             </dl>
+            <label for="selAIGModelPolicy" style="margin-top:8px">Response policy:</label>
+            <select id="selAIGModelPolicy">
+              <option value="pinned" selected>Pinned selected backend</option>
+              <option value="auto-balanced">Auto Balanced (shadow evaluation)</option>
+              <option value="auto-fast">Auto Fast (shadow evaluation)</option>
+            </select>
+            <p class="auth-note" style="margin-top:4px">Auto policies currently record a recommendation for response-time and reliability evaluation. Eva continues using the selected backend until automatic switching is explicitly enabled after validation.</p>
           </div>
           <div class="model-opt" id="opt-lmstudio-config">
             <label for="aigLmStudioBaseUrl">LM Studio base URL:</label>
             <input type="text" id="aigLmStudioBaseUrl" placeholder="http://localhost:1234/v1" style="width:100%">
             <label for="aigLmStudioModel" style="margin-top:6px">LM Studio model name:</label>
-            <input type="text" id="aigLmStudioModel" placeholder="granite-3.1-8b-instruct" style="width:100%">
-            <p class="auth-note" style="margin-top:4px">Used when "LM Studio (configured model)" is selected as Eva or cognition backend. Make sure LM Studio's local server is running with this model loaded.</p>
+            <input type="text" id="aigLmStudioModel" placeholder="Automatic - use the model loaded in LM Studio" style="width:100%">
+            <p class="auth-note" style="margin-top:4px">Leave blank to use the model currently loaded in LM Studio. Enter a name only to override automatic selection.</p>
           </div>
           <div id="opt-acpModel" class="model-opt" style="display:none">
             <label for="selACPModel">ACP Model:</label>
@@ -922,11 +938,14 @@
         </div>
 
         <div class="auth-field">
-          <label for="authGitHub">GitHub PAT (Copilot Models API):</label>
+          <label for="authGitHub">GitHub PAT (Models and private repository imports):</label>
           <div class="auth-input-wrap">
             <input type="password" id="authGitHub" placeholder="ghp_... or github_pat_..." autocomplete="off">
             <button type="button" class="auth-toggle" onclick="toggleAuthVis(this)" aria-label="Show/hide key">Show</button>
           </div>
+          <p class="auth-note">For private repository imports, grant the selected repository Contents: Read access. Fine-grained tokens must include that repository; classic tokens need the <code>repo</code> scope.</p>
+          <button id="authGitHubCliBtn" type="button" class="auth-toggle" title="Authorize GitHub CLI using a device code">Authorize GitHub CLI</button>
+          <p class="auth-note">Eva opens the GitHub device page and copies the one-time code. Complete sign-in in GitHub; the credential stays in GitHub CLI storage.</p>
         </div>
 
         <div class="auth-field">

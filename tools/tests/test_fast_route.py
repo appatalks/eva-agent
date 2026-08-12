@@ -36,6 +36,21 @@ def main():
         "search github for a function",
         _classify_request_type("search github for a function"),
     )
+    for message in (
+        "List open GitHub issues for owner/repository.",
+        "Review pull requests in GitHub.",
+        "Check the latest GitHub release for owner/repository.",
+        "Show GitHub workflow runs for owner/repository.",
+    ):
+        assert _classify_request_type(message.lower()) == "github-data", message
+        assert _needs_acp_preflight(message.lower(), "github-data"), message
+        assert _select_acp_tool_profile(message, "github-data") == "github", message
+    for message in (
+        "Explain GitHub merge conflicts.",
+        "How does GitHub delete a branch work?",
+    ):
+        assert _classify_request_type(message.lower()) == "general", message
+        assert not _needs_acp_preflight(message.lower(), "general"), message
     assert _needs_acp_preflight(
         "what is the current stock price for aapl",
         _classify_request_type("what is the current stock price for aapl"),
@@ -71,6 +86,7 @@ def main():
     routed_news = _effective_routing_message(wrapped_prompt, True, news_query)
     assert _classify_request_type(routed_news.lower()) == "news-search"
     assert _needs_acp_preflight(routed_news.lower(), "news-search")
+    assert _classify_request_type("How does GitHub Actions work?") == "general"
     print("fast route tests: PASS")
 
 

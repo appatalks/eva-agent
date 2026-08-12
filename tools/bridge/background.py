@@ -611,7 +611,9 @@ def _bg_agent_prompt(prompt_text, ctx, timeout=120):
     if _st.acp_client is None or not getattr(_st.acp_client, "alive", False):
         return None, "agent unavailable"
     try:
-        result = _st.acp_client.prompt(prompt_text, timeout=timeout)
+        from bridge.acp_client import _acquire_acp_client
+        with _acquire_acp_client(_st.acp_client.model or "", tool_profile="web") as (client, detail):
+            result = client.prompt(prompt_text, timeout=timeout) if client else {"error": detail}
     except Exception as agent_error:
         return None, "agent error: " + str(agent_error)[:200]
     if isinstance(result, dict):

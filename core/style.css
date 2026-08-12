@@ -971,6 +971,11 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .workspace-kicker { color: #78dce8; font: 600 10px monospace; letter-spacing: 0.15em; }
 .workspace-workbench-header h1 { margin: 3px 0 0; color: #f2fdff; font-size: 24px; font-weight: 600; }
 .workspace-workbench-actions { display: flex; align-items: center; gap: 8px; }
+.workspace-github-repositories { margin: 0 18px 10px; max-height: 180px; overflow-y: auto; border: 1px solid rgba(120,220,232,0.24); background: rgba(12,29,42,0.88); }
+.workspace-github-repository { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid rgba(120,220,232,0.14); color: #d9fbff; font: 12px monospace; }
+.workspace-github-repository:last-child { border-bottom: 0; }
+.workspace-github-repository-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-github-repository button { flex: 0 0 auto; }
 .workspace-monitor-updated { margin-right: 8px; color: #73979c; font: 10px monospace; }
 .workspace-monitor-btn,
 .workspace-monitor-icon { min-height: 34px; border: 1px solid rgba(120,220,232,0.28); border-radius: 3px; background: rgba(120,220,232,0.045); color: #c5fbff; cursor: pointer; font: 600 11px monospace; }
@@ -1255,8 +1260,11 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
   .agent-graph-heading { padding: 8px 12px 5px; }
   .agent-graph-legend span:not(:last-child) { display: none; }
   body.workspace-workbench-open .workspace-workbench { grid-template-rows: auto auto minmax(0, 1fr); }
-  .workspace-workbench-header { padding: 12px 14px 9px; }
+  .workspace-workbench-header { align-items: flex-start; flex-wrap: wrap; padding: 12px 14px 9px; }
   .workspace-workbench-header h1 { font-size: 19px; }
+  .workspace-workbench-actions { flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+  .workspace-workbench-actions .workspace-monitor-btn { min-height: 32px; padding: 0 8px; font-size: 10px; }
+  .workspace-workbench-actions .workspace-monitor-icon { min-height: 32px; width: 32px; }
   .workspace-monitor-updated { display: none; }
   .workspace-monitor-metrics { grid-template-columns: repeat(2, 1fr); }
   .workspace-monitor-metrics > div { padding: 7px 12px; }

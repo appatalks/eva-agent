@@ -9,6 +9,10 @@ __pycache__/
 
 # Runtime / temp data
 *.data
+memory.db
+memory.db-shm
+memory.db-wal
+backups/
 core/external/*.data
 audio/
 *.wav
@@ -54,6 +58,7 @@ standalone/dist/
 standalone/dist-*/
 standalone/out/
 *.AppImage
+core/img/eva-memory-graph.png
 
 # Local-only agent knowledge for the maintainer (never committed).
 # Holds dev topology, cluster URLs, recurring commands, and agent playbooks

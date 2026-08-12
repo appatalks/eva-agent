@@ -158,7 +158,7 @@ class StreamingContractTests(unittest.TestCase):
             "outcome": {"outcome": "selected", "optionId": "allow-once"}
         })])
         self.assertEqual(client.list_pending_permissions(), [])
-        self.assertEqual(emit.call_args.kwargs["decision"], "workspace-auto-allow")
+        self.assertEqual(emit.call_args.kwargs["decision"], "workspace-auto-allow-tool")
 
     def test_workspace_agent_auto_allows_explicit_read_only_execute_once(self):
         client = CallbackACPClient()
@@ -184,7 +184,7 @@ class StreamingContractTests(unittest.TestCase):
             "outcome": {"outcome": "selected", "optionId": "allow-once"}
         })])
         self.assertEqual(client.list_pending_permissions(), [])
-        self.assertEqual(emit.call_args.kwargs["decision"], "workspace-auto-allow-read-execute")
+        self.assertEqual(emit.call_args.kwargs["decision"], "workspace-auto-allow-execute")
 
     def test_interactive_agent_auto_allows_explicit_read_only_execute_once(self):
         client = CallbackACPClient()
@@ -385,8 +385,8 @@ class StreamingContractTests(unittest.TestCase):
         self.assertEqual(responses, [])
         self.assertEqual(len(client.list_pending_permissions()), 1)
 
-    def test_workspace_agent_requires_explicit_decision_for_mutating_tool(self):
-        for index, tool_kind in enumerate(("execute", "edit", "delete", "other")):
+    def test_workspace_agent_auto_allows_local_edit_but_gates_opaque_or_destructive_tools(self):
+        for index, tool_kind in enumerate(("edit", "delete", "other")):
             with self.subTest(tool_kind=tool_kind):
                 client = CallbackACPClient()
                 responses = []
@@ -407,10 +407,36 @@ class StreamingContractTests(unittest.TestCase):
                         },
                     })
                 client._finish_prompt(203 + index)
-                self.assertEqual(responses, [])
-                pending = client.list_pending_permissions()
-                self.assertEqual(len(pending), 1)
-                self.assertEqual(pending[0]["tool_kind"], tool_kind)
+                if tool_kind == "edit":
+                    self.assertEqual(responses, [(63 + index, {"outcome": {"outcome": "selected", "optionId": "allow-once"}})])
+                    self.assertEqual(client.list_pending_permissions(), [])
+                else:
+                    self.assertEqual(responses, [])
+                    pending = client.list_pending_permissions()
+                    self.assertEqual(len(pending), 1)
+                    self.assertEqual(pending[0]["tool_kind"], tool_kind)
+
+    def test_workspace_agent_auto_allows_normal_local_mutations(self):
+        for index, command in enumerate(("git add README.md", "git commit -m update-readme", "npm test", "python3 scripts/check.py")):
+            with self.subTest(command=command):
+                client = CallbackACPClient()
+                responses = []
+                client._send_response = lambda request_id, result: responses.append((request_id, result))
+                client._begin_prompt(240 + index, "workspace-session", None, "workspace_write")
+                with patch("bridge.acp_client._telemetry_emit") as emit:
+                    client._handle_message({
+                        "id": 90 + index,
+                        "method": "session/request_permission",
+                        "params": {
+                            "sessionId": "workspace-session",
+                            "toolCall": {"toolCallId": "call-normal-" + str(index), "kind": "execute", "rawInput": {"command": command}},
+                            "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                        },
+                    })
+                client._finish_prompt(240 + index)
+                self.assertEqual(responses, [(90 + index, {"outcome": {"outcome": "selected", "optionId": "allow-once"}})])
+                self.assertEqual(client.list_pending_permissions(), [])
+                self.assertEqual(emit.call_args.kwargs["decision"], "workspace-auto-allow-execute")
 
     def test_passive_recall_rejects_tool_immediately(self):
         client = CallbackACPClient()

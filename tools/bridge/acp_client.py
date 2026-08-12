@@ -16,7 +16,7 @@ from bridge import state as _st
 from bridge.utils import _safe_child_environment
 from bridge.kusto import _inject_kusto_token
 from bridge.learning import get_consent as _get_learning_consent
-from bridge.telemetry import _telemetry_emit
+from bridge.telemetry import _telemetry_emit, _verbose_debug_emit
 
 _ACP_POOL_MAX = _cfg.ACP_POOL_MAX
 _ACP_SESSION_MAX = _cfg.ACP_SESSION_MAX
@@ -27,6 +27,18 @@ _ACP_TOOL_PROFILES = _cfg.ACP_TOOL_PROFILES
 _SECRET_MARKERS = ("TOKEN", "KEY", "SECRET", "PAT", "PASSWORD", "CREDENTIAL")
 _WORKSPACE_READ_ONLY_COMMANDS = {"pwd", "ls", "git"}
 _WORKSPACE_READ_ONLY_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "rev-parse"}
+_WORKSPACE_SENSITIVE_COMMANDS = {
+    "sudo", "su", "doas", "pkexec", "rm", "shred", "mkfs", "fdisk", "parted", "dd",
+    "mount", "umount", "chmod", "chown", "chgrp", "curl", "wget", "ssh", "scp", "sftp",
+    "nc", "ncat", "telnet", "ftp", "rsync", "docker", "kubectl", "gh", "aws", "az",
+    "gcloud", "npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "poetry", "gem", "cargo",
+}
+_WORKSPACE_SENSITIVE_PATH_RE = re.compile(
+    r"(?:^|[/\s])(?:\.env(?:\.[A-Za-z0-9_.-]+)?|\.ssh|\.aws|\.azure|\.npmrc|\.pypirc|"
+    r"\.netrc|\.git-credentials|id_rsa|id_ed25519|kubeconfig|service-account|hosts\.yml|"
+    r"config\.json|config\.local\.(?:js|json))(?:[/\s]|$)",
+    re.IGNORECASE,
+)
 
 
 def _tool_call_command(tool_call):
@@ -100,6 +112,45 @@ def _workspace_read_only_execute(tool_call, cwd=None):
         if any(part == "-c" or part.startswith("-c=") or part.split("=", 1)[0] in forbidden_git for part in parts[2:]):
             return False
         return all(_workspace_local_path(part, cwd) for part in parts[2:])
+    return False
+
+
+def _workspace_sensitive_execute(tool_call, cwd=None):
+    """Return true when a workspace command needs an explicit user decision."""
+    command = _tool_call_command(tool_call)
+    if not command or re.search(r"[\n\r;|&><`] |\$\(|\$\{", command, re.VERBOSE):
+        return True
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        return True
+    if not parts:
+        return True
+    executable = os.path.basename(parts[0]).lower()
+    arguments = parts[1:]
+    if executable in {"node", "nodejs", "python", "python3", "ruby", "perl", "php"} and any(
+        argument in {"-c", "-e", "--eval"} for argument in arguments
+    ):
+        return True
+    if executable in _WORKSPACE_SENSITIVE_COMMANDS:
+        if executable not in {"npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "poetry", "gem", "cargo"}:
+            return True
+        if any(argument in {"install", "add", "remove", "uninstall", "publish", "login", "logout"} for argument in arguments):
+            return True
+    if executable in {"bash", "sh", "zsh", "fish", "env", "eval", "source"}:
+        return True
+    if executable == "git":
+        if len(arguments) < 1:
+            return True
+        if arguments[0] in {"push", "fetch", "pull", "clone", "remote", "submodule", "clean", "reset", "rebase", "filter-repo"}:
+            return True
+        if any(argument == "--hard" or argument.startswith("--force") for argument in arguments[1:]):
+            return True
+    for argument in arguments:
+        if any(marker in argument.upper() for marker in _SECRET_MARKERS) or _WORKSPACE_SENSITIVE_PATH_RE.search(argument):
+            return True
+        if not argument.startswith("-") and not _workspace_local_path(argument, cwd):
+            return True
     return False
 
 
@@ -553,6 +604,7 @@ class ACPClient:
             ]
         permission_mode = prompt_states[0].get("permission_mode", "interactive") \
             if len(prompt_states) == 1 else "interactive"
+        _verbose_debug_emit("permission_request", tool_kind=tool_kind, permission_mode=permission_mode, option_count=len(options))
         if permission_mode == "passive_recall":
             reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
             if reject_option is None:
@@ -570,11 +622,18 @@ class ACPClient:
             return
         if permission_mode == "workspace_write":
             allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
-            if tool_kind in {"read", "search", "fetch", "think"} and allow_once:
+            if tool_kind in {"read", "search", "fetch", "think", "edit"} and allow_once:
                 self._send_response(rpc_id, {
                     "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
                 })
-                _telemetry_emit("acp_permission", decision="workspace-auto-allow",
+                _telemetry_emit("acp_permission", decision="workspace-auto-allow-tool",
+                                tool_kind=tool_kind, option_count=len(options))
+                return
+            if tool_kind == "execute" and allow_once and not _workspace_sensitive_execute(tool_call, self.cwd):
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
+                })
+                _telemetry_emit("acp_permission", decision="workspace-auto-allow-execute",
                                 tool_kind=tool_kind, option_count=len(options))
                 return
         allow_once = next((option for option in options if option["kind"] == "allow_once"), None)

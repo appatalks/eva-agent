@@ -488,6 +488,15 @@ def _classify_request_type(msg_lower):
     if re.search(r'\b(search the web|web search|look up|google|what happened|who won|search for)\b', m):
         return "web-search"
 
+    github_operation = re.search(
+        r'\b(?:search|find|list|check|review|show|get|open|create|update|close|comment|manage|run|query|'
+        r'merge|delete|push|compare|monitor|trigger)\b', m
+    )
+    github_subject = re.search(r'\b(?:github|github\.com)\b', m)
+    github_explanation = re.match(r'^\s*(?:what|how|why|explain|describe)\b', m) or m.startswith('tell me about')
+    if github_subject and github_operation and not github_explanation:
+        return "github-data"
+
     return "general"
 
 
@@ -567,7 +576,7 @@ def _needs_acp_preflight(msg_lower, request_type):
     message = msg_lower or ""
     if request_type in {
         "news-search", "weather-search", "financial-data",
-        "web-search", "kusto-query", "kusto-operator"
+        "web-search", "github-data", "kusto-query", "kusto-operator"
     }:
         return True
 
@@ -610,6 +619,8 @@ def _select_acp_tool_profile(message, request_type=None, fast_route="", no_tools
     request_type = request_type or _classify_request_type(text)
     if request_type in {"news-search", "weather-search", "financial-data", "web-search"}:
         return "web"
+    if request_type == "github-data":
+        return "github"
     if request_type in {"kusto-query", "kusto-operator"} or re.search(
         r"\b(?:memory|remember|knowledge|goals?|skills?|emotion|kusto|adx|database|schema|table)\b", text
     ):

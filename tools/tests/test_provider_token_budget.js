@@ -379,9 +379,12 @@ async function testGeminiMemoryLifecycle(configuredSystemPrompt, userPrompt) {
 
 function testAcpReflectionOwnership() {
   const source = fs.readFileSync('core/js/copilot.js', 'utf8');
-  assert.ok(source.includes('_copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext, true, payload.session_id)'));
+  assert.ok(source.includes('_copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext, true, payload.session_id, turnId)'));
   assert.ok(source.includes('if (!reflectionHandledByBridge && content && userMessage)'));
   assert.ok(source.includes('session_id: reflectionSessionId ||'));
+  for (const path of ['core/js/aig.js', 'core/js/gpt-core.js', 'core/js/gl-google.js', 'core/js/lm-studio.js', 'core/js/copilot.js']) {
+    assert.ok(fs.readFileSync(path, 'utf8').includes('turn_id: turnId'), path + ' must reuse the captured turn ID for reflection');
+  }
 }
 
 main().catch((error) => {

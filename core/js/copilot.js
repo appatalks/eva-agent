@@ -106,6 +106,7 @@ async function copilotSend() {
   var signalContext = (typeof captureSignalDeliveryContext === 'function')
     ? captureSignalDeliveryContext(sQuestion)
     : null;
+  var turnId = window._evaActiveAuditTurnId || (typeof evaCreateAuditTurnId === 'function' ? evaCreateAuditTurnId() : '');
 
   var selModel = document.getElementById('selModel');
   var mode = getCopilotMode(selModel.value);
@@ -163,15 +164,15 @@ async function copilotSend() {
 
   // Route to the appropriate backend
   if (mode === 'acp') {
-    await _copilotSendACP(existingMessages, sQuestion, txtOutput, storageKey, signalContext);
+    await _copilotSendACP(existingMessages, sQuestion, txtOutput, storageKey, signalContext, turnId);
   } else {
-    await _copilotSendModelsAPI(existingMessages, selModel.value, sQuestion, txtOutput, storageKey, signalContext);
+    await _copilotSendModelsAPI(existingMessages, selModel.value, sQuestion, txtOutput, storageKey, signalContext, turnId);
   }
 }
 
 // --- GitHub Models API mode ---
 
-async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, storageKey, signalContext) {
+async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, storageKey, signalContext, turnId) {
   var githubToken = getAuthKey('GITHUB_PAT');
   var model = modelValue.replace(/^copilot-/, '');
   var requestMessages = EvaPromptBudget.compactMessages(messages, {
@@ -283,7 +284,7 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
     }
 
     var data = await resp.json();
-    _copilotRenderResponse(data, txtOutput, model, question, signalContext, false, contextSessionId);
+    _copilotRenderResponse(data, txtOutput, model, question, signalContext, false, contextSessionId, turnId);
 
   } catch (err) {
     _copilotHandleFetchError(err, txtOutput);
@@ -292,7 +293,7 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
 
 // --- ACP Bridge mode ---
 
-async function _copilotSendACP(messages, question, txtOutput, storageKey, signalContext) {
+async function _copilotSendACP(messages, question, txtOutput, storageKey, signalContext, turnId) {
   // Auto-detect bridge URL (tries configured, same-host, localhost)
   var bridgeUrl = await detectACPBridge();
   if (typeof watchACPPermissions === 'function') watchACPPermissions(190000);
@@ -334,7 +335,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
       appendEvaStreamingChunk(provisional, chunk, txtOutput);
     });
     removeEvaStreamingBubble(provisional);
-    await _copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext, true, payload.session_id);
+    await _copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext, true, payload.session_id, turnId);
 
   } catch (err) {
     removeEvaStreamingBubble(provisional);
@@ -348,7 +349,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
 
 // --- Shared response rendering ---
 
-async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, signalContext, reflectionHandledByBridge, reflectionSessionId) {
+async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, signalContext, reflectionHandledByBridge, reflectionSessionId, turnId) {
   var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
 
   // Use unified renderer
@@ -356,6 +357,8 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, 
     signalAuthorized: !!(signalContext && signalContext.authorized),
     signalMessage: signalContext ? signalContext.message : '',
     signalRequest: userMessage,
+    nativeRequest: userMessage,
+    turnId: turnId,
     signalContext: signalContext
   });
 
@@ -383,7 +386,7 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, 
           model: modelLabel,
                   session_id: reflectionSessionId || ((typeof ensureActiveSessionId === 'function')
                     ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')),
-                  turn_id: (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : ''
+                  turn_id: turnId
         }),
         signal: AbortSignal.timeout(5000)
       }).catch(function() {}); // fire-and-forget

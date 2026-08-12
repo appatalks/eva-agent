@@ -924,6 +924,134 @@ function openWorkspaceTerminal(rootId, label) {
   }
 }
 
+function runEvaTerminalCommand(command, submit) {
+  var text = String(command || '').trim();
+  if (!text || /[\r\n\0]/.test(text) || text.length > 8192) {
+    return Promise.reject(new Error('Terminal commands must be one non-empty line.'));
+  }
+  openWorkspaceTerminal(_evaWorkspaceTerminalTarget.rootId, _evaWorkspaceTerminalTarget.label);
+  var deadline = Date.now() + 5000;
+  return new Promise(function(resolve, reject) {
+    function waitForTerminal() {
+      if (window.EvaTerminal && typeof window.EvaTerminal.runCommand === 'function') {
+        window.EvaTerminal.runCommand(text, submit !== false).then(resolve, reject);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(new Error('Native terminal did not become ready.'));
+        return;
+      }
+      setTimeout(waitForTerminal, 25);
+    }
+    waitForTerminal();
+  });
+}
+
+function evaPlannedTerminalCommandIsSafe(command) {
+  var text = String(command || '').trim();
+  if (!text || /[\r\n\0;|&><`$\\]/.test(text)) return false;
+  if (/(?:^|[/\s])(?:\.env(?:\.[A-Za-z0-9_.-]+)?|\.ssh|\.aws|\.azure|\.npmrc|\.pypirc|\.netrc|\.git-credentials)(?:[/\s]|$)|\b(?:config\.json|config\.local\.(?:js|json)|auth\.enc(?:\.json)?|id_rsa|id_ed25519|kubeconfig|service-account|hosts\.yml|token|credential|password|secret)\b/i.test(text)) return false;
+  if (!/^[A-Za-z0-9_.:/=+,-]+(?:\s+[A-Za-z0-9_.:/=+,-]+)*$/.test(text)) return false;
+  var parts = text.split(/\s+/);
+  var commandName = parts[0];
+  var argumentsList = parts.slice(1);
+  if (argumentsList.some(function(argument) {
+    if (argument.startsWith('-')) return false;
+    return argument.split('/').some(function(component) { return component.length > 1 && component.charAt(0) === '.'; });
+  })) return false;
+  if (argumentsList.some(function(argument) { return argument === '..' || argument.indexOf('../') === 0 || argument.indexOf('/../') >= 0 || argument.charAt(0) === '/' || argument.charAt(0) === '~'; })) return false;
+  if (commandName === 'pwd') return argumentsList.every(function(argument) { return argument === '-L' || argument === '-P'; });
+  if (commandName === 'ls') return argumentsList.every(function(argument) { return !argument.startsWith('-') || /^-[aAlh1dF]+$/.test(argument); });
+  if (commandName === 'df') return argumentsList.every(function(argument) { return /^-[hHTiPk]+$/.test(argument); });
+  if (commandName === 'git') {
+    if (!argumentsList.length || ['status', 'diff', 'log', 'show', 'rev-parse'].indexOf(argumentsList[0]) < 0) return false;
+    return !argumentsList.slice(1).some(function(argument) { return argument === '-c' || argument.indexOf('-c=') === 0 || /--(?:output|ext-diff|textconv|exec-path|config-env|no-index)/.test(argument); });
+  }
+  return ['rg', 'grep', 'cat', 'head', 'tail', 'wc'].indexOf(commandName) >= 0;
+}
+
+async function planEvaTerminalTask(objective, submit, allowDecline) {
+  var task = String(objective || '').trim();
+  if (!task || /[\r\n\0]/.test(task) || task.length > 2000) throw new Error('Terminal task must be one non-empty line.');
+  var turnId = typeof evaCreateAuditTurnId === 'function' ? evaCreateAuditTurnId() : '';
+  if (typeof evaAuditEvent === 'function') evaAuditEvent('terminal_task', 'started', {
+    correlation_id: turnId,
+    action: submit === false ? 'type' : 'run',
+    request_chars: task.length
+  });
+  var modelSelect = document.getElementById('selAIGBackend');
+  var bridgeUrl = typeof getACPBridgeUrl === 'function' ? getACPBridgeUrl() : 'http://localhost:8888';
+  var response;
+  try {
+    var selectedPlannerModel = modelSelect && modelSelect.value ? modelSelect.value : 'gpt-5.6-luna';
+    var plannerOpenAIKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : '';
+    var requestTerminalPlan = function(model) {
+      return fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/aig/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+        messages: [{ role: 'user', content: task }],
+        user_message: task,
+        session_id: typeof ensureActiveSessionId === 'function' ? ensureActiveSessionId() : '',
+        turn_id: turnId,
+        model: model,
+        native_terminal_plan: true,
+        native_terminal_candidate: allowDecline === true,
+        internal: true,
+        no_tools: true,
+        max_completion_tokens: 512,
+        lmstudio_base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
+        lmstudio_model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
+        github_pat: typeof getAuthKey === 'function' ? getAuthKey('GITHUB_PAT') : '',
+        openai_api_key: plannerOpenAIKey
+        }),
+        signal: AbortSignal.timeout(30000)
+      });
+    };
+    response = await requestTerminalPlan(selectedPlannerModel);
+    var payload = await response.json().catch(function() { return {}; });
+    if (!response.ok && plannerOpenAIKey && String(selectedPlannerModel).indexOf('openai:') !== 0) {
+      response = await requestTerminalPlan('openai:gpt-5-mini');
+      payload = await response.json().catch(function() { return {}; });
+    }
+    if (!response.ok) throw new Error(payload && payload.error && payload.error.message ? payload.error.message : 'Terminal planner returned HTTP ' + response.status);
+    var rawContent = String(((((payload.choices || [])[0] || {}).message || {}).content) || '').trim();
+    var content = allowDecline === true ? rawContent : rawContent.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    var planned;
+    try { planned = JSON.parse(content); } catch (_) { planned = allowDecline === true ? null : { command: content }; }
+    var candidateKeys = allowDecline === true && planned && typeof planned === 'object' && !Array.isArray(planned)
+      ? Object.keys(planned).sort() : [];
+    var candidateEnvelopeValid = allowDecline === true && candidateKeys.length === 2 && candidateKeys[0] === 'applicable' && candidateKeys[1] === 'command' && typeof planned.applicable === 'boolean' && typeof planned.command === 'string';
+    var command = allowDecline === true
+      ? (candidateEnvelopeValid ? planned.command.trim() : '')
+      : String(planned && planned.command || '').trim();
+    if (allowDecline === true && (!candidateEnvelopeValid || planned.applicable !== true || !command)) {
+      if (typeof evaAuditEvent === 'function') evaAuditEvent('terminal_task', 'completed', {
+        correlation_id: turnId,
+        action: 'decline'
+      });
+      return { declined: true, submitted: false, reviewRequired: false };
+    }
+    if (!command || /[\r\n\0]/.test(command) || command.length > 8192) throw new Error('Terminal planner did not return one valid command line.');
+    var plannedSafe = evaPlannedTerminalCommandIsSafe(command);
+    var shouldSubmit = submit !== false && plannedSafe;
+    if (typeof evaAuditEvent === 'function') evaAuditEvent('terminal_task', 'planned', {
+      correlation_id: turnId,
+      action: shouldSubmit ? 'run' : 'type',
+      response_chars: command.length
+    });
+    await runEvaTerminalCommand(command, shouldSubmit);
+    return { submitted: shouldSubmit, reviewRequired: submit !== false && !plannedSafe };
+  } catch (error) {
+    if (typeof evaAuditEvent === 'function') evaAuditEvent('terminal_task', 'failed', {
+      correlation_id: turnId,
+      action: submit === false ? 'type' : 'run',
+      label: error && error.name ? error.name : 'terminal-planner'
+    });
+    throw error;
+  }
+}
+
 function initTerminal() {
   var container = document.getElementById('terminalContainer');
   var fallback = document.getElementById('terminalFallback');
@@ -1179,6 +1307,15 @@ async function _buildWorkspaceTerminal(frame) {
     if (!target || typeof target.rootId !== 'string' || !target.rootId) return Promise.resolve();
     _evaWorkspaceTerminalTarget = { rootId: target.rootId, label: String(target.label || 'Workspace') };
     return attachTerminal(false);
+  };
+  window.EvaTerminal.runCommand = async function(command, submit) {
+    var text = String(command || '').trim();
+    if (!text || /[\r\n\0]/.test(text) || text.length > 8192) throw new Error('Terminal commands must be one non-empty line.');
+    await attachTerminal(false);
+    if (!terminalId || exited) throw new Error('Native terminal is not connected.');
+    await api.terminalWrite(terminalId, text + (submit === false ? '' : '\r'));
+    terminal.focus();
+    return { id: terminalId, submitted: submit !== false };
   };
   window.addEventListener('beforeunload', function() {
     removeDataListener();

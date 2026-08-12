@@ -115,9 +115,10 @@ def main():
         git(repository, "add", "mcp.json")
         git(repository, "commit", "-m", "Add workspace MCP configuration")
         mcp_metadata = restored.get_project(project["id"])["mcp_servers"]
-        assert mcp_metadata["source"] == "mcp.json" and mcp_metadata["state"] == "ready"
+        assert mcp_metadata["source"] == "workspace MCP discovery" and mcp_metadata["state"] == "ready"
         server_metadata = mcp_metadata["servers"][0]
         assert server_metadata["name"] == "project-docs" and server_metadata["transport"] == "stdio"
+        assert server_metadata["source"] == "mcp.json"
         assert server_metadata["command"] == "example-mcp" and server_metadata["args"] == ["--docs"]
         assert server_metadata["env_keys"] == ["EXAMPLE_TOKEN"] and "env" not in server_metadata
         assert server_metadata["enabled"] is False and len(server_metadata["digest"]) == 64
@@ -169,8 +170,43 @@ def main():
             encoding="utf-8",
         )
 
-        def fake_github_clone(source_url, destination):
+        multi_repository = sandbox / "multi-mcp-repository"
+        multi_repository.mkdir()
+        git(multi_repository, "init", "-b", "main")
+        git(multi_repository, "config", "user.name", "Eva Test")
+        git(multi_repository, "config", "user.email", "eva-test@example.invalid")
+        (multi_repository / ".vscode").mkdir()
+        (multi_repository / ".github").mkdir()
+        (multi_repository / ".mcp.json").write_text(
+            '{"mcpServers":{"root-module":{"command":"root-mcp"}}}', encoding="utf-8"
+        )
+        (multi_repository / ".vscode" / "mcp.json").write_text(
+            '{"servers":{"editor-module":{"command":"editor-mcp"}}}', encoding="utf-8"
+        )
+        (multi_repository / ".github" / "mcp.json").write_text(
+            '{"mcpServers":{"workflow-module":{"command":"workflow-mcp"}}}', encoding="utf-8"
+        )
+        git(multi_repository, "add", ".")
+        git(multi_repository, "commit", "-m", "Add distributed MCP configuration")
+        multi_project = restored.register_project(multi_repository)
+        multi_mcp = restored.get_project(multi_project["id"])["mcp_servers"]
+        multi_servers = {server["name"]: server for server in multi_mcp["servers"]}
+        assert set(multi_servers) == {"root-module", "editor-module", "workflow-module"}
+        assert multi_servers["root-module"]["source"] == ".mcp.json"
+        assert multi_servers["editor-module"]["source"] == ".vscode/mcp.json"
+        assert multi_servers["workflow-module"]["source"] == ".github/mcp.json"
+        restored.set_project_mcp_server_enabled(
+            multi_project["id"], "editor-module", True, multi_servers["editor-module"]["digest"]
+        )
+        multi_run = restored.create_run(multi_project["id"], "Use the editor MCP module")
+        assert restored.mcp_config_for_run(multi_run["id"]) == {
+            "editor-module": {"command": "editor-mcp", "args": [], "env": {}}
+        }
+        assert restored.discard_run(multi_run["id"])["status"] == "discarded"
+
+        def fake_github_clone(source_url, destination, github_token=""):
             assert source_url == "https://github.com/eva-test/demo.git"
+            assert github_token == ""
             destination.mkdir(parents=True)
             git(destination, "init", "-b", "main")
             git(destination, "config", "user.name", "Eva Test")
@@ -218,6 +254,47 @@ def main():
             assert clone_environment["GIT_TERMINAL_PROMPT"] == "0"
             assert clone_environment["GCM_INTERACTIVE"] == "Never"
             assert clone_environment["HOME"].endswith("git-import-home")
+            assert "EVA_GITHUB_TOKEN" not in clone_environment
+
+        clone_failure_cases = [
+            ("remote: Repository not found.", True, "Contents: Read"),
+            ("fatal: Authentication failed", True, "authentication was rejected"),
+            ("fatal: unable to access: Could not resolve host: github.com", True, "could not be reached"),
+            ("fatal: repository not found", False, "Configure a GitHub PAT"),
+        ]
+        for stderr, authenticated, expected_message in clone_failure_cases:
+            with mock.patch("bridge.workspaces.subprocess.run") as clone_run:
+                clone_run.return_value = subprocess.CompletedProcess([], 1, stdout="", stderr=stderr)
+                try:
+                    restored._clone_github_repository(
+                        "https://github.com/eva-test/private-demo.git",
+                        sandbox / ("clone-failure-" + str(len(stderr))),
+                        github_token="ghp_TEST_RUNTIME_ONLY" if authenticated else "",
+                    )
+                    raise AssertionError("failed clone should raise")
+                except WorkspaceError as error:
+                    assert expected_message.lower() in str(error).lower()
+                    assert stderr not in str(error)
+                    assert "ghp_TEST_RUNTIME_ONLY" not in str(error)
+
+        authenticated_destination = sandbox / "authenticated-clone-test"
+        observed_askpass = []
+        def authenticated_clone(command, **kwargs):
+            environment = kwargs["env"]
+            askpass = Path(environment["GIT_ASKPASS"])
+            observed_askpass.append((askpass, askpass.exists(), askpass.stat().st_mode & 0o777, command, dict(environment)))
+            return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with mock.patch("bridge.workspaces.subprocess.run", side_effect=authenticated_clone):
+            restored._clone_github_repository(
+                "https://github.com/eva-test/private-demo.git",
+                authenticated_destination,
+                github_token="ghp_TEST_RUNTIME_ONLY",
+            )
+        askpass, existed, mode, command, environment = observed_askpass[0]
+        assert existed and mode == 0o700
+        assert "ghp_TEST_RUNTIME_ONLY" not in " ".join(command)
+        assert environment["EVA_GITHUB_TOKEN"] == "ghp_TEST_RUNTIME_ONLY"
+        assert not askpass.exists()
 
         symlink_import_store = WorkspaceStore(sandbox / "symlink-import-config")
         symlink_import_external = sandbox / "symlink-import-external"

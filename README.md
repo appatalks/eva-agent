@@ -57,21 +57,22 @@ supported on Windows.
 | **Browser agent** | Playwright-based DOM control, persistent Chrome login, hybrid vision fallback |
 | **Desktop agent** | PyAutoGUI mouse/keyboard control, optional AT-SPI via computer-use-linux MCP |
 | **Voice interface** | Full-screen voice orb, wake/barge-in, profile TTS for normal replies, fast native-speech Live Translation, persisted microphone/speaker selection, and cached Local Voices acknowledgement clips in Standalone |
-| **Native harness control** | Allowlisted in-app API for direct navigation, refresh, chat, and voice controls; Eva uses native controls for her own surfaces before browser or desktop automation |
+| **Native harness control** | Allowlisted in-app API for direct navigation, voice controls, owned GitHub repository selection, and terminal tasks; direct questions and requests are considered by a tool-free CLI planner, non-CLI questions fall back to chat, safe inspection plans auto-run, and other commands are typed for review |
 | **Signal messaging** | Send-only text notifications via signal-cli, keyword-triggered or on-demand |
 | **Persistent memory** | Kusto/ADX or local SQLite: conversations, emotion tracking, semantic recall |
 | **User profiles** | Switch local profiles with separate sessions, prompts, model choices, and UI preferences |
 | **Settings workspace** | Full-view grouped navigation for models, accounts, goals, background jobs, schedules, tools, memory, and learning controls |
 | **Self-improving skills** | Full searchable skills library and editor with source/status filters, tags, tools, imports, and reusable capability drafts |
-| **Cron scheduler** | Standard cron expressions, recurring prompts, morning briefings, alerts |
+| **Cron scheduler** | Standard cron expressions, recurring prompts, startup-prepared morning briefings with explicit incomplete-source status, alerts |
 | **Subagent parallelism** | Spawn up to 4 concurrent ACP tasks, results via notifications |
 | **Agent operations** | Live subagent output and sanitized activity updates, browser/desktop runs, steering, and animated memory topology |
-| **Coding workspaces (experimental)** | Eva Standalone imports local Git projects or public GitHub repositories into protected project boundaries, creates isolated durable worktrees, applies each workspace's enabled `mcp.json` servers only to its own coding agents, opens real PTY terminals, and monitors coding runs; worktree discard is explicit and terminates attached terminal processes first |
+| **Coding workspaces (experimental)** | Eva Standalone imports local Git projects or authenticated owned GitHub repositories into protected project boundaries, discovers project MCP modules from multiple `mcp.json` and `.mcp.json` locations, applies enabled modules only to that project’s coding agents, opens real PTY terminals, and monitors coding runs; private GitHub imports require repository Contents: Read access and can use native GitHub CLI device-code authorization; worktree discard is explicit and terminates attached terminal processes first |
 | **Multi-provider** | Eva AIG via direct OpenAI API, GitHub Copilot ACP, or LM Studio; direct Gemini remains available only as a deprecated browser compatibility route |
 | **Prompt budgets** | Bounded provider payloads with pinned instructions, recent turns, rolling summaries, and privacy-safe estimates |
 | **Reasoning controls** | Model-specific effort levels for OpenAI, GitHub Models, and Copilot CLI ACP |
 | **Streaming responses** | AIG and direct Copilot ACP show safe incremental text with TTFT telemetry; final actions run once |
 | **Structured learning controls** | Explicit response feedback, routine action outcomes, and optional voice diagnostics use consent-gated, expiring metadata only; prompts, transcripts, audio, credentials, and private content are excluded |
+| **Application audit log** | Owner-only rotating JSONL records sanitized routing, provider, native-action, terminal-planning, cancellation, and latency outcomes without prompts, responses, commands, credentials, or tokens |
 | **Doctor diagnostics** | Structured readiness probe for every subsystem with actionable fixes |
 | **MCP ecosystem** | Azure, GitHub, Kusto, computer-use-linux desktop control |
 | **Adaptive review** | Fast direct Eva responses with GPT-5.6 Terra review for consequential turns |

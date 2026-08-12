@@ -339,11 +339,15 @@ standalone/
 | Key | Used by | Get it from |
 |---|---|---|
 | `OPENAI_API_KEY` | Direct OpenAI Eva backends, OpenAI models, image generation, TTS/transcription, embeddings | [platform.openai.com](https://platform.openai.com/api-keys) |
-| `GITHUB_PAT` | Copilot Models API | [github.com/settings/tokens](https://github.com/settings/tokens) (needs "Models" permission) |
+| `GITHUB_PAT` | Copilot Models API, GitHub MCP, and private workspace imports | [github.com/settings/tokens](https://github.com/settings/tokens) (needs "Models" permission; private imports also need repository Contents: Read access. Fine-grained tokens must include the repository; classic tokens need `repo`. Alternatively, Workspaces can launch native `gh auth login --web` device-code authorization; that credential stays in GitHub CLI storage.) |
 | `GOOGLE_GL_KEY` | Google Gemini | [aistudio.google.com](https://aistudio.google.com/apikey) |
 | `GOOGLE_VISION_KEY` | Google Vision (image analysis) | [console.cloud.google.com](https://console.cloud.google.com/apis/credentials) |
 | AWS credentials | Amazon Polly TTS | [AWS IAM Console](https://console.aws.amazon.com/iam/) |
 | None | LM Studio (local mode) | Free, runs locally |
+
+### Workspace MCP Modules
+
+Imported coding workspaces discover repository MCP definitions from bounded project-relative `mcp.json` and `.mcp.json` locations, including common `.vscode/` and `.github/` locations. Workspaces lists each module with its source path. Enabling a module applies only to future coding-agent runs for that project; it never changes Eva's global MCP configuration.
 
 ## ACP Bridge
 

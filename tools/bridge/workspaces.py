@@ -18,6 +18,8 @@ _SCHEMA_VERSION = 3
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 _MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
 _MCP_CONFIG_MAX_BYTES = 256 * 1024
+_MCP_CONFIG_MAX_FILES = 32
+_MCP_DISCOVERY_SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "dist", "build", "target", "vendor", "__pycache__"}
 _MCP_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _MCP_RESERVED_ENV_KEYS = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "PYTHONPATH", "NODE_OPTIONS",
@@ -236,8 +238,8 @@ class WorkspaceStore:
                 self._git(str(project_path), ["commit", "-m", "Initialize Eva ready workspace"])
         return self.register_project(project_path, "Eva Ready Workspace")
 
-    def import_github_repository(self, repository_url):
-        """Clone a selected public github.com repository into Eva-owned workspace storage."""
+    def import_github_repository(self, repository_url, github_token=""):
+        """Clone a selected github.com repository into Eva-owned workspace storage."""
         normalized_url, owner, repository = self._normalize_github_repository_url(repository_url)
         destination_name = owner + "-" + repository + "-" + hashlib.sha256(
             normalized_url.encode("utf-8")
@@ -252,7 +254,7 @@ class WorkspaceStore:
                     raise WorkspaceError("GitHub workspace destination is unavailable.")
                 return self.register_project(destination, owner + "/" + repository)
             try:
-                self._clone_github_repository(normalized_url, destination)
+                self._clone_github_repository(normalized_url, destination, github_token=github_token)
             except WorkspaceError:
                 shutil.rmtree(destination, ignore_errors=True)
                 raise
@@ -318,20 +320,20 @@ class WorkspaceStore:
                 )
             }
         try:
-            servers = self._read_mcp_servers(self._validated_source_project(project_id))
+            servers, sources = self._discover_mcp_servers(self._validated_source_project(project_id))
         except WorkspaceError as error:
             self._revoke_project_mcp_preferences(project_id)
-            return {"source": "mcp.json", "state": "invalid", "message": str(error), "servers": []}
+            return {"source": "workspace MCP discovery", "state": "invalid", "message": str(error), "servers": []}
         if servers is None:
             self._revoke_project_mcp_preferences(project_id)
-            return {"source": "mcp.json", "state": "missing", "message": "", "servers": []}
+            return {"source": "workspace MCP discovery", "state": "missing", "message": "", "servers": []}
         preferences = self._revoke_stale_mcp_preferences(project_id, servers, preferences)
         return {
-            "source": "mcp.json",
+            "source": "workspace MCP discovery",
             "state": "ready",
             "message": "",
             "servers": [
-                self._mcp_server_metadata(name, config, preferences.get(name, {}))
+                self._mcp_server_metadata(name, config, preferences.get(name, {}), sources.get(name, "mcp.json"))
                 for name, config in sorted(servers.items(), key=lambda item: item[0].lower())
             ],
         }
@@ -868,7 +870,7 @@ class WorkspaceStore:
                 current.mkdir(mode=0o700)
         return current
 
-    def _clone_github_repository(self, repository_url, destination):
+    def _clone_github_repository(self, repository_url, destination, github_token=""):
         git_home = self.config_dir / "git-import-home"
         if git_home.exists() or git_home.is_symlink():
             if git_home.is_symlink() or not git_home.is_dir():
@@ -885,9 +887,23 @@ class WorkspaceStore:
             "GIT_TERMINAL_PROMPT": "0",
             "GCM_INTERACTIVE": "Never",
         }
+        askpass_path = None
+        if github_token:
+            askpass_path = git_home / ("askpass-" + uuid.uuid4().hex + ".sh")
+            askpass_path.write_text(
+                "#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' x-access-token ;; *) printf '%s\\n' \"$EVA_GITHUB_TOKEN\" ;; esac\n",
+                encoding="utf-8",
+            )
+            askpass_path.chmod(0o700)
+            environment["GIT_ASKPASS"] = str(askpass_path)
+            environment["EVA_GITHUB_TOKEN"] = github_token
+        clone_command = ["git", "-c", "credential.helper="]
+        if not github_token:
+            clone_command.extend(["-c", "core.askPass="])
+        clone_command.extend(["clone", "--origin", "origin", repository_url, str(destination)])
         try:
             completed = subprocess.run(
-                ["git", "-c", "credential.helper=", "-c", "core.askPass=", "clone", "--origin", "origin", repository_url, str(destination)],
+                clone_command,
                 env=environment,
                 text=True,
                 encoding="utf-8",
@@ -899,11 +915,76 @@ class WorkspaceStore:
             )
         except (OSError, subprocess.SubprocessError):
             raise WorkspaceError("GitHub repository import could not start.")
+        finally:
+            environment.pop("EVA_GITHUB_TOKEN", None)
+            if askpass_path is not None:
+                try:
+                    askpass_path.unlink()
+                except OSError:
+                    pass
         if completed.returncode != 0:
-            raise WorkspaceError("GitHub repository import failed. Confirm that the repository is public and available.")
+            raise WorkspaceError(self._github_clone_failure_message(completed.stderr, bool(github_token)))
+
+    @staticmethod
+    def _github_clone_failure_message(stderr, authenticated):
+        """Map Git transport failures to safe operator guidance without leaking output."""
+        detail = str(stderr or "").lower()
+        if any(marker in detail for marker in (
+            "authentication failed", "http basic: access denied", "could not read username",
+            "terminal prompts disabled", "invalid username or token",
+        )):
+            return "GitHub authentication was rejected. Update the GitHub PAT in Settings > Auth."
+        if any(marker in detail for marker in (
+            "repository not found", "not found", "permission denied", "access denied",
+        )):
+            if authenticated:
+                return "GitHub denied access to this repository. For private repositories, grant the configured PAT Contents: Read access to this repository."
+            return "GitHub denied access to this repository. Configure a GitHub PAT with repository Contents: Read access in Settings > Auth."
+        if any(marker in detail for marker in (
+            "could not resolve host", "failed to connect", "connection timed out",
+            "network is unreachable", "ssl certificate",
+        )):
+            return "GitHub could not be reached. Check the network connection and retry."
+        return "GitHub repository import failed. Confirm that the repository is available to your GitHub account."
 
     def _read_mcp_servers(self, workspace_root):
-        config_path = Path(workspace_root) / "mcp.json"
+        return self._discover_mcp_servers(workspace_root)[0]
+
+    def _discover_mcp_servers(self, workspace_root):
+        root = Path(workspace_root).resolve()
+        candidates = []
+        for current, directories, filenames in os.walk(root, followlinks=False):
+            directories[:] = [name for name in directories if name not in _MCP_DISCOVERY_SKIP_DIRS]
+            relative_dir = Path(current).relative_to(root)
+            if len(relative_dir.parts) > 5:
+                directories[:] = []
+                continue
+            for filename in filenames:
+                if filename in {"mcp.json", ".mcp.json"}:
+                    candidates.append(Path(current) / filename)
+        candidates.sort(key=lambda item: item.relative_to(root).as_posix().lower())
+        if len(candidates) > _MCP_CONFIG_MAX_FILES:
+            raise WorkspaceError("Workspace has too many MCP configuration files.")
+        servers = {}
+        sources = {}
+        for config_path in candidates:
+            relative_source = config_path.relative_to(root).as_posix()
+            parsed = self._read_mcp_config_file(config_path)
+            for name, config in parsed.items():
+                server_name = name
+                if server_name in servers:
+                    prefix = re.sub(r"[^A-Za-z0-9]+", "-", relative_source.rsplit(".", 1)[0]).strip("-") or "workspace"
+                    server_name = (prefix + "--" + name)[:119]
+                    suffix = 2
+                    while server_name in servers:
+                        suffix_text = "-" + str(suffix)
+                        server_name = (prefix + "--" + name)[:119 - len(suffix_text)] + suffix_text
+                        suffix += 1
+                servers[server_name] = config
+                sources[server_name] = relative_source
+        return (servers or None), sources
+
+    def _read_mcp_config_file(self, config_path):
         try:
             if not config_path.exists():
                 return None
@@ -917,7 +998,7 @@ class WorkspaceStore:
             raise WorkspaceError("Workspace mcp.json is not valid JSON.")
         if not isinstance(payload, dict):
             raise WorkspaceError("Workspace mcp.json must contain an object.")
-        candidates = payload.get("mcpServers", payload)
+        candidates = payload.get("mcpServers", payload.get("servers", payload))
         if not isinstance(candidates, dict):
             raise WorkspaceError("Workspace mcp.json must define mcpServers.")
         normalized = {}
@@ -974,11 +1055,12 @@ class WorkspaceStore:
         encoded = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def _mcp_server_metadata(self, name, config, preference):
+    def _mcp_server_metadata(self, name, config, preference, source):
         digest = self._mcp_config_digest(config)
         enabled = bool(preference.get("enabled")) and preference.get("approved_digest") == digest
         return {
             "name": name,
+            "source": source,
             "transport": self._mcp_transport(config),
             "enabled": enabled,
             "digest": digest,

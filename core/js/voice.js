@@ -144,9 +144,18 @@ var _voiceAwakeTimer = null;
 
 /** Send a voice command to the chat */
 function _sendVoiceCommand(command) {
+  if (typeof _vvStopTTS === 'function') _vvStopTTS();
+  else if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (_) {} }
   _setMicStatus('sending');
+  var voiceTurnId = typeof evaCreateAuditTurnId === 'function' ? evaCreateAuditTurnId() : '';
+  if (typeof evaAuditEvent === 'function') {
+    evaAuditEvent('voice.command', 'submitted', {
+      correlation_id: voiceTurnId,
+      request_chars: String(command || '').length
+    });
+  }
 
-  if (_runVoiceNavigationCommand(command)) {
+  if (_runVoiceNavigationCommand(command, voiceTurnId)) {
     setTimeout(function() { _setMicStatus('listening'); }, 500);
     return;
   }
@@ -155,6 +164,7 @@ function _sendVoiceCommand(command) {
   if (txtMsg) {
     txtMsg.textContent = command;
   }
+  window._evaPendingAuditTurnId = voiceTurnId;
 
   // Use sendData (routes to the selected model)
   if (typeof sendData === 'function') {
@@ -167,16 +177,24 @@ function _sendVoiceCommand(command) {
   }, 1000);
 }
 
-function _runVoiceNavigationCommand(command) {
+function _runVoiceNavigationCommand(command, turnId) {
+  if (!turnId && typeof evaCreateAuditTurnId === 'function') turnId = evaCreateAuditTurnId();
   var phrase = String(command || '').trim().toLowerCase();
   if (!phrase) return false;
   if (/^(?:new|start) (?:a )?(?:chat|conversation)$/.test(phrase)) {
-    if (window.EvaHarness) EvaHarness.execute({ action: 'new_chat' });
+    var newChatResult = window.EvaHarness ? EvaHarness.execute({ action: 'new_chat' }) : null;
+    Promise.resolve(newChatResult).then(function(result) {
+      if (typeof evaAuditEvent === 'function') evaAuditEvent('native_action', result && result.ok ? 'completed' : 'failed', { correlation_id: turnId || '', action: 'new_chat' });
+    }).catch(function() {
+      if (typeof evaAuditEvent === 'function') evaAuditEvent('native_action', 'failed', { correlation_id: turnId || '', action: 'new_chat' });
+    });
     return true;
   }
   if (!window.EvaHarness || typeof EvaHarness.resolveNavigationRequest !== 'function') return false;
-  var route = EvaHarness.resolveNavigationRequest(phrase);
+  var route = EvaHarness.resolveNavigationRequest(phrase, { directUser: true });
   if (!route) return false;
+  if (route.action === 'consider_terminal_task') return false;
+  if (typeof evaAuditEvent === 'function') evaAuditEvent('direct_route', 'started', { correlation_id: turnId || '', action: route.action || 'navigate', label: route.target || '' });
   if (typeof evaTextPromptCancel === 'function') evaTextPromptCancel();
   var pendingResult = route.action && route.action !== 'navigate'
     ? EvaHarness.execute(route)
@@ -184,17 +202,32 @@ function _runVoiceNavigationCommand(command) {
   Promise.resolve(pendingResult).then(function(navigationResult) {
     if (!navigationResult.ok) {
       if (typeof setStatus === 'function') setStatus('error', navigationResult.message || 'Voice navigation failed.');
+      if (typeof evaAuditEvent === 'function') evaAuditEvent('native_action', typeof evaAuditOutcome === 'function' ? evaAuditOutcome(navigationResult.data && navigationResult.data.outcome, false) : 'failed', { correlation_id: turnId || '', action: route.action || 'navigate', label: route.target || '', reason: navigationResult.data && navigationResult.data.reason || 'failed' });
       return;
     }
-    var reply = route.action === 'describe_workspaces' || route.action === 'import_github'
+    var reply = route.action === 'plan_terminal_task'
+      ? navigationResult.message
+      : route.action === 'type_terminal_command'
+      ? 'I typed that command in the terminal for your review.'
+      : route.action === 'run_terminal_command'
+      ? 'I submitted that command to the terminal.'
+      : route.action === 'list_github_repositories'
+      ? 'I listed your GitHub repositories in Workspaces. Choose one there to import.'
+      : route.action === 'continue_github_repositories'
+      ? navigationResult.message
+      : route.action === 'authorize_github'
+      ? 'I started GitHub device authorization in Workspaces.'
+      : route.action === 'describe_workspaces' || route.action === 'import_github'
       ? navigationResult.message
       : route.target === 'workspaces'
       ? 'I opened Workspaces. I can review imported projects and their files, Git status and diffs, active coding runs, generated assets, and workspace-scoped MCP configuration. I can inspect read-only workspace commands autonomously. Changes, deletions, external actions, and unclassified commands still require your approval.'
       : 'Opening ' + route.label + '.';
     if (typeof setStatus === 'function') setStatus('info', navigationResult.message || 'Opened ' + route.label + '.');
+    if (typeof evaAuditEvent === 'function') evaAuditEvent('native_action', typeof evaAuditOutcome === 'function' ? evaAuditOutcome(navigationResult.data && navigationResult.data.outcome, true) : 'completed', { correlation_id: turnId || '', action: route.action || 'navigate', label: route.target || '' });
     if (typeof speakText === 'function') speakText(reply);
   }).catch(function(error) {
     if (typeof setStatus === 'function') setStatus('error', error && error.message ? error.message : 'Voice navigation failed.');
+    if (typeof evaAuditEvent === 'function') evaAuditEvent('native_action', 'failed', { correlation_id: turnId || '', action: route.action || 'navigate', label: route.target || '' });
   });
   return true;
 }

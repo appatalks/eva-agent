@@ -71,7 +71,7 @@ def _parse_aig_backend(value):
         return "openai", model
     if not _AIG_MODEL_RE.fullmatch(requested):
         raise ValueError("Unsupported Eva backend model name")
-    return "auto", requested
+    return "acp", requested
 
 
 def _openai_chat_completions_url():
@@ -334,12 +334,16 @@ from bridge.background import (  # noqa: F401
     _background_proposal_payload,
     _background_proposal_update_row,
 )
+from bridge.briefing import briefing_prompt_context, briefing_status, briefing_unavailable_sources, start_startup_briefing
+from bridge.audit import audit_event
+from bridge.model_policy import select_model_policy
 from bridge.telemetry import (  # noqa: F401
     _StdoutTee,
     _log_ring_add,
     _install_log_tee,
     _telemetry_clip,
     _telemetry_emit,
+    _verbose_debug_emit,
     _percentile,
     _telemetry_summarize,
 )
@@ -508,6 +512,7 @@ def _dispatch_workspace_run(run):
     checkout = run.get("checkout") or {}
     checkout_path = _workspace_store().validated_checkout_path(checkout.get("id"))
     workspace_mcp_config = _workspace_store().mcp_config_for_run(run["id"])
+    _verbose_debug_emit("workspace_mcp", enabled_module_count=len(workspace_mcp_config))
     workspace_mcp_prefix = "workspace-" + str(run.get("project_id") or "workspace").replace("-", "")[:12] + "-"
     workspace_mcp_config = {
         workspace_mcp_prefix + name: config for name, config in workspace_mcp_config.items()
@@ -1057,6 +1062,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._skills_list()
         elif parsed_path == "/v1/background/status":
             self._background_status()
+        elif parsed_path == "/v1/briefing/status":
+            self._briefing_status()
         elif parsed_path == "/v1/background/proposals":
             self._background_proposals()
         elif parsed_path == "/v1/background/activity":
@@ -1160,6 +1167,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._translate()
         elif parsed_path == "/v1/telemetry":
             self._telemetry_ingest()
+        elif parsed_path == "/v1/audit/event":
+            self._audit_event_ingest()
         elif parsed_path == "/v1/cron":
             self._cron_create()
         elif parsed_path == "/v1/skills/auto-learn":
@@ -1357,11 +1366,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": {"message": error}})
             return
         repository_url = data.get("url")
+        github_pat = data.get("github_pat")
         if not isinstance(repository_url, str):
             self._json_response(400, {"error": {"message": "A GitHub repository URL is required."}})
             return
+        if github_pat is not None and (not isinstance(github_pat, str) or len(github_pat) > 1024):
+            self._json_response(400, {"error": {"message": "GitHub authentication is invalid."}})
+            return
         try:
-            project = _workspace_store().import_github_repository(repository_url)
+            project = _workspace_store().import_github_repository(repository_url, github_token=github_pat or "")
             self._json_response(201, {"project": project})
         except WorkspaceError as error:
             self._json_response(400, {"error": {"message": str(error)}})
@@ -2875,6 +2888,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             status["memory_db_path"] = _st.sqlite_mem.db_path
         self._json_response(200, status)
 
+    def _briefing_status(self):
+        """Expose cache state only; prepared source content stays out of prompts."""
+        self._json_response(200, briefing_status())
+
     # ------------------------------------------------------------------
     # Doctor — structured readiness report for all Eva subsystems
     # ------------------------------------------------------------------
@@ -3666,6 +3683,45 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _telemetry_emit("cognition_turn", source="frontend", **fields)
         self._json_response(200, {"status": "ok"})
 
+    def _audit_event_ingest(self):
+        """Accept a strictly bounded renderer lifecycle event for local audit."""
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length == 0:
+            self._json_response(400, {"error": {"message": "Empty request body"}})
+            return
+        try:
+            data = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except (json.JSONDecodeError, ValueError):
+            self._json_response(400, {"error": {"message": "Invalid JSON"}})
+            return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Body must be an object"}})
+            return
+        event = str(data.get("event") or "")[:64]
+        outcome = str(data.get("outcome") or "")[:32]
+        correlation_id = str(data.get("correlation_id") or "")[:120]
+        allowed_events = {"turn.input", "turn.rendered", "native_action", "direct_route", "terminal_task", "voice.command"}
+        allowed_outcomes = {"started", "planned", "completed", "cancelled", "failed", "submitted"}
+        allowed_reasons = {"authentication", "timeout", "unavailable", "failed", "cancelled"}
+        if event not in allowed_events or outcome not in allowed_outcomes:
+            self._json_response(400, {"error": {"message": "Unsupported audit event"}})
+            return
+        if data.get("reason") is not None and data.get("reason") not in allowed_reasons:
+            self._json_response(400, {"error": {"message": "Unsupported audit reason"}})
+            return
+        allowed_fields = {"action", "model", "provider", "request_chars", "response_chars", "label", "reason"}
+        fields = {}
+        for key in allowed_fields:
+            value = data.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                fields[key] = value
+            elif isinstance(value, str):
+                fields[key] = value[:120]
+        audit_event(event, correlation_id, outcome, **fields)
+        self._json_response(200, {"status": "ok"})
+
     def _notifications_list(self):
         """Return recent proactive notifications for the front end to surface.
         Query params: ?unseen_only=1, ?since=<id>, ?limit=N (default 20, max 100)."""
@@ -3877,7 +3933,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         messages = data.get("messages", [])
         user_message = data.get("user_message", "")
         translation_mode = bool(data.get("translation_mode"))
-        internal = bool(data.get("internal")) or translation_mode
+        native_terminal_candidate = bool(data.get("native_terminal_candidate"))
+        native_terminal_plan = bool(data.get("native_terminal_plan")) or native_terminal_candidate
+        internal = bool(data.get("internal")) or translation_mode or native_terminal_plan
         # Cognition draft/revise stages are internal but still want memory recall.
         # They pass the raw user turn so _build_memory_context runs on the real
         # message instead of the wrapped task prompt.
@@ -3886,7 +3944,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Tool-free mode: the cognition reviewer is a text-only judge. It already
         # has the draft and the user message, so it must NOT re-run web/Kusto/MCP
         # tools (that duplicated the draft's retrieval and doubled latency).
-        no_tools = bool(data.get("no_tools")) or translation_mode
+        no_tools = bool(data.get("no_tools")) or translation_mode or native_terminal_plan
         conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
         requested_backend = data.get("model", "gpt-5.6-luna")
         try:
@@ -3922,6 +3980,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         _mark_user_activity()
         _turn_t0 = time.perf_counter()
+        turn_id = str(data.get("turn_id") or uuid.uuid4())[:120]
 
         import re as _re
         _routing_message = _effective_routing_message(user_message, internal, recall_query)
@@ -3931,6 +3990,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _passive_recall = _is_passive_memory_recall(_routing_message)
         _prompt_fields = _prompt_budget_fields(data.get("prompt_budget"))
         stream_state = self._new_stream_state("aig", requested_backend) if stream_requested else None
+
+        def _audit_turn_failed(provider, error_type, status_code=None):
+            audit_event(
+                "turn.response", turn_id, "failed",
+                model=model_for_response,
+                provider=provider,
+                request_type=_request_type,
+                error_type=error_type,
+                status_code=status_code,
+                total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
+            )
 
         print(f"[AIG] Processing: {user_message[:80]}...")
 
@@ -4000,10 +4070,60 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # General chat, advice, writing, and browser/renderer action markers
         # go directly to the selected responder; their local capability routes
         # remain available in the final response.
-        needs_acp_tools = not skip_acp and _needs_acp_preflight(msg_lower, _request_type)
+        _briefing_request = bool(_re.search(r"\b(?:morning|daily)\s+briefing\b", msg_lower))
+        _briefing_status = briefing_status() if _briefing_request else {}
+        _briefing_state = _briefing_status.get("status", "idle")
+        _briefing_preparing = _briefing_state == "preparing"
+        _briefing_unavailable = briefing_unavailable_sources(_briefing_status) if _briefing_request else []
+        _briefing_context = briefing_prompt_context(allow_partial=_briefing_request) if _briefing_request else ""
+        needs_acp_tools = not _briefing_request and not skip_acp and _needs_acp_preflight(msg_lower, _request_type)
         _tool_profile = _select_acp_tool_profile(
             _routing_message, _request_type, fast_route=_fast_route, no_tools=no_tools
         ) if needs_acp_tools else "none"
+        _policy_mode = str(data.get("model_policy_mode") or "pinned").strip().lower()
+        if _policy_mode not in {"pinned", "auto-balanced", "auto-fast"}:
+            _policy_mode = "pinned"
+        _policy_evaluation_mode = _policy_mode if _policy_mode != "pinned" else "auto-balanced"
+        _policy_candidates = {
+            "acp_available": bool(_st.acp_client and _st.acp_client.alive),
+            "acp_model": _st.acp_client.model if _st.acp_client else "",
+            "openai_available": bool(openai_api_key),
+            "openai_model": "gpt-5.6-luna",
+            "lmstudio_available": data.get("lmstudio_available") is True,
+            "lmstudio_model": str(data.get("lmstudio_model") or "local")[:80],
+        }
+        _policy_shadow = select_model_policy(
+            _policy_evaluation_mode, requested_backend, _request_type, needs_acp_tools, _policy_candidates,
+            local_only=_st.local_mode,
+        )
+        _verbose_debug_emit(
+            "route",
+            request_type=_request_type,
+            selected_provider=responder_provider,
+            selected_model=model_for_response,
+            internal=internal,
+            no_tools=no_tools,
+            acp_preflight=needs_acp_tools,
+            tool_profile=_tool_profile,
+        )
+        audit_event(
+            "turn.accepted", turn_id, "started",
+            request_type=_request_type,
+            requested_backend=requested_backend,
+            policy_mode=_policy_mode,
+            user_chars=len(user_message),
+            internal=internal,
+        )
+        audit_event(
+            "model_policy.shadow", turn_id, "recommended",
+            policy_mode=_policy_evaluation_mode,
+            provider=_policy_shadow.get("provider"),
+            backend=_policy_shadow.get("backend"),
+            reason=_policy_shadow.get("reason"),
+            requires_tools=needs_acp_tools,
+        )
+        if _briefing_request:
+            audit_event("briefing.cache", turn_id, "used", prepared_chars=len(_briefing_context))
         _escalation = "fast-responder" if _fast_route else (
             "acp-preflight" if needs_acp_tools else "direct-responder"
         )
@@ -4067,6 +4187,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "Return ONLY the raw data results, no commentary:\n\n"
                     f"{user_message}"
                 )
+            elif _request_type == "github-data":
+                acp_prompt = (
+                    "You are a GitHub data retrieval assistant. Use the available GitHub MCP tools to answer the user's "
+                    "request. Do not use browser or desktop automation. Return factual GitHub results with repository, issue, "
+                    "pull request, workflow, release, or branch identifiers when available. If the requested GitHub data is "
+                    "unavailable, say so without inventing it.\n\n"
+                    f"{user_message}"
+                )
             else:
                 # General request — let ACP use whatever tools it deems appropriate
                 acp_prompt = (
@@ -4124,6 +4252,28 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "- Use the context below naturally as your own knowledge.\n\n"
         )
 
+        if native_terminal_plan:
+            if native_terminal_candidate:
+                eva_system = (
+                    "You are Eva's terminal applicability classifier and command planner. Decide whether the user's question "
+                    "or request can be materially answered or fulfilled by exactly one local CLI command. Return exactly one "
+                    "JSON object with fields applicable (boolean) and command (string). Do not execute tools. Do not explain. "
+                    "Do not use markdown. Use applicable=false and an empty command for conversation, opinions, general knowledge, "
+                    "or requests that do not benefit from inspecting or operating the local computer or approved workspace. "
+                    "When applicable=true, command must be one shell line with no newline characters. Prefer the simplest command. "
+                    "Never include credentials, tokens, sudo, su, destructive disk commands, process-killing commands, or network "
+                    "exfiltration. If one safe command cannot represent the task, return {\"applicable\":false,\"command\":\"\"}."
+                )
+            else:
+                eva_system = (
+                    "You are Eva's terminal command planner. Convert the user's explicit terminal objective into exactly one "
+                    "JSON object with one string field named command. Do not execute tools. Do not explain. Do not use markdown. "
+                    "The command must be one shell line with no newline characters. Prefer the simplest command that satisfies "
+                    "the objective in the current approved workspace. Never include credentials, tokens, sudo, su, destructive "
+                    "disk commands, process-killing commands, or network exfiltration. If the task cannot be represented safely "
+                    "as one command, return {\"command\":\"\"}."
+                )
+
         if translation_mode:
             eva_system = (
                 "You are a real-time interpreter. Translate the user's spoken text into the requested target language. "
@@ -4156,6 +4306,34 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         if memory_context:
             eva_system += memory_context
+
+        if _briefing_context:
+            eva_system += (
+                "\n[Prepared Morning Briefing]\n" + _briefing_context + "\n\n"
+                "Use these application-prepared entries as authoritative current context.\n"
+            )
+        if _briefing_preparing:
+            eva_system += (
+                "\n[Morning Briefing Preparation]\n"
+                "Live briefing preparation is still running. Do not call tools or start searches. "
+                "Summarize only prepared entries above, clearly identify that live news/market sections are still preparing, "
+                "and never claim the briefing is complete.\n"
+            )
+        elif _briefing_unavailable:
+            eva_system += (
+                "\n[Morning Briefing Availability]\n"
+                "Preparation finished without required live source(s): " + ", ".join(_briefing_unavailable) + ". "
+                "Do not call tools or start searches. Summarize only prepared entries and explicitly say which live sections "
+                "are unavailable. Never call this a complete briefing.\n"
+            )
+        elif _briefing_context:
+            eva_system += "Do not claim prepared briefing sources are unavailable or still running.\n"
+        elif _briefing_request:
+            eva_system += (
+                "\n[Morning Briefing Preparation]\n"
+                "Preparation did not complete. Do not call tools or start searches. State plainly that live briefing data "
+                "is unavailable right now, then provide only durable memory context if present.\n"
+            )
 
         if _passive_recall:
             eva_system += (
@@ -4198,12 +4376,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
             lms_model = (data.get("lmstudio_model") or "").strip()
             if not lms_base:
                 lms_base = "http://localhost:1234/v1"
-            if not lms_model:
-                lms_model = "granite-3.1-8b-instruct"
 
             lms_base, lms_error = _validate_lmstudio_base_url(lms_base)
             if lms_error:
+                _audit_turn_failed("lmstudio", "validation", 400)
                 self._json_response(400, {"error": {"message": lms_error}})
+                return
+            from bridge.local_mcp import _resolve_lmstudio_model
+            lms_model, model_error = _resolve_lmstudio_model(lms_base, lms_model)
+            if model_error:
+                _audit_turn_failed("lmstudio", "model-discovery", 502)
+                self._json_response(502, {"error": {"message": model_error}})
                 return
 
             eva_system_full = eva_system
@@ -4258,10 +4441,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     model_used = "aig:lmstudio:" + lms_model
                 else:
                     print(f"[AIG] LM Studio HTTP error: {lms_resp.status_code}")
+                    _audit_turn_failed("lmstudio", "http", lms_resp.status_code)
                     self._json_response(502, {"error": {"message": f"LM Studio returned HTTP {lms_resp.status_code}"}})
                     return
             except Exception as _lms_err:
                 print(f"[AIG] LM Studio request failed: {_lms_err}")
+                _audit_turn_failed("lmstudio", type(_lms_err).__name__, 504)
                 self._json_response(504, {"error": {"message": f"LM Studio request failed: {_lms_err}"}})
                 return
 
@@ -4347,16 +4532,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 response_chars=len(response_text or ""),
                 total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
             )
+            audit_event(
+                "turn.response", turn_id, "completed",
+                model=model_used,
+                request_type=_request_type,
+                response_chars=len(response_text or ""),
+                total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
+            )
             return
 
-        # Step 4: Pick the best responder. This timing separates the final
-        # model pass from memory and optional ACP pre-retrieval.
-        # Priority: request body PAT > env var > Copilot CLI OAuth token > ACP fallback
-        github_pat = "" if responder_provider == "openai" else (data.get("github_pat", "") or os.environ.get("GITHUB_PAT", ""))
+        # Step 4: Pick the best responder. Non-explicit OpenAI selections use
+        # Copilot ACP directly. GitHub Models is intentionally not a responder.
+        github_pat = ""
 
         # Fallback: read Copilot CLI's OAuth token (works with GitHub Models API — OpenAI models only)
         _using_oauth_token = False
-        if responder_provider != "openai" and not github_pat:
+        if responder_provider == "auto" and not github_pat:
             try:
                 oauth_path = os.path.expanduser("~/.config/github-copilot/oauth.json")
                 if os.path.isfile(oauth_path):
@@ -4373,12 +4564,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Models available on GitHub Models API (PAT).
         # Models absent from this map must route through ACP.
         # See: https://github.com/marketplace/models/catalog
-        # API endpoint: https://models.github.ai/inference/chat/completions
+        # Retained legacy model aliases are routed through ACP, not a direct provider endpoint.
         # Model names use publisher/model format.
         _github_model_map = {
             "gpt-4.1": "openai/gpt-4.1",
             "gpt-4o": "openai/gpt-4o",
             "gpt-4o-mini": "openai/gpt-4o-mini",
+            "gpt-5.6-sol": "openai/gpt-5.6-sol",
+            "gpt-5.6-terra": "openai/gpt-5.6-terra",
+            "gpt-5.6-luna": "openai/gpt-5.6-luna",
             "gpt-5": "openai/gpt-5",
             "gpt-5-mini": "openai/gpt-5-mini",
             "gpt-5-nano": "openai/gpt-5-nano",
@@ -4394,16 +4588,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # variants (e.g. gpt-5.5, gpt-5.3-codex) that Copilot CLI serves.
 
         api_model = _github_model_map.get(model_for_response, model_for_response)
-        acp_response_model = ""
+        acp_response_model = model_for_response if responder_provider == "acp" else ""
         if model_for_response == "acp":
             acp_response_model = ""
-        elif model_for_response not in _github_model_map:
+        elif responder_provider != "acp" and model_for_response not in _github_model_map:
             acp_response_model = model_for_response
 
         print(f"[AIG] Model requested: {model_for_response}, API model: {api_model}, PAT present: {bool(github_pat)} ({len(github_pat)} chars)")
         response_text = ""
         model_used = "aig"
         response_finish_reason = "stop"
+        response_outcome = "completed"
+        response_reason = ""
 
         if raw_output_requested and acp_data:
             active_raw_model = acp_model_used or (_st.acp_client.model if _st.acp_client else "copilot-acp")
@@ -4432,14 +4628,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Note: _st.cognition_enabled is only set at startup when Kusto MCP + token
         # are confirmed, so ACP availability is guaranteed at that point.
         # The alive check is deferred to the actual ACP prompt call.
-        if responder_provider != "openai" and not translation_mode and _st.cognition_enabled and _st.acp_client:
+        if responder_provider == "acp" and not translation_mode and not native_terminal_plan and not _briefing_request and _st.cognition_enabled and _st.acp_client:
             if model_for_response not in ("lmstudio",):
                 github_pat = ""
                 acp_response_model = model_for_response if model_for_response != "acp" else ""
                 print(f"[AIG] Cognition active: routing directly to ACP")
 
         # Non-mapped models are not on GitHub Models API and must go through ACP.
-        elif model_for_response != "acp" and model_for_response not in _github_model_map:
+        elif responder_provider == "auto" and model_for_response != "acp" and model_for_response not in _github_model_map:
             print(f"[AIG] {model_for_response} not on GitHub Models API, routing to ACP")
             github_pat = ""
 
@@ -4468,6 +4664,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             f"If 'Active responder model' is '{_runtime_model}', then your answer is "
             f"'{_runtime_model}' and nothing else. Do not second-guess this block.\n\n"
         )
+        if _request_type == "github-data":
+            eva_system += (
+                "GITHUB DATA ROUTE:\n"
+                "- Use [Data Retrieved] and GitHub MCP results for this request.\n"
+                "- Do not emit browser or desktop markers to research GitHub.\n"
+                "- If GitHub data is unavailable, state that plainly rather than opening a browser.\n\n"
+            )
 
         if responder_provider == "openai" and not response_text:
             print(f"[AIG] Step 3: Generating response via OpenAI API ({model_for_response})...")
@@ -4496,6 +4699,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 )
                 if openai_resp.status_code < 200 or openai_resp.status_code >= 300:
                     detail = openai_resp.text[:500] if openai_resp.text else "(empty response)"
+                    _audit_turn_failed("openai", "http", openai_resp.status_code)
                     self._json_response(openai_resp.status_code if openai_resp.status_code < 500 else 502, {
                         "error": {"message": f"OpenAI API failed ({openai_resp.status_code}): {detail}"}
                     })
@@ -4526,6 +4730,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     response_text = openai_choice.get("message", {}).get("content", "")
                     response_finish_reason = openai_choice.get("finish_reason") or "stop"
                 if not response_text:
+                    _audit_turn_failed("openai", "empty-response", 502)
                     if stream_state and stream_state["started"]:
                         self._stream_error(stream_state, "OpenAI API returned an empty response.", 502)
                     else:
@@ -4536,6 +4741,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     model_used += f"+{acp_model_used}"
                 print(f"[AIG] OpenAI response: {len(response_text)} chars")
             except Exception as error:
+                _audit_turn_failed("openai", type(error).__name__, 502)
                 if stream_state and stream_state["started"]:
                     self._stream_error(stream_state, f"OpenAI API request failed: {error}", 502)
                 else:
@@ -4556,7 +4762,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if not pat_messages or pat_messages[-1].get("content") != user_message:
                     pat_messages.append({"role": "user", "content": user_message})
 
-                pat_resp = _req.post("https://models.github.ai/inference/chat/completions",
+                pat_resp = _req.post("https://disabled.invalid/github-models-retired",
                     headers={
                         "Authorization": f"Bearer {github_pat}",
                         "Content-Type": "application/json"
@@ -4601,13 +4807,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 else:
                     err_body = pat_resp.text[:500] if pat_resp.text else "(empty)"
                     print(f"[AIG] PAT model failed ({pat_resp.status_code}): {err_body}")
+                    if native_terminal_plan:
+                        _audit_turn_failed("github-models", "http", pat_resp.status_code)
+                        self._json_response(502, {"error": {"message": "Terminal planner model request failed."}})
+                        return
                     print(f"[AIG] Falling back to ACP")
                     github_pat = ""  # trigger ACP fallback
             except Exception as e:
+                if native_terminal_plan:
+                    _audit_turn_failed("github-models", type(e).__name__, 502)
+                    self._json_response(502, {"error": {"message": "Terminal planner model request failed."}})
+                    return
                 print(f"[AIG] PAT error: {e}, falling back to ACP")
                 github_pat = ""
 
         if not response_text and responder_provider != "openai":
+            if native_terminal_plan:
+                _audit_turn_failed("terminal-planner", "direct-provider-unavailable", 503)
+                self._json_response(503, {"error": {"message": "A direct terminal planner model is unavailable."}})
+                return
             # ACP response generation — primary path when cognition is active,
             # fallback path when PAT is unavailable or failed.
             print(f"[AIG] Using ACP for response generation...")
@@ -4627,10 +4845,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 else:
                     full_prompt = eva_system + "\n\nUser: " + user_message
                 with _acquire_acp_client(acp_response_model, reasoning_effort or None,
-                                         tool_profile="none") as (response_client, acquire_detail):
+                                         tool_profile=_tool_profile if needs_acp_tools else "none") as (response_client, acquire_detail):
                     if not response_client:
-                        response_text = f"ACP model switch failed: {acquire_detail}"
-                        model_used = "aig:unavailable"
+                        _audit_turn_failed("acp", "acquire", 503)
+                        message = "ACP model switch failed: " + str(acquire_detail or "unavailable")
+                        if stream_state and stream_state["started"]:
+                            self._stream_error(stream_state, message, 503)
+                        else:
+                            self._json_response(503, {"error": {"message": message}})
+                        return
                     else:
                         on_chunk = (lambda chunk: self._stream_chunk(stream_state, chunk)) if stream_state else None
                         acp_result = response_client.prompt(
@@ -4640,6 +4863,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             on_chunk=on_chunk,
                             permission_mode="passive_recall" if _passive_recall else "interactive",
                         )
+                        if acp_result.get("error"):
+                            _audit_turn_failed("acp", "prompt", 502)
+                            message = "ACP response failed: " + str(acp_result.get("error"))[:300]
+                            if stream_state and stream_state["started"]:
+                                self._stream_error(stream_state, message, 502)
+                            else:
+                                self._json_response(502, {"error": {"message": message}})
+                            return
+                        if acp_result.get("permission_cancelled"):
+                            response_outcome = "cancelled"
+                            response_reason = "permission-cancelled"
                         response_text = acp_result.get("text", "I'm having trouble processing that right now.")
                         if acp_result.get("stop_reason") in ("max_tokens", "length"):
                             response_finish_reason = "length"
@@ -4648,8 +4882,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         if acp_model_used and acp_model_used != active_model:
                             model_used += f"+{acp_model_used}"
             else:
-                response_text = "The AIG system needs either a GitHub PAT or a running ACP bridge to generate responses."
-                model_used = "aig:unavailable"
+                _audit_turn_failed("acp", "unavailable", 503)
+                message = "The AIG system needs either a GitHub PAT or a running ACP bridge to generate responses."
+                if stream_state and stream_state["started"]:
+                    self._stream_error(stream_state, message, 503)
+                else:
+                    self._json_response(503, {"error": {"message": message}})
+                return
 
         # Step 5: Post-response reflection (background)
         if response_text and _st.cognition_enabled and not internal:
@@ -4698,6 +4937,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             fast_route=_fast_route or "",
             escalation=_escalation,
             **_prompt_fields,
+            response_chars=len(response_text or ""),
+            total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
+        )
+        audit_event(
+            "turn.response", turn_id, response_outcome,
+            model=model_used,
+            request_type=_request_type,
+            reason=response_reason,
             response_chars=len(response_text or ""),
             total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
         )
@@ -4803,6 +5050,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             acp_prompt = (
                 "You are a data retrieval assistant. Execute the appropriate Kusto MCP tool to answer this request. "
                 "Return ONLY the raw data results, no commentary:\n\n"
+                f"{user_message}"
+            )
+        elif _request_type == "github-data":
+            acp_prompt = (
+                "You are a GitHub data retrieval assistant. Use the available GitHub MCP tools to answer the user's "
+                "request. Do not use browser or desktop automation. Return factual GitHub results with repository, issue, "
+                "pull request, workflow, release, or branch identifiers when available. If the requested GitHub data is "
+                "unavailable, say so without inventing it.\n\n"
                 f"{user_message}"
             )
         else:
@@ -5759,7 +6014,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             self._json_response(400, {"error": {"message": "expected an object"}})
             return
-        self._json_response(200, _save_client_prefs(data))
+        saved = _save_client_prefs(data)
+        _st.verbose_debug = saved.get("verbose_debug") is True
+        self._json_response(200, saved)
 
     # ── Mode switching (cloud vs local) ─────────────────────────────
 
@@ -6105,6 +6362,7 @@ def main():
     # block status/cancel/confirm polling on other connections.
     server = ThreadingHTTPServer((args.bind, args.port), BridgeHandler)
     print(f"[Bridge] Listening on http://{args.bind}:{args.port}")
+    start_startup_briefing()
     print(f"[Bridge] Endpoints:")
     print(f"  POST /v1/chat/completions   - Send chat messages")
     print(f"  GET  /v1/models             - List available models")
