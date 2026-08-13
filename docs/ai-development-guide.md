@@ -58,6 +58,7 @@ local inspection and its privacy implications have been established.
 | --- | --- | --- |
 | UI composition and settings markup | `index.html`, `core/style.css` | DOM IDs and user-facing settings |
 | Shared browser behavior | `core/js/options.js` | Startup, settings orchestration, and rendering helpers |
+| Voice View lifecycle | `core/js/features/voice/view.js` | Ambient HUD, listening, endpoint handoff, barge-in, and compact voice globals |
 | Model settings | `core/js/model-routing.js`, `core/js/settings/model-settings.js` | Selector classification, parameter controls, AIG metadata, and theme filtering |
 | Goals settings | `core/js/settings/goals.js` | Goal list, form validation, and private bridge lifecycle |
 | Runtime settings | `core/js/settings/runtime.js` | Data retrieval mode and local diagnostics |

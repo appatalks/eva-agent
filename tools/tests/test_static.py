@@ -84,6 +84,7 @@ def test_required_files():
         "core/js/features/sessions/explorer.js",
         "core/js/features/voice/wake-listener.js",
         "core/js/features/voice/endpoint.js",
+        "core/js/features/voice/view.js",
         "core/js/features/agents/operations.js",
         "core/js/features/assets/library.js",
         "core/js/dialogs.js",
@@ -122,6 +123,8 @@ def test_required_files():
         "tools/tests/test_sessions_api.js",
         "tools/tests/test_voice_listener_api.js",
         "tools/tests/test_voice_endpoint.js",
+        "tools/tests/test_voice_view_api.js",
+        "tools/tests/test_voice_interruption.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -326,6 +329,8 @@ def test_local_speech_contract():
         standalone = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
+    with open("core/js/features/voice/view.js") as f:
+        voice_view = f.read()
     with open("core/js/settings/audio.js") as f:
         audio_settings = f.read()
     with open("core/js/features/sessions/explorer.js") as f:
@@ -346,7 +351,7 @@ def test_local_speech_contract():
     report("local_speech_no_wildcard_cors", 'Access-Control-Allow-Origin' not in bridge)
     report("local_speech_local_stt", 'faster_whisper' in bridge and 'vad_filter=True' in bridge)
     report("local_speech_electron_webm", '"video/webm"' in bridge)
-    report("local_speech_electron_proxy", 'local-speech-transcribe' in standalone and 'localSpeechTranscribe' in options)
+    report("local_speech_electron_proxy", 'local-speech-transcribe' in standalone and 'localSpeechTranscribe' in voice_view)
     report("local_speech_response_aware_proxy", "res.headers['content-type']" in standalone)
     report("local_speech_proxy_error_detail", "JSON.parse(response.toString('utf8')).error" in standalone and "Buffer.from(body)" in standalone)
     report("local_speech_per_request_profile", "resolveLocalVoiceForSynthesis" in standalone and "reference: profile.reference" in standalone)
@@ -358,32 +363,32 @@ def test_local_speech_contract():
     report("local_speech_playback_settings_snapshot", "var languageMode = getLocalVoicesLanguage();" in options and "var profileId = getLocalVoicesProfile();" in options and "languageMode: languageMode" in options and "profileId: profileId" in options)
     report("local_speech_explicit_custom_profile", "profile.language === null" in standalone and "!automatic && profile" in standalone)
     report("local_speech_stt_language_header", "X-Eva-Speech-Language" in standalone and "normalize_speech_language" in bridge)
-    report("local_speech_live_multilingual_warmup", "local-speech-warm-translation" in standalone and "X-Eva-Live-Translation" in standalone and "def warm(self, multilingual" in bridge and "function _vvUseMultilingualTranslationStt" in options)
+    report("local_speech_live_multilingual_warmup", "local-speech-warm-translation" in standalone and "X-Eva-Live-Translation" in standalone and "def warm(self, multilingual" in bridge and "function _vvUseMultilingualTranslationStt" in voice_view)
     report("local_speech_no_removed_profile_fallback", "localVoicesProfileEl.value || 'eva'" not in options and "localStorage.setItem('local_voices_profile', 'bundled:eva-english')" in options)
     report("local_speech_no_renderer_url", "fetch(bridgeUrl + '/v1/speech'" not in options)
     report("local_speech_incremental_tts", 'function _ttsSpeakLocalChunked' in options and 'synth(chunkIndex + 1)' in options)
     report("local_speech_acknowledgement_cache", "local-speech-acknowledgement" in standalone and "acknowledgementCachePath" in standalone and "MAX_LOCAL_SPEECH_ACK_CACHE_ENTRIES" in standalone)
     report("local_speech_acknowledgement_profile_key", "profile.profileId" in standalone and "crypto.createHash('sha256')" in standalone)
-    report("local_speech_acknowledgement_renderer", "function _vvWarmAcknowledgements" in options and "localSpeechAcknowledgement" in options and "localSpeechWarmAcknowledgements" in options)
+    report("local_speech_acknowledgement_renderer", "function _vvWarmAcknowledgements" in voice_view and "localSpeechAcknowledgement" in voice_view and "localSpeechWarmAcknowledgements" in voice_view)
     report("local_speech_acknowledgement_priority", "queueAcknowledgementSynthesis" in standalone and "acknowledgementSynthesisQueue.urgent" in standalone and "LOCAL_SPEECH_ACK_TIMEOUT_MS = 20000" in standalone)
-    report("local_speech_acknowledgement_prewarm", "function _vvPrepareAcknowledgements" in options and "_vvPrepareAcknowledgements();" in options and "_ackWarmCompleteKey" in options)
+    report("local_speech_acknowledgement_prewarm", "function _vvPrepareAcknowledgements" in voice_view and "_vvPrepareAcknowledgements();" in voice_view and "_ackWarmCompleteKey" in voice_view)
     report("live_translation_controls", 'id="liveTranslationTarget"' in open("index.html").read() and 'id="liveTranslationModel"' in open("index.html").read() and 'id="vvLiveTranslationToggle"' not in open("index.html").read())
-    report("live_translation_fast_route", "function _vvTranslateLiveTranscript" in options and "'/v1/translate'" in options and "_vvSpeakBrowser(translated" in options and "_VV_LIVE_TRANSLATION_TIMEOUT_MS = 12000" in options)
+    report("live_translation_fast_route", "function _vvTranslateLiveTranscript" in voice_view and "'/v1/translate'" in voice_view and "_vvSpeakBrowser(translated" in voice_view and "_VV_LIVE_TRANSLATION_TIMEOUT_MS = 12000" in voice_view)
     aig_request = open("tools/bridge/aig_request.py").read()
     report("live_translation_dedicated_bridge", "def _translate(self):" in core_bridge and 'elif parsed_path == "/v1/translate":' in core_bridge and "translation_mode = bool(data.get(\"translation_mode\"))" in aig_request)
     report("live_translation_lmstudio_isolation", "if translation_mode:" in core_bridge and "not translation_mode and any(kw in user_message.lower()" in core_bridge and "if not translation_mode:" in core_bridge)
-    report("live_translation_persisted_target", "function getLiveTranslationTarget" in audio_settings and "function getLiveTranslationModel" in audio_settings and "function getResolvedLiveTranslationModel" in options and "live_translation_target" in audio_settings and "live_translation_model" in audio_settings and "function _vvSetLiveTranslation" in options)
-    report("voice_view_selected_mic_fallback", "Selected microphone needs an OpenAI key" in options and "if (whisperKey)" in options)
-    report("voice_view_restores_listener_after_translation", "_vvStopListening();\n      _vvStartListening();" in options)
-    report("local_speech_recorder_exclusive", "if (_vv._capture) return;" in options and "_vv._capture === capture" in options)
-    report("local_speech_capture_generation", "capture.generation !== _vv.listenGeneration" in options and "capture.chunks" in options)
-    report("local_speech_recorder_finalizes_before_rearm", "var ownsCapture = _vv._capture === capture;" in options and "if (ownsCapture && _vvIsActive() && _vv.whisperMode" in options)
-    report("local_speech_400_recovers", "if (/HTTP 400/.test(message))" in options and "if (_vv.phase === 'speaking')" in options and "if (_vv.phase === 'awake')" in options and "_vvEnterAwake(_vv.convoMode ? _vv.convoTimeoutMs : 10000)" in options)
-    report("local_speech_energy_barge", "_vv.whisperProvider !== 'local'" in options and "average > 38 && peak > 90" in options and "_vv._bargeEnergyFrames >= 8" in options)
-    report("local_speech_voice_threshold", "var threshold = 12;" in options)
+    report("live_translation_persisted_target", "function getLiveTranslationTarget" in audio_settings and "function getLiveTranslationModel" in audio_settings and "function getResolvedLiveTranslationModel" in options and "live_translation_target" in audio_settings and "live_translation_model" in audio_settings and "function _vvSetLiveTranslation" in voice_view)
+    report("voice_view_selected_mic_fallback", "Selected microphone needs an OpenAI key" in voice_view and "if (whisperKey)" in voice_view)
+    report("voice_view_restores_listener_after_translation", "_vvStopListening();\n      _vvStartListening();" in voice_view)
+    report("local_speech_recorder_exclusive", "if (_vv._capture) return;" in voice_view and "_vv._capture === capture" in voice_view)
+    report("local_speech_capture_generation", "capture.generation !== _vv.listenGeneration" in voice_view and "capture.chunks" in voice_view)
+    report("local_speech_recorder_finalizes_before_rearm", "var ownsCapture = _vv._capture === capture;" in voice_view and "if (ownsCapture && _vvIsActive() && _vv.whisperMode" in voice_view)
+    report("local_speech_400_recovers", "if (/HTTP 400/.test(message))" in voice_view and "if (_vv.phase === 'speaking')" in voice_view and "if (_vv.phase === 'awake')" in voice_view and "_vvEnterAwake(_vv.convoMode ? _vv.convoTimeoutMs : 10000)" in voice_view)
+    report("local_speech_energy_barge", "_vv.whisperProvider !== 'local'" in voice_view and "average > 38 && peak > 90" in voice_view and "_vv._bargeEnergyFrames >= 8" in voice_view)
+    report("local_speech_voice_threshold", "var threshold = 12;" in voice_view)
     report("local_speech_auto_defaults_english", 'model_language = "ko" if multilingual or language == "ko" else "en"' in bridge)
-    report("local_speech_wake_alias", "function _vvWakeWordMatch" in options and "(eva|ava)" in options)
-    report("local_speech_direct_dispatch", "if (_vv.whisperProvider === 'local')" in options and "_vvHandleTranscript(data.text.trim())" in options and "_vvQueueTranscript(data.text.trim(), _vv.whisperProvider)" in options)
+    report("local_speech_wake_alias", "function _vvWakeWordMatch" in voice_view and "(eva|ava)" in voice_view)
+    report("local_speech_direct_dispatch", "if (_vv.whisperProvider === 'local')" in voice_view and "_vvHandleTranscript(data.text.trim())" in voice_view and "_vvQueueTranscript(data.text.trim(), _vv.whisperProvider)" in voice_view)
     report("local_speech_installer", '--voice-deps' in installer and 'install_local_speech' in installer)
     report("local_speech_installer_refreshes_existing_runtime", 'queue "Refresh Local Voices and local transcription" "install_local_speech"' in installer)
     report("local_speech_installer_uses_adapter", 'voice_package="$SCRIPT_DIR/tools/voice_clone_module"' in installer and '--reinstall "$voice_package"' in installer)
@@ -729,6 +734,8 @@ def test_protected_memory_settings_contract():
         copilot = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
+    with open("core/js/features/voice/view.js") as f:
+        voice_view = f.read()
     with open("standalone/package.json") as f:
         package = json.load(f)
     resource_filters = package["build"]["extraResources"][0]["filter"]
@@ -1245,6 +1252,8 @@ def test_sidebar_workflow_contract():
         cognition_js = f.read()
     with open("core/js/options.js") as f:
         options_js = f.read()
+    with open("core/js/features/voice/view.js") as f:
+        voice_view_js = f.read()
     with open("tools/bridge/core.py") as f:
         bridge_core = f.read()
     with open("standalone/main.js") as f:
@@ -1264,7 +1273,7 @@ def test_sidebar_workflow_contract():
     report("workflow_voice_conversation_record", "voiceMessages" in sessions_js and "function recordConversationTurn" in sessions_js and "function recordSpokenEvaText" in sessions_js and "recordConversationTurn(command, reply)" in open("core/js/features/voice/wake-listener.js").read() and "recordConversationTurn(protectedRawText, nativeResult.message)" in options_js)
     report("workflow_sidebar_session_provider", "function getAllSessions" in sessions_js and "updatedAt:" in sessions_js)
     report("workflow_new_session_on_launch", "startFreshSessionOnLaunch();\n\n  // Migrate saved sessions" in sessions_js and "function startFreshSessionOnLaunch()" in sessions_js)
-    report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "opens a fresh chat on launch" in options_js)
+    report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "opens a fresh chat on launch" in voice_view_js)
     report("workflow_side_panels_click_outside", "function closeSidePanels" in sessions_js and "EVA_SIDE_PANEL_IDS" in sessions_js and "document.addEventListener('click'" in sessions_js)
     report("workflow_workspace_navigation", "function closeAgentOperationsForNavigation" in sessions_js and "#evaAgentsBtn, #evaWorkspacesBtn" in sessions_js and 'id="evaAgentsBtn"' in html and 'id="lcarsWorkspacesBtn"' in html and "EvaAgents.open()" in html and "EvaWorkspaces.openWorkbench()" in html and "!target.closest('#lcarsWorkspacesBtn')" in sessions_js)
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
@@ -1286,15 +1295,15 @@ def test_sidebar_workflow_contract():
     harness_js = open("core/js/harness-control.js").read()
     prompts_js = open("core/js/settings/prompts.js").read()
     report("workflow_text_prompt_lazy_binding", "function _bindEvaTextPrompt" in dialogs_js and "_bindEvaTextPrompt();" in dialogs_js and "dialog.dataset.bound" in dialogs_js)
-    report("workflow_text_prompt_voice_handoff", "function evaTextPromptConsumeVoice" in dialogs_js and "function evaTextPromptIsOpen" in dialogs_js and "function _evaGithubPromptCorrection" in dialogs_js and "github_repository_url" in dialogs_js and "Say the corrected repository name" in dialogs_js and "form.requestSubmit()" in dialogs_js and "dispatchEvent(new Event('input'" in dialogs_js and "evaTextPromptConsumeVoice(transcript)" in options_js and "evaTextPromptConsumeVoice(transcript)" in voice_js)
+    report("workflow_text_prompt_voice_handoff", "function evaTextPromptConsumeVoice" in dialogs_js and "function evaTextPromptIsOpen" in dialogs_js and "function _evaGithubPromptCorrection" in dialogs_js and "github_repository_url" in dialogs_js and "Say the corrected repository name" in dialogs_js and "form.requestSubmit()" in dialogs_js and "dispatchEvent(new Event('input'" in dialogs_js and "evaTextPromptConsumeVoice(transcript)" in voice_view_js and "evaTextPromptConsumeVoice(transcript)" in voice_js)
     report("workflow_native_field_control", "function evaTextPromptDescribe" in dialogs_js and "function evaTextPromptSetField" in dialogs_js and "function evaTextPromptSubmit" in dialogs_js and "inspect_form" in harness_js and "set_field" in harness_js and "submit_form" in harness_js and "CURRENT NATIVE FORM" in harness_js)
     eva_theme = open("core/themes/eva.css").read()
-    report("workflow_compact_voice_control", 'id="evaSidebarMicButton"' in html and 'id="evaSidebarVoiceStatus"' in html and 'id="evaSidebarVoiceViewButton"' in html and "eva-sidebar-voice" in eva_theme and "toggleCompactVoiceController()" in html and "function toggleCompactVoiceController" in options_js)
-    report("workflow_compact_voice_full_pipeline", "compactActive: false" in options_js and "function _vvIsActive" in options_js and "_vvStartListening();" in options_js.split("function toggleCompactVoiceController", 1)[1].split("function toggleVoiceView", 1)[0] and "_vvIsActive() || !_vv.whisperMode" in options_js and "_runVoiceNavigationCommand(command, compactVoiceTurnId)" in options_js.split("function _vvSendCommand", 1)[1].split("function _vvWatchForResponse", 1)[0] and "var keepCompactController = _vv.compactActive;" in options_js and "if (!keepCompactController) _vvStopListening();" in options_js)
+    report("workflow_compact_voice_control", 'id="evaSidebarMicButton"' in html and 'id="evaSidebarVoiceStatus"' in html and 'id="evaSidebarVoiceViewButton"' in html and "eva-sidebar-voice" in eva_theme and "toggleCompactVoiceController()" in html and "function toggleCompactVoiceController" in voice_view_js)
+    report("workflow_compact_voice_full_pipeline", "compactActive: false" in voice_view_js and "function _vvIsActive" in voice_view_js and "_vvStartListening();" in voice_view_js.split("function toggleCompactVoiceController", 1)[1].split("function toggleVoiceView", 1)[0] and "_vvIsActive() || !_vv.whisperMode" in voice_view_js and "_runVoiceNavigationCommand(command, compactVoiceTurnId)" in voice_view_js.split("function _vvSendCommand", 1)[1].split("function _vvWatchForResponse", 1)[0] and "var keepCompactController = _vv.compactActive;" in voice_view_js and "if (!keepCompactController) _vvStopListening();" in voice_view_js)
     report("workflow_compact_voice_shared_status", "evaSidebarMicButton" in voice_js and "evaSidebarVoiceStatus" in voice_js and "buttons.forEach" in voice_js)
     report("workflow_voice_native_navigation", "function _runVoiceNavigationCommand" in voice_js and "EvaHarness.resolveNavigationRequest(phrase, { directUser: true })" in voice_js and "EvaHarness.navigate(route.target)" in voice_js and "EvaHarness.resolveNavigationRequest(protectedRawText, { directUser: true })" in options_js and "EvaHarness.navigate(nativeRoute.target)" in options_js)
     report("workflow_voice_workspace_compound_navigation", "route.target === 'workspaces'" in voice_js and "read-only workspace commands" in voice_js)
-    report("workflow_voice_graph_disabled", "VOICE_MEMORY_GRAPH_ENABLED = false" in options_js and "if (VOICE_MEMORY_GRAPH_ENABLED) _vvStartMemoryGraph();" in options_js and ".vv-memory-graph" in eva_theme and "display: none" in eva_theme)
+    report("workflow_voice_graph_disabled", "VOICE_MEMORY_GRAPH_ENABLED = false" in voice_view_js and "if (VOICE_MEMORY_GRAPH_ENABLED) _vvStartMemoryGraph();" in voice_view_js and ".vv-memory-graph" in eva_theme and "display: none" in eva_theme)
     report("workflow_compact_voice_reduced_motion", "@media (prefers-reduced-motion: reduce)" in eva_theme and ".eva-sidebar-voice-shell-scan" in eva_theme and "animation: none;" in eva_theme)
     report("workflow_native_harness_api", "core/js/harness-control.js" in html and "var EvaHarness" in harness_js and "function execute" in harness_js and "function capabilities" in harness_js and "function resolveSurface" in harness_js and "function resolveNavigationRequest" in harness_js and "nativeOnly: true" in harness_js and all(target in harness_js for target in ("agent_operations", "voice_control", "models", "personality", "goals", "background_jobs", "schedules", "accounts", "tools_memory", "learning", "profile")))
     report("workflow_native_harness_marker", "EVA_HARNESS" in options_js and "EvaHarness.execute" in options_js and "browserLaunch = null;" in options_js and "desktopLaunch = null;" in options_js and "EvaHarness.promptContract" in prompts_js and options_js.find("var desktopLaunch = null;") < options_js.find("if (harnessActions.length) {\n    browserLaunch = null;"))
@@ -1793,7 +1802,7 @@ def test_sessions_api_contract():
 
 
 def test_voice_module_contracts():
-    """Moved Voice modules retain wake-listener globals and endpoint behavior."""
+    """Moved Voice modules retain listener, endpoint, and Voice View contracts."""
     node = shutil.which("node")
     if not node:
         report("voice_listener_api_contract", None, "node is unavailable")
@@ -1802,6 +1811,8 @@ def test_voice_module_contracts():
     for name, path in (
         ("voice_listener_api_contract", "tools/tests/test_voice_listener_api.js"),
         ("voice_endpoint_contract", "tools/tests/test_voice_endpoint.js"),
+        ("voice_view_api_contract", "tools/tests/test_voice_view_api.js"),
+        ("voice_interruption_contract", "tools/tests/test_voice_interruption.js"),
     ):
         result = subprocess.run([node, path], capture_output=True, text=True, check=False)
         detail = (result.stderr or result.stdout).strip()
