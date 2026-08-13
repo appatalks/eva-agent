@@ -294,7 +294,8 @@ core/
                  terminal/xterm renderer and dock navigation
     voice.js               Wake-word "Eva" via Web Speech API
     camera.js              Webcam capture for [[EVA_LOOK]] vision
-    browser-agent.js       Frontend integration for browser agent runs
+    features/automation/browser-agent.js
+                 Frontend integration for browser and desktop agent runs
     pandora.js             Pandora box / Easter egg system
     skills.js              Full-view Skills library/editor: search, status/source
                  filters, sort, import, edit, enable/disable, delete

@@ -31,8 +31,8 @@ const optionsIndex = scriptIndex('core/js/options.js');
   assert.ok(scriptIndex(path) < optionsIndex, `${path} must load before options.js`);
 });
 
-assert.ok(scriptIndex('core/js/browser-agent.js') > optionsIndex,
-  'browser-agent.js must load after options.js because it consumes shared UI helpers');
+assert.ok(scriptIndex('core/js/features/automation/browser-agent.js') > optionsIndex,
+  'browser automation controller must load after options.js because it consumes shared UI helpers');
 assert.ok(scriptIndex('core/js/skills.js') > optionsIndex,
   'skills.js must load after options.js because it consumes shared bridge helpers');
 
