@@ -16,7 +16,7 @@ assert.strictEqual(routing.needsDataRetrieval('Search the web for the latest NAS
 assert.strictEqual(routing.needsDataRetrieval('Search GitHub for the parser.'), true);
 assert.strictEqual(routing.needsDataRetrieval('Create a PDF report.'), true);
 
-const lmStudio = fs.readFileSync('core/js/lm-studio.js', 'utf8');
+const lmStudio = fs.readFileSync('core/js/providers/lm-studio.js', 'utf8');
 assert.match(lmStudio, /EvaRequestRouting\.needsDataRetrieval/);
 assert.match(lmStudio, /if \(_lmsNeedsRetrieval\)/);
 

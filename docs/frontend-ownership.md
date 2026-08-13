@@ -13,11 +13,11 @@ without a documented compatibility plan.
 | Selector classification | `core/js/model-routing.js` | `core/js/options.js`, provider adapters |
 | Shared private bridge transport | `core/js/runtime/bridge-client.js` | Settings, Skills, Workspaces, and Memory Inspector |
 | Prompt budget and request classification | `core/js/prompt-budget.js`, `request-routing.js` | all provider adapters |
-| OpenAI direct | `core/js/gpt-core.js` | model settings, prompt budget |
-| Copilot and GitHub Models | `core/js/copilot.js` | bridge, model settings |
-| Eva AIG | `core/js/aig.js` | bridge AIG lifecycle, cognition |
-| Gemini and LM Studio | `core/js/gl-google.js`, `lm-studio.js` | prompt budget, local MCP |
-| Image generation | `core/js/dalle3.js` | response renderer |
+| OpenAI direct | `core/js/providers/openai.js` | model settings, prompt budget |
+| Copilot and GitHub Models | `core/js/providers/copilot.js` | bridge, model settings |
+| Eva AIG | `core/js/providers/aig.js` | bridge AIG lifecycle, cognition |
+| Gemini and LM Studio | `core/js/providers/gemini.js`, `core/js/providers/lm-studio.js` | prompt budget, local MCP |
+| Image generation | `core/js/providers/image-generation.js` | response renderer |
 
 ## Settings
 

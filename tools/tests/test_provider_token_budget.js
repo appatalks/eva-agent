@@ -92,8 +92,8 @@ async function main() {
     },
   };
   context.window = context;
-  vm.runInNewContext(fs.readFileSync('core/js/lm-studio.js', 'utf8'), context, {
-    filename: 'core/js/lm-studio.js',
+  vm.runInNewContext(fs.readFileSync('core/js/providers/lm-studio.js', 'utf8'), context, {
+    filename: 'core/js/providers/lm-studio.js',
   });
 
   context.lmsSend();
@@ -200,8 +200,8 @@ async function testOpenAITurnSessionRetention() {
     },
   };
   context.window = context;
-  vm.runInNewContext(fs.readFileSync('core/js/gpt-core.js', 'utf8'), context, {
-    filename: 'core/js/gpt-core.js',
+  vm.runInNewContext(fs.readFileSync('core/js/providers/openai.js', 'utf8'), context, {
+    filename: 'core/js/providers/openai.js',
   });
 
   context.trboSend();
@@ -272,8 +272,8 @@ async function testGitHubModelsTurnSessionRetention() {
       return Promise.reject(new Error('unexpected URL: ' + url));
     },
   };
-  vm.runInNewContext(fs.readFileSync('core/js/copilot.js', 'utf8'), context, {
-    filename: 'core/js/copilot.js',
+  vm.runInNewContext(fs.readFileSync('core/js/providers/copilot.js', 'utf8'), context, {
+    filename: 'core/js/providers/copilot.js',
   });
 
   await context._copilotSendModelsAPI(
@@ -354,8 +354,8 @@ async function testGeminiMemoryLifecycle(configuredSystemPrompt, userPrompt) {
       return Promise.reject(new Error('unexpected URL: ' + url));
     },
   };
-  vm.runInNewContext(fs.readFileSync('core/js/gl-google.js', 'utf8'), context, {
-    filename: 'core/js/gl-google.js',
+  vm.runInNewContext(fs.readFileSync('core/js/providers/gemini.js', 'utf8'), context, {
+    filename: 'core/js/providers/gemini.js',
   });
 
   context.geminiSend();
@@ -378,11 +378,11 @@ async function testGeminiMemoryLifecycle(configuredSystemPrompt, userPrompt) {
 }
 
 function testAcpReflectionOwnership() {
-  const source = fs.readFileSync('core/js/copilot.js', 'utf8');
+  const source = fs.readFileSync('core/js/providers/copilot.js', 'utf8');
   assert.ok(source.includes('_copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext, true, payload.session_id, turnId)'));
   assert.ok(source.includes('if (!reflectionHandledByBridge && content && userMessage)'));
   assert.ok(source.includes('session_id: reflectionSessionId ||'));
-  for (const path of ['core/js/aig.js', 'core/js/gpt-core.js', 'core/js/gl-google.js', 'core/js/lm-studio.js', 'core/js/copilot.js']) {
+  for (const path of ['core/js/providers/aig.js', 'core/js/providers/openai.js', 'core/js/providers/gemini.js', 'core/js/providers/lm-studio.js', 'core/js/providers/copilot.js']) {
     assert.ok(fs.readFileSync(path, 'utf8').includes('turn_id: turnId'), path + ' must reuse the captured turn ID for reflection');
   }
 }

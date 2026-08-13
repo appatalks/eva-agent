@@ -4,7 +4,7 @@
 const assert = require('assert');
 const fs = require('fs');
 
-const source = fs.readFileSync('core/js/aig.js', 'utf8');
+const source = fs.readFileSync('core/js/providers/aig.js', 'utf8');
 const bridge = fs.readFileSync('tools/bridge/core.py', 'utf8');
 assert.match(source, /var briefingRequest = \/\\b\(\?:morning\|daily\)\\s\+briefing\\b\/i/);
 assert.match(source, /if \(briefingRequest\) \{\s+cogDecision = \{ active: false, reason: 'briefing-cache' \}/);

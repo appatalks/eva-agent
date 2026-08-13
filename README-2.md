@@ -259,22 +259,22 @@ core/
                 features/voice/view.js
                        Voice View ambient HUD lifecycle, listening, endpoint handoff,
                        barge-in, compact voice controls, and compatible globals
-    gpt-core.js            OpenAI Chat Completions API (trboSend)
+    providers/openai.js    OpenAI Chat Completions API (trboSend)
                            - XHR-based (legacy, not fetch)
                            - Model-specific params (o3-mini reasoning, gpt-5 top_p)
                            - External data augmentation (weather, news, markets, solar)
-    gl-google.js           Google Gemini API (geminiSend)
+    providers/gemini.js    Google Gemini API (geminiSend)
                            - Thinking mode (extracts thoughts vs non-thoughts)
-    lm-studio.js           Local LLM via LM Studio (lmsSend)
+    providers/lm-studio.js Local LLM via LM Studio (lmsSend)
                            - OpenAI-compatible endpoint on localhost:1234
                            - Parallel memory context + data retrieval from bridge
                            - Action block execution (Cognition.executeActions)
                            - File capability documentation in system prompt
                            - Post-response reflection via bridge
-    copilot.js             GitHub Copilot integration (copilotSend)
+    providers/copilot.js   GitHub Copilot integration (copilotSend)
                            - Dual mode: GitHub Models API (PAT) + ACP Bridge
                            - MCP configuration (applyMCPConfig, refreshMCPStatus)
-    aig.js                 Eva AIG orchestration (aigSend)
+    providers/aig.js       Eva AIG orchestration (aigSend)
                            - Routes through bridge /v1/aig/chat
                            - Optional browser-side cognitive layer
                            - Phrase triggers force cognition for single turn
@@ -293,7 +293,8 @@ core/
                  Main Assets library: generated artifacts plus
                  changed files from retained coding worktrees
     dialogs.js             Promise-based in-app text prompt for Electron
-    dalle3.js              Image generation via gpt-image-1 (dalle3Send)
+    providers/image-generation.js
+                 Image generation via gpt-image-1 (dalle3Send)
     idb-store.js           IndexedDB storage backend (sessions + blobs)
     features/sessions/explorer.js
                  Session persistence, legacy-visible restoration,
