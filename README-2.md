@@ -10,6 +10,54 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 > intelligent cross-model orchestration. All other models work standalone, but AIG is the
 > way Eva was designed to be used.
 
+## Setup and Operation
+
+### Source Build
+
+```bash
+git clone https://github.com/appatalks/eva-agent.git
+cd eva-agent
+./install.sh
+cd standalone && npm install && npm run dist
+./dist/'Eva Standalone-5.5.11.AppImage' --eva-workspace-terminal-v1
+```
+
+Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
+features. Authenticate the CLI with `copilot auth login` when using Copilot ACP.
+
+### Windows Packaging
+
+From a Windows checkout, run `npm install` and `npm run dist:win` in `standalone/`.
+The installer is written to `standalone/dist/`, provisions the supported local runtime,
+and opens a terminal for interactive Copilot sign-in. Linux-only desktop automation and
+camera discovery are not available on Windows.
+
+### Core Configuration
+
+Select **Eva (AIG)** for the integrated experience. Settings > Models supports Copilot
+ACP, direct OpenAI, and local LM Studio backends. Direct OpenAI retains Eva's memory,
+persona, response rendering, and action markers but requires an OpenAI key; ACP
+subagents and ACP MCP retrieval require Copilot. LM Studio provides the local no-cloud
+chat path.
+
+Local SQLite is the default memory backend. Azure Data Explorer can be configured in
+Settings > MCP, and an OpenAI key enables semantic recall with keyword fallback when no
+key is configured. Signal delivery requires [signal-cli](https://github.com/AsamK/signal-cli),
+linked with `signal-cli link -n "Eva"`, plus configured sender and recipient numbers.
+
+### Local Voices and Learning
+
+Install optional local speech dependencies with `./install.sh --voice-deps`. This creates
+a dedicated Python 3.11 environment for Chatterbox, Faster Whisper, and Silero VAD. The
+standalone app runs its speech service on a token-protected loopback endpoint and does
+not upload microphone audio to a cloud transcription service.
+
+Settings > Learning controls bounded, revocable feedback, routine outcomes, voice
+diagnostics, and standing consent for routine read/search tools. Higher-risk actions,
+including opaque execution, writes, remote mutations, edits, and deletes, require a
+fresh in-chat approval. Skills can be imported from text, URLs, GitHub repositories, or
+files and are normalized before Eva uses them.
+
 ## Providers
 
 | Provider | Models |
