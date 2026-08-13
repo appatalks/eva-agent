@@ -124,6 +124,18 @@ class MCPServer:
 
     def start(self):
         """Spawn the MCP server process and initialize."""
+        self._spawn()
+
+        try:
+            self._negotiate_protocol()
+            self.tools = self._discover_tools()
+            print(f"[LocalMCP] {self.name}: {len(self.tools)} tools discovered ({self.protocol_era})")
+        except Exception:
+            self.stop()
+            raise
+
+    def _spawn(self):
+        """Start a fresh server process and its stdio readers."""
         cmd = [self.command] + self.args
         process_env = _safe_child_environment({"EVA_ARTIFACTS_DIR": _ARTIFACTS_DIR})
         process_env.update(_safe_child_environment(self.env))
@@ -145,14 +157,6 @@ class MCPServer:
         self._reader.start()
         # stderr drain
         threading.Thread(target=self._stderr_loop, daemon=True).start()
-
-        try:
-            self._negotiate_protocol()
-            self.tools = self._discover_tools()
-            print(f"[LocalMCP] {self.name}: {len(self.tools)} tools discovered ({self.protocol_era})")
-        except Exception:
-            self.stop()
-            raise
 
     def call_tool(self, tool_name, arguments, timeout=60):
         """Call an MCP tool and return the result text."""
@@ -193,6 +197,11 @@ class MCPServer:
             self._raise_unsupported_protocol(supported)
 
         # An unrecognized response may be from an initialization-era server.
+        # Some legacy servers exit after receiving an unknown modern request, so
+        # their legacy handshake must begin in a fresh process.
+        if not self.alive or not self.process or self.process.poll() is not None:
+            self.stop()
+            self._spawn()
         self._initialize_legacy()
 
     def _modern_discover(self):

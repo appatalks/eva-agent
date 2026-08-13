@@ -19,6 +19,8 @@ var EvaWorkspaces = (function() {
     permissionSignature: '',
     monitorRunStates: {},
     monitorActivity: [],
+    clearedCodingRunProjectIds: {},
+    clearedResultRunIds: {},
     lastMonitorVoiceAt: 0,
     lastPeriodicNoteAt: 0,
     lastCheckedAt: 0,
@@ -92,6 +94,7 @@ var EvaWorkspaces = (function() {
 
   function selectProject(projectId) {
     state.selectedProjectId = projectId || '';
+    delete state.clearedCodingRunProjectIds[state.selectedProjectId];
     var selectedRun = state.runs.find(function(run) { return run.id === state.selectedRunId; });
     if (selectedRun && selectedRun.projectId !== state.selectedProjectId) state.selectedRunId = '';
     var select = document.getElementById('workspaceProjectSelect');
@@ -104,7 +107,10 @@ var EvaWorkspaces = (function() {
   function selectRun(runId) {
     var run = state.runs.find(function(item) { return item.id === runId; });
     state.selectedRunId = run ? run.id : '';
-    if (run) state.selectedProjectId = run.projectId;
+    if (run) {
+      state.selectedProjectId = run.projectId;
+      delete state.clearedResultRunIds[run.id];
+    }
     renderProjects();
     renderRuns();
     renderDetail();
@@ -494,6 +500,106 @@ var EvaWorkspaces = (function() {
     if (index >= 0) state.projects[index] = project;
   }
 
+  function dismissWorkspaceContextMenu() {
+    var menu = document.getElementById('workspaceContextMenu');
+    if (menu) menu.hidden = true;
+  }
+
+  function showWorkspaceContextMenu(event, items) {
+    if (!items || !items.length) return;
+    event.preventDefault();
+    var menu = document.getElementById('workspaceContextMenu');
+    if (!menu) return;
+    menu.replaceChildren();
+    items.forEach(function(item) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = item.label;
+      if (item.danger) button.dataset.danger = 'true';
+      button.addEventListener('click', function() {
+        dismissWorkspaceContextMenu();
+        item.action();
+      });
+      menu.appendChild(button);
+    });
+    menu.hidden = false;
+    var width = menu.offsetWidth;
+    var height = menu.offsetHeight;
+    menu.style.left = Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)) + 'px';
+    menu.style.top = Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)) + 'px';
+  }
+
+  function clearSelectedProjectActivity() {
+    var project = projectById(state.selectedProjectId);
+    if (!project) return;
+    state.monitorActivity = state.monitorActivity.filter(function(entry) {
+      return entry.projectId !== project.id;
+    });
+    renderWorkbench();
+    status('Cleared Eva activity for ' + project.name + '.', 'success');
+  }
+
+  function clearSelectedRunResult() {
+    var run = state.runs.find(function(item) { return item.id === state.selectedRunId; });
+    if (!run) return;
+    state.clearedResultRunIds[run.id] = true;
+    renderWorkbench();
+    status('Cleared the displayed result for this coding run.', 'success');
+  }
+
+  function clearSelectedProjectRuns() {
+    var project = projectById(state.selectedProjectId);
+    if (!project) return;
+    state.clearedCodingRunProjectIds[project.id] = true;
+    renderWorkbench();
+    status('Cleared the coding runs display for ' + project.name + '.', 'success');
+  }
+
+  function bindWorkbenchContextMenus() {
+    var workbench = document.getElementById('workspaceWorkbench');
+    if (!workbench) return;
+    workbench.addEventListener('contextmenu', function(event) {
+      var projectButton = event.target.closest('#workspaceWorkbenchProjects .workspace-monitor-run');
+      if (projectButton) {
+        var project = projectById(projectButton.dataset.projectId);
+        if (project) {
+          showWorkspaceContextMenu(event, [{
+            label: 'Remove workspace',
+            danger: true,
+            action: function() { removeProject(project); }
+          }]);
+        }
+        return;
+      }
+      if (event.target.closest('#workspaceMonitorFeed')) {
+        if (state.selectedProjectId) {
+          showWorkspaceContextMenu(event, [{
+            label: 'Clear activity display',
+            action: clearSelectedProjectActivity
+          }]);
+        }
+        return;
+      }
+      if (event.target.closest('#workspaceWorkbenchRuns') && state.selectedProjectId) {
+        showWorkspaceContextMenu(event, [{
+          label: 'Clear coding runs display',
+          action: clearSelectedProjectRuns
+        }]);
+        return;
+      }
+      if (event.target.closest('#workspaceWorkbenchResults') && state.selectedRunId) {
+        showWorkspaceContextMenu(event, [{
+          label: 'Clear run results display',
+          action: clearSelectedRunResult
+        }]);
+      }
+    });
+    document.addEventListener('keydown', function(event) {
+      if (event.key === 'Escape') dismissWorkspaceContextMenu();
+    });
+    window.addEventListener('resize', dismissWorkspaceContextMenu);
+  }
+
   function setProjectTerminalTarget(project) {
     var checkout = project && project.sourceCheckout;
     if (!checkout || !checkout.id || typeof setWorkspaceTerminalTarget !== 'function') return;
@@ -834,6 +940,7 @@ var EvaWorkspaces = (function() {
       var button = document.createElement('button');
       button.type = 'button';
       button.className = 'workspace-monitor-run';
+      button.dataset.projectId = project.id;
       if (project.id === state.selectedProjectId) button.classList.add('active');
       var title = document.createElement('strong');
       title.textContent = project.name;
@@ -847,13 +954,16 @@ var EvaWorkspaces = (function() {
     });
 
     runList.replaceChildren();
-    var orderedRuns = state.runs.filter(function(run) {
+    var projectRuns = state.runs.filter(function(run) {
       return run.status !== 'discarded' && run.projectId === state.selectedProjectId;
     });
+    var orderedRuns = state.clearedCodingRunProjectIds[state.selectedProjectId] ? [] : projectRuns;
     if (!orderedRuns.length) {
       var empty = document.createElement('p');
       empty.className = 'workspace-monitor-empty';
-      empty.textContent = state.selectedProjectId ? 'No coding runs' : 'Select a workspace';
+      empty.textContent = state.selectedProjectId && state.clearedCodingRunProjectIds[state.selectedProjectId]
+        ? 'Coding runs display cleared. Select this workspace to restore it.'
+        : state.selectedProjectId ? 'No coding runs' : 'Select a workspace';
       runList.appendChild(empty);
     }
     orderedRuns.forEach(function(run) {
@@ -912,9 +1022,14 @@ var EvaWorkspaces = (function() {
       appendWorkbenchRunComposer(detail, project);
       appendWorkbenchMcpSettings(detail, project);
     }
-    var selected = orderedRuns.find(function(run) { return run.id === state.selectedRunId; }) || orderedRuns[0];
+    var selected = projectRuns.find(function(run) { return run.id === state.selectedRunId; }) || projectRuns[0];
     results.replaceChildren();
-    if (selected) {
+    if (selected && state.clearedResultRunIds[selected.id]) {
+      var clearedResults = document.createElement('p');
+      clearedResults.className = 'workspace-monitor-empty';
+      clearedResults.textContent = 'Run result display cleared. Select the coding run again to restore it.';
+      results.appendChild(clearedResults);
+    } else if (selected) {
       state.selectedRunId = selected.id;
       var heading = document.createElement('h2');
       heading.textContent = selected.objective;
@@ -1672,6 +1787,7 @@ var EvaWorkspaces = (function() {
     var monitorRefresh = document.getElementById('workspaceMonitorRefreshBtn');
     var monitorClose = document.getElementById('workspaceMonitorCloseBtn');
     var monitorNew = document.getElementById('workspaceMonitorNewBtn');
+    bindWorkbenchContextMenus();
     if (close) close.addEventListener('click', toggle);
     if (add) add.addEventListener('click', addProject);
     if (refreshButton) refreshButton.addEventListener('click', refresh);

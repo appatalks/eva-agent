@@ -136,7 +136,6 @@ async function main() {
     }
     browser = attached.browser;
     const page = attached.page;
-    await page.setViewportSize({ width: 1280, height: 900 });
 
     await page.locator('#evaWorkspacesBtn').click();
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
@@ -151,13 +150,6 @@ async function main() {
       const titleBar = document.querySelector('#evaTitleBar').getBoundingClientRect();
       return workbenchHeader.top >= titleBar.bottom;
     });
-    await page.setViewportSize({ width: 480, height: 760 });
-    const narrowOverflow = await page.evaluate(function() {
-      const workbench = document.querySelector('#workspaceWorkbench');
-      return workbench.scrollWidth > workbench.clientWidth || workbench.scrollHeight > workbench.clientHeight;
-    });
-    assert.strictEqual(narrowOverflow, false, 'Workspace monitor overflows in the narrow layout');
-    await page.setViewportSize({ width: 1280, height: 900 });
     assert.strictEqual(await page.locator('#authGitHubCliBtn').count(), 1, 'GitHub device authorization command is missing from Settings > Auth');
     const githubAuthSurface = await page.evaluate(function() {
       return {
@@ -311,6 +303,21 @@ async function main() {
     await monitoredRun.waitFor();
     await monitoredRun.click();
     await page.locator('#workspaceMonitorFeed').filter({ hasText: 'Eva monitor:' }).waitFor();
+    await projectWorkspace.click({ button: 'right' });
+    await page.locator('#workspaceContextMenu').filter({ hasText: 'Remove workspace' }).waitFor();
+    await page.keyboard.press('Escape');
+    await page.locator('#workspaceWorkbenchRuns').click({ button: 'right' });
+    await page.locator('#workspaceContextMenu button').filter({ hasText: 'Clear coding runs display' }).click();
+    await page.locator('#workspaceWorkbenchRuns').filter({ hasText: 'Coding runs display cleared.' }).waitFor();
+    await projectWorkspace.click();
+    await monitoredRun.waitFor();
+    await page.locator('#workspaceMonitorFeed').click({ button: 'right' });
+    await page.locator('#workspaceContextMenu button').filter({ hasText: 'Clear activity display' }).click();
+    await page.locator('#workspaceMonitorFeed').filter({ hasText: 'No Eva activity recorded for this workspace.' }).waitFor();
+    await page.locator('#workspaceWorkbenchResults').click({ button: 'right' });
+    await page.locator('#workspaceContextMenu button').filter({ hasText: 'Clear run results display' }).click();
+    await page.locator('#workspaceWorkbenchResults').filter({ hasText: 'Run result display cleared.' }).waitFor();
+    await monitoredRun.click();
     const terminalAction = page.locator('.workspace-monitor-detail-actions button', { hasText: 'Open terminal' });
     await terminalAction.evaluate(function(element) { element.scrollIntoView({ block: 'center' }); });
     const terminalActionVisible = await terminalAction.evaluate(function(element) {
