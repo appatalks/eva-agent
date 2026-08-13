@@ -24,4 +24,4 @@ jobs:
 
       - name: Run Pa11y on local site
         run: |
-          pa11y /home/runner/work/eva-agent/eva-agent/index.html --reporter=cli --threshold 25
+          pa11y /home/runner/work/eva-agent/eva-agent/index.html --config .github/pa11y.json --reporter=cli --threshold 25

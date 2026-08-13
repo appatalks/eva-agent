@@ -24,6 +24,7 @@ without a documented compatibility plan.
 | Workflow | Owner | Focused contract |
 | --- | --- | --- |
 | Model controls and theme filtering | `core/js/settings/model-settings.js` | `test_provider_token_budget.js`, `test_model_catalog.js` |
+| System prompt and personality presets | `core/js/settings/prompts.js` | `test_prompts_settings.js` |
 | Goals | `core/js/settings/goals.js` | `test_goals_settings.js` |
 | Data mode and diagnostics | `core/js/settings/runtime.js` | `test_runtime_settings.js` |
 | Cron schedules | `core/js/settings/cron.js` | `test_cron_settings.js` |
