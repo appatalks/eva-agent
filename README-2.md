@@ -285,7 +285,8 @@ core/
                              [[EVA_LOOK]], [[EVA_FILE]]
     agents.js              Agent Operations scorecard, task detail, steering,
                            keyed card updates, and memory topology canvas
-    assets.js              Main Assets library: generated artifacts plus
+    features/assets/library.js
+                 Main Assets library: generated artifacts plus
                  changed files from retained coding worktrees
     dialogs.js             Promise-based in-app text prompt for Electron
     dalle3.js              Image generation via gpt-image-1 (dalle3Send)
@@ -1447,7 +1448,7 @@ rejected rather than followed.
 
 ### Unified Assets
 
-`core/js/assets.js` is a main-window library combining generated files from
+`core/js/features/assets/library.js` is a main-window library combining generated files from
 `ARTIFACTS_DIR` and changed files from retained coding runs. Workspace files
 include committed and uncommitted differences relative to the checkout's
 recorded base revision.

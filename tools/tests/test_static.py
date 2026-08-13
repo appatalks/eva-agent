@@ -84,7 +84,7 @@ def test_required_files():
         "core/js/sessions.js",
         "core/js/voice.js",
         "core/js/agents.js",
-        "core/js/assets.js",
+        "core/js/features/assets/library.js",
         "core/js/dialogs.js",
         "core/js/workspaces.js",
         "core/js/harness-control.js",
@@ -112,6 +112,7 @@ def test_required_files():
         "tools/tests/test_acp_permissions.js",
         "tools/tests/test_browser_agent_api.js",
         "tools/tests/test_camera_api.js",
+        "tools/tests/test_assets_api.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -1260,7 +1261,7 @@ def test_sidebar_workflow_contract():
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
     report("workflow_skills_main_view", "_buildSkillsWorkspace" in skills_js and "skills-view-open" in skills_js and "window.EvaSkills" in skills_js and "body.skills-view-open" in open("core/style.css").read())
     report("workflow_skills_organization", all(value in skills_js for value in ("skillsSearch", "skillsStatusFilter", 'value=\"draft\"', "skillsSourceFilter", "skillsSort", "_filteredSkills", "_skillSourceKind", "skillsViewSummary")))
-    report("workflow_skills_cross_navigation", "EvaSkills.close" in sessions_js and "EvaSkills.close" in open("core/js/agents.js").read() and "EvaSkills.close" in open("core/js/assets.js").read() and "EvaSkills.close" in open("core/js/workspaces.js").read())
+    report("workflow_skills_cross_navigation", "EvaSkills.close" in sessions_js and "EvaSkills.close" in open("core/js/agents.js").read() and "EvaSkills.close" in open("core/js/features/assets/library.js").read() and "EvaSkills.close" in open("core/js/workspaces.js").read())
     report("workflow_profile_picker", 'id="profilePanel"' in html and re.search(r'src="core/js/profiles\.js(?:\?[^" ]+)?"', html) is not None and "function switchEvaProfile" in profiles_js)
     report("workflow_profile_awaits_session_save", "async function switchEvaProfile" in profiles_js and "await saveCurrentSession()" in profiles_js)
     report("workflow_profile_scoped_sessions", "saveCurrentSession" in profiles_js and "eva_sessions" not in profiles_js)
@@ -1336,7 +1337,7 @@ def test_coding_workspace_contract():
     with open("core/js/options.js") as f:
         options_js = f.read()
     permission_ui = open("core/js/features/permissions/acp.js").read()
-    with open("core/js/assets.js") as f:
+    with open("core/js/features/assets/library.js") as f:
         assets_ui = f.read()
     with open("core/js/sessions.js") as f:
         sessions_js = f.read()
@@ -1700,6 +1701,22 @@ def test_camera_api_contract():
     )
     detail = (result.stderr or result.stdout).strip()
     report("camera_api_contract", result.returncode == 0, detail[:300])
+
+
+def test_assets_api_contract():
+    """Moved Assets library retains its public API and backend integrations."""
+    node = shutil.which("node")
+    if not node:
+        report("assets_api_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_assets_api.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("assets_api_contract", result.returncode == 0, detail[:300])
 
 
 def test_aig_request_contract():
@@ -2343,7 +2360,7 @@ def main():
         ("Reasoning Effort", [test_reasoning_effort_contract]),
         ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract, test_issue_130_latency_contract, test_prompt_budget_contract, test_streaming_contract, test_acp_permissions_ui_contract]),
         ("Security Alerts", [test_security_alert_contract, test_alerts_settings_ui_contract, test_proactive_notifications_contract]),
-        ("Sidebar Workflows", [test_sidebar_workflow_contract, test_browser_agent_api_contract, test_camera_api_contract]),
+        ("Sidebar Workflows", [test_sidebar_workflow_contract, test_browser_agent_api_contract, test_camera_api_contract, test_assets_api_contract]),
         ("Workspace Terminal", [test_workspace_terminal_contract]),
         ("Coding Workspaces", [test_coding_workspace_contract]),
         ("Pages Comparison", [test_pages_comparison_contract]),
