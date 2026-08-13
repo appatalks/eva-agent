@@ -300,7 +300,8 @@ core/
     features/automation/browser-agent.js
                  Frontend integration for browser and desktop agent runs
     pandora.js             Pandora box / Easter egg system
-    skills.js              Full-view Skills library/editor: search, status/source
+    features/skills/library.js
+                 Full-view Skills library/editor: search, status/source
                  filters, sort, import, edit, enable/disable, delete
     workspaces.js          Workspace Monitor, coding-run creation, progress
                  narration, terminal/chat handoff, lifecycle actions
