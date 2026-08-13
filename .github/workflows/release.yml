@@ -3,7 +3,7 @@ name: Release Eva Standalone
 on:
   push:
     tags:
-      - "v.*"
+      - "v*"
 
 permissions:
   contents: write

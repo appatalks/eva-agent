@@ -219,7 +219,7 @@ function lmsSend() {
                 })
         .catch(error => {
             console.error("Error:", error);
-            document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + error.message + "<br>\n";
+          document.getElementById("txtOutput").innerHTML += '<span class="error">Error: </span>' + escapeHtml(error.message || String(error)) + "<br>\n";
         });
     }); // end Promise.all
 }

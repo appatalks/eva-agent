@@ -1120,6 +1120,8 @@ def test_security_alert_contract():
         google_js = f.read()
     with open("core/js/gpt-core.js") as f:
         gpt_js = f.read()
+    with open("core/js/lm-studio.js") as f:
+        lm_studio_js = f.read()
     with open("core/js/pandora.js") as f:
         pandora_js = f.read()
     with open("core/js/copilot.js") as f:
@@ -1145,7 +1147,7 @@ def test_security_alert_contract():
     report("security_mcp_env_allowlist", "_MCP_ENV_KEYS" in local_mcp and "LD_PRELOAD" not in local_mcp)
     report("security_bridge_private_route_gate", "def _require_private_route" in bridge_core and "file-origin bridge requests require Eva Standalone authorization" in bridge_core and "parsed_path not in (\"/health\", \"/v1/models\")" in bridge_core and bridge_core.count("if not self._require_private_route():") >= 3)
     report("security_child_env_allowlist", "def _safe_child_environment" in bridge_utils and "_safe_child_environment()" in acp_client and "os.environ.copy()" not in local_mcp + acp_client)
-    report("security_provider_dom_output_escaped", "escapeHtml(thoughts)" in google_js and "escapeHtml(error.message)" in google_js and "escapeHtml(oHttp.responseText)" in gpt_js)
+    report("security_provider_dom_output_escaped", "escapeHtml(thoughts)" in google_js and "escapeHtml(error.message)" in google_js and "escapeHtml(oHttp.responseText)" in gpt_js and "escapeHtml(error.message || String(error))" in lm_studio_js)
     report("security_cognition_action_markup_not_restored", "cog-action-" not in options_js and "actionText.replace(/<[^>]*>/g" in cognition_js)
     report("security_pandora_no_dynamic_eval", "eval(" not in pandora_js and "dynamic code execution is disabled" in pandora_js)
     report("security_protected_mime_header_safe", '_safe_content_type(metadata.get("MimeType") or "")' in bridge_core and 'mime_type=mime_type' in bridge_core)
@@ -1158,6 +1160,7 @@ def test_security_alert_contract():
     report("security_search_exact_hostname", "result_host.endswith(\".google.com\")" in web_search)
     report("security_workflow_read_only", "permissions:\n  contents: read" in accessibility_workflow)
     report("security_web_search_mcp_bundled", '"tools/web_search_mcp.py"' in standalone_package)
+    report("security_release_tag_pattern", 'tags:\n      - "v*"' in open(".github/workflows/release.yml").read())
 
 
 def test_sidebar_workflow_contract():
