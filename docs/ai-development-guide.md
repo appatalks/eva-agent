@@ -38,6 +38,9 @@ Never read, create, or commit API keys, tokens, cookies, browser profiles,
 runtime databases, logs, or other private data unless an explicit task requires
 local inspection and its privacy implications have been established.
 
+Before removing a deprecated or fallback path, consult
+`docs/deprecation-inventory.md` and provide the listed usage/migration evidence.
+
 ## Task Bundles
 
 | Change | Read first | Focused validation |

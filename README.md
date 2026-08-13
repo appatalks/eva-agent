@@ -50,6 +50,7 @@ For a source build, platform-specific packaging, Local Voices, providers, memory
 - [docs/ai-development-guide.md](docs/ai-development-guide.md): focused development workflow, ownership map, and validation bundles
 - [docs/frontend-ownership.md](docs/frontend-ownership.md): browser feature owners, collaborators, and classic-script migration rules
 - [docs/testing-contracts.md](docs/testing-contracts.md): behavior, security, and compatibility test policy for refactors
+- [docs/deprecation-inventory.md](docs/deprecation-inventory.md): active compatibility paths and evidence required before removal
 - [docs/contracts/provider-routing.md](docs/contracts/provider-routing.md): selectable model routing and provider-mapping contract
 - [Website](https://appatalks.github.io/eva-agent/): features, comparison, install guide
 
