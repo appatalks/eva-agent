@@ -83,7 +83,7 @@ def test_required_files():
         "core/js/external.js",
         "core/js/sessions.js",
         "core/js/voice.js",
-        "core/js/agents.js",
+        "core/js/features/agents/operations.js",
         "core/js/features/assets/library.js",
         "core/js/dialogs.js",
         "core/js/workspaces.js",
@@ -113,6 +113,7 @@ def test_required_files():
         "tools/tests/test_browser_agent_api.js",
         "tools/tests/test_camera_api.js",
         "tools/tests/test_assets_api.js",
+        "tools/tests/test_agents_api.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -1261,7 +1262,7 @@ def test_sidebar_workflow_contract():
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
     report("workflow_skills_main_view", "_buildSkillsWorkspace" in skills_js and "skills-view-open" in skills_js and "window.EvaSkills" in skills_js and "body.skills-view-open" in open("core/style.css").read())
     report("workflow_skills_organization", all(value in skills_js for value in ("skillsSearch", "skillsStatusFilter", 'value=\"draft\"', "skillsSourceFilter", "skillsSort", "_filteredSkills", "_skillSourceKind", "skillsViewSummary")))
-    report("workflow_skills_cross_navigation", "EvaSkills.close" in sessions_js and "EvaSkills.close" in open("core/js/agents.js").read() and "EvaSkills.close" in open("core/js/features/assets/library.js").read() and "EvaSkills.close" in open("core/js/workspaces.js").read())
+    report("workflow_skills_cross_navigation", "EvaSkills.close" in sessions_js and "EvaSkills.close" in open("core/js/features/agents/operations.js").read() and "EvaSkills.close" in open("core/js/features/assets/library.js").read() and "EvaSkills.close" in open("core/js/workspaces.js").read())
     report("workflow_profile_picker", 'id="profilePanel"' in html and re.search(r'src="core/js/profiles\.js(?:\?[^" ]+)?"', html) is not None and "function switchEvaProfile" in profiles_js)
     report("workflow_profile_awaits_session_save", "async function switchEvaProfile" in profiles_js and "await saveCurrentSession()" in profiles_js)
     report("workflow_profile_scoped_sessions", "saveCurrentSession" in profiles_js and "eva_sessions" not in profiles_js)
@@ -1386,7 +1387,7 @@ def test_coding_workspace_contract():
     report("coding_workspace_fast_terminal_narration", "!prior && current.status" in workspace_ui and "narrateTerminalRun(run, current)" in workspace_ui and "narrateFailedRun(run)" in workspace_ui)
     report("coding_workspace_scoped_activity_results", "projectId: run && run.projectId" in workspace_ui and "entry.projectId === state.selectedProjectId" in workspace_ui and "workspaceWorkbenchResults" in workspace_ui and "RUN RESULTS" in html and "workspace-monitor-results" in style_css)
     report("standalone_workspace_real_estate", "width: 1728" in standalone_main and "height: 1215" in standalone_main and "minWidth: 1280" in standalone_main and "minHeight: 900" in standalone_main)
-    report("coding_workspace_main_navigation", "openWorkbench" in workspace_ui and "workspace-workbench-open" in style_css and "closeWorkbench" in sessions_js and "closeWorkbench" in open("core/js/agents.js").read())
+    report("coding_workspace_main_navigation", "openWorkbench" in workspace_ui and "workspace-workbench-open" in style_css and "closeWorkbench" in sessions_js and "closeWorkbench" in open("core/js/features/agents/operations.js").read())
     report("coding_workspace_mcp_isolation", "project_mcp_preferences" in workspaces and "approved_digest" in workspaces and "_mcp_config_digest" in workspaces and "_MCP_RESERVED_ENV_KEYS" in workspaces and "BASH_ENV" in workspaces and "key.startswith(\"LD_\")" in workspaces and "mcp_config_for_run" in workspaces and "_workspace_mcp_config" in bridge_core and "workspace_mcp_prefix" in bridge_core and "_subagent_mcp_config(template, task)" in workspace_utils and "return copy.deepcopy(workspace_config)" in workspace_utils and "workspaceSetMcpServer" in workspace_ui and "Any configuration change will revoke this approval" in workspace_ui and "envKeys" in renderer_project and "headerKeys" in renderer_project and "env:" not in renderer_project and "headers:" not in renderer_project)
     report("coding_workspace_github_prompt_visible", ":not(#workspaceWorkbench):not(#textToSynth)" in style_css and "#textToSynth > :not(#evaTextPrompt)" in style_css and "workspaceImportGitHub" in workspace_ui and "evaTextPrompt('GitHub repository URL'" in workspace_ui)
     report("coding_workspace_github_native_api", "importGitHub: importGitHubProject" in workspace_ui and "authorizeGitHub: authorizeGitHub" in workspace_ui and "setProjectMcpServerByName" in workspace_ui and "authGitHubCliBtn" in html and "workspaceCollapseGitHubBtn" in html and "workspaceGitHubAuthStart" in standalone_main and "'auth', 'refresh'" in standalone_main and "'auth', 'login'" in standalone_main and "workspaceGitHubImportErrorMessage" in standalone_main and "return { error: workspaceGitHubImportErrorMessage(error) }" in standalone_main and "importResult && importResult.error" in workspace_ui)
@@ -1719,6 +1720,22 @@ def test_assets_api_contract():
     report("assets_api_contract", result.returncode == 0, detail[:300])
 
 
+def test_agents_api_contract():
+    """Moved Agent Operations retains its public API and bridge endpoint contract."""
+    node = shutil.which("node")
+    if not node:
+        report("agents_api_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_agents_api.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("agents_api_contract", result.returncode == 0, detail[:300])
+
+
 def test_aig_request_contract():
     """AIG request validation and derived routing flags remain unit-testable."""
     result = subprocess.run(
@@ -1768,7 +1785,7 @@ def test_agent_operations_contract():
     """Agent dashboard routes, UI entry points, and steering are wired."""
     bridge_path = "tools/bridge/core.py"
     worker_path = "tools/bridge/utils.py"
-    ui_path = "core/js/agents.js"
+    ui_path = "core/js/features/agents/operations.js"
     with open(bridge_path) as f:
         bridge = f.read()
     with open(worker_path) as f:
@@ -1795,7 +1812,7 @@ def test_agent_operations_contract():
     for element_id in ("agentsMobileBtn", "agentsView", "agentsGrid", "agentGraphCanvas"):
         report(f"agent_operations_element:{element_id}", f'id="{element_id}"' in html,
                f"missing #{element_id}" if f'id="{element_id}"' not in html else "")
-    report("agent_operations_script", re.search(r'src="core/js/agents\.js(?:\?[^" ]+)?"', html) is not None)
+    report("agent_operations_script", re.search(r'src="core/js/features/agents/operations\.js(?:\?[^" ]+)?"', html) is not None)
     report("agent_operations_adaptive_polling",
            "AGENT_ACTIVE_POLL_MS = 2000" in ui and "AGENT_IDLE_POLL_MS = 20000" in ui
             and "function scheduleNextRefresh" in ui and "return Promise.resolve(refresh()).finally(scheduleNextRefresh);" in ui and "setInterval(refresh, 2000)" not in ui
@@ -2360,7 +2377,7 @@ def main():
         ("Reasoning Effort", [test_reasoning_effort_contract]),
         ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract, test_issue_130_latency_contract, test_prompt_budget_contract, test_streaming_contract, test_acp_permissions_ui_contract]),
         ("Security Alerts", [test_security_alert_contract, test_alerts_settings_ui_contract, test_proactive_notifications_contract]),
-        ("Sidebar Workflows", [test_sidebar_workflow_contract, test_browser_agent_api_contract, test_camera_api_contract, test_assets_api_contract]),
+        ("Sidebar Workflows", [test_sidebar_workflow_contract, test_browser_agent_api_contract, test_camera_api_contract, test_assets_api_contract, test_agents_api_contract]),
         ("Workspace Terminal", [test_workspace_terminal_contract]),
         ("Coding Workspaces", [test_coding_workspace_contract]),
         ("Pages Comparison", [test_pages_comparison_contract]),

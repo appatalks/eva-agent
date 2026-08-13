@@ -37,6 +37,8 @@ assert.ok(scriptIndex('core/js/features/automation/camera.js') > optionsIndex,
   'camera controller must load after options.js because it consumes shared auth and bridge helpers');
 assert.ok(scriptIndex('core/js/features/assets/library.js') > optionsIndex,
   'Assets library must load after options.js because it consumes shared bridge helpers');
+assert.ok(scriptIndex('core/js/features/agents/operations.js') > optionsIndex,
+  'Agent Operations must load after options.js because it consumes shared navigation helpers');
 assert.ok(scriptIndex('core/js/skills.js') > optionsIndex,
   'skills.js must load after options.js because it consumes shared bridge helpers');
 

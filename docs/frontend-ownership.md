@@ -46,7 +46,7 @@ without a documented compatibility plan.
 | Voice | `core/js/voice.js`, `voice-endpoint.js`, voice-view logic in `options.js` | Split only behind focused lifecycle tests |
 | Workspaces | `core/js/workspaces.js` | Electron preload/main and bridge workspaces are immediate collaborators |
 | Assets library | `core/js/features/assets/library.js` | Generated and workspace file library |
-| Agent Operations | `core/js/agents.js` | Agent cards and memory topology view |
+| Agent Operations | `core/js/features/agents/operations.js` | Agent cards and memory topology view |
 | Sessions and profiles | `core/js/sessions.js`, `idb-store.js`, `profiles.js` | Storage contracts are compatibility-sensitive |
 
 ## Migration Rules
