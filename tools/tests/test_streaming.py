@@ -93,6 +93,17 @@ def make_handler(wfile):
 
 
 class StreamingContractTests(unittest.TestCase):
+    def test_private_routes_reject_unauthenticated_file_origins(self):
+        handler = BridgeHandler.__new__(BridgeHandler)
+        handler.headers = {"Origin": "null"}
+        handler.command = "GET"
+        responses = []
+        handler._json_response = lambda status, body: responses.append((status, body))
+        with patch.dict(os.environ, {"EVA_BRIDGE_TOKEN": ""}, clear=False), \
+                patch("bridge.core._is_loopback_bind", return_value=True):
+            self.assertFalse(handler._require_private_route())
+        self.assertEqual(responses[0][0], 403)
+
     def test_permission_request_waits_for_explicit_user_decision(self):
         client = CallbackACPClient()
         responses = []

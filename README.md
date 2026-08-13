@@ -27,7 +27,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh            # install dependencies
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.5.10.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.5.11.AppImage' --eva-workspace-terminal-v1
 ```
 
 Prereqs: Node.js 24+, Python 3.12+, GitHub Copilot CLI (`copilot auth login`).

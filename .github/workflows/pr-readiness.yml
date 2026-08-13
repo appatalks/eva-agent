@@ -27,7 +27,6 @@ jobs:
     permissions:
       actions: read
       contents: read
-      issues: write
       pull-requests: read
     outputs:
       pr_number: ${{ steps.pr.outputs.pr_number }}
@@ -237,7 +236,6 @@ jobs:
       cancel-in-progress: true
     permissions:
       contents: read
-      issues: write
       pull-requests: read
       security-events: read
       copilot-requests: write
@@ -399,24 +397,26 @@ jobs:
               verdict_json="$(python3 .github/scripts/readiness_verdict.py readiness/copilot-review.md)"
               verdict="$(jq -r '.verdict // ""' <<< "$verdict_json")"
           printf 'verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Terra readiness"
+            echo
+            cat readiness/copilot-review.md
+          } >> "$GITHUB_STEP_SUMMARY"
           case "$verdict" in
             APPROVE)
               publish_status success 'Terra approved PR readiness'
               printf 'status_published=true\n' >> "$GITHUB_OUTPUT"
               echo "Terra verdict: APPROVE"
-              printf '### Terra readiness\n\nVerdict: APPROVE\n' >> "$GITHUB_STEP_SUMMARY"
               ;;
             NEEDS_MAINTAINER)
               publish_status pending 'Terra requires maintainer review'
               printf 'status_published=true\n' >> "$GITHUB_OUTPUT"
               echo "::notice::Terra requires maintainer review."
-              printf '### Terra readiness\n\nVerdict: NEEDS_MAINTAINER\n' >> "$GITHUB_STEP_SUMMARY"
               ;;
             REQUEST_CHANGES)
               publish_status failure 'Terra requested changes'
               printf 'status_published=true\n' >> "$GITHUB_OUTPUT"
               echo "::error::Terra requested changes."
-              printf '### Terra readiness\n\nVerdict: REQUEST_CHANGES\n' >> "$GITHUB_STEP_SUMMARY"
               exit 1
               ;;
             *)
@@ -431,38 +431,9 @@ jobs:
               fi
               printf 'status_published=true\n' >> "$GITHUB_OUTPUT"
               echo "::error::Terra returned $response_kind verdict output."
-              printf '### Terra readiness\n\nVerdict: INVALID (%s response)\n' "$response_kind" >> "$GITHUB_STEP_SUMMARY"
               exit 1
               ;;
           esac
-
-      - name: Post maintainer summary
-        if: steps.verdict.outcome == 'success' && steps.verdict.outputs.verdict == 'NEEDS_MAINTAINER' && contains(steps.verdict.outputs.status_published, 'true')
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
-          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          current_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')"
-          if [[ "$current_head" != "$HEAD_SHA" ]]; then
-            echo "::notice::PR head advanced to $current_head; skipping stale maintainer summary for $HEAD_SHA."
-            exit 0
-          fi
-          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" > readiness/pr-comments.json
-          if python3 .github/scripts/readiness_maintainer_comment.py --has-marker readiness/pr-comments.json --head-sha "$HEAD_SHA"; then
-            exit 0
-          fi
-          python3 .github/scripts/readiness_maintainer_comment.py readiness/copilot-review.md --head-sha "$HEAD_SHA" > readiness/maintainer-comment.md
-          if ! comment_error="$(gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-            -f body="$(cat readiness/maintainer-comment.md)" 2>&1)"; then
-            echo "::warning::Readiness status was published, but the optional maintainer comment could not be created: $comment_error"
-            {
-              echo "### Maintainer comment unavailable"
-              echo
-              echo "The authoritative readiness status was published for \`$HEAD_SHA\`, but GitHub denied the optional PR comment."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Publish unexpected readiness failure
         if: failure() && steps.credential_scan.outcome != 'failure'

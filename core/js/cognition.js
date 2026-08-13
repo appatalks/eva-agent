@@ -350,15 +350,13 @@
       try {
         var result = await cap.run(spec.args || {}, actionContext);
         actions.push({ ok: true, id: spec.id, result: result });
-        var html = (result && typeof result.html === 'string') ? result.html :
-                   '<div class="cog-action-ok">[action ' + spec.id + ' completed]</div>';
-        out = out.replace(r.full, html);
+        var actionText = (result && typeof result.html === 'string') ? result.html :
+             '[action ' + spec.id + ' completed]';
+        out = out.replace(r.full, actionText.replace(/<[^>]*>/g, ' ').replace(/\s{2,}/g, ' ').trim());
       } catch (err) {
         var msg = (err && err.message) ? err.message : String(err);
         actions.push({ ok: false, id: spec.id, error: 'run-failed', detail: msg });
-        out = out.replace(r.full,
-          '<div class="cog-action-err">[action ' + spec.id + ' failed: ' +
-          String(msg).replace(/</g,'&lt;') + ']</div>');
+        out = out.replace(r.full, '[action ' + spec.id + ' failed: ' + String(msg) + ']');
       }
     }
     // Strip fake [Data Retrieved] sections that local models hallucinate.
@@ -669,7 +667,7 @@
           ? 'The requested agent batch needs ' + capacity[1] + ' slots, but ' + capacity[2] + ' are available because existing agents are still active. Open Sessions > Active to monitor or steer them, then try again when capacity is free.'
           : 'No agents were started: ' + String(error.message || error).replace(/</g, '&lt;');
         return {
-          content: '<div class="cog-action-err">' + capacityMessage + '</div>',
+          content: capacityMessage,
           actions: actions,
           deferredSignal: _agentSignalIntent(userMessage)
         };
@@ -681,7 +679,7 @@
       : 'The accepted agents are running independently.';
     if (result.deferred_signal) statusLine += ' Signal delivery is queued until synthesis completes.';
     return {
-      content: result.html + '<div class="cog-action-ok">' + statusLine + '</div>',
+      content: 'Started ' + acceptedCount + ' agent' + (acceptedCount === 1 ? '' : 's') + '.\n\n' + statusLine,
       actions: actions,
       deferredSignal: !!result.deferred_signal,
       acceptedCount: acceptedCount

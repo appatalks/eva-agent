@@ -35,11 +35,5 @@ Return concise Markdown beginning with exactly one line:
 `VERDICT: APPROVE`, `VERDICT: REQUEST_CHANGES`, or
 `VERDICT: NEEDS_MAINTAINER`.
 
-For `NEEDS_MAINTAINER`, add exactly one line after the verdict:
-
-`MAINTAINER_CATEGORY: identity-governance | security-boundary | release-policy | product-scope | test-coverage | other`
-
-Choose the closest category. Do not include a freeform maintainer summary,
-paths, URLs, quoted PR content, identifiers, credentials, or token-like values
-in that category line. Then list only concrete findings, required test gaps, and
-maintainer actions.
+Then list only a concise summary of concrete findings, required test gaps, and
+maintainer actions. Do not include credentials or token-like values.

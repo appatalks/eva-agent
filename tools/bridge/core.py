@@ -1028,6 +1028,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self.close_connection = True
             self._json_response(403, {"error": {"message": "private bridge routes are restricted to localhost"}})
             return False
+        if self._normalized_cors_origin() == "null":
+            if self.command not in ("GET", "HEAD", "OPTIONS"):
+                self.close_connection = True
+            self._json_response(403, {"error": {"message": "file-origin bridge requests require Eva Standalone authorization"}})
+            return False
         return True
 
     def _require_workspace_capability(self):

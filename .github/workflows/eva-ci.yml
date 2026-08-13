@@ -235,8 +235,6 @@ jobs:
           EVA_OFFICIAL_MCP_TYPESCRIPT_ROOT=/tmp/eva-mcp-typescript-v2 python3 tools/tests/test_mcp_official_typescript.py
           python3 tools/tests/test_openai_aig.py
           python3 tools/tests/test_pr_diff_secret_scan.py
-          python3 tools/tests/test_readiness_maintainer_comment.py
-          python3 tools/tests/test_readiness_decision.py
           node tools/tests/test_cognition_provider.js
           node tools/tests/test_provider_token_budget.js
 

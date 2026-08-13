@@ -14,12 +14,14 @@ import threading
 import time
 import urllib.request
 import urllib.error
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from bridge import core as m
 from bridge import cognition as cognition
+from bridge.skills import _safe_external_url
 
 # ── In-memory Kusto store ────────────────────────────────────────────────
 _STORE = {"Skills": [], "SkillVersions": []}  # table -> append-only list of row dicts
@@ -139,6 +141,10 @@ def main():
             failures.append(label)
 
     try:
+        with patch("bridge.skills.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("8.8.8.8", 443))]):
+            safe, _error, pinned_ip = _safe_external_url("https://skills.example.invalid/import")
+        check("external URL validation resolves a public target", safe and pinned_ip == "8.8.8.8")
+
         # 1. Eva'rise an imported source.
         st, body = req("POST", "/v1/skills/evarise", {"source_type": "paste", "content": "A guide to summarizing web pages."})
         check("evarise returns 200", st == 200)
