@@ -4,6 +4,8 @@
 
 A voice-first AI assistant for conversation, memory, automation, and local or cloud-backed work. Eva can use voice, camera, browser, desktop, MCP tools, skills, and coding workspaces while keeping control and configuration on your machine.
 
+![Eva splash](core/img/Eva-splash.png)
+
 ## In Use
 
 <table>
