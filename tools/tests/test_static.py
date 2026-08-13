@@ -69,6 +69,7 @@ def test_required_files():
         "core/js/settings/alerts.js",
         "core/js/features/skills/auto-learn.js",
         "core/js/features/notifications/proactive.js",
+        "core/js/features/permissions/acp.js",
         "core/js/gpt-core.js",
         "core/js/gl-google.js",
         "core/js/lm-studio.js",
@@ -102,6 +103,7 @@ def test_required_files():
         "tools/tests/test_background_settings.js",
         "tools/tests/test_alerts_settings.js",
         "tools/tests/test_proactive_notifications.js",
+        "tools/tests/test_acp_permissions.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -1321,6 +1323,7 @@ def test_coding_workspace_contract():
         workspace_ui = f.read()
     with open("core/js/options.js") as f:
         options_js = f.read()
+    permission_ui = open("core/js/features/permissions/acp.js").read()
     with open("core/js/assets.js") as f:
         assets_ui = f.read()
     with open("core/js/sessions.js") as f:
@@ -1382,7 +1385,7 @@ def test_coding_workspace_contract():
     report("coding_workspace_permission_rerender", "permissionSignature" in workspace_ui and "permissionsChanged" in workspace_ui and "changed || permissionsChanged" in workspace_ui)
     cancellation_worker = workspace_utils.split('prompt_result = client.prompt(', 1)[1].split('while True:', 1)[0]
     report("coding_workspace_structured_cancellation", '"permission_cancelled": False' in acp_client and '"permission_reason": ""' in acp_client and 'state["permission_cancelled"] = True' in acp_client and 'state["permission_reason"] = "user_rejected"' in acp_client and 'state["permission_reason"] = "permission_timeout"' in acp_client and 'decision="invalid-decision"' in acp_client and '"error": result["error"]' in acp_client and 'prompt_result.get("permission_cancelled")' in workspace_utils and '_workspace_permission_cancelled' not in workspace_utils and cancellation_worker.find('permission_cancelled =') < cancellation_worker.find('result_text = _subagent_result_text'))
-    report("coding_workspace_informed_approval", '"command_summary"' in acp_client and '"approval_allowed"' in acp_client and "commandSummary" in workspace_ui and "approvalAllowed" in workspace_ui and "command_summary" in options_js and "approval_allowed" in options_js)
+    report("coding_workspace_informed_approval", '"command_summary"' in acp_client and '"approval_allowed"' in acp_client and "commandSummary" in workspace_ui and "approvalAllowed" in workspace_ui and "command_summary" in permission_ui and "approval_allowed" in permission_ui)
     report("coding_workspace_project_tree", "buildProjectFileTree" in workspace_ui and "renderProjectTreeNode" in workspace_ui and "projectTreeExpanded" in workspace_ui and "workspace-tree-folder" in style_css and "workspace-tree-chevron" in style_css)
     report("coding_workspace_execution_approval", "workspace_acp_clients" in bridge_core and "workspace_run_id" in bridge_core and "pendingPermissions" in workspace_ui and "EXECUTION APPROVAL" in workspace_ui and "resolveWorkspacePermission" in workspace_ui)
     report("coding_workspace_monitor_responsive", "workspace-workbench-body" in style_css and "@media (max-width: 760px)" in style_css and "resize: horizontal" in style_css and "terminal-panel-expanded" in style_css and "terminal-panel-docked" in style_css and "text-align: left !important" in style_css and "toggleTerminalWidth" in sessions_js)
@@ -1607,6 +1610,22 @@ def test_proactive_notifications_contract():
     report("proactive_notifications_contract", result.returncode == 0, detail[:300])
 
 
+def test_acp_permissions_ui_contract():
+    """ACP permission polling and one-time decisions retain capability and policy checks."""
+    node = shutil.which("node")
+    if not node:
+        report("acp_permissions_ui_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_acp_permissions.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("acp_permissions_ui_contract", result.returncode == 0, detail[:300])
+
+
 def test_aig_request_contract():
     """AIG request validation and derived routing flags remain unit-testable."""
     result = subprocess.run(
@@ -1671,6 +1690,7 @@ def test_agent_operations_contract():
         sessions = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
+    permission_ui = open("core/js/features/permissions/acp.js").read()
     with open("core/js/sessions.js") as f:
         session_ui = f.read()
     with open("index.html") as f:
@@ -1689,9 +1709,9 @@ def test_agent_operations_contract():
             and "setInterval(function() { if (!state.open) refresh(); }, 15000);" not in ui,
            "Agent Operations must use active/idle timeout polling")
     report("acp_permission_adaptive_polling",
-            "idleIntervalMs: 300000" in options and "requestIntervalMs: 30000" in options
-            and "pendingIntervalMs: 3000" in options and "_acpPermissionState.pending" in options
-           and "function watchACPPermissions" in options and "setInterval(pollACPPermissions" not in options,
+            "idleIntervalMs: 300000" in permission_ui and "requestIntervalMs: 30000" in permission_ui
+            and "pendingIntervalMs: 3000" in permission_ui and "_acpPermissionState.pending" in permission_ui
+           and "function watchACPPermissions" in permission_ui and "setInterval(pollACPPermissions" not in permission_ui,
             "ACP permissions must use request, pending, and idle timeout polling")
     acp_client_source = open("tools/bridge/acp_client.py").read()
     report("verbose_diagnostics_safe_toggle", 'id="verboseDiagnostics"' in html and "verbose_debug" in options and "_verbose_debug_emit" in bridge and "enabled_module_count" in bridge and '"workspace_run", stage=' in bridge and "dispatch_state=" in bridge and re.search(r'_verbose_debug_emit\(\s*"permission_request"', acp_client_source) is not None and "user_message" not in open("tools/bridge/telemetry.py").read().split("def _verbose_debug_emit", 1)[1].split("def _percentile", 1)[0])
@@ -2245,7 +2265,7 @@ def main():
         ("JS Routing Functions", [test_js_routing_functions]),
         ("Learning Contract", [test_learning_static_contract]),
         ("Reasoning Effort", [test_reasoning_effort_contract]),
-        ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract, test_issue_130_latency_contract, test_prompt_budget_contract, test_streaming_contract]),
+        ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract, test_issue_130_latency_contract, test_prompt_budget_contract, test_streaming_contract, test_acp_permissions_ui_contract]),
         ("Security Alerts", [test_security_alert_contract, test_alerts_settings_ui_contract, test_proactive_notifications_contract]),
         ("Sidebar Workflows", [test_sidebar_workflow_contract]),
         ("Workspace Terminal", [test_workspace_terminal_contract]),
