@@ -16,7 +16,7 @@ from bridge import state as _st
 from bridge.utils import _safe_child_environment
 from bridge.kusto import _inject_kusto_token
 from bridge.learning import get_consent as _get_learning_consent
-from bridge.telemetry import _telemetry_emit
+from bridge.telemetry import _telemetry_emit, _verbose_debug_emit
 
 _ACP_POOL_MAX = _cfg.ACP_POOL_MAX
 _ACP_SESSION_MAX = _cfg.ACP_SESSION_MAX
@@ -27,6 +27,20 @@ _ACP_TOOL_PROFILES = _cfg.ACP_TOOL_PROFILES
 _SECRET_MARKERS = ("TOKEN", "KEY", "SECRET", "PAT", "PASSWORD", "CREDENTIAL")
 _WORKSPACE_READ_ONLY_COMMANDS = {"pwd", "ls", "git"}
 _WORKSPACE_READ_ONLY_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "rev-parse"}
+_WORKSPACE_SENSITIVE_COMMANDS = {
+    "sudo", "su", "doas", "pkexec", "rm", "shred", "mkfs", "fdisk", "parted", "dd",
+    "mount", "umount", "chmod", "chown", "chgrp", "curl", "wget", "ssh", "scp", "sftp",
+    "nc", "ncat", "telnet", "ftp", "rsync", "docker", "kubectl", "gh", "aws", "az",
+    "gcloud", "npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "poetry", "gem", "cargo",
+}
+_WORKSPACE_SAFE_GIT_SUBCOMMANDS = {"add", "commit", "status", "diff", "log", "show", "rev-parse"}
+_WORKSPACE_SAFE_PACKAGE_SUBCOMMANDS = {"test", "run", "lint", "check", "build"}
+_WORKSPACE_SENSITIVE_PATH_RE = re.compile(
+    r"(?:^|[/\s])(?:\.env(?:\.[A-Za-z0-9_.-]+)?|\.ssh|\.aws|\.azure|\.npmrc|\.pypirc|"
+    r"\.netrc|\.git-credentials|id_rsa|id_ed25519|kubeconfig|service-account|hosts\.yml|"
+    r"config\.json|config\.local\.(?:js|json))(?:[/\s]|$)",
+    re.IGNORECASE,
+)
 
 
 def _tool_call_command(tool_call):
@@ -77,6 +91,15 @@ def _workspace_local_path(value, cwd):
         return False
 
 
+def _workspace_edit_target_is_local(tool_call, cwd=None):
+    """Return true only for an explicitly named edit target inside the workspace."""
+    raw_input = tool_call.get("rawInput") if isinstance(tool_call, dict) else None
+    if not isinstance(raw_input, dict):
+        return False
+    target = raw_input.get("path") or raw_input.get("filePath") or raw_input.get("file_path")
+    return isinstance(target, str) and _workspace_local_path(target, cwd)
+
+
 def _workspace_read_only_execute(tool_call, cwd=None):
     """Allow only transparent, non-mutating workspace inspection commands."""
     command = _tool_call_command(tool_call)
@@ -101,6 +124,63 @@ def _workspace_read_only_execute(tool_call, cwd=None):
             return False
         return all(_workspace_local_path(part, cwd) for part in parts[2:])
     return False
+
+
+def _workspace_execute_category(tool_call, cwd=None):
+    """Classify workspace execution without retaining or emitting command content."""
+    command = _tool_call_command(tool_call)
+    if not command:
+        return "missing_command"
+    if re.search(r"[\n\r;|&><`] |\$\(|\$\{", command, re.VERBOSE):
+        return "shell_composition"
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        return "parse_error"
+    if not parts:
+        return "missing_command"
+    executable = os.path.basename(parts[0]).lower()
+    arguments = parts[1:]
+    if executable in {"node", "nodejs", "python", "python3", "ruby", "perl", "php"} and any(
+        argument in {"-c", "-e", "--eval"} for argument in arguments
+    ):
+        return "inline_script"
+    if executable in _WORKSPACE_SENSITIVE_COMMANDS:
+        if executable not in {"npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "poetry", "gem", "cargo"}:
+            return "sensitive_executable"
+        if any(argument in {"install", "add", "remove", "uninstall", "publish", "login", "logout"} for argument in arguments):
+            return "package_or_auth_mutation"
+    if executable in {"bash", "sh", "zsh", "fish", "env", "eval", "source"}:
+        return "shell_interpreter"
+    if executable == "git":
+        if len(arguments) < 1 or any(argument == "-c" or argument.startswith("-c=") or argument == "--config-env" for argument in arguments):
+            return "git_configuration_override"
+        subcommand = next((argument for argument in arguments if not argument.startswith("-")), "")
+        if subcommand not in _WORKSPACE_SAFE_GIT_SUBCOMMANDS:
+            return "git_remote_or_destructive"
+        if any(argument == "--hard" or argument.startswith("--force") for argument in arguments[1:]):
+            return "git_force"
+    for argument in arguments:
+        if any(marker in argument.upper() for marker in _SECRET_MARKERS) or _WORKSPACE_SENSITIVE_PATH_RE.search(argument):
+            return "secret_or_sensitive_path"
+        if not argument.startswith("-") and not _workspace_local_path(argument, cwd):
+            return "outside_workspace"
+    if executable == "git":
+        return "trusted_local"
+    if executable in {"npm", "pnpm", "yarn"}:
+        subcommand = next((argument for argument in arguments if not argument.startswith("-")), "")
+        return "trusted_local" if subcommand in _WORKSPACE_SAFE_PACKAGE_SUBCOMMANDS else "approval_required"
+    if executable in {"node", "nodejs", "python", "python3"}:
+        return "trusted_local" if any(
+            not argument.startswith("-") and _workspace_local_path(argument, cwd)
+            for argument in arguments
+        ) else "approval_required"
+    return "approval_required"
+
+
+def _workspace_sensitive_execute(tool_call, cwd=None):
+    """Return true when a workspace command needs an explicit user decision."""
+    return _workspace_execute_category(tool_call, cwd) != "trusted_local"
 
 
 def _hidden_subprocess_options():
@@ -480,7 +560,7 @@ class ACPClient:
         elif update_type == "plan":
             entries = update.get("entries", [])
             if entries:
-                print(f"[ACP] Agent plan: {', '.join(e.get('content','') for e in entries[:5])}")
+                print(f"[ACP] Agent plan received: entries={len(entries)}")
                 self._dispatch_prompt_event(params, {
                     "kind": "plan",
                     "label": "Planning next steps",
@@ -553,6 +633,12 @@ class ACPClient:
             ]
         permission_mode = prompt_states[0].get("permission_mode", "interactive") \
             if len(prompt_states) == 1 else "interactive"
+        execute_category = _workspace_execute_category(tool_call, self.cwd) \
+            if permission_mode == "workspace_write" and tool_kind == "execute" else ""
+        _verbose_debug_emit(
+            "permission_request", tool_kind=tool_kind, permission_mode=permission_mode,
+            option_count=len(options), execute_category=execute_category,
+        )
         if permission_mode == "passive_recall":
             reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
             if reject_option is None:
@@ -574,7 +660,21 @@ class ACPClient:
                 self._send_response(rpc_id, {
                     "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
                 })
-                _telemetry_emit("acp_permission", decision="workspace-auto-allow",
+                _telemetry_emit("acp_permission", decision="workspace-auto-allow-tool",
+                                tool_kind=tool_kind, option_count=len(options))
+                return
+            if tool_kind == "edit" and allow_once and _workspace_edit_target_is_local(tool_call, self.cwd):
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
+                })
+                _telemetry_emit("acp_permission", decision="workspace-auto-allow-edit",
+                                tool_kind=tool_kind, option_count=len(options))
+                return
+            if tool_kind == "execute" and allow_once and not _workspace_sensitive_execute(tool_call, self.cwd):
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
+                })
+                _telemetry_emit("acp_permission", decision="workspace-auto-allow-execute",
                                 tool_kind=tool_kind, option_count=len(options))
                 return
         allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
@@ -624,33 +724,56 @@ class ACPClient:
                 "created_at": entry["created_at"],
             } for entry in self.pending_permissions.values()]
 
-    def resolve_permission(self, permission_id, option_id=None):
+    def resolve_permission(self, permission_id, option_id=None, decision=None):
         with self.permission_lock:
-            entry = self.pending_permissions.pop(str(permission_id), None)
+            entry = self.pending_permissions.get(str(permission_id))
         if not entry:
             return False
-        selected = next((
-            option for option in entry["options"]
-            if option["option_id"] == str(option_id or "")
-            and option["kind"] in {"allow_once", "reject_once"}
-        ), None)
-        workspace_rejection = selected and selected["kind"] == "reject_once" and bool(getattr(self, "workspace_run_id", ""))
-        if selected and entry.get("approval_allowed", True) and not workspace_rejection:
+        normalized_decision = str(decision or "").strip().lower()
+        if normalized_decision in {"allow", "reject"}:
+            requested_kind = "allow_once" if normalized_decision == "allow" else "reject_once"
+            selected = next((option for option in entry["options"] if option["kind"] == requested_kind), None)
+        else:
+            selected = next((
+                option for option in entry["options"]
+                if option["option_id"] == str(option_id or "")
+                and option["kind"] in {"allow_once", "reject_once"}
+            ), None)
+        if not selected or (selected["kind"] == "allow_once" and not entry.get("approval_allowed", True)):
+            _telemetry_emit("acp_permission", decision="invalid-decision",
+                            tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
+            return False
+        with self.permission_lock:
+            if self.pending_permissions.pop(str(permission_id), None) is None:
+                return False
+        if selected["kind"] == "allow_once":
             self._send_response(entry["rpc_id"], {"outcome": {"outcome": "selected", "optionId": selected["option_id"]}})
-            decision = selected["kind"] or "selected"
+            resolved_decision = "allow_once"
         else:
             with self._prompt_state_lock:
                 for state in self._active_prompts.values():
                     if state.get("session_id") == entry["session_id"]:
                         state["permission_cancelled"] = True
+                        state["permission_reason"] = "user_rejected"
             self._send_notification("session/cancel", {"sessionId": entry["session_id"]})
             self._send_response(entry["rpc_id"], {"outcome": {"outcome": "cancelled"}})
-            decision = "cancelled"
-        _telemetry_emit("acp_permission", decision=decision, tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
+            resolved_decision = "user-rejected"
+        _telemetry_emit("acp_permission", decision=resolved_decision, tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
         return True
 
     def _expire_permission(self, permission_id):
-        self.resolve_permission(permission_id, None)
+        with self.permission_lock:
+            entry = self.pending_permissions.pop(str(permission_id), None)
+        if not entry:
+            return
+        with self._prompt_state_lock:
+            for state in self._active_prompts.values():
+                if state.get("session_id") == entry["session_id"]:
+                    state["permission_cancelled"] = True
+                    state["permission_reason"] = "permission_timeout"
+        self._send_notification("session/cancel", {"sessionId": entry["session_id"]})
+        self._send_response(entry["rpc_id"], {"outcome": {"outcome": "cancelled"}})
+        _telemetry_emit("acp_permission", decision="expired", tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
 
     # --- Terminal handlers (for ACP tool execution) ---
 
@@ -771,6 +894,7 @@ class ACPClient:
                 "on_event": on_event,
                 "permission_mode": permission_mode,
                 "permission_cancelled": False,
+                "permission_reason": "",
                 "chunk_count": 0,
                 "first_chunk_at": None,
                 "started_at": time.perf_counter(),
@@ -785,6 +909,7 @@ class ACPClient:
         return response_text, {
             "chunk_count": state.get("chunk_count", 0),
             "permission_cancelled": bool(state.get("permission_cancelled")),
+            "permission_reason": str(state.get("permission_reason") or "")[:32],
             "first_chunk_ms": round((first_chunk_at - started_at) * 1000.0, 1)
             if first_chunk_at is not None and started_at is not None else None,
         }
@@ -817,7 +942,8 @@ class ACPClient:
                                 chunk_count=prompt_metrics["chunk_count"],
                                 first_chunk_ms=prompt_metrics["first_chunk_ms"])
                 return {"error": result["error"],
-                    "permission_cancelled": prompt_metrics["permission_cancelled"]}
+                    "permission_cancelled": prompt_metrics["permission_cancelled"],
+                    "permission_reason": prompt_metrics["permission_reason"]}
             stop_reason = result.get("stopReason", "end_turn")
             _telemetry_emit("acp_prompt", model=self.model or "default",
                             prompt_chars=len(text or ""), response_chars=len(response_text or ""),
@@ -828,6 +954,7 @@ class ACPClient:
                 "text": response_text,
                 "stop_reason": stop_reason,
                 "permission_cancelled": prompt_metrics["permission_cancelled"],
+                "permission_reason": prompt_metrics["permission_reason"],
             }
 
         _telemetry_emit("acp_prompt", model=self.model or "default",
@@ -836,7 +963,8 @@ class ACPClient:
                         chunk_count=prompt_metrics["chunk_count"],
                         first_chunk_ms=prompt_metrics["first_chunk_ms"])
         return {"text": response_text, "stop_reason": "end_turn",
-            "permission_cancelled": prompt_metrics["permission_cancelled"]}
+            "permission_cancelled": prompt_metrics["permission_cancelled"],
+            "permission_reason": prompt_metrics["permission_reason"]}
 
     def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None):
         with _pin_acp_client(self) as acquired:

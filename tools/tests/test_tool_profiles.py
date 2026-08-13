@@ -73,6 +73,7 @@ class ToolProfileTests(unittest.TestCase):
         self.assertEqual(set(_acp_tool_profile_config(_st.configured_mcp_config, "broad")), set(_st.configured_mcp_config))
 
         self.assertEqual(_select_acp_tool_profile("What is the weather today?", "weather-search"), "web")
+        self.assertEqual(_select_acp_tool_profile("List open GitHub issues", "github-data"), "github")
         self.assertEqual(_select_acp_tool_profile("Search GitHub for issue 42", "general"), "github")
         self.assertEqual(_select_acp_tool_profile("Show my active goals", "general"), "kusto")
         self.assertEqual(_select_acp_tool_profile("Explain recursion", "general"), "none")

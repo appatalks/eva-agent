@@ -1,5 +1,6 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, session, shell } = require('electron');
 const http = require('http');
+const https = require('https');
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
@@ -29,6 +30,9 @@ let stoppingBridge = false;
 let mainWindow = null;
 let terminalBroker = null;
 let bridgeBaseUrl = '';
+let githubAuthProcess = null;
+let githubAuthState = { state: 'idle', message: '' };
+let githubCliAuthPreferred = false;
 
 const BRIDGE_READY_TIMEOUT_MS = 60000;
 const LOCAL_VOICES_READY_TIMEOUT_MS = 10000;
@@ -77,6 +81,98 @@ function requireWorkspaceFeature(event) {
 
 function validWorkspaceId(value) {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function githubAuthSnapshot() {
+  return {
+    state: githubAuthState.state,
+    message: String(githubAuthState.message || '').slice(0, 300),
+    code: String(githubAuthState.code || '').slice(0, 16),
+    url: githubAuthState.url === 'https://github.com/login/device' ? githubAuthState.url : ''
+  };
+}
+
+function githubCliToken() {
+  return new Promise(function(resolve, reject) {
+    const child = spawn('gh', ['auth', 'token', '--hostname', 'github.com'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0' })
+    });
+    let output = '';
+    let errors = '';
+    child.stdout.on('data', function(chunk) { output = (output + String(chunk)).slice(0, 4096); });
+    child.stderr.on('data', function(chunk) { errors = (errors + String(chunk)).slice(0, 4096); });
+    child.once('error', function() { reject(new Error('GitHub CLI is unavailable. Install gh to authorize private repository imports.')); });
+    child.once('exit', function(code) {
+      const token = output.trim();
+      if (code === 0 && token) return resolve(token);
+      reject(new Error(errors ? 'GitHub CLI is not authenticated.' : 'GitHub CLI did not return an authentication token.'));
+    });
+  });
+}
+
+function workspaceGitHubAuthStart(event) {
+  requireWorkspaceFeature(event);
+  if (githubAuthProcess) return githubAuthSnapshot();
+  githubAuthState = { state: 'starting', message: 'Starting GitHub device authorization...' };
+  function startAuthorization(command, fallbackToLogin) {
+    let child;
+    try {
+      child = spawn('gh', command, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0' })
+      });
+    } catch (_) {
+      githubAuthState = { state: 'failed', message: 'GitHub CLI is unavailable. Install gh to authorize private repository imports.' };
+      return null;
+    }
+    githubAuthProcess = child;
+    let output = '';
+    let continued = false;
+    function consume(chunk) {
+      output = (output + String(chunk)).slice(-8192);
+      const code = output.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/);
+      if (code) {
+        githubAuthState = {
+          state: 'pending',
+          message: 'GitHub device authorization is open; the one-time code is copied to the clipboard.',
+          code: code[1],
+          url: 'https://github.com/login/device'
+        };
+        try { clipboard.writeText(code[1]); } catch (_) {}
+        shell.openExternal('https://github.com/login/device').catch(function() {});
+        if (!continued) {
+          continued = true;
+          try { child.stdin.write('\n'); } catch (_) {}
+        }
+      }
+    }
+    child.stdout.on('data', consume);
+    child.stderr.on('data', consume);
+    child.once('error', function() {
+      githubAuthProcess = null;
+      githubAuthState = { state: 'failed', message: 'GitHub CLI could not start device authorization.' };
+    });
+    child.once('exit', function(code) {
+      githubAuthProcess = null;
+      if (code !== 0 && fallbackToLogin) {
+        startAuthorization(['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web', '--scopes', 'repo'], false);
+        return;
+      }
+      githubAuthState = code === 0
+        ? { state: 'complete', message: 'GitHub authorization complete. Private repository imports can now use the GitHub CLI credential.' }
+        : { state: 'failed', message: 'GitHub device authorization did not complete.' };
+      if (code === 0) githubCliAuthPreferred = true;
+    });
+    return child;
+  }
+  startAuthorization(['auth', 'refresh', '--hostname', 'github.com', '--scopes', 'repo', '--clipboard'], true);
+  return githubAuthSnapshot();
+}
+
+function workspaceGitHubAuthStatus(event) {
+  requireWorkspaceFeature(event);
+  return githubAuthSnapshot();
 }
 
 function requestWorkspaceBridge(pathname, method, payload) {
@@ -195,6 +291,7 @@ function workspaceProjectForRenderer(project) {
       servers: Array.isArray(mcp.servers) ? mcp.servers.map(function(server) {
         return {
           name: server.name,
+          source: typeof server.source === 'string' ? server.source : 'mcp.json',
           transport: server.transport,
           enabled: server.enabled === true,
           digest: typeof server.digest === 'string' ? server.digest : '',
@@ -267,15 +364,83 @@ async function workspaceSelectProject(event) {
   return { canceled: false, project: workspaceProjectForRenderer(project) };
 }
 
+function workspaceGitHubImportErrorMessage(error) {
+  const message = String(error && error.message || error || '');
+  if (message.startsWith('GitHub authentication was rejected.')) return message;
+  if (message.startsWith('GitHub denied access to this repository.')) return message;
+  if (message.startsWith('GitHub could not be reached.')) return message;
+  if (message.startsWith('A valid GitHub repository URL is required.')) return message;
+  return 'GitHub workspace import failed. Retry the import or verify repository access.';
+}
+
 async function workspaceImportGitHub(event, repositoryUrl) {
   requireWorkspaceFeature(event);
   if (typeof repositoryUrl !== 'string' || repositoryUrl.length > 2048) {
-    throw new Error('A valid GitHub repository URL is required.');
+    return { error: 'A valid GitHub repository URL is required.' };
   }
-  const response = await requestWorkspaceBridge('/v1/workspaces/github-import', 'POST', { url: repositoryUrl });
-  const project = response.project;
-  if (!project || !validWorkspaceId(project.id)) throw new Error('Workspace bridge returned an invalid imported project.');
-  return workspaceProjectForRenderer(project);
+  try {
+    let githubToken = '';
+    if (githubCliAuthPreferred) {
+      githubToken = await githubCliToken().catch(function() { return ''; });
+    } else {
+      githubToken = loadEncryptedAuth().GITHUB_PAT || '';
+      if (!githubToken) githubToken = await githubCliToken().catch(function() { return ''; });
+    }
+    const response = await requestWorkspaceBridge('/v1/workspaces/github-import', 'POST', { url: repositoryUrl, github_pat: githubToken });
+    const project = response.project;
+    if (!project || !validWorkspaceId(project.id)) {
+      return { error: 'GitHub workspace import returned an invalid project.' };
+    }
+    return workspaceProjectForRenderer(project);
+  } catch (error) {
+    return { error: workspaceGitHubImportErrorMessage(error) };
+  }
+}
+
+async function workspaceListGitHubRepositories(event) {
+  requireWorkspaceFeature(event);
+  let githubToken = '';
+  if (githubCliAuthPreferred) {
+    githubToken = await githubCliToken();
+  } else {
+    githubToken = loadEncryptedAuth().GITHUB_PAT;
+    if (!githubToken) githubToken = await githubCliToken();
+  }
+  const requestOptions = {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/vnd.github+json',
+      'Authorization': 'Bearer ' + githubToken,
+      'User-Agent': 'Eva-Standalone'
+    },
+    timeout: 15000
+  };
+  const payload = await new Promise(function(resolve, reject) {
+    const request = https.request('https://api.github.com/user/repos?affiliation=owner&sort=updated&per_page=20', requestOptions, function(response) {
+      const chunks = [];
+      let size = 0;
+      response.on('data', function(chunk) { size += chunk.length; if (size <= 1024 * 1024) chunks.push(chunk); });
+      response.on('end', function() {
+        if (size > 1024 * 1024) return reject(new Error('GitHub repository response was too large.'));
+        let data;
+        try { data = JSON.parse(Buffer.concat(chunks).toString('utf8') || '[]'); } catch (_) { return reject(new Error('GitHub returned invalid repository data.')); }
+        if (response.statusCode < 200 || response.statusCode >= 300) return reject(new Error((data && data.message) || 'GitHub returned HTTP ' + response.statusCode));
+        resolve(data);
+      });
+    });
+    request.setTimeout(15000, function() { request.destroy(new Error('GitHub repository request timed out.')); });
+    request.on('error', reject);
+    request.end();
+  });
+  if (!Array.isArray(payload)) throw new Error('GitHub returned an invalid repository list.');
+  return payload.map(function(repository) {
+    return {
+      name: typeof repository.name === 'string' ? repository.name : '',
+      fullName: typeof repository.full_name === 'string' ? repository.full_name : '',
+      url: typeof repository.html_url === 'string' ? repository.html_url : '',
+      private: repository.private === true
+    };
+  }).filter(function(repository) { return repository.name && repository.fullName && repository.url; });
 }
 
 async function workspaceSetMcpServer(event, projectId, serverName, enabled, approvedDigest) {
@@ -292,6 +457,42 @@ async function workspaceSetMcpServer(event, projectId, serverName, enabled, appr
   const project = response.project;
   if (!project || !validWorkspaceId(project.id)) throw new Error('Workspace bridge returned an invalid project record.');
   return workspaceProjectForRenderer(project);
+}
+
+async function workspaceDeleteProject(event, projectId, confirmDirty) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(projectId)) throw new Error('Invalid project ID.');
+  const checkoutIds = [];
+  if (terminalBroker) {
+    const projectsResponse = await requestWorkspaceBridge('/v1/workspaces/projects', 'GET');
+    const project = (projectsResponse.projects || []).find(function(item) { return item.id === projectId; });
+    if (!project) throw new Error('Workspace is no longer registered.');
+    if (project.source_checkout && validWorkspaceId(project.source_checkout.id)) checkoutIds.push(project.source_checkout.id);
+    const runsResponse = await requestWorkspaceBridge('/v1/workspaces/runs?project_id=' + encodeURIComponent(projectId), 'GET');
+    (runsResponse.runs || []).forEach(function(run) {
+      if (run.checkout && validWorkspaceId(run.checkout.id)) checkoutIds.push(run.checkout.id);
+    });
+    for (const checkoutId of Array.from(new Set(checkoutIds))) {
+      await terminalBroker.terminateByRoot(checkoutId);
+      if (terminalBroker.list().some(function(session) { return session.rootId === checkoutId; })) {
+        throw new Error('A workspace terminal did not terminate; removal was cancelled.');
+      }
+    }
+  }
+  const response = await requestWorkspaceBridge(
+    '/v1/workspaces/projects/' + encodeURIComponent(projectId),
+    'DELETE',
+    { confirm_dirty: confirmDirty === true }
+  );
+  const removed = response.removed;
+  if (!removed || !validWorkspaceId(removed.id)) throw new Error('Workspace bridge returned an invalid removal result.');
+  if (terminalBroker) checkoutIds.forEach(function(checkoutId) { terminalBroker.unregisterRoot(checkoutId); });
+  return {
+    id: removed.id,
+    name: typeof removed.name === 'string' ? removed.name : 'Workspace',
+    sourcePreserved: removed.source_preserved === true,
+    removedWorktrees: Number(removed.removed_worktrees || 0)
+  };
 }
 
 async function workspaceCreateRun(event, request) {
@@ -312,6 +513,15 @@ async function workspaceCreateRun(event, request) {
   const projected = workspaceRunForRenderer(run);
   projected.dispatchError = typeof response.dispatch_error === 'string' ? response.dispatch_error : '';
   return projected;
+}
+
+async function workspaceDispatchRun(event, runId) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(runId)) throw new Error('Invalid workspace run ID.');
+  const response = await requestWorkspaceBridge('/v1/workspaces/runs/' + encodeURIComponent(runId) + '/dispatch', 'POST', {});
+  const run = response.run;
+  if (!run || !run.checkout || !validWorkspaceId(run.checkout.id)) throw new Error('Workspace bridge returned an invalid coding run.');
+  return workspaceRunForRenderer(run);
 }
 
 async function workspaceListRuns(event, projectId) {
@@ -1378,8 +1588,13 @@ ipcMain.handle('terminal-close-root', function(event, rootId) {
 ipcMain.handle('workspace-list-projects', workspaceListProjects);
 ipcMain.handle('workspace-select-project', workspaceSelectProject);
 ipcMain.handle('workspace-import-github', workspaceImportGitHub);
+ipcMain.handle('workspace-list-github-repositories', workspaceListGitHubRepositories);
+ipcMain.handle('workspace-github-auth-start', workspaceGitHubAuthStart);
+ipcMain.handle('workspace-github-auth-status', workspaceGitHubAuthStatus);
 ipcMain.handle('workspace-set-mcp-server', workspaceSetMcpServer);
+ipcMain.handle('workspace-delete-project', workspaceDeleteProject);
 ipcMain.handle('workspace-create-run', workspaceCreateRun);
+ipcMain.handle('workspace-dispatch-run', workspaceDispatchRun);
 ipcMain.handle('workspace-list-runs', workspaceListRuns);
 ipcMain.handle('workspace-list-project-files', workspaceListProjectFiles);
 ipcMain.handle('workspace-open-project-file', workspaceOpenProjectFile);
@@ -1409,8 +1624,10 @@ function createWindow(acpBaseUrl) {
   });
 
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 900,
+    width: 1728,
+    height: 1215,
+    minWidth: 1280,
+    minHeight: 900,
     show: false,
     frame: false,
     transparent: true,

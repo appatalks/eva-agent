@@ -169,6 +169,12 @@ def _telemetry_emit(event, **fields):
         pass
 
 
+def _verbose_debug_emit(event, **fields):
+    """Emit opt-in structured diagnostics without content payloads."""
+    if getattr(_st, "verbose_debug", False):
+        _telemetry_emit("verbose_" + str(event)[:40], **fields)
+
+
 
 def _percentile(sorted_vals, pct):
     if not sorted_vals:

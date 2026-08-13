@@ -106,6 +106,7 @@ async function copilotSend() {
   var signalContext = (typeof captureSignalDeliveryContext === 'function')
     ? captureSignalDeliveryContext(sQuestion)
     : null;
+  var turnId = window._evaActiveAuditTurnId || (typeof evaCreateAuditTurnId === 'function' ? evaCreateAuditTurnId() : '');
 
   var selModel = document.getElementById('selModel');
   var mode = getCopilotMode(selModel.value);
@@ -163,15 +164,15 @@ async function copilotSend() {
 
   // Route to the appropriate backend
   if (mode === 'acp') {
-    await _copilotSendACP(existingMessages, sQuestion, txtOutput, storageKey, signalContext);
+    await _copilotSendACP(existingMessages, sQuestion, txtOutput, storageKey, signalContext, turnId);
   } else {
-    await _copilotSendModelsAPI(existingMessages, selModel.value, sQuestion, txtOutput, storageKey, signalContext);
+    await _copilotSendModelsAPI(existingMessages, selModel.value, sQuestion, txtOutput, storageKey, signalContext, turnId);
   }
 }
 
 // --- GitHub Models API mode ---
 
-async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, storageKey, signalContext) {
+async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, storageKey, signalContext, turnId) {
   var githubToken = getAuthKey('GITHUB_PAT');
   var model = modelValue.replace(/^copilot-/, '');
   var requestMessages = EvaPromptBudget.compactMessages(messages, {
@@ -283,7 +284,7 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
     }
 
     var data = await resp.json();
-    _copilotRenderResponse(data, txtOutput, model, question, signalContext, false, contextSessionId);
+    _copilotRenderResponse(data, txtOutput, model, question, signalContext, false, contextSessionId, turnId);
 
   } catch (err) {
     _copilotHandleFetchError(err, txtOutput);
@@ -292,7 +293,7 @@ async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, 
 
 // --- ACP Bridge mode ---
 
-async function _copilotSendACP(messages, question, txtOutput, storageKey, signalContext) {
+async function _copilotSendACP(messages, question, txtOutput, storageKey, signalContext, turnId) {
   // Auto-detect bridge URL (tries configured, same-host, localhost)
   var bridgeUrl = await detectACPBridge();
   if (typeof watchACPPermissions === 'function') watchACPPermissions(190000);
@@ -334,7 +335,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
       appendEvaStreamingChunk(provisional, chunk, txtOutput);
     });
     removeEvaStreamingBubble(provisional);
-    await _copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext, true, payload.session_id);
+    await _copilotRenderResponse(data, txtOutput, modelLabel, question, signalContext, true, payload.session_id, turnId);
 
   } catch (err) {
     removeEvaStreamingBubble(provisional);
@@ -348,7 +349,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
 
 // --- Shared response rendering ---
 
-async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, signalContext, reflectionHandledByBridge, reflectionSessionId) {
+async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, signalContext, reflectionHandledByBridge, reflectionSessionId, turnId) {
   var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
 
   // Use unified renderer
@@ -356,6 +357,8 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, 
     signalAuthorized: !!(signalContext && signalContext.authorized),
     signalMessage: signalContext ? signalContext.message : '',
     signalRequest: userMessage,
+    nativeRequest: userMessage,
+    turnId: turnId,
     signalContext: signalContext
   });
 
@@ -383,7 +386,7 @@ async function _copilotRenderResponse(data, txtOutput, modelLabel, userMessage, 
           model: modelLabel,
                   session_id: reflectionSessionId || ((typeof ensureActiveSessionId === 'function')
                     ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')),
-                  turn_id: (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : ''
+                  turn_id: turnId
         }),
         signal: AbortSignal.timeout(5000)
       }).catch(function() {}); // fire-and-forget
@@ -452,6 +455,22 @@ function populateMCPForm(cfg) {
   }
   var cuCheck = document.getElementById('mcpComputerUse');
   if (cuCheck) cuCheck.checked = !!cfg['computer-use-linux'];
+}
+
+function forgetMissingMCPSelections(config, unavailable) {
+  var retained = Object.assign({}, config || {});
+  var changed = false;
+  Object.keys(unavailable || {}).forEach(function(name) {
+    if (unavailable[name] === 'command_not_found' && retained[name]) {
+      delete retained[name];
+      changed = true;
+    }
+  });
+  if (changed) {
+    localStorage.setItem('mcp_config', JSON.stringify(retained));
+    populateMCPForm(retained);
+  }
+  return retained;
 }
 
 // Re-apply the saved MCP config to a freshly started bridge.
@@ -527,7 +546,9 @@ async function _applySavedMCPConfig(githubPat) {
       if (resp.ok) {
         _lastAutoAppliedMCPPat = githubPat;
         var data = await resp.json();
-        setStatus('info', 'MCP restored: ' + ((data.active_servers || []).join(', ') || 'none'));
+        saved = forgetMissingMCPSelections(saved, data.unavailable_servers);
+        var unavailable = Object.keys(data.unavailable_servers || {});
+        setStatus(unavailable.length ? 'error' : 'info', 'MCP restored: ' + ((data.active_servers || []).join(', ') || 'none') + (unavailable.length ? '. Unavailable: ' + unavailable.join(', ') : ''));
         if (typeof refreshMCPStatus === 'function') refreshMCPStatus();
         return;
       }
@@ -605,7 +626,9 @@ async function applyMCPConfig() {
     });
     var data = await resp.json();
     if (resp.ok) {
-      setStatus('info', 'MCP configured: ' + (data.active_servers || []).join(', '));
+      mcpServers = forgetMissingMCPSelections(mcpServers, data.unavailable_servers);
+      var unavailable = Object.keys(data.unavailable_servers || {});
+      setStatus(unavailable.length ? 'error' : 'info', 'MCP configured: ' + ((data.active_servers || []).join(', ') || 'none') + (unavailable.length ? '. Unavailable: ' + unavailable.join(', ') : ''));
       refreshMCPStatus();
       return { ok: true, data: data, bridgeUrl: bridgeUrl, mcpServers: mcpServers };
     } else {
@@ -782,19 +805,29 @@ async function refreshMCPStatus() {
     if (resp.ok) {
       var data = await resp.json();
       var active = data.active || [];
+      var unavailableState = data.unavailable || {};
+      var unavailable = Object.keys(unavailableState);
+      var saved = {};
+      try {
+        saved = JSON.parse(localStorage.getItem('mcp_config') || '{}') || {};
+      } catch (e) {}
+      saved = forgetMissingMCPSelections(saved, unavailableState);
       if (active.length > 0) {
         statusEl.innerHTML = '<strong>Active MCP Servers:</strong> ' + active.map(function(s) { return '<span class="mcp-badge">' + escapeHtml(s) + '</span>'; }).join(' ');
-        // Sync checkboxes
-        var azureCheck = document.getElementById('mcpAzure');
-        var githubCheck = document.getElementById('mcpGitHub');
-      if (azureCheck) azureCheck.checked = active.indexOf('azure-mcp-server') >= 0;
-      if (githubCheck) githubCheck.checked = active.indexOf('github-mcp-server') >= 0;
-        // Kusto
-        var kustoCheckS = document.getElementById('mcpKusto');
-        if (kustoCheckS) kustoCheckS.checked = active.indexOf('kusto-mcp-server') >= 0;
       } else {
         statusEl.innerHTML = '<em>No MCP servers active</em>';
       }
+      if (unavailable.length) statusEl.innerHTML += '<div><strong>Unavailable:</strong> ' + unavailable.map(escapeHtml).join(', ') + '</div>';
+      var presetStates = {
+        mcpAzure: 'azure-mcp-server',
+        mcpGitHub: 'github-mcp-server',
+        mcpKusto: 'kusto-mcp-server',
+        mcpComputerUse: 'computer-use-linux'
+      };
+      Object.keys(presetStates).forEach(function(id) {
+        var checkbox = document.getElementById(id);
+        if (checkbox) checkbox.checked = active.indexOf(presetStates[id]) >= 0 || !!saved[presetStates[id]];
+      });
     } else {
       statusEl.innerHTML = '<em>Bridge unreachable</em>';
     }

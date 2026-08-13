@@ -8,7 +8,7 @@ var SESSION_PANEL_TAB_KEY = 'eva_session_panel_tab';
 var SESSION_TITLE_MAX_LENGTH = 140;
 
 // All provider message keys
-var SESSION_MSG_KEYS = ['messages', 'copilotMessages', 'copilotACPMessages', 'geminiMessages', 'openLLMessages', 'aigMessages'];
+var SESSION_MSG_KEYS = ['messages', 'copilotMessages', 'copilotACPMessages', 'geminiMessages', 'openLLMessages', 'aigMessages', 'voiceMessages'];
 
 function closeAgentOperationsForNavigation() {
   if (typeof EvaAgents !== 'undefined' && EvaAgents.close) EvaAgents.close();
@@ -182,6 +182,86 @@ function _sessionMsgCount(data) {
   return count;
 }
 
+function _appendVoiceSessionMessage(role, content) {
+  var text = String(content || '').trim();
+  if (!text) return;
+  var messages = [];
+  try { messages = JSON.parse(localStorage.getItem('voiceMessages') || '[]'); } catch (_) {}
+  if (!Array.isArray(messages)) messages = [];
+  var previous = messages.length ? messages[messages.length - 1] : null;
+  if (!previous || previous.role !== role || previous.content !== text) {
+    messages.push({ role: role, content: text });
+    localStorage.setItem('voiceMessages', JSON.stringify(messages.slice(-200)));
+  }
+}
+
+function _appendVoiceChatBubble(role, content) {
+  var output = document.getElementById('txtOutput');
+  var text = String(content || '').trim();
+  if (!output || !text) return;
+  var className = role === 'user' ? 'user-bubble' : 'eva-bubble';
+  var bubbles = output.querySelectorAll('.chat-bubble.' + className);
+  var latest = bubbles.length ? bubbles[bubbles.length - 1] : null;
+  var latestText = latest ? String(latest.textContent || '').replace(/^(?:You|Eva):\s*/, '').trim() : '';
+  if (latestText === text) return;
+  var bubble = document.createElement('div');
+  bubble.className = 'chat-bubble ' + className;
+  var label = document.createElement('span');
+  label.className = role === 'user' ? 'user' : 'eva';
+  label.textContent = role === 'user' ? 'You:' : 'Eva:';
+  bubble.append(label, document.createTextNode(' ' + text));
+  output.appendChild(bubble);
+  output.scrollTop = output.scrollHeight;
+}
+
+function recordConversationTurn(userText, assistantText) {
+  var user = String(userText || '').trim();
+  var assistant = String(assistantText || '').trim();
+  if (user) {
+    _appendVoiceSessionMessage('user', user);
+    _appendVoiceChatBubble('user', user);
+  }
+  if (assistant) {
+    _appendVoiceSessionMessage('assistant', assistant);
+    _appendVoiceChatBubble('assistant', assistant);
+  }
+  return saveCurrentSession();
+}
+
+function recordSpokenEvaText(text) {
+  var assistant = String(text || '').trim();
+  if (!assistant) return Promise.resolve();
+  _appendVoiceSessionMessage('assistant', assistant);
+  _appendVoiceChatBubble('assistant', assistant);
+  return saveCurrentSession();
+}
+
+function _saveSessionRecoveryCopy(id, snapshot) {
+  try {
+    localStorage.setItem('session_' + id, JSON.stringify(snapshot));
+  } catch (error) {
+    console.warn('[Sessions] Local recovery copy could not be saved:', error && error.name ? error.name : 'storage unavailable');
+  }
+}
+
+function _showSessionRestoreUnavailable(id) {
+  var indexEntry = _getSessionIndex().find(function(entry) { return entry.id === id; });
+  var output = document.getElementById('txtOutput');
+  if (output) {
+    output.replaceChildren();
+    var notice = document.createElement('div');
+    notice.className = 'session-restore-unavailable';
+    var heading = document.createElement('strong');
+    heading.textContent = indexEntry && indexEntry.title ? indexEntry.title : 'Saved session';
+    var message = document.createElement('span');
+    message.textContent = 'The session name is still indexed, but its transcript snapshot is unavailable on this installation.';
+    notice.append(heading, message);
+    output.appendChild(notice);
+  }
+  if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
+  if (typeof setStatus === 'function') setStatus('error', 'This saved session is unavailable. Its index entry was preserved.');
+}
+
 /** Auto-save the current session (call on every send and periodically) */
 function saveCurrentSession() {
   var snapshot = _snapshotSession();
@@ -212,7 +292,9 @@ function saveCurrentSession() {
     }
   }
 
-  // Save to IndexedDB (async, non-blocking)
+  // IndexedDB is the primary store; retain the legacy key as a recovery copy
+  // because packaged file origins can change across AppImage rebuilds.
+  _saveSessionRecoveryCopy(id, snapshot);
   var savePromise = idbSaveSession(id, snapshot).catch(function(e) {
     console.error('[Sessions] IDB save failed:', e);
   });
@@ -251,6 +333,9 @@ function loadSession(id) {
   // avoids a read/restore race when users switch sessions quickly.
   return Promise.resolve(saveCurrentSession()).then(function() {
     return idbLoadSession(id);
+  }).catch(function(error) {
+    console.warn('[Sessions] IDB load failed:', error && error.name ? error.name : 'storage unavailable');
+    return null;
   }).then(function(data) {
     if (!data) {
       var legacy = localStorage.getItem('session_' + id);
@@ -258,7 +343,6 @@ function loadSession(id) {
         try {
           data = JSON.parse(legacy);
           idbSaveSession(id, data).then(function() {
-            localStorage.removeItem('session_' + id);
           }).catch(function() {});
         } catch (error) {
           data = null;
@@ -266,23 +350,7 @@ function loadSession(id) {
       }
     }
     if (!data) {
-      var indexEntry = _getSessionIndex().find(function(entry) { return entry.id === id; });
-      var output = document.getElementById('txtOutput');
-      if (output) {
-        output.replaceChildren();
-        var notice = document.createElement('div');
-        notice.className = 'session-restore-unavailable';
-        var heading = document.createElement('strong');
-        heading.textContent = indexEntry && indexEntry.title ? indexEntry.title : 'Saved session';
-        var message = document.createElement('span');
-        message.textContent = 'The session name is still indexed, but its transcript snapshot is unavailable on this installation.';
-        notice.append(heading, message);
-        output.appendChild(notice);
-      }
-      var unavailablePanel = document.getElementById('sessionPanel');
-      if (unavailablePanel) unavailablePanel.setAttribute('aria-hidden', 'true');
-      if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
-      if (typeof setStatus === 'function') setStatus('error', 'This saved session is unavailable. Its index entry was preserved.');
+      _showSessionRestoreUnavailable(id);
       return false;
     }
     _restoreSession(data);
@@ -297,6 +365,7 @@ function loadSession(id) {
     return true;
   }).catch(function(e) {
     console.error('Failed to load session:', e);
+    _showSessionRestoreUnavailable(id);
     return false;
   });
 }
@@ -306,6 +375,7 @@ function deleteSession(id) {
   var index = _getSessionIndex();
   index = index.filter(function(s) { return s.id !== id; });
   _saveSessionIndex(index);
+  localStorage.removeItem('session_' + id);
   idbDeleteSession(id).catch(function(e) {
     console.error('[Sessions] IDB delete failed:', e);
   });
@@ -924,6 +994,134 @@ function openWorkspaceTerminal(rootId, label) {
   }
 }
 
+function runEvaTerminalCommand(command, submit) {
+  var text = String(command || '').trim();
+  if (!text || /[\r\n\0]/.test(text) || text.length > 8192) {
+    return Promise.reject(new Error('Terminal commands must be one non-empty line.'));
+  }
+  openWorkspaceTerminal(_evaWorkspaceTerminalTarget.rootId, _evaWorkspaceTerminalTarget.label);
+  var deadline = Date.now() + 5000;
+  return new Promise(function(resolve, reject) {
+    function waitForTerminal() {
+      if (window.EvaTerminal && typeof window.EvaTerminal.runCommand === 'function') {
+        window.EvaTerminal.runCommand(text, submit !== false).then(resolve, reject);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        reject(new Error('Native terminal did not become ready.'));
+        return;
+      }
+      setTimeout(waitForTerminal, 25);
+    }
+    waitForTerminal();
+  });
+}
+
+function evaPlannedTerminalCommandIsSafe(command) {
+  var text = String(command || '').trim();
+  if (!text || /[\r\n\0;|&><`$\\]/.test(text)) return false;
+  if (/(?:^|[/\s])(?:\.env(?:\.[A-Za-z0-9_.-]+)?|\.ssh|\.aws|\.azure|\.npmrc|\.pypirc|\.netrc|\.git-credentials)(?:[/\s]|$)|\b(?:config\.json|config\.local\.(?:js|json)|auth\.enc(?:\.json)?|id_rsa|id_ed25519|kubeconfig|service-account|hosts\.yml|token|credential|password|secret)\b/i.test(text)) return false;
+  if (!/^[A-Za-z0-9_.:/=+,-]+(?:\s+[A-Za-z0-9_.:/=+,-]+)*$/.test(text)) return false;
+  var parts = text.split(/\s+/);
+  var commandName = parts[0];
+  var argumentsList = parts.slice(1);
+  if (argumentsList.some(function(argument) {
+    if (argument.startsWith('-')) return false;
+    return argument.split('/').some(function(component) { return component.length > 1 && component.charAt(0) === '.'; });
+  })) return false;
+  if (argumentsList.some(function(argument) { return argument === '..' || argument.indexOf('../') === 0 || argument.indexOf('/../') >= 0 || argument.charAt(0) === '/' || argument.charAt(0) === '~'; })) return false;
+  if (commandName === 'pwd') return argumentsList.every(function(argument) { return argument === '-L' || argument === '-P'; });
+  if (commandName === 'ls') return argumentsList.every(function(argument) { return !argument.startsWith('-') || /^-[aAlh1dF]+$/.test(argument); });
+  if (commandName === 'df') return argumentsList.every(function(argument) { return /^-[hHTiPk]+$/.test(argument); });
+  if (commandName === 'git') {
+    if (!argumentsList.length || ['status', 'diff', 'log', 'show', 'rev-parse'].indexOf(argumentsList[0]) < 0) return false;
+    return !argumentsList.slice(1).some(function(argument) { return argument === '-c' || argument.indexOf('-c=') === 0 || /--(?:output|ext-diff|textconv|exec-path|config-env|no-index)/.test(argument); });
+  }
+  return ['rg', 'grep', 'cat', 'head', 'tail', 'wc'].indexOf(commandName) >= 0;
+}
+
+async function planEvaTerminalTask(objective, submit, allowDecline) {
+  var task = String(objective || '').trim();
+  if (!task || /[\r\n\0]/.test(task) || task.length > 2000) throw new Error('Terminal task must be one non-empty line.');
+  var turnId = typeof evaCreateAuditTurnId === 'function' ? evaCreateAuditTurnId() : '';
+  if (typeof evaAuditEvent === 'function') evaAuditEvent('terminal_task', 'started', {
+    correlation_id: turnId,
+    action: submit === false ? 'type' : 'run',
+    request_chars: task.length
+  });
+  var modelSelect = document.getElementById('selAIGBackend');
+  var bridgeUrl = typeof getACPBridgeUrl === 'function' ? getACPBridgeUrl() : 'http://localhost:8888';
+  var response;
+  try {
+    var selectedPlannerModel = modelSelect && modelSelect.value ? modelSelect.value : 'gpt-5.6-luna';
+    var plannerOpenAIKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : '';
+    var requestTerminalPlan = function(model) {
+      return fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/aig/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+        messages: [{ role: 'user', content: task }],
+        user_message: task,
+        session_id: typeof ensureActiveSessionId === 'function' ? ensureActiveSessionId() : '',
+        turn_id: turnId,
+        model: model,
+        native_terminal_plan: true,
+        native_terminal_candidate: allowDecline === true,
+        internal: true,
+        no_tools: true,
+        max_completion_tokens: 512,
+        lmstudio_base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
+        lmstudio_model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
+        github_pat: typeof getAuthKey === 'function' ? getAuthKey('GITHUB_PAT') : '',
+        openai_api_key: plannerOpenAIKey
+        }),
+        signal: AbortSignal.timeout(30000)
+      });
+    };
+    response = await requestTerminalPlan(selectedPlannerModel);
+    var payload = await response.json().catch(function() { return {}; });
+    if (!response.ok && plannerOpenAIKey && String(selectedPlannerModel).indexOf('openai:') !== 0) {
+      response = await requestTerminalPlan('openai:gpt-5-mini');
+      payload = await response.json().catch(function() { return {}; });
+    }
+    if (!response.ok) throw new Error(payload && payload.error && payload.error.message ? payload.error.message : 'Terminal planner returned HTTP ' + response.status);
+    var rawContent = String(((((payload.choices || [])[0] || {}).message || {}).content) || '').trim();
+    var content = allowDecline === true ? rawContent : rawContent.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    var planned;
+    try { planned = JSON.parse(content); } catch (_) { planned = allowDecline === true ? null : { command: content }; }
+    var candidateKeys = allowDecline === true && planned && typeof planned === 'object' && !Array.isArray(planned)
+      ? Object.keys(planned).sort() : [];
+    var candidateEnvelopeValid = allowDecline === true && candidateKeys.length === 2 && candidateKeys[0] === 'applicable' && candidateKeys[1] === 'command' && typeof planned.applicable === 'boolean' && typeof planned.command === 'string';
+    var command = allowDecline === true
+      ? (candidateEnvelopeValid ? planned.command.trim() : '')
+      : String(planned && planned.command || '').trim();
+    if (allowDecline === true && (!candidateEnvelopeValid || planned.applicable !== true || !command)) {
+      if (typeof evaAuditEvent === 'function') evaAuditEvent('terminal_task', 'completed', {
+        correlation_id: turnId,
+        action: 'decline'
+      });
+      return { declined: true, submitted: false, reviewRequired: false };
+    }
+    if (!command || /[\r\n\0]/.test(command) || command.length > 8192) throw new Error('Terminal planner did not return one valid command line.');
+    var plannedSafe = evaPlannedTerminalCommandIsSafe(command);
+    var shouldSubmit = submit !== false && plannedSafe;
+    if (typeof evaAuditEvent === 'function') evaAuditEvent('terminal_task', 'planned', {
+      correlation_id: turnId,
+      action: shouldSubmit ? 'run' : 'type',
+      response_chars: command.length
+    });
+    await runEvaTerminalCommand(command, shouldSubmit);
+    return { submitted: shouldSubmit, reviewRequired: submit !== false && !plannedSafe };
+  } catch (error) {
+    if (typeof evaAuditEvent === 'function') evaAuditEvent('terminal_task', 'failed', {
+      correlation_id: turnId,
+      action: submit === false ? 'type' : 'run',
+      label: error && error.name ? error.name : 'terminal-planner'
+    });
+    throw error;
+  }
+}
+
 function initTerminal() {
   var container = document.getElementById('terminalContainer');
   var fallback = document.getElementById('terminalFallback');
@@ -1179,6 +1377,15 @@ async function _buildWorkspaceTerminal(frame) {
     if (!target || typeof target.rootId !== 'string' || !target.rootId) return Promise.resolve();
     _evaWorkspaceTerminalTarget = { rootId: target.rootId, label: String(target.label || 'Workspace') };
     return attachTerminal(false);
+  };
+  window.EvaTerminal.runCommand = async function(command, submit) {
+    var text = String(command || '').trim();
+    if (!text || /[\r\n\0]/.test(text) || text.length > 8192) throw new Error('Terminal commands must be one non-empty line.');
+    await attachTerminal(false);
+    if (!terminalId || exited) throw new Error('Native terminal is not connected.');
+    await api.terminalWrite(terminalId, text + (submit === false ? '' : '\r'));
+    terminal.focus();
+    return { id: terminalId, submitted: submit !== false };
   };
   window.addEventListener('beforeunload', function() {
     removeDataListener();

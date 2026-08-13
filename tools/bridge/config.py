@@ -49,6 +49,9 @@ EMBEDDING_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "embeddings_cache.json")
 MEMORY_BACKEND_PREF_PATH = os.path.join(EVA_CONFIG_DIR, "memory_backend.txt")
 MODE_PREF_PATH = os.path.join(EVA_CONFIG_DIR, "mode.txt")
 TELEMETRY_PATH = os.path.join(EVA_CONFIG_DIR, "telemetry.jsonl")
+AUDIT_LOG_PATH = os.path.join(EVA_CONFIG_DIR, "audit.jsonl")
+AUDIT_LOG_MAX_BYTES = 10 * 1024 * 1024
+AUDIT_LOG_TEXT_LIMIT = 4000
 
 # ── Networking / validation ─────────────────────────────────────────
 LMSTUDIO_ALLOWED_PORTS = {1234, 8000, 8080, 11434}

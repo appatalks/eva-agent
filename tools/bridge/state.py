@@ -68,6 +68,10 @@ bg_last_activity = {}
 last_user_activity_ts = 0.0
 bg_tick_lock = threading.Lock()
 
+# ── Startup briefing cache ──────────────────────────────────────────
+startup_briefing = {"status": "idle", "started_at": "", "completed_at": "", "sources": {}, "summary": ""}
+startup_briefing_thread = None
+
 # ── Bridge networking ───────────────────────────────────────────────
 bridge_bind_address = "127.0.0.1"
 
@@ -86,6 +90,7 @@ workspace_acp_clients = {}  # task_id -> live workspace-scoped ACPClient
 
 # ── Telemetry ───────────────────────────────────────────────────────
 telemetry_enabled = os.environ.get("EVA_TELEMETRY", "1") not in ("0", "false", "no")
+verbose_debug = False
 telemetry_lock = threading.Lock()
 telemetry_ring = []
 

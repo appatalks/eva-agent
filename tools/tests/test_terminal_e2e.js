@@ -141,6 +141,71 @@ async function run() {
   });
 
   await page.setViewportSize({ width: 1280, height: 900 });
+  const candidateFallback = await page.evaluate(async function() {
+    const input = document.getElementById('txtMsg');
+    const model = document.getElementById('selModel');
+    const originals = {
+      resolve: EvaHarness.resolveNavigationRequest,
+      execute: EvaHarness.execute,
+      capture: window.captureProtectedMemoryFromChat,
+      clear: window.clearText,
+      aig: window.aigSend,
+      audit: window.evaAuditEvent,
+    };
+    let chatSends = 0;
+    let nativeExecutions = 0;
+    const capturedQuestions = [];
+    try {
+      EvaHarness.resolveNavigationRequest = function(value) {
+        return { action: 'consider_terminal_task', target: 'terminal', label: 'Terminal', objective: String(value || ''), submit: true };
+      };
+      window.captureProtectedMemoryFromChat = async function() { return false; };
+      window.clearText = function() {
+        capturedQuestions.push(input.innerText || input.textContent || '');
+        input.innerHTML = '';
+      };
+      window.aigSend = function() { chatSends += 1; };
+      window.evaAuditEvent = function() {};
+      model.value = 'aig';
+
+      EvaHarness.execute = function() {
+        nativeExecutions += 1;
+        return Promise.resolve({ ok: true, message: 'No terminal command needed.', data: { outcome: 'completed', declined: true } });
+      };
+      input.textContent = 'What is your favorite color?';
+      await sendData();
+
+      EvaHarness.execute = function() {
+        nativeExecutions += 1;
+        return Promise.resolve({ ok: false, message: 'Planner unavailable.', data: { outcome: 'failed', reason: 'unavailable' } });
+      };
+      input.textContent = 'How should I think about this?';
+      await sendData();
+
+      const executionsBeforeVoice = nativeExecutions;
+      const voiceHandled = _runVoiceNavigationCommand('What is the current kernel version?', 'voice-e2e');
+      return {
+        chatSends,
+        nativeExecutions,
+        executionsBeforeVoice,
+        capturedQuestions,
+        voiceHandled,
+      };
+    } finally {
+      EvaHarness.resolveNavigationRequest = originals.resolve;
+      EvaHarness.execute = originals.execute;
+      window.captureProtectedMemoryFromChat = originals.capture;
+      window.clearText = originals.clear;
+      window.aigSend = originals.aig;
+      window.evaAuditEvent = originals.audit;
+      input.innerHTML = '';
+    }
+  });
+  assert.strictEqual(candidateFallback.chatSends, 2, 'CLI decline/failure did not each fall back to chat exactly once');
+  assert.deepStrictEqual(candidateFallback.capturedQuestions, ['What is your favorite color?', 'How should I think about this?']);
+  assert.strictEqual(candidateFallback.voiceHandled, false, 'Generic voice candidate was consumed before sendData fallback');
+  assert.strictEqual(candidateFallback.nativeExecutions, candidateFallback.executionsBeforeVoice, 'Generic voice candidate executed a native action before sendData');
+
   await openTerminal(page);
   await page.locator('.workspace-terminal-host').click();
   await page.keyboard.type("printf '\\033[31mEVA_E2E_ANSI\\033[0m\\n'");
@@ -149,8 +214,28 @@ async function run() {
     return document.querySelector('.workspace-terminal-host').innerText.includes('EVA_E2E_ANSI');
   });
 
+  await page.evaluate(function() {
+    return window.EvaTerminal.runCommand("printf 'EVA_E2E_DIRECT_COMMAND\\n'");
+  });
+  await page.waitForFunction(function() {
+    return document.querySelector('.workspace-terminal-host').innerText.includes('EVA_E2E_DIRECT_COMMAND');
+  });
+
+  const typedCommand = "printf 'EVA_E2E_TYPED_ONLY\\n'";
+  await page.evaluate(function(command) {
+    return window.EvaTerminal.runCommand(command, false);
+  }, typedCommand);
+  await page.waitForFunction(function(command) {
+    return document.querySelector('.workspace-terminal-host').innerText.includes(command);
+  }, typedCommand);
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(function() {
+    return document.querySelector('.workspace-terminal-host').innerText.includes('EVA_E2E_TYPED_ONLY');
+  });
+
   const beforeReload = await terminalText(page);
   assert.match(beforeReload, /EVA_E2E_ANSI/);
+  assert.match(beforeReload, /EVA_E2E_DIRECT_COMMAND/);
   assert.match(beforeReload.replace(/\s/g, ''), /resources\/app/);
   await page.locator('.workspace-terminal-search').fill('EVA_E2E_ANSI');
   await page.locator('.workspace-terminal-tool', { hasText: 'Find' }).click();

@@ -2,21 +2,24 @@
 // For OpenAI API
 
 // API Call for latest gpt classes
-async function trboSend() {
+async function trboSend(retryContext) {
 
   // Remove occurrences of the specific syntax from the txtMsg element
-	txtMsg.innerHTML = txtMsg.innerHTML.replace(/<img\b[^>]*>/g, '');
+	if (!retryContext) txtMsg.innerHTML = txtMsg.innerHTML.replace(/<img\b[^>]*>/g, '');
 
-  var sQuestion = txtMsg.innerHTML;
-    sQuestion = sQuestion.replace(/<br>/g, "\n");
+  var isRetry = !!(retryContext && retryContext.isRetry);
+
+  var sQuestion = retryContext && retryContext.question || txtMsg.innerHTML;
+  sQuestion = sQuestion.replace(/<br>/g, "\n");
   if (sQuestion.trim() == "") {
     alert("Type in your question!");
     txtMsg.focus();
     return;
   }
-  var signalContext = (typeof captureSignalDeliveryContext === 'function')
+  var signalContext = retryContext && retryContext.signalContext || ((typeof captureSignalDeliveryContext === 'function')
     ? captureSignalDeliveryContext(sQuestion)
-    : null;
+    : null);
+  var turnId = retryContext && retryContext.turnId || window._evaActiveAuditTurnId || (typeof evaCreateAuditTurnId === 'function' ? evaCreateAuditTurnId() : '');
 
   var oHttp = new XMLHttpRequest();
   oHttp.open("POST", "https://api.openai.com/v1/chat/completions");
@@ -82,7 +85,9 @@ async function trboSend() {
                 retryCount++;
                 var retryDelay = Math.pow(2, retryCount) * 1000;
                 console.log("Too busy. Retrying in " + retryDelay + "ms");
-                setTimeout(trboSend, retryDelay);
+                setTimeout(function() {
+                  trboSend({ question: sQuestion, signalContext: signalContext, turnId: turnId, isRetry: true });
+                }, retryDelay);
                 return;
             }
 	    else {
@@ -102,6 +107,8 @@ async function trboSend() {
               signalAuthorized: !!(signalContext && signalContext.authorized),
               signalMessage: signalContext ? signalContext.message : '',
               signalRequest: sQuestion,
+              nativeRequest: sQuestion,
+              turnId: turnId,
               signalContext: signalContext
             });
             if (typeof reportCompletionTruncation === 'function') reportCompletionTruncation(oJson);
@@ -126,7 +133,7 @@ async function trboSend() {
                   assistant_message: s.content.substring(0, 500),
                   model: sModel,
                   session_id: _gptSessionId,
-                  turn_id: (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : ''
+                  turn_id: turnId
                 }),
                 signal: AbortSignal.timeout(5000)
               }).catch(function() {});
@@ -227,9 +234,11 @@ async function trboSend() {
         }
 
     // Append the new messages to the existing messages in localStorage
-    let existingMessages = JSON.parse(localStorage.getItem("messages")) || [];
-    existingMessages = existingMessages.concat(newMessages);
-    localStorage.setItem("messages", JSON.stringify(existingMessages));
+    if (!isRetry) {
+      let existingMessages = JSON.parse(localStorage.getItem("messages")) || [];
+      existingMessages = existingMessages.concat(newMessages);
+      localStorage.setItem("messages", JSON.stringify(existingMessages));
+    }
 
     // Retrieve messages from local storage
     var cStoredMessages = localStorage.getItem("messages");
@@ -290,7 +299,7 @@ async function trboSend() {
 
     // Relay Send to Screen
 
-  if (imgSrcGlobal) {
+  if (!isRetry && imgSrcGlobal) {
     var responseImage = document.createElement("img");
     responseImage.src = imgSrcGlobal;
   // no leading newline to avoid extra gaps
@@ -308,7 +317,7 @@ async function trboSend() {
     userWrap.innerHTML = '<span class="user">You:</span> ' + safeUserImg;
     userWrap.appendChild(responseImage);
     txtOutput.appendChild(userWrap);
-  } else {
+  } else if (!isRetry) {
     // Sanitize user HTML to avoid breaking the bubble but preserve line breaks
     const safeUser = (function escapeHtmlLite(str){
       return String(str)

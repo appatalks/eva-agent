@@ -3,6 +3,23 @@
 // Routes through the bridge which picks the best model for each task,
 // maintains Eva's persona, and handles data retrieval seamlessly.
 
+var _aigLmStudioHealth = { baseUrl: '', checkedAt: 0, available: false };
+
+function aigLmStudioAvailable() {
+  var baseUrl = (typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '').replace(/\/+$/, '');
+  var now = Date.now();
+  if (!baseUrl) return false;
+  if (_aigLmStudioHealth.baseUrl !== baseUrl || now - _aigLmStudioHealth.checkedAt > 30000) {
+    _aigLmStudioHealth.baseUrl = baseUrl;
+    _aigLmStudioHealth.checkedAt = now;
+    _aigLmStudioHealth.available = false;
+    fetch(baseUrl + '/models', { signal: AbortSignal.timeout(1500) }).then(function(response) {
+      _aigLmStudioHealth.available = response.ok;
+    }).catch(function() {});
+  }
+  return _aigLmStudioHealth.available;
+}
+
 async function aigSend() {
   var txtMsg = document.getElementById('txtMsg');
   var txtOutput = document.getElementById('txtOutput');
@@ -22,6 +39,7 @@ async function aigSend() {
     : null;
   var sessionId = (typeof ensureActiveSessionId === 'function')
     ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
+  var turnId = window._evaActiveAuditTurnId || ((typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : '');
 
   // Display user message
   var safeUser = escapeHtml(sQuestion).replace(/\n/g, '<br>');
@@ -63,6 +81,12 @@ async function aigSend() {
   existingMessages = existingMessages.concat(newMessages);
   localStorage.setItem(storageKey, JSON.stringify(existingMessages));
 
+  var workspaceMcpRequest = /\b(?:mcp|workspace\s+(?:module|server|tool)|work\s*iq)\b/i.test(sQuestion);
+  if (workspaceMcpRequest && window.EvaWorkspaces && typeof EvaWorkspaces.mcpContext === 'function') {
+    var workspaceMcpContext = EvaWorkspaces.mcpContext();
+    if (workspaceMcpContext) existingMessages.push({ role: 'system', content: workspaceMcpContext });
+  }
+
   // Send to AIG orchestrator via bridge
   var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
   if (typeof watchACPPermissions === 'function') watchACPPermissions(190000);
@@ -75,6 +99,21 @@ async function aigSend() {
   var cogDecision = (typeof Cognition !== 'undefined' && Cognition.shouldRun)
                       ? Cognition.shouldRun(sQuestion)
                       : { active: false, reason: null };
+  var briefingRequest = /\b(?:morning|daily)\s+briefing\b/i.test(sQuestion);
+  if (briefingRequest) {
+    cogDecision = { active: false, reason: 'briefing-cache' };
+    try {
+      var briefingResponse = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/briefing/status', {
+        signal: AbortSignal.timeout(1500)
+      });
+      var briefingStatus = briefingResponse.ok ? await briefingResponse.json() : {};
+      if (briefingStatus.status === 'ready' || briefingStatus.status === 'preparing') {
+        setStatus('info', briefingStatus.status === 'ready'
+          ? 'Eva is using the prepared morning briefing...'
+          : 'Eva is preparing the morning briefing...');
+      }
+    } catch (_) {}
+  }
   if (cogDecision.active) {
     if (cogDecision.reason === 'phrase') {
       setStatus('info', 'Eva cognition force-enabled by phrase trigger...');
@@ -85,6 +124,7 @@ async function aigSend() {
         userMessage: sQuestion,
         messages: existingMessages,
         sessionId: sessionId,
+        turnId: turnId,
         forceEnable: cogDecision.reason === 'phrase',
         forcedReason: cogDecision.reason,
         reviewReason: cogDecision.reason
@@ -113,6 +153,8 @@ async function aigSend() {
         signalAuthorized: !deferredSignal && !!(signalContext && signalContext.authorized),
         signalMessage: deferredSignal ? '' : (signalContext ? signalContext.message : ''),
         signalRequest: sQuestion,
+        nativeRequest: sQuestion,
+        turnId: turnId,
         signalContext: signalContext
       });
       if (Cognition.getCfg && Cognition.getCfg().showTrace && Cognition.renderTraceHtml) {
@@ -141,7 +183,7 @@ async function aigSend() {
               assistant_message: cogContent,
               model: cogTag,
               session_id: sessionId,
-              turn_id: (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : ''
+              turn_id: turnId
             }),
             signal: AbortSignal.timeout(5000)
           }).catch(function () {});
@@ -211,11 +253,14 @@ async function aigSend() {
         prompt_budget: EvaPromptBudget.telemetry(aigPromptBudget),
         user_message: sQuestion,
         session_id: sessionId,
+        turn_id: turnId,
         model: aigModel,
+        model_policy_mode: (typeof getAIGModelPolicyMode === 'function') ? getAIGModelPolicyMode() : 'pinned',
         max_completion_tokens: (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384,
         acp_reasoning_effort: reasoningEffort === 'default' ? '' : reasoningEffort,
         lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
         lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
+        lmstudio_available: aigLmStudioAvailable(),
         github_pat: (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : '',
         openai_api_key: (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : '',
         stream: true
@@ -244,6 +289,8 @@ async function aigSend() {
       signalAuthorized: !!(signalContext && signalContext.authorized),
       signalMessage: signalContext ? signalContext.message : '',
       signalRequest: sQuestion,
+      nativeRequest: sQuestion,
+      turnId: turnId,
       signalContext: signalContext
     });
 

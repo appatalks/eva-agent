@@ -319,7 +319,7 @@ jobs:
         id: credential_scan
         continue-on-error: true
         run: |
-          python3 tools/scan_pr_diff_secrets.py readiness/diff.patch \
+          python3 .github/scripts/scan_pr_diff_secrets.py readiness/diff.patch \
             --text-path readiness/pr.json \
             --text-path readiness/all-inline-comments.json \
             --text-path readiness/reviews.json \
@@ -396,7 +396,7 @@ jobs:
               -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             touch "$RUNNER_TEMP/eva-readiness-status-published-$HEAD_SHA"
           }
-              verdict_json="$(python3 tools/readiness_verdict.py readiness/copilot-review.md)"
+              verdict_json="$(python3 .github/scripts/readiness_verdict.py readiness/copilot-review.md)"
               verdict="$(jq -r '.verdict // ""' <<< "$verdict_json")"
           printf 'verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
           case "$verdict" in
@@ -421,7 +421,7 @@ jobs:
               ;;
             *)
                 response_kind="$(jq -r '.kind' <<< "$verdict_json")"
-              python3 tools/readiness_verdict.py readiness/copilot-review.md \
+              python3 .github/scripts/readiness_verdict.py readiness/copilot-review.md \
               --diagnostic-output readiness/terra-verdict-diagnostic.json > /dev/null
               printf 'invalid_verdict=true\n' >> "$GITHUB_OUTPUT"
               if [[ "$response_kind" == "empty" ]]; then
@@ -450,10 +450,10 @@ jobs:
             exit 0
           fi
           gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" > readiness/pr-comments.json
-          if python3 tools/readiness_maintainer_comment.py --has-marker readiness/pr-comments.json --head-sha "$HEAD_SHA"; then
+          if python3 .github/scripts/readiness_maintainer_comment.py --has-marker readiness/pr-comments.json --head-sha "$HEAD_SHA"; then
             exit 0
           fi
-          python3 tools/readiness_maintainer_comment.py readiness/copilot-review.md --head-sha "$HEAD_SHA" > readiness/maintainer-comment.md
+          python3 .github/scripts/readiness_maintainer_comment.py readiness/copilot-review.md --head-sha "$HEAD_SHA" > readiness/maintainer-comment.md
           if ! comment_error="$(gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
             -f body="$(cat readiness/maintainer-comment.md)" 2>&1)"; then
             echo "::warning::Readiness status was published, but the optional maintainer comment could not be created: $comment_error"

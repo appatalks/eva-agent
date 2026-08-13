@@ -27,6 +27,24 @@ _MCP_CLIENT_INFO = {"name": "eva-local-mcp", "version": "1.0.0"}
 # Eva consumes tools; it does not yet offer elicitation, subscriptions, or extensions.
 _MCP_CLIENT_CAPABILITIES = {}
 
+
+def _resolve_lmstudio_model(base_url, requested_model="", timeout=3):
+    """Use an explicit override or the model currently exposed by LM Studio."""
+    override = str(requested_model or "").strip()
+    if override:
+        return override, ""
+    try:
+        request = urllib.request.Request(base_url.rstrip("/") + "/models", method="GET")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as error:
+        return "", "LM Studio model discovery failed: " + str(error)[:160]
+    for item in payload.get("data") or []:
+        model_id = str((item or {}).get("id") or "").strip()
+        if model_id:
+            return model_id[:240], ""
+    return "", "LM Studio did not report a loaded model"
+
 _MCP_ENV_KEYS = {
     "playwright": set(),
     "azure-mcp-server": {"AZURE_MCP_COLLECT_TELEMETRY"},
@@ -399,6 +417,7 @@ class LocalMCPManager:
     def __init__(self):
         self.servers = {}         # name -> MCPServer
         self._tool_map = {}       # tool_name -> server_name
+        self.start_failures = {}  # name -> content-free reason
 
     def start_servers(self, mcp_config):
         """Start MCP servers from config dict (same format as mcp.json mcpServers)."""
@@ -408,6 +427,7 @@ class LocalMCPManager:
             env = cfg.get("env", {})
             unresolved_flags = [key for key in env if str(key).startswith("_")]
             if unresolved_flags:
+                self.start_failures[name] = "credentials_unresolved"
                 print(f"[LocalMCP] Skipping {name}: credentials are not resolved yet")
                 continue
             try:
@@ -419,6 +439,7 @@ class LocalMCPManager:
                     if tname:
                         self._tool_map[tname] = name
             except Exception as e:
+                self.start_failures[name] = "command_not_found" if "command not found" in str(e).lower() else "start_failed"
                 print(f"[LocalMCP] Failed to start {name}: {e}")
 
     def list_tools(self):
@@ -497,7 +518,11 @@ def local_agent_query(user_message, mcp_manager, lms_base_url="http://localhost:
         {"role": "user", "content": user_message},
     ]
 
-    model_used = lms_model or "local"
+    lms_model, model_error = _resolve_lmstudio_model(lms_base, lms_model)
+    if model_error:
+        print("[LocalAgent] " + model_error)
+        return "", ""
+    model_used = lms_model
     _t0 = time.perf_counter()
     _deadline = _t0 + timeout
 
@@ -507,7 +532,7 @@ def local_agent_query(user_message, mcp_manager, lms_base_url="http://localhost:
             break
 
         payload = {
-            "model": lms_model or "default",
+            "model": lms_model,
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",

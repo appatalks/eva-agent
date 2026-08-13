@@ -17,6 +17,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 APP_ROOT = Path(os.environ.get("EVA_TEST_APP_ROOT", ROOT)).resolve()
+sys.path.insert(0, str(ROOT / "tools"))
+from bridge.core import _parse_aig_backend
 
 
 class _FakeOpenAIHandler(BaseHTTPRequestHandler):
@@ -32,7 +34,13 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
             "authorization": self.headers.get("Authorization", ""),
             "payload": payload,
         })
-        content = "Direct Eva response. [[EVA_LOOK]]{\"question\":\"what is visible?\"}[[/EVA_LOOK]]"
+        system_prompt = (payload.get("messages") or [{}])[0].get("content", "")
+        if "terminal applicability classifier" in system_prompt:
+            content = '{"applicable":false,"command":""}'
+        elif "terminal command planner" in system_prompt:
+            content = '{"command":"git status"}'
+        else:
+            content = "Direct Eva response. [[EVA_LOOK]]{\"question\":\"what is visible?\"}[[/EVA_LOOK]]"
         finish_reason = "length" if payload.get("messages", [{}])[-1].get("content") == "Force token limit." else "stop"
         if payload.get("stream") is True:
             chunks = ["Direct Eva response. ", "[[EVA_LOOK]]{\"question\":", "\"what is visible?\"}[[/EVA_LOOK]]"]
@@ -99,6 +107,11 @@ def _ndjson_request(url, payload):
 
 
 class OpenAIAIGEndToEndTests(unittest.TestCase):
+    def test_legacy_aig_backends_use_acp_not_github_models(self):
+        self.assertEqual(_parse_aig_backend("gpt-5.6-luna"), ("acp", "gpt-5.6-luna"))
+        self.assertEqual(_parse_aig_backend("claude-sonnet-4.6"), ("acp", "claude-sonnet-4.6"))
+        self.assertEqual(_parse_aig_backend("openai:gpt-5-mini"), ("openai", "gpt-5-mini"))
+
     @classmethod
     def setUpClass(cls):
         _FakeOpenAIHandler.requests = []
@@ -218,6 +231,92 @@ class OpenAIAIGEndToEndTests(unittest.TestCase):
         body = json.loads(raised.exception.read().decode("utf-8"))
         self.assertIn("OpenAI API key", body["error"]["message"])
 
+    def test_terminal_planner_uses_one_tool_free_direct_response(self):
+        _FakeOpenAIHandler.requests = []
+        status, response = _json_request(self.bridge_url + "/v1/aig/chat", {
+            "user_message": "show the current git status",
+            "messages": [{"role": "user", "content": "show the current git status"}],
+            "model": "openai:gpt-5",
+            "openai_api_key": "sk-FAKE-OPENAI-E2E",
+            "native_terminal_plan": True,
+            "internal": True,
+            "no_tools": True,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(len(_FakeOpenAIHandler.requests), 1)
+        self.assertEqual(response["choices"][0]["message"]["content"], '{"command":"git status"}')
+        system_prompt = _FakeOpenAIHandler.requests[0]["payload"]["messages"][0]["content"]
+        self.assertIn("terminal command planner", system_prompt)
+        self.assertIn("Do not execute tools", system_prompt)
+
+    def test_terminal_candidate_can_decline_without_tools(self):
+        _FakeOpenAIHandler.requests = []
+        status, response = _json_request(self.bridge_url + "/v1/aig/chat", {
+            "user_message": "What is your favorite color?",
+            "messages": [{"role": "user", "content": "What is your favorite color?"}],
+            "model": "openai:gpt-5",
+            "openai_api_key": "sk-FAKE-OPENAI-E2E",
+            "native_terminal_candidate": True,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(len(_FakeOpenAIHandler.requests), 1)
+        self.assertEqual(response["choices"][0]["message"]["content"], '{"applicable":false,"command":""}')
+        system_prompt = _FakeOpenAIHandler.requests[0]["payload"]["messages"][0]["content"]
+        self.assertIn("terminal applicability classifier", system_prompt)
+        self.assertIn("Do not execute tools", system_prompt)
+
+    def test_briefing_uses_one_responder_without_acp_preflight(self):
+        _FakeOpenAIHandler.requests = []
+        status, response = _json_request(self.bridge_url + "/v1/aig/chat", {
+            "user_message": "Please give me my morning briefing.",
+            "model": "openai:gpt-5",
+            "openai_api_key": "sk-FAKE-OPENAI-E2E",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(response["model"], "aig:gpt-5+openai-direct")
+        self.assertEqual(len(_FakeOpenAIHandler.requests), 1)
+        system_prompt = _FakeOpenAIHandler.requests[0]["payload"]["messages"][0]["content"]
+        self.assertIn("[Morning Briefing Preparation]", system_prompt)
+        self.assertIn("Do not call tools or start searches", system_prompt)
+
+    def test_acp_unavailable_closes_audit_as_failed(self):
+        request = urllib.request.Request(
+            self.bridge_url + "/v1/aig/chat",
+            data=json.dumps({
+                "user_message": "Use the unavailable ACP responder.",
+                "model": "gpt-5.6-luna",
+                "internal": True,
+                "no_tools": True,
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(raised.exception.code, 503)
+        audit_path = Path(self.temp_dir.name) / "audit.jsonl"
+        records = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertTrue(any(record.get("event") == "turn.response" and record.get("outcome") == "failed" and record.get("provider") == "acp" for record in records))
+
+    def test_renderer_audit_rejects_freeform_reason_text(self):
+        request = urllib.request.Request(
+            self.bridge_url + "/v1/audit/event",
+            data=json.dumps({
+                "event": "native_action",
+                "outcome": "failed",
+                "correlation_id": "turn-audit-reason",
+                "action": "run_terminal_command",
+                "reason": "git status && disclose objective",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(raised.exception.code, 400)
+        body = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertIn("Unsupported audit reason", body["error"]["message"])
+
     def test_direct_openai_streams_chunks_before_done(self):
         events = _ndjson_request(self.bridge_url + "/v1/aig/chat", {
             "messages": [{"role": "user", "content": "Look now."}],
@@ -272,6 +371,9 @@ class OpenAIAIGEndToEndTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in events], ["chunk", "error"])
         self.assertEqual(events[-1]["status"], 502)
         self.assertIn("synthetic stream failure", events[-1]["message"])
+        audit_path = Path(self.temp_dir.name) / "audit.jsonl"
+        records = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        self.assertTrue(any(record.get("event") == "turn.response" and record.get("outcome") == "failed" for record in records))
 
     def test_configured_token_limit_and_truncation_are_preserved(self):
         status, response = _json_request(self.bridge_url + "/v1/aig/chat", {

@@ -158,6 +158,15 @@ async function main() {
     });
     assert.strictEqual(narrowOverflow, false, 'Workspace monitor overflows in the narrow layout');
     await page.setViewportSize({ width: 1280, height: 900 });
+    assert.strictEqual(await page.locator('#authGitHubCliBtn').count(), 1, 'GitHub device authorization command is missing from Settings > Auth');
+    const githubAuthSurface = await page.evaluate(function() {
+      return {
+        start: typeof window.evaStandalone.workspaceGitHubAuthStart,
+        status: typeof window.evaStandalone.workspaceGitHubAuthStatus,
+        authorize: typeof window.EvaWorkspaces.authorizeGitHub,
+      };
+    });
+    assert.deepStrictEqual(githubAuthSurface, { start: 'function', status: 'function', authorize: 'function' }, 'GitHub device authorization APIs are unavailable');
     const projectWorkspace = page.locator('#workspaceWorkbenchProjects .workspace-monitor-run').filter({ hasText: 'project' });
     await projectWorkspace.waitFor();
     await projectWorkspace.click();
@@ -188,6 +197,25 @@ async function main() {
     await page.locator('#evaTextPrompt[aria-hidden="true"]').waitFor({ state: 'hidden' });
     assert.strictEqual(await page.locator('#workspaceAddProjectWorkbenchBtn').isEnabled(), true, 'Import workspace stayed disabled after cancelling GitHub import');
     assert.strictEqual(await page.locator('#workspaceImportGitHubBtn').isEnabled(), true, 'Import GitHub stayed disabled after cancelling its prompt');
+    const structuredImportError = await page.evaluate(async function() {
+      const originalPrompt = window.evaTextPrompt;
+      try {
+        let resolvePrompt;
+        window.evaTextPrompt = function() {
+          return new Promise(function(resolve) { resolvePrompt = resolve; });
+        };
+        const importAttempt = window.EvaWorkspaces.importGitHub('https://github.com/example/invalid/path');
+        while (!resolvePrompt) await new Promise(function(resolve) { setTimeout(resolve, 0); });
+        const message = document.getElementById('workspaceWorkbenchStatus').textContent;
+        resolvePrompt(null);
+        await importAttempt;
+        return message;
+      } finally {
+        window.evaTextPrompt = originalPrompt;
+      }
+    });
+    assert.match(structuredImportError, /GitHub workspace import failed/, 'GitHub import did not render the structured IPC failure');
+    assert.doesNotMatch(structuredImportError, /Error invoking remote method/, 'GitHub import exposed Electron IPC wrapper text');
     const voicePromptValue = await page.evaluate(async function() {
       const pending = window.evaTextPrompt('GitHub repository URL', '', { maxLength: 2048 });
       window.evaTextPromptConsumeVoice('https colon slash slash github dot com slash example slash packaged-test');
@@ -343,6 +371,7 @@ async function main() {
     assert.strictEqual(await page.locator('#workspaceWorkbench').isVisible(), false, 'Assets did not become the primary main view');
     await page.locator('#evaWorkspacesBtn').click();
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#workspaceWorkbenchProjects').innerText(), /1 MCP available/, 'Imported workspace MCP modules are not visible in the project summary');
     await page.locator('#evaTerminalBtn').click();
     await page.locator('#terminalPanel[aria-hidden="false"]').waitFor();
     assert.strictEqual(await page.locator('#workspaceWorkbench').isVisible(), true, 'Terminal sidebar navigation returned to chat');

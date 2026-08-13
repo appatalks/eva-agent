@@ -58,6 +58,7 @@ function geminiSend() {
         : null;
     const sessionId = (typeof ensureActiveSessionId === 'function')
         ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
+    const turnId = window._evaActiveAuditTurnId || (typeof evaCreateAuditTurnId === 'function' ? evaCreateAuditTurnId() : '');
     const geminiCandidates = geminiMessages.concat([{ role: "user", parts: [{ text: sQuestion }] }]);
     let geminiMemoryContextPromise = Promise.resolve('');
     try {
@@ -149,6 +150,8 @@ function geminiSend() {
                             signalAuthorized: !!(signalContext && signalContext.authorized),
                             signalMessage: signalContext ? signalContext.message : '',
                             signalRequest: sQuestion,
+                            nativeRequest: sQuestion,
+                            turnId: turnId,
                             signalContext: signalContext
                         });
                         if (mainResponse) {
@@ -162,7 +165,7 @@ function geminiSend() {
                                         assistant_message: mainResponse.substring(0, 500),
                                         model: 'gemini-2.0-flash-thinking-exp',
                                         session_id: sessionId,
-                                        turn_id: (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : ''
+                                        turn_id: turnId
                                     }),
                                     signal: AbortSignal.timeout(5000)
                                 }).catch(() => {});

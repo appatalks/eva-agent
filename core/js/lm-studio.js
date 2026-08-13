@@ -49,6 +49,7 @@ function lmsSend() {
     }
     const sessionId = (typeof ensureActiveSessionId === 'function')
       ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
+    const turnId = window._evaActiveAuditTurnId || (typeof evaCreateAuditTurnId === 'function' ? evaCreateAuditTurnId() : '');
     const signalContext = (typeof captureSignalDeliveryContext === 'function')
       ? captureSignalDeliveryContext(sQuestion)
       : null;
@@ -77,7 +78,7 @@ function lmsSend() {
       } catch (e) {}
     }
 
-    Promise.all([_lmsMemoryPromise, _lmsDataPromise]).then(function(results) {
+    Promise.all([_lmsMemoryPromise, _lmsDataPromise]).then(async function(results) {
       var _memCtx = results[0];
       var _acpData = results[1];
 
@@ -116,7 +117,15 @@ function lmsSend() {
                 })(sQuestion);
 
     var _lmsBaseUrl = (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : 'http://localhost:1234/v1';
-    var _lmsModel = (typeof getLmStudioModel === 'function') ? getLmStudioModel() : 'granite-3.1-8b-instruct';
+    var _lmsModel = (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '';
+    if (!_lmsModel) {
+      try {
+        var _lmsCatalog = await fetch(_lmsBaseUrl.replace(/\/+$/, '') + '/models', { signal: AbortSignal.timeout(3000) });
+        var _lmsCatalogBody = _lmsCatalog.ok ? await _lmsCatalog.json() : {};
+        _lmsModel = String((((_lmsCatalogBody || {}).data || [])[0] || {}).id || '').trim();
+      } catch (_) {}
+    }
+    if (!_lmsModel) throw new Error('LM Studio did not report a loaded model. Load a model in LM Studio or enter a model override in Settings.');
     const openAIUrl = _lmsBaseUrl.replace(/\/+$/, '') + '/chat/completions';
     const requestOptions = {
         method: "POST",
@@ -166,6 +175,8 @@ function lmsSend() {
                           signalAuthorized: !_lmsDeferredSignal && !!(signalContext && signalContext.authorized),
                           signalMessage: _lmsDeferredSignal ? '' : (signalContext ? signalContext.message : ''),
                           signalRequest: sQuestion,
+                          nativeRequest: sQuestion,
+                          turnId: turnId,
                           signalContext: signalContext
                         });
                         if (typeof reportCompletionTruncation === 'function') reportCompletionTruncation(result);
@@ -200,7 +211,7 @@ function lmsSend() {
                               assistant_message: candidate.substring(0, 500),
                               model: 'lm-studio',
                               session_id: sessionId,
-                              turn_id: (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : ''
+                              turn_id: turnId
                             }),
                             signal: AbortSignal.timeout(5000)
                           }).catch(function() {});

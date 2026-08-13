@@ -6,11 +6,12 @@ import tempfile
 import textwrap
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from bridge.local_mcp import MCPServer
+from bridge.local_mcp import LocalMCPManager, MCPServer
 
 
 FIXTURE = r'''
@@ -179,6 +180,15 @@ def main():
         late_server.stop()
         late_path.unlink(missing_ok=True)
         late_path.parent.rmdir()
+    missing_manager = LocalMCPManager()
+    with patch.object(MCPServer, "start", side_effect=RuntimeError("command not found")):
+        missing_manager.start_servers({"computer-use-linux": {}})
+    assert missing_manager.start_failures == {"computer-use-linux": "command_not_found"}
+    transient_manager = LocalMCPManager()
+    with patch.object(MCPServer, "start", side_effect=RuntimeError("temporary startup failure with private detail")):
+        transient_manager.start_servers({"computer-use-linux": {}})
+    assert transient_manager.start_failures == {"computer-use-linux": "start_failed"}
+    assert "private detail" not in str(transient_manager.start_failures)
     print("local MCP modern compatibility tests: PASS")
 
 

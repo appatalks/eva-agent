@@ -691,7 +691,7 @@
   // ---------------------------------------------------------------------------
   // Bridge call primitive
   // ---------------------------------------------------------------------------
-  async function callAgent(role, model, systemPrompt, conversation, taskMessage, extra, sessionId) {
+  async function callAgent(role, model, systemPrompt, conversation, taskMessage, extra, sessionId, turnId) {
     var url = bridgeUrl().replace(/\/+$/, '') + '/v1/aig/chat';
     var msgs = [{ role: 'system', content: systemPrompt }];
     if (Array.isArray(conversation) && conversation.length) {
@@ -712,6 +712,7 @@
       model: model,
       session_id: sessionId || ((typeof ensureActiveSessionId === 'function')
         ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')),
+      turn_id: turnId || '',
       max_completion_tokens: role === 'reviewer'
         ? Math.min((typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384, 8192)
         : ((typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384),
@@ -849,6 +850,7 @@
     var convo = Array.isArray(opts.messages) ? opts.messages.slice() : [];
     var sessionId = String(opts.sessionId || ((typeof ensureActiveSessionId === 'function')
       ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')));
+    var turnId = String(opts.turnId || '');
     var trace = [];
     var _turnStart = Date.now();
     var _draftMs = 0, _reviewMs = 0, _reviseMs = 0;
@@ -914,7 +916,7 @@
     ].join('\n');
     var draft = await callAgent(
       'eva', cfg.evaModel, cfg.evaPrompt, convo, draftTask,
-      { inject_memory: true, recall_query: userMsg, retrieve_data: true }, sessionId
+      { inject_memory: true, recall_query: userMsg, retrieve_data: true }, sessionId, turnId
     );
 
     // Eva's silent self-review signal decides whether a second opinion runs.
@@ -977,7 +979,7 @@
       try {
         review = await callAgent(
           'reviewer', cfg.reviewerModel, cfg.reviewerPrompt, convo, reviewTask,
-          { no_tools: true }, sessionId
+          { no_tools: true }, sessionId, turnId
         );
       } catch (reviewErr) {
         // Review failed (timeout, network). Skip review and use the draft as-is.
@@ -1018,7 +1020,7 @@
       try {
         revised = await callAgent(
           'eva', cfg.evaModel, cfg.evaPrompt, convo, reviseTask,
-          { inject_memory: true, recall_query: userMsg }, sessionId
+          { inject_memory: true, recall_query: userMsg }, sessionId, turnId
         );
       } catch (reviseErr) {
         // Revise failed (timeout, network error). Fall back to the draft

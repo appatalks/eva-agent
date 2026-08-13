@@ -201,6 +201,7 @@ function saveAuthKeys() {
   } else if (lmsModelEl) {
     localStorage.removeItem('aig_lmstudio_model');
   }
+  syncAIGRuntimePrefs();
   var localVoicesProfileEl = document.getElementById('localVoicesProfile');
   if (localVoicesProfileEl && localVoicesProfileEl.value) {
     localStorage.setItem('local_voices_profile', localVoicesProfileEl.value);
@@ -301,7 +302,7 @@ function populateAuthFields() {
   }
   var lmsModelEl = document.getElementById('aigLmStudioModel');
   if (lmsModelEl) {
-    lmsModelEl.value = (typeof getLmStudioModel === 'function') ? getLmStudioModel() : (localStorage.getItem('aig_lmstudio_model') || 'granite-3.1-8b-instruct');
+    lmsModelEl.value = (typeof getLmStudioModel === 'function') ? getLmStudioModel() : (localStorage.getItem('aig_lmstudio_model') || '');
   }
   // Signal fields: prefer localStorage, but if empty, hydrate from the bridge
   // (the bridge persists numbers in alerts.json, which survives AppImage rebuilds).
@@ -312,6 +313,7 @@ function populateAuthFields() {
   if ((!sigSender || !sigSender.value) || (!sigRecip || !sigRecip.value)) {
     _hydrateSignalFromBridge(sigSender, sigRecip);
   }
+  syncAIGRuntimePrefs();
 }
 
 function getLmStudioBaseUrl() {
@@ -321,7 +323,22 @@ function getLmStudioBaseUrl() {
 
 function getLmStudioModel() {
   var v = (localStorage.getItem('aig_lmstudio_model') || '').trim();
-  return v || 'granite-3.1-8b-instruct';
+  return v;
+}
+
+function syncAIGRuntimePrefs() {
+  if (typeof fetch !== 'function') return;
+  var bridgeUrl = typeof getACPBridgeUrl === 'function' ? getACPBridgeUrl() : 'http://localhost:8888';
+  fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/prefs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      lmstudio_base_url: getLmStudioBaseUrl(),
+      lmstudio_model: getLmStudioModel(),
+      verbose_debug: localStorage.getItem('verboseDiagnostics') === '1'
+    }),
+    signal: AbortSignal.timeout(3000)
+  }).catch(function() {});
 }
 
 function getLocalVoicesProfile() {
@@ -1510,6 +1527,24 @@ function injectProactiveBubble(notif) {
   txtOutput.scrollTop = txtOutput.scrollHeight;
 }
 
+function injectWorkspaceStatusBubble(message, kind) {
+  message = String(message || '').trim();
+  if (!message) return;
+  var txtOutput = document.getElementById('txtOutput');
+  if (txtOutput) {
+    if (typeof hideEvaWelcome === 'function') hideEvaWelcome();
+    var safe = escapeHtml(message).replace(/\n/g, '<br>');
+    var badge = kind === 'working' ? '<span class="eva-proactive-badge">working</span> ' : '';
+    txtOutput.innerHTML += '<div class="chat-bubble eva-bubble eva-proactive"><span class="eva">Eva:</span> ' + badge + '<div class="md">' + safe + '</div></div>';
+    txtOutput.scrollTop = txtOutput.scrollHeight;
+  }
+  try {
+    var autoSpeakEl = document.getElementById('autoSpeak');
+    var voiceOpen = typeof _vv !== 'undefined' && _vvIsActive();
+    if ((voiceOpen || (autoSpeakEl && autoSpeakEl.checked)) && typeof speakText === 'function') speakText(message);
+  } catch (_) {}
+}
+
 // ---------------------------------------------------------------------------
 // Agent feedback loop — make Eva cognisant of what the browser/desktop agent
 // actually did. Fired once when a run reaches a terminal state. It (1) renders
@@ -1837,9 +1872,9 @@ function initNotifications() {
 var _acpPermissionState = {
   shown: {},
   polling: false,
-  idleIntervalMs: 60000,
-  requestIntervalMs: 15000,
-  pendingIntervalMs: 2000,
+  idleIntervalMs: 300000,
+  requestIntervalMs: 30000,
+  pendingIntervalMs: 3000,
   activeUntil: 0,
   pending: false,
   timer: null
@@ -1867,15 +1902,21 @@ function watchACPPermissions(durationMs) {
   _scheduleACPPermissionPoll(0);
 }
 
-function _resolveACPPermission(permissionId, optionId, bubble) {
+function _resolveACPPermission(permissionId, decision, bubble) {
   backgroundBridgeRequest('/v1/acp/permissions/' + encodeURIComponent(permissionId), {
     method: 'POST',
     headers: getBridgeCapabilityHeaders(),
-    body: JSON.stringify({ option_id: optionId || '' })
+    body: JSON.stringify({ decision: decision })
   }).then(function() {
     if (bubble && bubble.parentNode) bubble.parentNode.removeChild(bubble);
     _scheduleACPPermissionPoll(0);
-  }).catch(function() {});
+  }).catch(function(error) {
+    var message = document.createElement('div');
+    message.className = 'error';
+    message.textContent = error.message || 'Permission could not be resolved; no command was run.';
+    if (bubble) bubble.appendChild(message);
+    setStatus('error', message.textContent);
+  });
 }
 
 function _renderACPPermission(permission) {
@@ -1899,12 +1940,12 @@ function _renderACPPermission(permission) {
   allowButton.className = 'auth-toggle';
   allowButton.textContent = 'Allow once';
   allowButton.disabled = !allow || permission.approval_allowed === false;
-  allowButton.addEventListener('click', function() { _resolveACPPermission(permission.id, allow && allow.option_id, bubble); });
+  allowButton.addEventListener('click', function() { _resolveACPPermission(permission.id, 'allow', bubble); });
   var rejectButton = document.createElement('button');
   rejectButton.type = 'button';
   rejectButton.className = 'auth-toggle';
   rejectButton.textContent = 'Reject';
-  rejectButton.addEventListener('click', function() { _resolveACPPermission(permission.id, reject && reject.option_id, bubble); });
+  rejectButton.addEventListener('click', function() { _resolveACPPermission(permission.id, 'reject', bubble); });
   actions.appendChild(allowButton);
   actions.appendChild(rejectButton);
   bubble.appendChild(actions);
@@ -2708,6 +2749,12 @@ function getACPModel() {
   return (el && el.value) ? el.value : '';
 }
 
+function getAIGModelPolicyMode() {
+  var el = document.getElementById('selAIGModelPolicy');
+  var value = el ? el.value : 'pinned';
+  return ['pinned', 'auto-balanced', 'auto-fast'].indexOf(value) >= 0 ? value : 'pinned';
+}
+
 // --- Model option filtering per theme (LCARS-restricted) ---
 // Cache of the original full model list and last non-LCARS selection
 var __originalModelOptions = null;
@@ -2855,6 +2902,16 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     updateAIGModelInfo();
   }
+  var aigPolicySel = document.getElementById('selAIGModelPolicy');
+  if (aigPolicySel) {
+    var savedAigPolicy = localStorage.getItem('aigModelPolicyMode') || 'pinned';
+    if (Array.from(aigPolicySel.options).some(function (option) { return option.value === savedAigPolicy; })) {
+      aigPolicySel.value = savedAigPolicy;
+    }
+    aigPolicySel.addEventListener('change', function () {
+      localStorage.setItem('aigModelPolicyMode', getAIGModelPolicyMode());
+    });
+  }
 
   // Camera presence (auto-wake): toggle the local webcam sensor. Restore the
   // persisted choice, but only auto-start the camera if it was previously on.
@@ -2909,6 +2966,26 @@ document.addEventListener('DOMContentLoaded', () => {
       } else {
         EvaCamera.disable();
       }
+    });
+  }
+
+  var verboseDiagnosticsEl = document.getElementById('verboseDiagnostics');
+  if (verboseDiagnosticsEl) {
+    verboseDiagnosticsEl.checked = localStorage.getItem('verboseDiagnostics') === '1';
+    var verboseBridgeUrl = typeof getSafeBridgeBaseUrl === 'function' ? getSafeBridgeBaseUrl() : '';
+    if (verboseBridgeUrl) {
+      fetch(verboseBridgeUrl.replace(/\/+$/, '') + '/v1/prefs').then(function(response) {
+        return response.ok ? response.json() : null;
+      }).then(function(prefs) {
+        if (prefs && typeof prefs.verbose_debug === 'boolean') {
+          verboseDiagnosticsEl.checked = prefs.verbose_debug;
+          localStorage.setItem('verboseDiagnostics', prefs.verbose_debug ? '1' : '0');
+        }
+      }).catch(function() {});
+    }
+    verboseDiagnosticsEl.addEventListener('change', function() {
+      localStorage.setItem('verboseDiagnostics', verboseDiagnosticsEl.checked ? '1' : '0');
+      syncAIGRuntimePrefs();
     });
   }
 
@@ -5156,10 +5233,18 @@ function _vvStartBargeMonitor() {
     }
     _vv.analyser.getByteFrequencyData(_vv.dataArray);
     var total = 0;
-    for (var index = 0; index < _vv.dataArray.length; index++) total += _vv.dataArray[index];
+    var peak = 0;
+    var voicedBins = 0;
+    for (var index = 0; index < _vv.dataArray.length; index++) {
+      var level = _vv.dataArray[index];
+      total += level;
+      if (level > peak) peak = level;
+      if (level > 45) voicedBins += 1;
+    }
     var average = total / _vv.dataArray.length;
-    _vv._bargeEnergyFrames = average > 25 ? _vv._bargeEnergyFrames + 1 : 0;
-    if (_vv._bargeEnergyFrames >= 4) _vvBargeIn();
+    var speechLike = average > 38 && peak > 90 && voicedBins >= Math.max(3, Math.floor(_vv.dataArray.length * 0.08));
+    _vv._bargeEnergyFrames = speechLike ? _vv._bargeEnergyFrames + 1 : 0;
+    if (_vv._bargeEnergyFrames >= 8) _vvBargeIn();
   }, 100);
 }
 
@@ -5367,6 +5452,7 @@ function _vvSpeakAck() {
 }
 
 function _vvSendCommand(command, fromWakeWord) {
+  if (typeof _vvStopTTS === 'function') _vvStopTTS();
   // Natural agent confirmation via voice: if an agent is parked on a yes/no,
   // interpret this utterance as the answer instead of a new command.
   // But NOT if the user used the wake word "Eva" — that signals a new intent.
@@ -5379,7 +5465,9 @@ function _vvSendCommand(command, fromWakeWord) {
       return;
     }
   }
-  if (typeof _runVoiceNavigationCommand === 'function' && _runVoiceNavigationCommand(command)) {
+  var compactVoiceTurnId = typeof evaCreateAuditTurnId === 'function' ? evaCreateAuditTurnId() : '';
+  if (typeof evaAuditEvent === 'function') evaAuditEvent('voice.command', 'submitted', { correlation_id: compactVoiceTurnId, request_chars: String(command || '').length });
+  if (typeof _runVoiceNavigationCommand === 'function' && _runVoiceNavigationCommand(command, compactVoiceTurnId)) {
     _vvAfterTurn();
     return;
   }
@@ -5866,24 +5954,56 @@ async function sendData() {
     }
     var protectedInput = document.getElementById('txtMsg');
     var protectedRawText = protectedInput ? (protectedInput.innerText || protectedInput.textContent || '') : '';
+    var auditTurnId = window._evaPendingAuditTurnId || evaCreateAuditTurnId();
+    window._evaPendingAuditTurnId = '';
+    window._evaActiveAuditTurnId = auditTurnId;
+    evaAuditEvent('turn.input', 'submitted', {
+      correlation_id: auditTurnId,
+      request_chars: protectedRawText.length,
+      model: (document.getElementById('selModel') || {}).value || ''
+    });
     if (typeof captureProtectedMemoryFromChat === 'function' && await captureProtectedMemoryFromChat(protectedRawText)) {
       return;
     }
     if (window.EvaHarness && typeof EvaHarness.resolveNavigationRequest === 'function') {
-      var nativeRoute = EvaHarness.resolveNavigationRequest(protectedRawText);
+      var nativeRoute = EvaHarness.resolveNavigationRequest(protectedRawText, { directUser: true });
       if (nativeRoute) {
+        evaAuditEvent('direct_route', 'started', {
+          correlation_id: auditTurnId,
+          action: nativeRoute.action || 'navigate',
+          label: nativeRoute.target || ''
+        });
         if (typeof evaTextPromptCancel === 'function') evaTextPromptCancel();
         var nativeResult = await Promise.resolve(
           nativeRoute.action && nativeRoute.action !== 'navigate'
             ? EvaHarness.execute(nativeRoute)
             : EvaHarness.navigate(nativeRoute.target)
         );
-        if (protectedInput) protectedInput.innerHTML = '';
-        if (typeof setStatus === 'function') {
-          setStatus(nativeResult.ok ? 'info' : 'error', nativeResult.message);
+        var terminalFallback = nativeRoute.action === 'consider_terminal_task' && (!nativeResult.ok || (nativeResult.data && nativeResult.data.declined === true));
+        if (terminalFallback) {
+          evaAuditEvent('native_action', nativeResult.ok ? 'completed' : 'failed', {
+            correlation_id: auditTurnId,
+            action: nativeRoute.action,
+            label: nativeRoute.target || '',
+            reason: nativeResult.ok ? '' : (nativeResult.data && nativeResult.data.reason || 'failed')
+          });
+        } else {
+          if (protectedInput) protectedInput.innerHTML = '';
+          if (typeof setStatus === 'function') {
+            setStatus(nativeResult.ok ? 'info' : 'error', nativeResult.message);
+          }
+          if (nativeRoute.action === 'run_workspace_check' || nativeRoute.action === 'describe_workspace_tools') {
+            injectWorkspaceStatusBubble(nativeResult.message, nativeResult.ok ? 'working' : 'error');
+          }
+          if (typeof recordConversationTurn === 'function') recordConversationTurn(protectedRawText, nativeResult.message);
+          evaAuditEvent('native_action', evaAuditOutcome(nativeResult && nativeResult.data && nativeResult.data.outcome, nativeResult.ok), {
+            correlation_id: auditTurnId,
+            action: nativeRoute.action || 'navigate',
+            label: nativeRoute.target || ''
+          });
+          if ((nativeRoute.action === 'describe_workspaces' || nativeRoute.action === 'describe_workspace_tools' || nativeRoute.action === 'consider_terminal_task' || nativeRoute.action === 'continue_github_repositories') && nativeResult.ok && typeof speakText === 'function') speakText(nativeResult.message);
+          return;
         }
-        if (nativeRoute.action === 'describe_workspaces' && nativeResult.ok && typeof speakText === 'function') speakText(nativeResult.message);
-        return;
       }
     }
     // Hide Eva welcome MOTD on first send
@@ -5920,6 +6040,45 @@ async function sendData() {
         document.getElementById("txtOutput").innerHTML = "\n" + "Invalid Model"
         console.error('Invalid Model')
     }
+}
+
+function evaAuditEvent(event, outcome, fields) {
+  var allowedEvents = { 'turn.input': true, 'turn.rendered': true, native_action: true, direct_route: true, terminal_task: true, 'voice.command': true };
+  var allowedOutcomes = { started: true, planned: true, completed: true, cancelled: true, failed: true, submitted: true };
+  var allowedReasons = { authentication: true, timeout: true, unavailable: true, failed: true, cancelled: true };
+  if (!allowedEvents[event] || !allowedOutcomes[outcome] || typeof fetch !== 'function') return;
+  fields = fields || {};
+  var payload = {
+    event: event,
+    outcome: outcome,
+    correlation_id: String(fields.correlation_id || '').slice(0, 120)
+  };
+  ['action', 'model', 'provider', 'label'].forEach(function(key) {
+    if (typeof fields[key] === 'string') payload[key] = fields[key].slice(0, 120);
+  });
+  if (typeof fields.reason === 'string' && allowedReasons[fields.reason]) payload.reason = fields.reason;
+  ['request_chars', 'response_chars'].forEach(function(key) {
+    if (typeof fields[key] === 'number' && isFinite(fields[key])) payload[key] = fields[key];
+  });
+  var bridgeUrl = typeof getACPBridgeUrl === 'function' ? getACPBridgeUrl() : 'http://localhost:8888';
+  fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/audit/event', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(3000)
+  }).catch(function() {});
+}
+
+function evaCreateAuditTurnId() {
+  return (typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId)
+    ? EvaRequestRouting.createTurnId() : ('turn-' + Date.now().toString(36));
+}
+
+function evaAuditOutcome(outcome, ok) {
+  if (outcome === 'submitted') return 'submitted';
+  if (outcome === 'cancelled') return 'cancelled';
+  if (outcome === 'failed') return 'failed';
+  return ok === false ? 'failed' : 'completed';
 }
 
 // Footer status helper
@@ -6969,10 +7128,14 @@ function _ttsSpeakLocalChunked(text, voiceId) {
 }
 
 function speakText() {
+  // A new reply always replaces prior playback; queued chunks must never speak over it.
+  if (typeof _vvStopTTS === 'function') _vvStopTTS();
+  else if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (_) {} }
   // Optional override (e.g. proactive notifications) speaks an arbitrary string
   // directly. Resolve it BEFORE the empty-transcript guard so voice alerts work
   // on first load or before any chat output exists.
   var overrideText = (typeof arguments[0] === 'string' && arguments[0].trim()) ? arguments[0] : '';
+  if (overrideText && typeof recordSpokenEvaText === 'function') recordSpokenEvaText(overrideText);
 
   var txtOutputEl = document.getElementById('txtOutput');
   var sText = txtOutputEl ? txtOutputEl.innerHTML : '';
@@ -7312,7 +7475,20 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   });
   var harnessResults = [];
   if (harnessActions.length && window.EvaHarness && typeof EvaHarness.execute === 'function') {
-    harnessResults = await Promise.all(harnessActions.slice(0, 3).map(function(action) { return Promise.resolve(EvaHarness.execute(action, { source: 'model' })); }));
+    for (var harnessIndex = 0; harnessIndex < Math.min(harnessActions.length, 3); harnessIndex++) {
+      harnessResults.push(await Promise.resolve(EvaHarness.execute(harnessActions[harnessIndex], {
+        source: 'model',
+        userRequest: renderOptions.nativeRequest || ''
+      })));
+    }
+    harnessResults.forEach(function(item, index) {
+      evaAuditEvent('native_action', evaAuditOutcome(item && item.data && item.data.outcome, item && item.ok), {
+        correlation_id: renderOptions.turnId || window._evaActiveAuditTurnId || '',
+        action: harnessActions[index] && harnessActions[index].action || '',
+        label: item && item.label || '',
+        reason: item && item.data && item.data.reason || ''
+      });
+    });
     text = text.replace(/\n{3,}/g, '\n\n').trim();
     var harnessSummary = harnessResults.map(function(item) { return item.ok ? item.message : 'Native control failed: ' + item.message; }).join(' ');
     if (harnessSummary) text = (text ? text + '\n\n' : '') + '_' + harnessSummary + '_';
@@ -7709,6 +7885,10 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   }
 
   // Auto-save session after each response
+  evaAuditEvent('turn.rendered', 'completed', {
+    correlation_id: renderOptions.turnId || window._evaActiveAuditTurnId || '',
+    response_chars: content.length
+  });
   if (typeof saveCurrentSession === 'function') saveCurrentSession();
 }
 
