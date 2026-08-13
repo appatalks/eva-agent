@@ -1002,6 +1002,10 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .workspace-monitor-detail { background: rgba(7,20,24,0.82); }
 .workspace-monitor-pane-header { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 0 14px; border-bottom: 1px solid rgba(120,220,232,0.11); color: #82b7bd; font: 700 9px monospace; letter-spacing: 0.12em; }
 #workspaceMonitorMode { color: #78dce8; }
+.workspace-monitor-pane-header > span > .workspace-monitor-pane-action { margin-left: 9px; }
+.workspace-monitor-pane-action { min-height: 24px; padding: 0 6px; border: 1px solid rgba(120,220,232,0.24); border-radius: 2px; background: transparent; color: #a9dce1; font: 700 9px monospace; letter-spacing: 0.08em; cursor: pointer; }
+.workspace-monitor-pane-action:hover:not(:disabled) { border-color: #78dce8; background: rgba(120,220,232,0.12); color: #e1fbff; }
+.workspace-monitor-pane-action:disabled { opacity: 0.4; cursor: not-allowed; }
 .workspace-monitor-runs { display: grid; gap: 1px; padding: 8px; }
 .workspace-monitor-run { display: grid; gap: 5px; width: 100%; padding: 11px 10px; border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 3px; background: transparent; color: #def6f8; text-align: left; cursor: pointer; }
 .workspace-monitor-run:hover { background: rgba(120,220,232,0.06); border-color: rgba(120,220,232,0.18); }

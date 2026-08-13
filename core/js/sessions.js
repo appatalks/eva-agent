@@ -727,12 +727,15 @@ function initSessions() {
     if (window.EvaSkills && typeof window.EvaSkills.close === 'function') window.EvaSkills.close();
   });
 
-  // Migrate saved sessions, then discard unowned provider-local state and
-  // present a fresh chat when Eva launches.
+  // Clear volatile provider state before IndexedDB work yields to the user.
+  // Saved session snapshots remain intact for migration and later loading.
+  startFreshSessionOnLaunch();
+
+  // Migrate saved sessions in the background without touching the fresh chat.
   idbMigrateFromLocalStorage().then(function() {
-    startFreshSessionOnLaunch();
+    renderSessionList();
   }).catch(function() {
-    startFreshSessionOnLaunch();
+    renderSessionList();
   });
 
   document.addEventListener('click', function(event) {

@@ -438,18 +438,18 @@
           <div id="workspaceWorkbenchProjects" class="workspace-monitor-runs"></div>
         </nav>
         <nav class="workspace-monitor-nav" aria-label="Coding runs">
-          <div class="workspace-monitor-pane-header">CODING RUNS</div>
+          <div class="workspace-monitor-pane-header"><span>CODING RUNS</span><button id="workspaceRunsDisplayBtn" class="workspace-monitor-pane-action" type="button">CLEAR</button></div>
           <div id="workspaceWorkbenchRuns" class="workspace-monitor-runs"></div>
         </nav>
         <section class="workspace-monitor-activity" aria-labelledby="workspaceMonitorActivityTitle">
           <div class="workspace-monitor-pane-header">
             <span id="workspaceMonitorActivityTitle">EVA ACTIVITY</span>
-            <span id="workspaceMonitorMode">WATCHING</span>
+            <span><span id="workspaceMonitorMode">WATCHING</span><button id="workspaceActivityDisplayBtn" class="workspace-monitor-pane-action" type="button">CLEAR</button></span>
           </div>
           <ol id="workspaceMonitorFeed" class="workspace-monitor-feed" aria-live="polite"></ol>
         </section>
         <aside class="workspace-monitor-results" aria-labelledby="workspaceMonitorResultsTitle">
-          <div class="workspace-monitor-pane-header" id="workspaceMonitorResultsTitle">RUN RESULTS</div>
+          <div class="workspace-monitor-pane-header"><span id="workspaceMonitorResultsTitle">RUN RESULTS</span><button id="workspaceResultsDisplayBtn" class="workspace-monitor-pane-action" type="button">CLEAR</button></div>
           <div id="workspaceWorkbenchResults" class="workspace-monitor-detail-content"></div>
         </aside>
         <aside class="workspace-monitor-detail" aria-labelledby="workspaceMonitorDetailTitle">

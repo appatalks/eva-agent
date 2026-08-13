@@ -398,10 +398,14 @@ self_update() {
 }
 
 # ── Build the standalone AppImage ───────────────────────────────────────────
+newest_appimage() {
+  find "$SCRIPT_DIR/standalone/dist" -maxdepth 1 -type f -name 'Eva Standalone-*.AppImage' -printf '%T@ %p\n' | sort -n | tail -n 1 | cut -d' ' -f2-
+}
+
 refresh_system_launcher() {
   [ "$OS" = "linux" ] || return 0
   local appimage launcher desktop
-  appimage="$(find "$SCRIPT_DIR/standalone/dist" -maxdepth 1 -type f -name 'Eva Standalone-*.AppImage' -print | sort -V | tail -n 1)"
+  appimage="${1:-$(newest_appimage)}"
   [ -n "$appimage" ] && [ -x "$appimage" ] || { warn "Built AppImage was not found; launcher was not refreshed."; return 1; }
   launcher="$HOME/.local/bin/eva"
   desktop="$HOME/.local/share/applications/eva.desktop"
@@ -423,18 +427,19 @@ refresh_system_launcher() {
 }
 
 prune_superseded_appimages() {
-  local keep=2
-  local appimages=()
-  local appimage
-  while IFS= read -r appimage; do
-    appimages+=("$appimage")
-  done < <(find "$SCRIPT_DIR/standalone/dist" -maxdepth 1 -type f -name 'Eva Standalone-*.AppImage' -print | sort -V)
-  while [ "${#appimages[@]}" -gt "$keep" ]; do
-    appimage="${appimages[0]}"
-    rm -f -- "$appimage"
-    appimages=("${appimages[@]:1}")
-    info "Removed superseded AppImage: $(basename "$appimage")"
-  done
+  local built_appimage="$1" keep=2 retained_rollbacks=0 record appimage
+  [ -f "$built_appimage" ] || return 1
+  while IFS= read -r record; do
+    appimage="${record#* }"
+    if [ "$appimage" = "$built_appimage" ]; then
+      continue
+    elif [ "$retained_rollbacks" -lt $((keep - 1)) ]; then
+      retained_rollbacks=$((retained_rollbacks + 1))
+    else
+      rm -f -- "$appimage"
+      info "Removed superseded AppImage: $(basename "$appimage")"
+    fi
+  done < <(find "$SCRIPT_DIR/standalone/dist" -maxdepth 1 -type f -name 'Eva Standalone-*.AppImage' -printf '%T@ %p\n' | sort -nr)
 }
 
 build_appimage() {
@@ -444,7 +449,7 @@ build_appimage() {
   ( cd "$SCRIPT_DIR/standalone" \
       && { [ -d node_modules ] || npm install; } \
       && npm run dist ) \
-    && { ok "AppImage rebuilt under standalone/dist/"; prune_superseded_appimages; refresh_system_launcher; } \
+    && { local appimage; appimage="$(newest_appimage)"; ok "AppImage rebuilt under standalone/dist/"; prune_superseded_appimages "$appimage"; refresh_system_launcher "$appimage"; } \
     || err "AppImage build failed (see output above)."
 }
 

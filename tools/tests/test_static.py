@@ -655,7 +655,7 @@ def test_model_selector():
     with open("get-eva.sh") as f:
         remote_installer = f.read()
     report("workspace_installer_launcher_enabled", "--eva-workspace-terminal-v1" in remote_installer and "Created workspace-enabled launcher" in remote_installer)
-    report("installer_prunes_superseded_appimages", "function prune_superseded_appimages" in installer and "keep=2" in installer and "prune_superseded_appimages; refresh_system_launcher" in installer)
+    report("installer_prunes_superseded_appimages", "prune_superseded_appimages()" in installer and "keep=2" in installer and "prune_superseded_appimages \"$appimage\"; refresh_system_launcher \"$appimage\"" in installer)
 
 
 def test_protected_memory_settings_contract():
@@ -1198,7 +1198,7 @@ def test_sidebar_workflow_contract():
     report("workflow_session_recovery_copy", "_saveSessionRecoveryCopy" in sessions_js and "session_' + id" in sessions_js and "IDB load failed" in sessions_js and "localStorage.removeItem('session_' + entry.id)" not in open("core/js/idb-store.js").read())
     report("workflow_voice_conversation_record", "voiceMessages" in sessions_js and "function recordConversationTurn" in sessions_js and "function recordSpokenEvaText" in sessions_js and "recordConversationTurn(command, reply)" in open("core/js/voice.js").read() and "recordConversationTurn(protectedRawText, nativeResult.message)" in options_js)
     report("workflow_sidebar_session_provider", "function getAllSessions" in sessions_js and "updatedAt:" in sessions_js)
-    report("workflow_new_session_on_launch", "idbMigrateFromLocalStorage().then(function() {\n    startFreshSessionOnLaunch();" in sessions_js and "function startFreshSessionOnLaunch()" in sessions_js)
+    report("workflow_new_session_on_launch", "startFreshSessionOnLaunch();\n\n  // Migrate saved sessions" in sessions_js and "function startFreshSessionOnLaunch()" in sessions_js)
     report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "opens a fresh chat on launch" in options_js)
     report("workflow_side_panels_click_outside", "function closeSidePanels" in sessions_js and "EVA_SIDE_PANEL_IDS" in sessions_js and "document.addEventListener('click'" in sessions_js)
     report("workflow_workspace_navigation", "function closeAgentOperationsForNavigation" in sessions_js and "#evaAgentsBtn, #evaWorkspacesBtn" in sessions_js and 'id="evaAgentsBtn"' in html and 'id="lcarsWorkspacesBtn"' in html and "EvaAgents.open()" in html and "EvaWorkspaces.openWorkbench()" in html and "!target.closest('#lcarsWorkspacesBtn')" in sessions_js)
@@ -1253,7 +1253,7 @@ def test_workspace_terminal_contract():
     packaged_files = package.get("build", {}).get("files", [])
     report("workspace_terminal_feature_flagged", "EVA_WORKSPACE_TERMINAL_V1" in standalone_main and "--eva-workspace-terminal-v1" in standalone_main and standalone_main.count("requireWorkspaceFeature(event);") >= 7 and "if (workspaceTerminalEnabled())" in standalone_main)
     installer = open("install.sh").read()
-    report("workspace_terminal_system_launcher_flagged", '${BASH_SOURCE[0]}' in installer and "refresh_system_launcher()" in installer and "--eva-workspace-terminal-v1" in installer and "System launcher refreshed" in installer and "refresh_system_launcher;" in installer)
+    report("workspace_terminal_system_launcher_flagged", '${BASH_SOURCE[0]}' in installer and "refresh_system_launcher()" in installer and "--eva-workspace-terminal-v1" in installer and "System launcher refreshed" in installer and "refresh_system_launcher \"$appimage\"" in installer)
     report("workspace_terminal_trusted_renderer", "requireTerminalBroker(event)" in standalone_main and "isTrustedEvaRenderer(event)" in standalone_main)
     report("workspace_terminal_no_preload_process_access", "child_process" not in standalone_preload and "terminalCreate" in standalone_preload and "onTerminalData" in standalone_preload)
     report("workspace_terminal_opaque_root", "registerRoot('app-root', getAppRoot(), { allowSymlinks: true })" in standalone_main and "CREATE_FIELDS = new Set(['rootId', 'cols', 'rows'])" in broker and "_assertNoSymlinkComponents" in broker)
