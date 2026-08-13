@@ -41,7 +41,8 @@ function lmsSend() {
         openLLMessages = JSON.parse(storedopenLLMessages);
     }
 
-    const sQuestion = document.getElementById("txtMsg").innerHTML.replace(/<br>/g, "\n").replace(/<[^>]+>/g, "").trim();
+    const messageElement = document.getElementById("txtMsg");
+    const sQuestion = String(messageElement.innerText || messageElement.textContent || "").trim();
     if (!sQuestion) {
         alert("Type in your question!");
         txtMsg.focus();

@@ -689,6 +689,10 @@ def test_model_selector():
 
     asset_versions = re.findall(r'(?:src|href)="core/[^"]+\?v=([^"]+)"', html)
     report("app_asset_versions_consistent", bool(asset_versions) and set(asset_versions) == {release_version}, f"got: {sorted(set(asset_versions))}")
+    report("security_fixed_providers_cache_busted", all(
+        f'core/js/providers/{provider}.js?v={release_version}' in html
+        for provider in ("gemini", "lm-studio")
+    ))
 
     with open("README.md") as f:
         readme = f.read()
