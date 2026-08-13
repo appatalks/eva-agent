@@ -41,6 +41,8 @@ assert.ok(scriptIndex('core/js/features/agents/operations.js') > optionsIndex,
   'Agent Operations must load after options.js because it consumes shared navigation helpers');
 assert.ok(scriptIndex('core/js/features/workspaces/monitor.js') > optionsIndex,
   'Workspace Monitor must load after options.js because it consumes shared navigation and bridge helpers');
+assert.ok(scriptIndex('core/js/features/sessions/explorer.js') > optionsIndex,
+  'Sessions Explorer must load after options.js because it consumes provider and navigation state');
 assert.ok(scriptIndex('core/js/features/skills/library.js') > optionsIndex,
   'Skills library must load after options.js because it consumes shared bridge helpers');
 
