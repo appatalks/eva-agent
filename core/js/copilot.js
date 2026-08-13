@@ -805,7 +805,13 @@ async function refreshMCPStatus() {
     if (resp.ok) {
       var data = await resp.json();
       var active = data.active || [];
-      var unavailable = Object.keys(data.unavailable || {});
+      var unavailableState = data.unavailable || {};
+      var unavailable = Object.keys(unavailableState);
+      var saved = {};
+      try {
+        saved = JSON.parse(localStorage.getItem('mcp_config') || '{}') || {};
+      } catch (e) {}
+      saved = forgetMissingMCPSelections(saved, unavailableState);
       if (active.length > 0) {
         statusEl.innerHTML = '<strong>Active MCP Servers:</strong> ' + active.map(function(s) { return '<span class="mcp-badge">' + escapeHtml(s) + '</span>'; }).join(' ');
       } else {
@@ -820,7 +826,7 @@ async function refreshMCPStatus() {
       };
       Object.keys(presetStates).forEach(function(id) {
         var checkbox = document.getElementById(id);
-        if (checkbox) checkbox.checked = active.indexOf(presetStates[id]) >= 0;
+        if (checkbox) checkbox.checked = active.indexOf(presetStates[id]) >= 0 || !!saved[presetStates[id]];
       });
     } else {
       statusEl.innerHTML = '<em>Bridge unreachable</em>';

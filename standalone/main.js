@@ -100,6 +100,7 @@ function githubCliToken() {
     });
     let output = '';
     let errors = '';
+    child.stdout.on('data', function(chunk) { output = (output + String(chunk)).slice(0, 4096); });
     child.stderr.on('data', function(chunk) { errors = (errors + String(chunk)).slice(0, 4096); });
     child.once('error', function() { reject(new Error('GitHub CLI is unavailable. Install gh to authorize private repository imports.')); });
     child.once('exit', function(code) {
@@ -380,10 +381,10 @@ async function workspaceImportGitHub(event, repositoryUrl) {
   try {
     let githubToken = '';
     if (githubCliAuthPreferred) {
-      githubToken = await githubCliToken();
+      githubToken = await githubCliToken().catch(function() { return ''; });
     } else {
       githubToken = loadEncryptedAuth().GITHUB_PAT || '';
-      if (!githubToken) githubToken = await githubCliToken();
+      if (!githubToken) githubToken = await githubCliToken().catch(function() { return ''; });
     }
     const response = await requestWorkspaceBridge('/v1/workspaces/github-import', 'POST', { url: repositoryUrl, github_pat: githubToken });
     const project = response.project;

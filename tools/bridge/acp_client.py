@@ -33,6 +33,8 @@ _WORKSPACE_SENSITIVE_COMMANDS = {
     "nc", "ncat", "telnet", "ftp", "rsync", "docker", "kubectl", "gh", "aws", "az",
     "gcloud", "npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "poetry", "gem", "cargo",
 }
+_WORKSPACE_SAFE_GIT_SUBCOMMANDS = {"add", "commit", "status", "diff", "log", "show", "rev-parse"}
+_WORKSPACE_SAFE_PACKAGE_SUBCOMMANDS = {"test", "run", "lint", "check", "build"}
 _WORKSPACE_SENSITIVE_PATH_RE = re.compile(
     r"(?:^|[/\s])(?:\.env(?:\.[A-Za-z0-9_.-]+)?|\.ssh|\.aws|\.azure|\.npmrc|\.pypirc|"
     r"\.netrc|\.git-credentials|id_rsa|id_ed25519|kubeconfig|service-account|hosts\.yml|"
@@ -89,6 +91,15 @@ def _workspace_local_path(value, cwd):
         return False
 
 
+def _workspace_edit_target_is_local(tool_call, cwd=None):
+    """Return true only for an explicitly named edit target inside the workspace."""
+    raw_input = tool_call.get("rawInput") if isinstance(tool_call, dict) else None
+    if not isinstance(raw_input, dict):
+        return False
+    target = raw_input.get("path") or raw_input.get("filePath") or raw_input.get("file_path")
+    return isinstance(target, str) and _workspace_local_path(target, cwd)
+
+
 def _workspace_read_only_execute(tool_call, cwd=None):
     """Allow only transparent, non-mutating workspace inspection commands."""
     command = _tool_call_command(tool_call)
@@ -142,9 +153,10 @@ def _workspace_execute_category(tool_call, cwd=None):
     if executable in {"bash", "sh", "zsh", "fish", "env", "eval", "source"}:
         return "shell_interpreter"
     if executable == "git":
-        if len(arguments) < 1:
-            return "git_incomplete"
-        if arguments[0] in {"push", "fetch", "pull", "clone", "remote", "submodule", "clean", "reset", "rebase", "filter-repo"}:
+        if len(arguments) < 1 or any(argument == "-c" or argument.startswith("-c=") or argument == "--config-env" for argument in arguments):
+            return "git_configuration_override"
+        subcommand = next((argument for argument in arguments if not argument.startswith("-")), "")
+        if subcommand not in _WORKSPACE_SAFE_GIT_SUBCOMMANDS:
             return "git_remote_or_destructive"
         if any(argument == "--hard" or argument.startswith("--force") for argument in arguments[1:]):
             return "git_force"
@@ -153,7 +165,17 @@ def _workspace_execute_category(tool_call, cwd=None):
             return "secret_or_sensitive_path"
         if not argument.startswith("-") and not _workspace_local_path(argument, cwd):
             return "outside_workspace"
-    return "trusted_local"
+    if executable == "git":
+        return "trusted_local"
+    if executable in {"npm", "pnpm", "yarn"}:
+        subcommand = next((argument for argument in arguments if not argument.startswith("-")), "")
+        return "trusted_local" if subcommand in _WORKSPACE_SAFE_PACKAGE_SUBCOMMANDS else "approval_required"
+    if executable in {"node", "nodejs", "python", "python3"}:
+        return "trusted_local" if any(
+            not argument.startswith("-") and _workspace_local_path(argument, cwd)
+            for argument in arguments
+        ) else "approval_required"
+    return "approval_required"
 
 
 def _workspace_sensitive_execute(tool_call, cwd=None):
@@ -634,11 +656,18 @@ class ACPClient:
             return
         if permission_mode == "workspace_write":
             allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
-            if tool_kind in {"read", "search", "fetch", "think", "edit"} and allow_once:
+            if tool_kind in {"read", "search", "fetch", "think"} and allow_once:
                 self._send_response(rpc_id, {
                     "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
                 })
                 _telemetry_emit("acp_permission", decision="workspace-auto-allow-tool",
+                                tool_kind=tool_kind, option_count=len(options))
+                return
+            if tool_kind == "edit" and allow_once and _workspace_edit_target_is_local(tool_call, self.cwd):
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
+                })
+                _telemetry_emit("acp_permission", decision="workspace-auto-allow-edit",
                                 tool_kind=tool_kind, option_count=len(options))
                 return
             if tool_kind == "execute" and allow_once and not _workspace_sensitive_execute(tool_call, self.cwd):

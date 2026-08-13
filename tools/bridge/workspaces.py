@@ -269,8 +269,8 @@ class WorkspaceStore:
 
     def delete_project(self, project_id, confirm_dirty=False):
         """Remove Eva's project record and managed run worktrees, preserving the source repository."""
-        project = self.get_project(project_id)
         with self.lock:
+            project = self.get_project(project_id)
             active_agent = self.connection.execute(
                 """SELECT agent_runs.id FROM agent_runs
                    JOIN coding_runs ON coding_runs.id = agent_runs.coding_run_id
@@ -282,20 +282,20 @@ class WorkspaceStore:
                 "SELECT * FROM checkouts WHERE project_id = ? AND kind = 'worktree' AND lifecycle != 'disposed'",
                 (project_id,),
             ).fetchall()
-        if active_agent:
-            raise WorkspaceError("A workspace agent is still active. Wait for it to finish before removing this workspace.")
-        worktrees = []
-        for row in worktree_rows:
-            checkout = self.checkout_status(row["id"])
-            if checkout["dirty_file_count"] and not confirm_dirty:
-                raise WorkspaceError("A managed workspace run has local changes. Confirm dirty cleanup before removing this workspace.")
-            worktrees.append(checkout)
-        for checkout in worktrees:
-            self._remove_worktree(
-                project["path"], Path(checkout["path"]), checkout["branch"], bool(confirm_dirty)
-            )
-        with self.lock, self.connection:
-            self.connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            if active_agent:
+                raise WorkspaceError("A workspace agent is still active. Wait for it to finish before removing this workspace.")
+            worktrees = []
+            for row in worktree_rows:
+                checkout = self.checkout_status(row["id"])
+                if checkout["dirty_file_count"] and not confirm_dirty:
+                    raise WorkspaceError("A managed workspace run has local changes. Confirm dirty cleanup before removing this workspace.")
+                worktrees.append(checkout)
+            for checkout in worktrees:
+                self._remove_worktree(
+                    project["path"], Path(checkout["path"]), checkout["branch"], bool(confirm_dirty)
+                )
+            with self.connection:
+                self.connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         return {
             "id": project["id"],
             "name": project["name"],
@@ -1006,6 +1006,8 @@ class WorkspaceStore:
         for config_path in candidates:
             relative_source = config_path.relative_to(root).as_posix()
             parsed = self._read_mcp_config_file(config_path)
+            if not parsed:
+                continue
             for name, config in parsed.items():
                 server_name = name
                 if server_name in servers:

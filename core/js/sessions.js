@@ -375,6 +375,7 @@ function deleteSession(id) {
   var index = _getSessionIndex();
   index = index.filter(function(s) { return s.id !== id; });
   _saveSessionIndex(index);
+  localStorage.removeItem('session_' + id);
   idbDeleteSession(id).catch(function(e) {
     console.error('[Sessions] IDB delete failed:', e);
   });

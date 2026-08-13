@@ -419,7 +419,11 @@ class StreamingContractTests(unittest.TestCase):
                         "method": "session/request_permission",
                         "params": {
                             "sessionId": "workspace-session",
-                            "toolCall": {"toolCallId": "call-" + str(8 + index), "kind": tool_kind},
+                            "toolCall": {
+                                "toolCallId": "call-" + str(8 + index),
+                                "kind": tool_kind,
+                                **({"rawInput": {"path": "README.md"}} if tool_kind == "edit" else {}),
+                            },
                             "options": [
                                 {"optionId": "allow-once", "kind": "allow_once"},
                                 {"optionId": "reject", "kind": "reject_once"},
@@ -436,7 +440,7 @@ class StreamingContractTests(unittest.TestCase):
                     self.assertEqual(len(pending), 1)
                     self.assertEqual(pending[0]["tool_kind"], tool_kind)
 
-    def test_workspace_agent_auto_allows_normal_local_mutations(self):
+    def test_workspace_agent_auto_allows_explicit_safe_local_mutations(self):
         for index, command in enumerate(("git add README.md", "git commit -m update-readme", "npm test", "python3 scripts/check.py")):
             with self.subTest(command=command):
                 client = CallbackACPClient()
@@ -458,12 +462,39 @@ class StreamingContractTests(unittest.TestCase):
                 self.assertEqual(client.list_pending_permissions(), [])
                 self.assertEqual(emit.call_args.kwargs["decision"], "workspace-auto-allow-execute")
 
+    def test_workspace_agent_requires_decision_for_untrusted_commands_and_edits(self):
+        for index, tool_call in enumerate((
+            {"toolCallId": "call-systemctl", "kind": "execute", "rawInput": {"command": "systemctl", "args": ["stop", "service"]}},
+            {"toolCallId": "call-git-config", "kind": "execute", "rawInput": {"command": "git", "args": ["-c", "alias.x=!id", "x"]}},
+            {"toolCallId": "call-edit", "kind": "edit", "rawInput": {"path": "../outside.txt"}},
+        )):
+            with self.subTest(tool_call=tool_call["toolCallId"]):
+                client = CallbackACPClient()
+                responses = []
+                client._send_response = lambda request_id, result: responses.append((request_id, result))
+                client._begin_prompt(260 + index, "workspace-session", None, "workspace_write")
+                with patch("bridge.acp_client._telemetry_emit"), patch("bridge.acp_client.threading.Timer"):
+                    client._handle_message({
+                        "id": 100 + index,
+                        "method": "session/request_permission",
+                        "params": {
+                            "sessionId": "workspace-session",
+                            "toolCall": tool_call,
+                            "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                        },
+                    })
+                client._finish_prompt(260 + index)
+                self.assertEqual(responses, [])
+                self.assertEqual(len(client.list_pending_permissions()), 1)
+
     def test_workspace_execute_telemetry_uses_content_free_categories(self):
         cases = (
             ({"rawInput": {"command": "npm", "args": ["test"]}}, "trusted_local"),
             ({"rawInput": {"command": "npm test && npm run lint"}}, "shell_composition"),
             ({"rawInput": {"command": "npm", "args": ["install"]}}, "package_or_auth_mutation"),
             ({"rawInput": {"command": "git", "args": ["push", "origin", "main"]}}, "git_remote_or_destructive"),
+            ({"rawInput": {"command": "systemctl", "args": ["stop", "service"]}}, "approval_required"),
+            ({"rawInput": {"command": "git", "args": ["-c", "alias.x=!id", "x"]}}, "git_configuration_override"),
         )
         for tool_call, expected in cases:
             with self.subTest(expected=expected):
