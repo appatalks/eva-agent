@@ -242,7 +242,7 @@ core/
     eva.css                Eva dark theme overrides
     lcars.css              LCARS (Star Trek) theme overrides
   js/
-    options.js             Core application logic (5000+ lines):
+    options.js             Core application logic:
                            - Config loading (auth(), applyConfig())
                            - Auth key management (getAuthKey, saveAuthKeys)
                            - System prompt management (getSystemPrompt, applyPersonalityPreset)
@@ -255,7 +255,10 @@ core/
                            - Artifact download/open links (appendArtifactLinks)
                            - Auto-open artifacts via bridge /v1/files/<name>?open=1
                            - AWS Polly TTS (speakText)
-                           - Speech recognition, print, clear memory
+                           - Print, clear memory
+                features/voice/view.js
+                       Voice View ambient HUD lifecycle, listening, endpoint handoff,
+                       barge-in, compact voice controls, and compatible globals
     gpt-core.js            OpenAI Chat Completions API (trboSend)
                            - XHR-based (legacy, not fetch)
                            - Model-specific params (o3-mini reasoning, gpt-5 top_p)

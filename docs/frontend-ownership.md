@@ -43,7 +43,7 @@ without a documented compatibility plan.
 | ACP permissions | `core/js/features/permissions/acp.js` | Adaptive polling, capability headers, and one-time decisions |
 | Browser and desktop automation controller | `core/js/features/automation/browser-agent.js` | Shared popup, polling, confirmation, and cancellation API |
 | Camera sensing and vision | `core/js/features/automation/camera.js` | Camera lifecycle and `[[EVA_LOOK]]` vision routing |
-| Voice listener and endpoint | `core/js/features/voice/wake-listener.js`, `endpoint.js` | Wake word and transcript buffering; Voice View lifecycle remains in `options.js` |
+| Voice listener, endpoint, and Voice View | `core/js/features/voice/wake-listener.js`, `endpoint.js`, `view.js` | Wake word, transcript buffering, and the Voice View lifecycle; classic-script globals remain compatible |
 | Workspaces | `core/js/features/workspaces/monitor.js` | Electron preload/main and bridge workspaces are immediate collaborators |
 | Assets library | `core/js/features/assets/library.js` | Generated and workspace file library |
 | Agent Operations | `core/js/features/agents/operations.js` | Agent cards and memory topology view |

@@ -13,8 +13,14 @@ function scriptIndex(path) {
 }
 
 const optionsIndex = scriptIndex('core/js/options.js');
-assert.ok(scriptIndex('core/js/features/voice/endpoint.js') < optionsIndex,
-  'Voice endpoint must load before options.js because Voice View constructs it');
+const voiceViewIndex = scriptIndex('core/js/features/voice/view.js');
+const voiceEndpointIndex = scriptIndex('core/js/features/voice/endpoint.js');
+assert.strictEqual(voiceViewIndex, optionsIndex + 1,
+  'Voice View must load immediately after options.js so its globals are ready for later consumers');
+assert.ok(voiceEndpointIndex < voiceViewIndex,
+  'Voice endpoint must load before view.js because Voice View constructs it');
+assert.ok(scriptIndex('core/js/features/voice/wake-listener.js') > voiceViewIndex,
+  'wake listener must load after view.js because it consumes Voice View globals');
 [
   'core/js/model-routing.js',
   'core/js/runtime/bridge-client.js',
@@ -45,10 +51,14 @@ assert.ok(scriptIndex('core/js/features/workspaces/monitor.js') > optionsIndex,
   'Workspace Monitor must load after options.js because it consumes shared navigation and bridge helpers');
 assert.ok(scriptIndex('core/js/features/sessions/explorer.js') > optionsIndex,
   'Sessions Explorer must load after options.js because it consumes provider and navigation state');
-assert.ok(scriptIndex('core/js/features/voice/wake-listener.js') > optionsIndex,
-  'wake listener must load after options.js because it consumes shared voice command helpers');
 assert.ok(scriptIndex('core/js/features/skills/library.js') > optionsIndex,
   'Skills library must load after options.js because it consumes shared bridge helpers');
+
+const voiceViewSource = fs.readFileSync('core/js/features/voice/view.js', 'utf8');
+assert.ok(voiceViewSource.includes('var _vv ='),
+  'Voice View source must retain its global state declaration');
+assert.ok(voiceViewSource.includes('function openVoiceView()'),
+  'Voice View source must retain its public open function');
 
 const extractedSources = [
   'core/js/model-routing.js',
