@@ -5,6 +5,7 @@ import datetime
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -64,6 +65,61 @@ def _subagent_result_text(result):
             raise RuntimeError(str(result["error"]))
         return str(result.get("text") or "")
     return str(result or "")
+
+
+def _workspace_github_delivery_url(text):
+    match = re.search(
+        r"(?im)^Submitted:\s*(https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/\d+(?:#issuecomment-\d+)?)\s*$",
+        str(text or ""),
+    )
+    return match.group(1) if match else ""
+
+
+def _run_gh_api(endpoint, jq_filter=""):
+    command = ["gh", "api", endpoint]
+    if jq_filter:
+        command.extend(["--jq", jq_filter])
+    else:
+        command.append("--silent")
+    try:
+        completed = subprocess.run(
+            command,
+            env=_safe_child_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if jq_filter else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip() if jq_filter else ""
+
+
+def _verify_workspace_github_delivery(url, required_issue_state=""):
+    match = re.fullmatch(
+        r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/issues/(\d+)(?:#issuecomment-(\d+))?",
+        str(url or ""),
+    )
+    if not match:
+        return False
+    owner, repository, issue_number, comment_id = match.groups()
+    delivery_endpoint = (
+        f"repos/{owner}/{repository}/issues/comments/{comment_id}"
+        if comment_id else f"repos/{owner}/{repository}/issues/{issue_number}"
+    )
+    if _run_gh_api(delivery_endpoint) is None:
+        return False
+    expected_state = str(required_issue_state or "").strip().lower()
+    if expected_state:
+        issue_endpoint = f"repos/{owner}/{repository}/issues/{issue_number}"
+        actual_state = _run_gh_api(issue_endpoint, ".state")
+        if actual_state != expected_state:
+            return False
+    return True
 
 
 def _subagent_dependency_context(task_id, timeout=300):
@@ -393,7 +449,8 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 active_task["last_activity_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             sync_workspace("running", label_text)
         try:
-            permission_mode = "workspace_write" if task.get("capability_policy") == "workspace_write" else "interactive"
+            capability_policy = task.get("capability_policy")
+            permission_mode = capability_policy if capability_policy in {"workspace_write", "workspace_auto"} else "interactive"
             prompt_result = client.prompt(
                 prompt_text, timeout=180, on_chunk=on_chunk, permission_mode=permission_mode, on_event=on_event,
             )
@@ -402,6 +459,19 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 cancel_workspace_run()
                 return
             result_text = _subagent_result_text(prompt_result)
+            if task.get("requires_github_delivery"):
+                delivery_url = _workspace_github_delivery_url(result_text)
+                required_issue_state = task.get("required_github_issue_state") or ""
+                if not delivery_url or not _verify_workspace_github_delivery(delivery_url, required_issue_state):
+                    state_requirement = (
+                        " and leave the issue " + required_issue_state
+                        if required_issue_state else ""
+                    )
+                    raise RuntimeError(
+                        "GitHub Issues submission was required but not verified. The agent must create or comment on the issue "
+                        + state_requirement +
+                        " and return a final 'Submitted: <github-url>' line that resolves through GitHub."
+                    )
             while True:
                 with _st.subagent_lock:
                     task["result"] = result_text[-4000:]

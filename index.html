@@ -334,6 +334,10 @@
         <select id="workspaceProjectSelect" aria-label="Project for new coding run"></select>
         <label for="workspaceObjective">Coding run</label>
         <textarea id="workspaceObjective" rows="3" maxlength="4000" placeholder="Describe the change Eva should make"></textarea>
+        <label class="workspace-auto-approve" for="workspaceAutoApprove">
+          <input id="workspaceAutoApprove" type="checkbox">
+          <span>Auto approve actions</span>
+        </label>
         <div class="workspace-run-options">
           <label for="workspaceBaseRef">Base</label>
           <input id="workspaceBaseRef" type="text" value="HEAD" maxlength="256" autocomplete="off">
@@ -949,7 +953,12 @@
           </div>
           <p class="auth-note">For private repository imports, grant the selected repository Contents: Read access. Fine-grained tokens must include that repository; classic tokens need the <code>repo</code> scope.</p>
           <button id="authGitHubCliBtn" type="button" class="auth-toggle" title="Authorize GitHub CLI using a device code">Authorize GitHub CLI</button>
-          <p class="auth-note">Eva opens the GitHub device page and copies the one-time code. Complete sign-in in GitHub; the credential stays in GitHub CLI storage.</p>
+          <div id="authGitHubDevice" class="auth-device-code" hidden aria-live="polite">
+            <span>Device code</span>
+            <strong id="authGitHubDeviceCode"></strong>
+            <button id="authGitHubCopyCodeBtn" type="button" class="auth-toggle">Copy code</button>
+          </div>
+          <p id="authGitHubCliStatus" class="auth-note">Eva opens the GitHub device page and shows the one-time code here. Complete sign-in in GitHub; the credential stays in GitHub CLI storage.</p>
         </div>
 
         <div class="auth-field">

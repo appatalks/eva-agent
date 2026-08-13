@@ -339,7 +339,7 @@ async function main() {
     await page.keyboard.type("sh -c 'trap \"\" HUP; sleep 60 & echo EVA_E2E_CHILD:$!'");
     await page.keyboard.press('Enter');
     await page.waitForFunction(function() {
-      return document.querySelector('.workspace-terminal-host').innerText.includes('EVA_E2E_CHILD:');
+      return /EVA_E2E_CHILD:\s*\d+/.test(document.querySelector('.workspace-terminal-host').innerText);
     });
     const childMarkers = Array.from((await page.locator('.workspace-terminal-host').innerText()).matchAll(/EVA_E2E_CHILD:\s*(\d+)/g));
     const childPid = Number(childMarkers[childMarkers.length - 1] && childMarkers[childMarkers.length - 1][1]);

@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 _MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
 _MCP_CONFIG_MAX_BYTES = 256 * 1024
@@ -182,6 +182,14 @@ class WorkspaceStore:
             if 3 not in applied:
                 self.connection.execute(
                     "ALTER TABLE project_mcp_preferences ADD COLUMN approved_digest TEXT NOT NULL DEFAULT ''"
+                )
+                self.connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (3, _utc_now()),
+                )
+            if 4 not in applied:
+                self.connection.execute(
+                    "ALTER TABLE coding_runs ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 0 CHECK(auto_approve IN (0, 1))"
                 )
                 self.connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
@@ -464,7 +472,7 @@ class WorkspaceStore:
                     (now, project_id),
                 )
 
-    def create_run(self, project_id, objective, primary_session_id="", base_ref="HEAD", model_policy=""):
+    def create_run(self, project_id, objective, primary_session_id="", base_ref="HEAD", model_policy="", auto_approve=False):
         clean_objective = _json_text(objective).strip()
         if not clean_objective or len(clean_objective) > 4000:
             raise WorkspaceError("A coding-run objective between 1 and 4000 characters is required.")
@@ -515,9 +523,10 @@ class WorkspaceStore:
                 )
                 self.connection.execute(
                     """INSERT INTO coding_runs(
-                        id, project_id, checkout_id, objective, status, primary_session_id, model_policy, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)""",
-                    (run_id, project_id, checkout_id, clean_objective, session_id, policy, now, now),
+                        id, project_id, checkout_id, objective, status, primary_session_id, model_policy,
+                        auto_approve, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)""",
+                    (run_id, project_id, checkout_id, clean_objective, session_id, policy, int(auto_approve is True), now, now),
                 )
                 self.connection.execute(
                     "UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id)
@@ -664,6 +673,7 @@ class WorkspaceStore:
             "status": run_row["status"],
             "primary_session_id": run_row["primary_session_id"],
             "model_policy": run_row["model_policy"],
+            "auto_approve": bool(run_row["auto_approve"]),
             "final_disposition": run_row["final_disposition"],
             "created_at": run_row["created_at"],
             "updated_at": run_row["updated_at"],

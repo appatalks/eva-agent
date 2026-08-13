@@ -25,6 +25,9 @@ _ACP_SESSION_IDLE_SECONDS = _cfg.ACP_SESSION_IDLE_SECONDS
 _ARTIFACTS_DIR = _cfg.ARTIFACTS_DIR
 _ACP_TOOL_PROFILES = _cfg.ACP_TOOL_PROFILES
 _SECRET_MARKERS = ("TOKEN", "KEY", "SECRET", "PAT", "PASSWORD", "CREDENTIAL")
+_SECRET_ARGUMENT_RE = re.compile(
+    r"(?:^|[^A-Z0-9])(?:TOKEN|KEY|SECRET|PAT|PASSWORD|CREDENTIAL)(?:$|[^A-Z0-9])"
+)
 _WORKSPACE_READ_ONLY_COMMANDS = {"pwd", "ls", "git"}
 _WORKSPACE_READ_ONLY_GIT_SUBCOMMANDS = {"status", "diff", "log", "show", "rev-parse"}
 _WORKSPACE_SENSITIVE_COMMANDS = {
@@ -35,6 +38,7 @@ _WORKSPACE_SENSITIVE_COMMANDS = {
 }
 _WORKSPACE_SAFE_GIT_SUBCOMMANDS = {"add", "commit", "status", "diff", "log", "show", "rev-parse"}
 _WORKSPACE_SAFE_PACKAGE_SUBCOMMANDS = {"test", "run", "lint", "check", "build"}
+_GH_FILE_OPTIONS = {"--body-file", "--template", "--input"}
 _WORKSPACE_SENSITIVE_PATH_RE = re.compile(
     r"(?:^|[/\s])(?:\.env(?:\.[A-Za-z0-9_.-]+)?|\.ssh|\.aws|\.azure|\.npmrc|\.pypirc|"
     r"\.netrc|\.git-credentials|id_rsa|id_ed25519|kubeconfig|service-account|hosts\.yml|"
@@ -81,23 +85,69 @@ def _command_summary(tool_call):
 def _workspace_local_path(value, cwd):
     if not value or value.startswith(("-", ":")):
         return True
-    if value.startswith("~") or os.path.isabs(value):
+    if value.startswith("~"):
         return False
     root = os.path.realpath(cwd or os.getcwd())
-    candidate = os.path.realpath(os.path.join(root, value))
+    candidate = os.path.realpath(value) if os.path.isabs(value) else os.path.realpath(os.path.join(root, value))
     try:
         return os.path.commonpath([root, candidate]) == root
     except ValueError:
         return False
 
 
-def _workspace_edit_target_is_local(tool_call, cwd=None):
-    """Return true only for an explicitly named edit target inside the workspace."""
+def _workspace_edit_targets(tool_call):
+    """Return explicitly named edit targets from ACP raw input, locations, or diffs."""
+    targets = []
     raw_input = tool_call.get("rawInput") if isinstance(tool_call, dict) else None
-    if not isinstance(raw_input, dict):
-        return False
-    target = raw_input.get("path") or raw_input.get("filePath") or raw_input.get("file_path")
-    return isinstance(target, str) and _workspace_local_path(target, cwd)
+    if isinstance(raw_input, dict):
+        for key in ("path", "filePath", "file_path", "targetPath", "target_path"):
+            if isinstance(raw_input.get(key), str):
+                targets.append(raw_input[key])
+    for location in tool_call.get("locations", []) if isinstance(tool_call, dict) else []:
+        if isinstance(location, dict) and isinstance(location.get("path"), str):
+            targets.append(location["path"])
+    for item in tool_call.get("content", []) if isinstance(tool_call, dict) else []:
+        if isinstance(item, dict) and item.get("type") == "diff" and isinstance(item.get("path"), str):
+            targets.append(item["path"])
+    return list(dict.fromkeys(targets))
+
+
+def _workspace_edit_target_is_local(tool_call, cwd=None):
+    """Return true only when every explicit edit target is inside the workspace."""
+    targets = _workspace_edit_targets(tool_call)
+    return bool(targets) and all(_workspace_local_path(target, cwd) for target in targets)
+
+
+def _workspace_edit_target_is_protected(tool_call):
+    targets = _workspace_edit_targets(tool_call)
+    return not targets or any(_workspace_argument_is_protected(target) for target in targets)
+
+
+def _workspace_argument_is_protected(value):
+    candidates = [str(value or "")]
+    if "=" in candidates[0]:
+        candidates.append(candidates[0].split("=", 1)[1])
+    return any(_WORKSPACE_SENSITIVE_PATH_RE.search(candidate.lstrip("@")) for candidate in candidates)
+
+
+def _workspace_argument_mentions_secret(value):
+    return bool(_SECRET_ARGUMENT_RE.search(str(value or "").upper()))
+
+
+def _workspace_gh_path_category(arguments, cwd=None):
+    """Check only gh options whose values are filesystem paths."""
+    for index, argument in enumerate(arguments):
+        option, separator, assigned = argument.partition("=")
+        if option not in _GH_FILE_OPTIONS:
+            continue
+        value = assigned if separator else (arguments[index + 1] if index + 1 < len(arguments) else "")
+        if not value or value == "-":
+            continue
+        if _workspace_argument_is_protected(value):
+            return "secret_or_sensitive_path"
+        if not _workspace_local_path(value, cwd):
+            return "outside_workspace"
+    return ""
 
 
 def _workspace_read_only_execute(tool_call, cwd=None):
@@ -145,6 +195,15 @@ def _workspace_execute_category(tool_call, cwd=None):
         argument in {"-c", "-e", "--eval"} for argument in arguments
     ):
         return "inline_script"
+    if executable == "gh":
+        gh_path_category = _workspace_gh_path_category(arguments, cwd)
+        if gh_path_category:
+            return gh_path_category
+    for argument in arguments:
+        if _workspace_argument_mentions_secret(argument) or _workspace_argument_is_protected(argument):
+            return "secret_or_sensitive_path"
+        if executable != "gh" and not argument.startswith("-") and not _workspace_local_path(argument, cwd):
+            return "outside_workspace"
     if executable in _WORKSPACE_SENSITIVE_COMMANDS:
         if executable not in {"npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "poetry", "gem", "cargo"}:
             return "sensitive_executable"
@@ -160,11 +219,6 @@ def _workspace_execute_category(tool_call, cwd=None):
             return "git_remote_or_destructive"
         if any(argument == "--hard" or argument.startswith("--force") for argument in arguments[1:]):
             return "git_force"
-    for argument in arguments:
-        if any(marker in argument.upper() for marker in _SECRET_MARKERS) or _WORKSPACE_SENSITIVE_PATH_RE.search(argument):
-            return "secret_or_sensitive_path"
-        if not argument.startswith("-") and not _workspace_local_path(argument, cwd):
-            return "outside_workspace"
     if executable == "git":
         return "trusted_local"
     if executable in {"npm", "pnpm", "yarn"}:
@@ -633,8 +687,9 @@ class ACPClient:
             ]
         permission_mode = prompt_states[0].get("permission_mode", "interactive") \
             if len(prompt_states) == 1 else "interactive"
+        workspace_mode = permission_mode in {"workspace_write", "workspace_auto"}
         execute_category = _workspace_execute_category(tool_call, self.cwd) \
-            if permission_mode == "workspace_write" and tool_kind == "execute" else ""
+            if workspace_mode and tool_kind == "execute" else ""
         _verbose_debug_emit(
             "permission_request", tool_kind=tool_kind, permission_mode=permission_mode,
             option_count=len(options), execute_category=execute_category,
@@ -654,7 +709,35 @@ class ACPClient:
                 _telemetry_emit("acp_permission", decision="policy-deny",
                                 tool_kind=tool_kind, option_count=len(options))
             return
-        if permission_mode == "workspace_write":
+        if permission_mode == "workspace_auto":
+            allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
+            confined = tool_kind != "edit" or (
+                _workspace_edit_target_is_local(tool_call, self.cwd)
+                and not _workspace_edit_target_is_protected(tool_call)
+            )
+            safe_execute = tool_kind != "execute" or execute_category not in {"outside_workspace", "secret_or_sensitive_path"}
+            if allow_once and confined and safe_execute:
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
+                })
+                _telemetry_emit("acp_permission", decision="workspace-auto-approve",
+                                tool_kind=tool_kind, option_count=len(options))
+                return
+            if not confined or not safe_execute:
+                reject_once = next((option for option in options if option["kind"] == "reject_once"), None)
+                reject_option = reject_once or next(
+                    (option for option in options if option["kind"] == "reject_always"), None
+                )
+                if reject_option:
+                    self._send_response(rpc_id, {
+                        "outcome": {"outcome": "selected", "optionId": reject_option["option_id"]}
+                    })
+                else:
+                    self._send_rpc_error(rpc_id, -32602, "Workspace auto approval cannot leave the assigned root or access protected paths")
+                _telemetry_emit("acp_permission", decision="workspace-auto-reject-boundary",
+                                tool_kind=tool_kind, option_count=len(options))
+                return
+        if workspace_mode:
             allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
             if tool_kind in {"read", "search", "fetch", "think"} and allow_once:
                 self._send_response(rpc_id, {
@@ -682,7 +765,7 @@ class ACPClient:
             self._send_response(rpc_id, {
                 "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
             })
-            decision = "workspace-auto-allow-read-execute" if permission_mode == "workspace_write" else "auto-allow-read-execute"
+            decision = "workspace-auto-allow-read-execute" if workspace_mode else "auto-allow-read-execute"
             _telemetry_emit("acp_permission", decision=decision,
                             tool_kind=tool_kind, option_count=len(options))
             return

@@ -37,6 +37,15 @@ var EvaWorkspaces = (function() {
     return !!(value && value.workspaceTerminalV1 && value.workspaceListProjects && value.workspaceCreateRun);
   }
 
+  function autoApprovePreference(value) {
+    try {
+      if (typeof value === 'boolean') localStorage.setItem('workspaceAutoApprove', value ? 'true' : 'false');
+      return localStorage.getItem('workspaceAutoApprove') === 'true';
+    } catch (_) {
+      return false;
+    }
+  }
+
   function panel() {
     return document.getElementById('workspacePanel');
   }
@@ -219,6 +228,22 @@ var EvaWorkspaces = (function() {
     }
   }
 
+  async function retryWorkspaceRun(run) {
+    if (!run || !api() || typeof api().workspaceDispatchRun !== 'function' || state.loading) return;
+    setBusy(true);
+    status('Retrying workspace agent...', 'loading');
+    try {
+      var updated = await api().workspaceDispatchRun(run.id);
+      state.selectedProjectId = updated.projectId;
+      state.selectedRunId = updated.id;
+      await refresh();
+      status('Workspace agent retry started.', 'success');
+    } catch (error) {
+      status(error.message || 'Workspace agent retry failed.', 'error');
+      setBusy(false);
+    }
+  }
+
   function appendWorkspacePermissions(detail, run) {
     var permissions = state.pendingPermissions.filter(function(permission) { return permission.workspaceRunId === run.id; });
     if (!permissions.length) return;
@@ -298,6 +323,11 @@ var EvaWorkspaces = (function() {
       actions.appendChild(actionButton('Chat', 'Open this run\'s primary chat', function() { loadSession(run.primarySessionId); }));
     }
     var agentActive = run.agent && ['starting', 'running', 'steering'].indexOf(run.agent.status) !== -1;
+    if (run.status === 'active' && run.agent && run.agent.status === 'error') {
+      actions.appendChild(actionButton('Retry', 'Retry this failed workspace run', function() {
+        retryWorkspaceRun(run);
+      }));
+    }
     if ((run.status === 'active' || run.status === 'completed') && !agentActive) {
       actions.appendChild(actionButton('Archive', 'Keep this run and hide it from active work', function() { applyRunAction(run, 'archive'); }));
       actions.appendChild(actionButton('Discard', 'Review removal of this managed worktree', function() {
@@ -638,7 +668,7 @@ var EvaWorkspaces = (function() {
   }
 
   function appendWorkbenchRunComposer(detail, project) {
-    var draft = state.runDrafts[project.id] || (state.runDrafts[project.id] = { objective: '', baseRef: 'HEAD' });
+    var draft = state.runDrafts[project.id] || (state.runDrafts[project.id] = { objective: '', baseRef: 'HEAD', autoApprove: autoApprovePreference() });
     var section = document.createElement('section');
     section.className = 'workspace-workbench-section';
     var heading = document.createElement('h2');
@@ -660,17 +690,29 @@ var EvaWorkspaces = (function() {
     baseRef.maxLength = 256;
     baseRef.value = draft.baseRef || 'HEAD';
     baseRef.autocomplete = 'off';
+    var autoApprove = document.createElement('label');
+    autoApprove.className = 'workspace-auto-approve';
+    var autoApproveInput = document.createElement('input');
+    autoApproveInput.type = 'checkbox';
+    autoApproveInput.checked = draft.autoApprove === true;
+    var autoApproveText = document.createElement('span');
+    autoApproveText.textContent = 'Auto approve actions';
+    autoApprove.append(autoApproveInput, autoApproveText);
     objective.addEventListener('input', function() { draft.objective = objective.value; });
     baseRef.addEventListener('input', function() { draft.baseRef = baseRef.value; });
+    autoApproveInput.addEventListener('change', function() {
+      draft.autoApprove = autoApproveInput.checked;
+      autoApprovePreference(autoApproveInput.checked);
+    });
     var submit = document.createElement('button');
     submit.type = 'submit';
     submit.textContent = 'Start isolated run';
     submit.disabled = state.loading || !supported();
-    form.append(objectiveLabel, objective, baseLabel, baseRef, submit);
+    form.append(objectiveLabel, objective, baseLabel, baseRef, autoApprove, submit);
     form.addEventListener('submit', async function(event) {
       event.preventDefault();
       submit.disabled = true;
-      var created = await createWorkspaceRun(project.id, objective.value, baseRef.value);
+      var created = await createWorkspaceRun(project.id, objective.value, baseRef.value, { autoApprove: autoApproveInput.checked });
       if (created) {
         draft.objective = '';
         draft.baseRef = 'HEAD';
@@ -897,6 +939,13 @@ var EvaWorkspaces = (function() {
         openWorkspaceTerminal(selected.checkout.id, (selected.project ? selected.project.name + ' | ' : '') + (selected.checkout.branch || 'worktree'));
       });
       actions.appendChild(terminalButton);
+      if (selected.status === 'active' && selected.agent && selected.agent.status === 'error') {
+        var retryButton = document.createElement('button');
+        retryButton.type = 'button';
+        retryButton.textContent = 'Retry run';
+        retryButton.addEventListener('click', function() { retryWorkspaceRun(selected); });
+        actions.appendChild(retryButton);
+      }
       if (selected.primarySessionId && typeof loadSession === 'function') {
         var chatButton = document.createElement('button');
         chatButton.type = 'button';
@@ -1257,6 +1306,13 @@ var EvaWorkspaces = (function() {
 
   function showGitHubAuthState(authState) {
     var stateValue = authState && authState.state || 'failed';
+    var device = document.getElementById('authGitHubDevice');
+    var deviceCode = document.getElementById('authGitHubDeviceCode');
+    var authStatus = document.getElementById('authGitHubCliStatus');
+    var pending = stateValue === 'pending' && authState && authState.code;
+    if (device) device.hidden = !pending;
+    if (deviceCode) deviceCode.textContent = pending ? authState.code : '';
+    if (authStatus) authStatus.textContent = authState && authState.message || '';
     if (stateValue === 'starting') {
       status(authState.message || 'Starting GitHub device authorization...', 'loading');
       return;
@@ -1479,12 +1535,16 @@ var EvaWorkspaces = (function() {
     setBusy(true);
     status('Creating isolated worktree...', 'loading');
     try {
+      var autoApprove = options && typeof options.autoApprove === 'boolean'
+        ? options.autoApprove
+        : autoApprovePreference();
       var primarySessionId = typeof _activeSessionId === 'function' ? _activeSessionId() : '';
       var run = await api().workspaceCreateRun({
         projectId: project.id,
         objective: objective,
         primarySessionId: primarySessionId,
-        baseRef: String(baseRefValue || '').trim() || 'HEAD'
+        baseRef: String(baseRefValue || '').trim() || 'HEAD',
+        autoApprove: autoApprove
       });
       state.selectedProjectId = run.projectId;
       state.selectedRunId = run.id;
@@ -1533,10 +1593,12 @@ var EvaWorkspaces = (function() {
     var projectSelect = document.getElementById('workspaceProjectSelect');
     var objective = document.getElementById('workspaceObjective');
     var baseRef = document.getElementById('workspaceBaseRef');
+    var autoApprove = document.getElementById('workspaceAutoApprove');
     var created = await createWorkspaceRun(
       projectSelect ? projectSelect.value : '',
       objective ? objective.value : '',
-      baseRef ? baseRef.value : 'HEAD'
+      baseRef ? baseRef.value : 'HEAD',
+      { autoApprove: !!(autoApprove && autoApprove.checked) }
     );
     if (created && objective) objective.value = '';
   }
@@ -1605,6 +1667,7 @@ var EvaWorkspaces = (function() {
     var workbenchGitHubImport = document.getElementById('workspaceImportGitHubBtn');
     var workbenchGitHubList = document.getElementById('workspaceListGitHubBtn');
     var workbenchGitHubAuth = document.getElementById('authGitHubCliBtn');
+    var githubCopyCode = document.getElementById('authGitHubCopyCodeBtn');
     var workbenchGitHubCollapse = document.getElementById('workspaceCollapseGitHubBtn');
     var monitorRefresh = document.getElementById('workspaceMonitorRefreshBtn');
     var monitorClose = document.getElementById('workspaceMonitorCloseBtn');
@@ -1618,6 +1681,15 @@ var EvaWorkspaces = (function() {
     if (workbenchAddProject) workbenchAddProject.addEventListener('click', addProject);
     if (workbenchGitHubImport) workbenchGitHubImport.addEventListener('click', importGitHubProject);
     if (workbenchGitHubAuth) workbenchGitHubAuth.addEventListener('click', authorizeGitHub);
+    if (githubCopyCode) githubCopyCode.addEventListener('click', function() {
+      var code = document.getElementById('authGitHubDeviceCode');
+      if (!code || !code.textContent || !navigator.clipboard) return;
+      navigator.clipboard.writeText(code.textContent).then(function() {
+        status('GitHub device code copied.', 'success');
+      }).catch(function() {
+        status('Could not copy the GitHub device code.', 'error');
+      });
+    });
     if (workbenchGitHubCollapse) workbenchGitHubCollapse.addEventListener('click', collapseGitHubRepositories);
     if (workbenchGitHubList) workbenchGitHubList.addEventListener('click', function() {
       listGitHubRepositories().catch(function(error) { status(error.message || 'GitHub repository listing failed.', 'error'); });
@@ -1634,6 +1706,11 @@ var EvaWorkspaces = (function() {
     });
     if (!supported()) renderUnavailable();
     else {
+      var autoApprove = document.getElementById('workspaceAutoApprove');
+      if (autoApprove) {
+        autoApprove.checked = autoApprovePreference();
+        autoApprove.addEventListener('change', function() { autoApprovePreference(autoApprove.checked); });
+      }
       monitor();
       state.monitorTimer = setInterval(monitor, 10000);
     }

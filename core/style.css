@@ -471,6 +471,9 @@ body.eva-standalone #settingsMenu {
       margin: 0 0 12px;
     }
     .auth-field { margin-bottom: 12px; }
+    .auth-device-code { display: flex; align-items: center; gap: 8px; margin: 8px 0; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+    .auth-device-code[hidden] { display: none; }
+    .auth-device-code strong { flex: 1; font: 700 16px monospace; letter-spacing: 0; }
     .auth-input-wrap {
       display: flex;
       gap: 6px;
@@ -1029,10 +1032,13 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .workspace-workbench-section p { margin: 0; color: #84aab0; font-size: 11px; line-height: 1.45; }
 .workspace-workbench-run-form { display: grid; gap: 8px; }
 .workspace-workbench-run-form label { color: #7fa3a9; font: 700 9px monospace; letter-spacing: 0.08em; }
+.workspace-auto-approve { display: flex; align-items: center; gap: 7px; color: inherit; cursor: pointer; }
+.workspace-auto-approve input { width: 15px; height: 15px; margin: 0; accent-color: #78dce8; }
+.workspace-auto-approve span { font-size: 11px; letter-spacing: 0; }
 .workspace-workbench-run-form textarea,
-.workspace-workbench-run-form input { box-sizing: border-box; width: 100%; margin: 0; border: 1px solid rgba(120,220,232,0.22); border-radius: 3px; background: rgba(2,11,14,0.72); color: #e7fbff; font: 12px/1.4 monospace; }
+.workspace-workbench-run-form input[type="text"] { box-sizing: border-box; width: 100%; margin: 0; border: 1px solid rgba(120,220,232,0.22); border-radius: 3px; background: rgba(2,11,14,0.72); color: #e7fbff; font: 12px/1.4 monospace; }
 .workspace-workbench-run-form textarea { min-height: 88px; padding: 8px; resize: vertical; }
-.workspace-workbench-run-form input { height: 32px; padding: 0 8px; }
+.workspace-workbench-run-form input[type="text"] { height: 32px; padding: 0 8px; }
 .workspace-workbench-run-form button { min-height: 34px; border: 1px solid rgba(120,220,232,0.32); border-radius: 3px; background: rgba(120,220,232,0.08); color: #dcfbff; font: 700 10px monospace; cursor: pointer; }
 .workspace-workbench-run-form button:hover:not(:disabled) { border-color: #78dce8; background: rgba(120,220,232,0.15); }
 .workspace-mcp-list { display: grid; gap: 2px; }

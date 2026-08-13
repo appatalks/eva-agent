@@ -519,7 +519,40 @@ def _dispatch_workspace_run(run):
     }
     task_id = "sub-" + uuid.uuid4().hex[:8]
     objective = str(run.get("objective") or "").strip()
+    github_delivery_required = bool(
+        run.get("auto_approve")
+        and re.search(r"\b(?:issue|issues)\b", objective, re.IGNORECASE)
+        and re.search(r"\b(?:close|comment|create|leave|post|publish|reopen|submit|write)\b", objective, re.IGNORECASE)
+    )
+    github_issue_state = ""
+    if github_delivery_required:
+        if re.search(r"\breopen\b", objective, re.IGNORECASE):
+            github_issue_state = "open"
+        elif re.search(r"\bclose\b", objective, re.IGNORECASE):
+            github_issue_state = "closed"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    github_delivery_prompt = ""
+    if github_delivery_required:
+        close_only_instruction = (
+            "This is a close-only request: do not implement, commit, or otherwise resolve the issue body first. "
+            "Inspect enough context to identify the requested issue, close it directly, and verify its state. "
+            if github_issue_state == "closed" and not re.search(
+                r"\b(?:fix|implement|resolve|address|change|update)\b", objective, re.IGNORECASE
+            ) else ""
+        )
+        github_delivery_prompt = (
+            "This objective requires a real GitHub Issues side effect, not only a draft or local report. "
+            "You are authorized to use the authenticated `gh` CLI in this auto-approved workspace run. "
+            + close_only_instruction +
+            "Perform the requested issue action exactly; an explicit close or reopen request must update that issue state "
+            "after any requested repository work is complete. "
+            "Resolve the repository from the origin remote. If the objective names an issue number or URL, comment there. "
+            "Otherwise inspect open issues and use a clearly matching target; if none exists, create a new issue containing "
+            "the requested report. If `gh` needs a body file, create it at a workspace-relative path and remove it after "
+            "submission; never use `/tmp` or another path outside the assigned worktree. Do not stop after preparing text. "
+            "Verify the created issue or comment with `gh`, then end "
+            "the final report with `Submitted: <github-issue-or-comment-url>`.\n\n"
+        )
     full_prompt = (
         "You are Eva's coding implementation agent. Work autonomously in the assigned Git worktree. "
         "Do not wait for further approval. Inspect the repository, implement the objective, run focused tests, "
@@ -527,10 +560,10 @@ def _dispatch_workspace_run(run):
         "per tool call without shell operators or command chaining. Do not install dependencies unless explicitly requested. "
         "Leave all requested files in the worktree. Do not access or modify paths outside the assigned "
         "worktree. Do not launch a browser, desktop, camera, external application, or new window, and do not "
-        "emit Eva browser, desktop, camera, or renderer action markers. For a GitHub issue or other remote "
-        "operation, use only an explicitly enabled workspace MCP tool. If that tool is unavailable or requires "
-        "permission that is not approved, report the blocker clearly instead of attempting another surface. "
+        "emit Eva browser, desktop, camera, or renderer action markers. For remote operations not explicitly authorized "
+        "by this prompt, use only an enabled workspace MCP tool and report unavailable capabilities clearly. "
         "Finish with a concise report of changed files, tests, and any remaining issue.\n\n"
+        + github_delivery_prompt +
         "Objective:\n" + objective
     )
     task = {
@@ -551,7 +584,9 @@ def _dispatch_workspace_run(run):
         "steer_history": [],
         "coding_run_id": run["id"],
         "checkout_id": checkout["id"],
-        "capability_policy": "workspace_write",
+        "capability_policy": "workspace_auto" if run.get("auto_approve") else "workspace_write",
+        "requires_github_delivery": github_delivery_required,
+        "required_github_issue_state": github_issue_state,
         "_cwd": checkout_path,
         "_workspace_mcp_config": workspace_mcp_config,
     }
@@ -563,7 +598,7 @@ def _dispatch_workspace_run(run):
             run["id"],
             checkout["id"],
             "agent:" + task_id,
-            "workspace_write",
+            task["capability_policy"],
         )
         thread = threading.Thread(
             target=_subagent_worker,
@@ -1522,6 +1557,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 data.get("primary_session_id", ""),
                 data.get("base_ref", "HEAD"),
                 data.get("model_policy", ""),
+                data.get("auto_approve") is True,
             )
         except WorkspaceError as error:
             self._json_response(400, {"error": {"message": str(error)}})

@@ -4,7 +4,7 @@
 
 [Website](https://appatalks.github.io/eva-agent/) | [Documentation](README-2.md) | [Issues](https://github.com/appatalks/eva-agent/issues) | License: MIT
 
-A voice-first AI assistant for conversation, memory, automation, and local or cloud-backed work. Eva can use voice, camera, browser, desktop, MCP tools, skills, and coding workspaces while keeping control and configuration on your machine.
+A voice-first AI assistant for conversation, memory, automation, and local or cloud-backed work. Eva can use voice, camera, browser, desktop, MCP tools, skills, and coding workspaces with optional auto approval while keeping control and configuration on your machine.
 
 ## In Use
 

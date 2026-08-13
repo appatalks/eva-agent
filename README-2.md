@@ -90,7 +90,8 @@ files and are normalized before Eva uses them.
 - LCARS and Eva themes (7 Eva variants)
 - Standalone Electron AppImage with bundled bridge
 - Durable coding workspaces with automatic Eva-ready Git project provisioning,
-  isolated worktrees, workspace-confined ACP agents, and durable run records
+  isolated worktrees, workspace-confined ACP agents, durable run records, and
+  optional per-run auto approval for remote or otherwise sensitive actions
 - Real Electron PTY terminal with xterm rendering, bounded replay, resize/search,
   lower-half Workspace Monitor docking, and process-session cancellation
 - Main-window Workspace Monitor, unified generated/workspace Assets library,
@@ -1334,16 +1335,30 @@ Workspace agents reuse the observable subagent registry, so the same task is
 visible in Agent Operations with `coding_run_id`, `checkout_id`, and
 `capability_policy`. Unlike generic subagents, the worker creates its
 `ACPClient` with the assigned worktree and uses prompt permission mode
-`workspace_write`.
+`workspace_write`, or `workspace_auto` when **Auto approve actions** is enabled
+for the run. The composer remembers that choice locally for later runs.
 
 ACP `session/request_permission` requests are automatically allowed once only
-for `read`, `search`, `fetch`, and `think` tool kinds when the active workspace
-prompt offers an `allow_once` option. Execute, edit, delete, and unknown tool
-kinds require an explicit permission decision because ACP does not provide a
-path contract that can prove worktree confinement. Ordinary chats and generic
-subagents retain interactive permission handling; passive recall continues to
-reject tools. The automatic mode never accepts persistent `allow_always`
-authority.
+for routine workspace reads, local edits, and trusted local build/test commands.
+With `workspace_auto`, Eva also selects one-time approval for remote tools such
+as GitHub CLI issue comments. Auto approval still rejects edits outside the
+assigned worktree and commands referencing protected credential/config paths.
+For an explicit GitHub Issues objective, Eva may use the authenticated `gh`
+CLI. A named issue receives a comment; when no target is named and no matching
+open issue exists, Eva creates a new issue containing the requested report. The
+run completes only after its final `Submitted:` issue/comment URL resolves
+through GitHub. Explicit close and reopen objectives additionally verify the
+issue endpoint reports the requested `closed` or `open` state before completion.
+Failed workspace agents are not automatically replayed on application startup,
+which prevents remote side effects from being duplicated after an ambiguous
+failure. Their retained run exposes an explicit **Retry** action instead.
+Ordinary chats and generic subagents retain interactive permission handling;
+passive recall continues to reject tools. Neither workspace mode accepts
+persistent `allow_always` authority.
+
+Settings > Auth launches GitHub CLI device authorization, opens GitHub's device
+page, copies the one-time code when possible, and keeps the code visible with a
+Copy code button until authorization completes.
 
 Live ACP chunks update the task and periodically persist a bounded report.
 Plan/tool events update activity. Completion persists the final report and
@@ -1792,7 +1807,7 @@ not a supported agent-state protocol.
 - Bridge binds to `127.0.0.1` by default (localhost only)
 - ACP tool permissions are never globally bypassed. Standalone Eva requires an authenticated in-chat decision; hosted/file clients fail closed.
 - Workspace routes require a second random capability held only by Electron main; the ordinary renderer-visible bridge token is insufficient.
-- Workspace agent `workspace_write` prompts auto-select `allow_once` only for read/search/fetch/think; mutating and unknown tools remain interactive. Normal prompts remain interactive and passive recall remains deny-by-policy.
+- Workspace agent `workspace_write` prompts auto-select `allow_once` for confined reads, edits, and trusted local commands. User-enabled `workspace_auto` also approves other one-time actions, while outside-worktree edits and protected-path commands are rejected by policy. Normal prompts remain interactive and passive recall remains deny-by-policy.
 - Renderer workspace DTOs contain opaque IDs and relative paths only. Known project/worktree paths are redacted from agent reports.
 - Managed worktree paths are revalidated under `EVA_CONFIG_DIR/worktrees` before status, Assets, terminal registration, and cleanup. Runtime-root, intermediate, leaf, and post-registration symlink swaps are rejected.
 - PTY roots are allowlisted; the renderer cannot provide a cwd/environment. PTY shutdown retains Unix session identity and escalates descendants to SIGKILL before root revocation.

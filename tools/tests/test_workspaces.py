@@ -58,7 +58,10 @@ def main():
         except WorkspaceError:
             pass
 
-        run = store.create_run(project["id"], "Add durable workspace behavior", primary_session_id="sess_test")
+        run = store.create_run(
+            project["id"], "Add durable workspace behavior", primary_session_id="sess_test", auto_approve=True
+        )
+        assert run["auto_approve"] is True
         checkout = run["checkout"]
         checkout_path = Path(checkout["path"])
         assert checkout_path.is_dir()

@@ -252,6 +252,8 @@ async function dispatchPendingWorkspaceRuns() {
   const runs = Array.isArray(response.runs) ? response.runs : [];
   for (const run of runs) {
     if (run.status !== 'active') continue;
+    const agentStatus = run.agent && run.agent.status;
+    if (agentStatus && !['starting', 'running', 'steering'].includes(agentStatus)) continue;
     try {
       await requestWorkspaceBridge('/v1/workspaces/runs/' + encodeURIComponent(run.id) + '/dispatch', 'POST');
     } catch (error) {
@@ -317,6 +319,7 @@ function workspaceRunForRenderer(run) {
     status: run.status,
     primarySessionId: run.primary_session_id,
     modelPolicy: run.model_policy,
+    autoApprove: run.auto_approve === 1 || run.auto_approve === true,
     finalDisposition: run.final_disposition,
     createdAt: run.created_at,
     updatedAt: run.updated_at,
@@ -504,7 +507,8 @@ async function workspaceCreateRun(event, request) {
     objective: typeof input.objective === 'string' ? input.objective : '',
     primary_session_id: typeof input.primarySessionId === 'string' ? input.primarySessionId : '',
     base_ref: typeof input.baseRef === 'string' ? input.baseRef : 'HEAD',
-    model_policy: typeof input.modelPolicy === 'string' ? input.modelPolicy : ''
+    model_policy: typeof input.modelPolicy === 'string' ? input.modelPolicy : '',
+    auto_approve: input.autoApprove === true
   });
   const run = response.run;
   if (!run || !run.checkout || !validWorkspaceId(run.checkout.id) || typeof run.checkout.path !== 'string') {
