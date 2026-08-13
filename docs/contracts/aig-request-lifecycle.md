@@ -8,6 +8,10 @@ telemetry.
 `tools/bridge/aig_request.py` owns only pure normalization of an already-parsed
 request. It must not perform I/O or change response formatting.
 
+`tools/bridge/aig_preflight.py` owns pure skip/preflight/tool-profile/escalation
+planning. ACP restart/execution, briefing cache access, policy evaluation,
+auditing, and responder execution remain in `BridgeHandler`.
+
 ## Normalization Contract
 
 - Default backend: `gpt-5.6-luna`.
