@@ -41,7 +41,7 @@ without a documented compatibility plan.
 | Skill auto-learning | `core/js/features/skills/auto-learn.js` | Bounded post-outcome draft extraction |
 | Proactive notifications | `core/js/features/notifications/proactive.js` | Polling, chat/voice delivery, and seen acknowledgment |
 | ACP permissions | `core/js/features/permissions/acp.js` | Adaptive polling, capability headers, and one-time decisions |
-| Browser automation | `core/js/browser-agent.js` | Do not move without updating packaging/docs/test path contracts |
+| Browser and desktop automation controller | `core/js/features/automation/browser-agent.js` | Shared popup, polling, confirmation, and cancellation API |
 | Camera and desktop interaction | `core/js/camera.js`, renderer logic in `options.js` | Permission and agent-confirmation boundaries remain explicit |
 | Voice | `core/js/voice.js`, `voice-endpoint.js`, voice-view logic in `options.js` | Split only behind focused lifecycle tests |
 | Workspaces | `core/js/workspaces.js` | Electron preload/main and bridge workspaces are immediate collaborators |
