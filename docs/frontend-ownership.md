@@ -44,7 +44,7 @@ without a documented compatibility plan.
 | Browser and desktop automation controller | `core/js/features/automation/browser-agent.js` | Shared popup, polling, confirmation, and cancellation API |
 | Camera sensing and vision | `core/js/features/automation/camera.js` | Camera lifecycle and `[[EVA_LOOK]]` vision routing |
 | Voice | `core/js/voice.js`, `voice-endpoint.js`, voice-view logic in `options.js` | Split only behind focused lifecycle tests |
-| Workspaces | `core/js/workspaces.js` | Electron preload/main and bridge workspaces are immediate collaborators |
+| Workspaces | `core/js/features/workspaces/monitor.js` | Electron preload/main and bridge workspaces are immediate collaborators |
 | Assets library | `core/js/features/assets/library.js` | Generated and workspace file library |
 | Agent Operations | `core/js/features/agents/operations.js` | Agent cards and memory topology view |
 | Sessions and profiles | `core/js/sessions.js`, `idb-store.js`, `profiles.js` | Storage contracts are compatibility-sensitive |

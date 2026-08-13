@@ -86,7 +86,7 @@ def test_required_files():
         "core/js/features/agents/operations.js",
         "core/js/features/assets/library.js",
         "core/js/dialogs.js",
-        "core/js/workspaces.js",
+        "core/js/features/workspaces/monitor.js",
         "core/js/harness-control.js",
         "tools/acp_bridge.py",
         "tools/bridge/workspaces.py",
@@ -115,6 +115,7 @@ def test_required_files():
         "tools/tests/test_assets_api.js",
         "tools/tests/test_agents_api.js",
         "tools/tests/test_skills_api.js",
+        "tools/tests/test_workspaces_api.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -1263,7 +1264,7 @@ def test_sidebar_workflow_contract():
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
     report("workflow_skills_main_view", "_buildSkillsWorkspace" in skills_js and "skills-view-open" in skills_js and "window.EvaSkills" in skills_js and "body.skills-view-open" in open("core/style.css").read())
     report("workflow_skills_organization", all(value in skills_js for value in ("skillsSearch", "skillsStatusFilter", 'value=\"draft\"', "skillsSourceFilter", "skillsSort", "_filteredSkills", "_skillSourceKind", "skillsViewSummary")))
-    report("workflow_skills_cross_navigation", "EvaSkills.close" in sessions_js and "EvaSkills.close" in open("core/js/features/agents/operations.js").read() and "EvaSkills.close" in open("core/js/features/assets/library.js").read() and "EvaSkills.close" in open("core/js/workspaces.js").read())
+    report("workflow_skills_cross_navigation", "EvaSkills.close" in sessions_js and "EvaSkills.close" in open("core/js/features/agents/operations.js").read() and "EvaSkills.close" in open("core/js/features/assets/library.js").read() and "EvaSkills.close" in open("core/js/features/workspaces/monitor.js").read())
     report("workflow_profile_picker", 'id="profilePanel"' in html and re.search(r'src="core/js/profiles\.js(?:\?[^" ]+)?"', html) is not None and "function switchEvaProfile" in profiles_js)
     report("workflow_profile_awaits_session_save", "async function switchEvaProfile" in profiles_js and "await saveCurrentSession()" in profiles_js)
     report("workflow_profile_scoped_sessions", "saveCurrentSession" in profiles_js and "eva_sessions" not in profiles_js)
@@ -1334,7 +1335,7 @@ def test_coding_workspace_contract():
         standalone_main = f.read()
     with open("standalone/preload.js") as f:
         standalone_preload = f.read()
-    with open("core/js/workspaces.js") as f:
+    with open("core/js/features/workspaces/monitor.js") as f:
         workspace_ui = f.read()
     with open("core/js/options.js") as f:
         options_js = f.read()
@@ -1378,7 +1379,7 @@ def test_coding_workspace_contract():
     report("coding_workspace_safe_removal", "def delete_project" in workspaces and "source_preserved" in workspaces and "workspace agent is still active" in workspaces.lower() and "workspace-delete-project" in standalone_main and "workspaceDeleteProject" in standalone_preload and "Remove workspace" in workspace_ui and "remove_workspace" in open("core/js/harness-control.js").read())
     report("coding_workspace_completed_actions", "(run.status === 'active' || run.status === 'completed') && !agentActive" in workspace_ui and "['active', 'completed'].indexOf(actionRun.status)" in workspace_ui)
     report("coding_workspace_current_monitor_snapshot", workspace_ui.find("state.runs = runs;") < workspace_ui.find("narrateRunChanges(state.runs);") and "workspaceCheckoutStatus(selected.checkout.id)" in workspace_ui)
-    report("coding_workspace_ui_wired", "core/js/workspaces.js" in html and "workspacePanel" in html and "workspaceWorkbench" in html and "openWorkspaceTerminal" in workspace_ui and "_evaWorkspaceTerminalTarget" in sessions_js and "body.eva-standalone .workspace-panel" in style_css)
+    report("coding_workspace_ui_wired", "core/js/features/workspaces/monitor.js" in html and "workspacePanel" in html and "workspaceWorkbench" in html and "openWorkspaceTerminal" in workspace_ui and "_evaWorkspaceTerminalTarget" in sessions_js and "body.eva-standalone .workspace-panel" in style_css)
     report("coding_workspace_monitor_observation_only", "setInterval(monitor, 10000)" in workspace_ui and "api().terminalList()" in workspace_ui and "terminalCreate" not in workspace_ui.split("async function monitor()", 1)[1].split("function openWorkbench", 1)[0] and "registerWorkspaceRoot" not in list_projects_handler and "registerWorkspaceRoot" not in list_runs_handler and "ensureTerminalRoot(rootId)" in standalone_main)
     report("coding_workspace_monitor_text_voice_updates", "addMonitorActivity" in workspace_ui and "forceVoice" in workspace_ui and "autoSpeak.checked" in workspace_ui and "speakText(message)" in workspace_ui and "lastPeriodicNoteAt" in workspace_ui)
     harness_js = open("core/js/harness-control.js").read()
@@ -1751,6 +1752,22 @@ def test_skills_api_contract():
     )
     detail = (result.stderr or result.stdout).strip()
     report("skills_api_contract", result.returncode == 0, detail[:300])
+
+
+def test_workspaces_api_contract():
+    """Moved Workspace Monitor retains its public and legacy navigation API."""
+    node = shutil.which("node")
+    if not node:
+        report("workspaces_api_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_workspaces_api.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("workspaces_api_contract", result.returncode == 0, detail[:300])
 
 
 def test_aig_request_contract():
@@ -2394,7 +2411,7 @@ def main():
         ("Reasoning Effort", [test_reasoning_effort_contract]),
         ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract, test_issue_130_latency_contract, test_prompt_budget_contract, test_streaming_contract, test_acp_permissions_ui_contract]),
         ("Security Alerts", [test_security_alert_contract, test_alerts_settings_ui_contract, test_proactive_notifications_contract]),
-        ("Sidebar Workflows", [test_sidebar_workflow_contract, test_browser_agent_api_contract, test_camera_api_contract, test_assets_api_contract, test_agents_api_contract, test_skills_api_contract]),
+        ("Sidebar Workflows", [test_sidebar_workflow_contract, test_browser_agent_api_contract, test_camera_api_contract, test_assets_api_contract, test_agents_api_contract, test_skills_api_contract, test_workspaces_api_contract]),
         ("Workspace Terminal", [test_workspace_terminal_contract]),
         ("Coding Workspaces", [test_coding_workspace_contract]),
         ("Pages Comparison", [test_pages_comparison_contract]),

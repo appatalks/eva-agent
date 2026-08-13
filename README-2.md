@@ -303,7 +303,8 @@ core/
     features/skills/library.js
                  Full-view Skills library/editor: search, status/source
                  filters, sort, import, edit, enable/disable, delete
-    workspaces.js          Workspace Monitor, coding-run creation, progress
+    features/workspaces/monitor.js
+                 Workspace Monitor, coding-run creation, progress
                  narration, terminal/chat handoff, lifecycle actions
     external.js            External data fetching at page load
 
@@ -1383,7 +1384,7 @@ crosses preload.
 
 ### Workspace Monitor and progress narration
 
-`core/js/workspaces.js` implements the full main-window monitor:
+`core/js/features/workspaces/monitor.js` implements the full main-window monitor:
 
 - run list with project, objective, agent state, branch, and dirty count;
 - context actions to remove a workspace and clear/show Coding Runs, activity,
