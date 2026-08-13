@@ -21,6 +21,7 @@ const optionsIndex = scriptIndex('core/js/options.js');
   'core/js/settings/runtime.js',
   'core/js/settings/cron.js',
   'core/js/settings/background.js',
+  'core/js/settings/alerts.js',
   'core/js/features/skills/auto-learn.js'
 ].forEach((path) => {
   assert.ok(scriptIndex(path) < optionsIndex, `${path} must load before options.js`);
@@ -39,6 +40,7 @@ const extractedSources = [
   'core/js/settings/runtime.js',
   'core/js/settings/cron.js',
   'core/js/settings/background.js',
+  'core/js/settings/alerts.js',
   'core/js/features/skills/auto-learn.js'
 ];
 const sandbox = {
@@ -63,6 +65,7 @@ assert.ok(sandbox.EvaModelRouting, 'model routing module must export EvaModelRou
   'switchDataMode',
   'cronAdd',
   'initBackground',
+  'initAlerts',
   'autoLearnSkill'
 ].forEach((name) => {
   assert.strictEqual(typeof sandbox[name], 'function', `${name} must remain globally available`);
@@ -73,5 +76,9 @@ assert.ok(!optionsSource.includes('function initBackground()'),
   'options.js must not shadow the extracted Background owner');
 assert.ok(!optionsSource.includes('var _backgroundState ='),
   'options.js must not recreate extracted Background state');
+assert.ok(!optionsSource.includes('function initAlerts()'),
+  'options.js must not shadow the extracted Alerts owner');
+assert.ok(!optionsSource.includes('var _alertsState ='),
+  'options.js must not recreate extracted Alerts state');
 
 console.log(`frontend script-order tests: PASS (${scriptSources.length} scripts)`);

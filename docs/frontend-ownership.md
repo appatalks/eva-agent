@@ -28,6 +28,7 @@ without a documented compatibility plan.
 | Data mode and diagnostics | `core/js/settings/runtime.js` | `test_runtime_settings.js` |
 | Cron schedules | `core/js/settings/cron.js` | `test_cron_settings.js` |
 | Background controls and proposals | `core/js/settings/background.js` | `test_background_settings.js` |
+| Alert rules and delivery limits | `core/js/settings/alerts.js` | `test_alerts_settings.js` |
 | Remaining settings orchestration | `core/js/options.js` | static suite plus domain-focused checks |
 
 ## Features
