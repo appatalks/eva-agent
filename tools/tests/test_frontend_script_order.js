@@ -23,7 +23,8 @@ const optionsIndex = scriptIndex('core/js/options.js');
   'core/js/settings/background.js',
   'core/js/settings/alerts.js',
   'core/js/features/skills/auto-learn.js',
-  'core/js/features/notifications/proactive.js'
+  'core/js/features/notifications/proactive.js',
+  'core/js/features/permissions/acp.js'
 ].forEach((path) => {
   assert.ok(scriptIndex(path) < optionsIndex, `${path} must load before options.js`);
 });
@@ -43,7 +44,8 @@ const extractedSources = [
   'core/js/settings/background.js',
   'core/js/settings/alerts.js',
   'core/js/features/skills/auto-learn.js',
-  'core/js/features/notifications/proactive.js'
+  'core/js/features/notifications/proactive.js',
+  'core/js/features/permissions/acp.js'
 ];
 const sandbox = {
   AbortSignal: { timeout() { return {}; } },
@@ -69,7 +71,8 @@ assert.ok(sandbox.EvaModelRouting, 'model routing module must export EvaModelRou
   'initBackground',
   'initAlerts',
   'autoLearnSkill',
-  'initNotifications'
+  'initNotifications',
+  'initACPPermissions'
 ].forEach((name) => {
   assert.strictEqual(typeof sandbox[name], 'function', `${name} must remain globally available`);
 });
@@ -87,5 +90,9 @@ assert.ok(!optionsSource.includes('function initNotifications()'),
   'options.js must not shadow the proactive Notifications owner');
 assert.ok(!optionsSource.includes('var _notifState ='),
   'options.js must not recreate proactive Notifications state');
+assert.ok(!optionsSource.includes('function initACPPermissions()'),
+  'options.js must not shadow the extracted ACP permission owner');
+assert.ok(!optionsSource.includes('var _acpPermissionState ='),
+  'options.js must not recreate extracted ACP permission state');
 
 console.log(`frontend script-order tests: PASS (${scriptSources.length} scripts)`);
