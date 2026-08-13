@@ -1,0 +1,5 @@
+{
+  "chromeLaunchConfig": {
+    "args": ["--no-sandbox"]
+  }
+}
