@@ -66,6 +66,7 @@ def test_required_files():
         "core/js/settings/runtime.js",
         "core/js/settings/cron.js",
         "core/js/settings/background.js",
+        "core/js/settings/alerts.js",
         "core/js/features/skills/auto-learn.js",
         "core/js/gpt-core.js",
         "core/js/gl-google.js",
@@ -98,6 +99,7 @@ def test_required_files():
         "tools/tests/test_frontend_script_order.js",
         "tools/tests/test_bridge_client.js",
         "tools/tests/test_background_settings.js",
+        "tools/tests/test_alerts_settings.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -1571,6 +1573,22 @@ def test_background_settings_ui_contract():
     report("background_settings_ui_contract", result.returncode == 0, detail[:300])
 
 
+def test_alerts_settings_ui_contract():
+    """Alert form, CRUD, delete confirmation, and delivery limits remain stable."""
+    node = shutil.which("node")
+    if not node:
+        report("alerts_settings_ui_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_alerts_settings.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("alerts_settings_ui_contract", result.returncode == 0, detail[:300])
+
+
 def test_aig_request_contract():
     """AIG request validation and derived routing flags remain unit-testable."""
     result = subprocess.run(
@@ -2210,7 +2228,7 @@ def main():
         ("Learning Contract", [test_learning_static_contract]),
         ("Reasoning Effort", [test_reasoning_effort_contract]),
         ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract, test_issue_130_latency_contract, test_prompt_budget_contract, test_streaming_contract]),
-        ("Security Alerts", [test_security_alert_contract]),
+        ("Security Alerts", [test_security_alert_contract, test_alerts_settings_ui_contract]),
         ("Sidebar Workflows", [test_sidebar_workflow_contract]),
         ("Workspace Terminal", [test_workspace_terminal_contract]),
         ("Coding Workspaces", [test_coding_workspace_contract]),
