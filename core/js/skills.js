@@ -13,7 +13,7 @@
 //   PATCH  /v1/skills/<id>   -> { skill }   (enable/disable/edit)
 //   DELETE /v1/skills/<id>   -> { skill }
 //
-// Bridge calls reuse backgroundBridgeRequest() from options.js (same bridge).
+// Bridge calls reuse the shared runtime bridge client.
 // ===========================================================================
 
 var _skillsState = {

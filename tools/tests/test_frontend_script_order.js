@@ -1,0 +1,68 @@
+#!/usr/bin/env node
+const assert = require('assert');
+const fs = require('fs');
+const vm = require('vm');
+
+const html = fs.readFileSync('index.html', 'utf8');
+const scriptSources = [...html.matchAll(/<script src="([^"]+)"/g)].map((match) => match[1].split('?')[0]);
+
+function scriptIndex(path) {
+  const index = scriptSources.indexOf(path);
+  assert.notStrictEqual(index, -1, `${path} must be loaded by index.html`);
+  return index;
+}
+
+const optionsIndex = scriptIndex('core/js/options.js');
+[
+  'core/js/model-routing.js',
+  'core/js/runtime/bridge-client.js',
+  'core/js/settings/model-settings.js',
+  'core/js/settings/goals.js',
+  'core/js/settings/runtime.js',
+  'core/js/settings/cron.js',
+  'core/js/features/skills/auto-learn.js'
+].forEach((path) => {
+  assert.ok(scriptIndex(path) < optionsIndex, `${path} must load before options.js`);
+});
+
+assert.ok(scriptIndex('core/js/browser-agent.js') > optionsIndex,
+  'browser-agent.js must load after options.js because it consumes shared UI helpers');
+assert.ok(scriptIndex('core/js/skills.js') > optionsIndex,
+  'skills.js must load after options.js because it consumes shared bridge helpers');
+
+const extractedSources = [
+  'core/js/model-routing.js',
+  'core/js/runtime/bridge-client.js',
+  'core/js/settings/model-settings.js',
+  'core/js/settings/goals.js',
+  'core/js/settings/runtime.js',
+  'core/js/settings/cron.js',
+  'core/js/features/skills/auto-learn.js'
+];
+const sandbox = {
+  AbortSignal: { timeout() { return {}; } },
+  JSON,
+  Promise,
+  Set,
+  Number,
+  String,
+  Date,
+  console
+};
+sandbox.window = sandbox;
+extractedSources.forEach((path) => {
+  vm.runInNewContext(fs.readFileSync(path, 'utf8'), sandbox, { filename: path });
+});
+assert.ok(sandbox.EvaModelRouting, 'model routing module must export EvaModelRouting');
+[
+  'backgroundBridgeRequest',
+  'getModelMaxTokens',
+  'initGoals',
+  'switchDataMode',
+  'cronAdd',
+  'autoLearnSkill'
+].forEach((name) => {
+  assert.strictEqual(typeof sandbox[name], 'function', `${name} must remain globally available`);
+});
+
+console.log(`frontend script-order tests: PASS (${scriptSources.length} scripts)`);

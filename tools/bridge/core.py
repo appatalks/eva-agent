@@ -50,6 +50,7 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 # Aliased with underscore prefix so existing code keeps working as-is.
 from bridge import config as _cfg
 from bridge import state as _st
+from bridge.aig_request import normalize_aig_request
 from protected_memory import (
     ProtectedMemoryError,
     ProtectedVault,
@@ -4056,54 +4057,35 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._json_response(400, {"error": {"message": "Invalid JSON"}})
                 return
 
-        messages = data.get("messages", [])
-        user_message = data.get("user_message", "")
-        translation_mode = bool(data.get("translation_mode"))
-        native_terminal_candidate = bool(data.get("native_terminal_candidate"))
-        native_terminal_plan = bool(data.get("native_terminal_plan")) or native_terminal_candidate
-        internal = bool(data.get("internal")) or translation_mode or native_terminal_plan
-        # Cognition draft/revise stages are internal but still want memory recall.
-        # They pass the raw user turn so _build_memory_context runs on the real
-        # message instead of the wrapped task prompt.
-        inject_memory = bool(data.get("inject_memory"))
-        recall_query = (data.get("recall_query") or "").strip()
-        # Tool-free mode: the cognition reviewer is a text-only judge. It already
-        # has the draft and the user message, so it must NOT re-run web/Kusto/MCP
-        # tools (that duplicated the draft's retrieval and doubled latency).
-        no_tools = bool(data.get("no_tools")) or translation_mode or native_terminal_plan
-        conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
-        requested_backend = data.get("model", "gpt-5.6-luna")
-        try:
-            responder_provider, model_for_response = _parse_aig_backend(requested_backend)
-        except ValueError as error:
-            self._json_response(400, {"error": {"message": str(error)}})
-            return
         openai_api_key = (data.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")).strip()
-        if responder_provider == "openai" and not openai_api_key:
-            self._json_response(400, {"error": {"message": "An OpenAI API key is required for the selected Eva backend."}})
-            return
         try:
-            max_completion_tokens = _completion_token_limit(data.get("max_completion_tokens"))
+            request = normalize_aig_request(
+                data,
+                parse_backend=_parse_aig_backend,
+                completion_token_limit=_completion_token_limit,
+                allowed_reasoning_efforts=ACP_REASONING_EFFORTS,
+                openai_api_key=openai_api_key,
+            )
         except ValueError as error:
             self._json_response(400, {"error": {"message": str(error)}})
             return
-        raw_reasoning_effort = data.get("acp_reasoning_effort", "")
-        if not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort not in ACP_REASONING_EFFORTS | {""}:
-            self._json_response(400, {"error": {"message": "Unsupported acp_reasoning_effort"}})
-            return
-        reasoning_effort = raw_reasoning_effort
-        stream_requested = data.get("stream") is True
+        messages = request["messages"]
+        user_message = request["user_message"]
+        translation_mode = request["translation_mode"]
+        native_terminal_candidate = request["native_terminal_candidate"]
+        native_terminal_plan = request["native_terminal_plan"]
+        internal = request["internal"]
+        inject_memory = request["inject_memory"]
+        recall_query = request["recall_query"]
+        no_tools = request["no_tools"]
+        conversation_id = request["conversation_id"]
+        requested_backend = request["requested_backend"]
+        responder_provider = request["responder_provider"]
+        model_for_response = request["model_for_response"]
+        max_completion_tokens = request["max_completion_tokens"]
+        reasoning_effort = request["reasoning_effort"]
+        stream_requested = request["stream_requested"]
         _set_openai_key_from(data)  # cache key for semantic recall (incl. background threads)
-
-        if not user_message and messages:
-            for msg in reversed(messages):
-                if msg.get("role") == "user":
-                    user_message = msg.get("content", "")
-                    break
-
-        if not user_message:
-            self._json_response(400, {"error": {"message": "No user message provided"}})
-            return
         _mark_user_activity()
         _turn_t0 = time.perf_counter()
         turn_id = str(data.get("turn_id") or uuid.uuid4())[:120]

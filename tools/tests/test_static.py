@@ -59,6 +59,13 @@ def test_required_files():
         "core/js/learning.js",
         "core/js/prompt-budget.js",
         "core/js/request-routing.js",
+        "core/js/model-routing.js",
+        "core/js/runtime/bridge-client.js",
+        "core/js/settings/model-settings.js",
+        "core/js/settings/goals.js",
+        "core/js/settings/runtime.js",
+        "core/js/settings/cron.js",
+        "core/js/features/skills/auto-learn.js",
         "core/js/gpt-core.js",
         "core/js/gl-google.js",
         "core/js/lm-studio.js",
@@ -75,11 +82,20 @@ def test_required_files():
         "core/js/harness-control.js",
         "tools/acp_bridge.py",
         "tools/bridge/workspaces.py",
+        "tools/bridge/aig_request.py",
         "tools/kusto_mcp.py",
         "tools/tests/test_prompt_budget.js",
         "tools/tests/test_request_routing.js",
         "tools/tests/test_cognition_provider.js",
         "tools/tests/test_provider_token_budget.js",
+        "tools/tests/test_model_catalog.js",
+        "tools/tests/test_goals_settings.js",
+        "tools/tests/test_runtime_settings.js",
+        "tools/tests/test_cron_settings.js",
+        "tools/tests/test_skill_auto_learn.js",
+        "tools/tests/test_aig_request.py",
+        "tools/tests/test_frontend_script_order.js",
+        "tools/tests/test_bridge_client.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -325,7 +341,8 @@ def test_local_speech_contract():
     report("local_speech_acknowledgement_prewarm", "function _vvPrepareAcknowledgements" in options and "_vvPrepareAcknowledgements();" in options and "_ackWarmCompleteKey" in options)
     report("live_translation_controls", 'id="liveTranslationTarget"' in open("index.html").read() and 'id="liveTranslationModel"' in open("index.html").read() and 'id="vvLiveTranslationToggle"' not in open("index.html").read())
     report("live_translation_fast_route", "function _vvTranslateLiveTranscript" in options and "'/v1/translate'" in options and "_vvSpeakBrowser(translated" in options and "_VV_LIVE_TRANSLATION_TIMEOUT_MS = 12000" in options)
-    report("live_translation_dedicated_bridge", "def _translate(self):" in core_bridge and 'elif parsed_path == "/v1/translate":' in core_bridge and "translation_mode = bool(data.get(\"translation_mode\"))" in core_bridge)
+    aig_request = open("tools/bridge/aig_request.py").read()
+    report("live_translation_dedicated_bridge", "def _translate(self):" in core_bridge and 'elif parsed_path == "/v1/translate":' in core_bridge and "translation_mode = bool(data.get(\"translation_mode\"))" in aig_request)
     report("live_translation_lmstudio_isolation", "if translation_mode:" in core_bridge and "not translation_mode and any(kw in user_message.lower()" in core_bridge and "if not translation_mode:" in core_bridge)
     report("live_translation_persisted_target", "function getLiveTranslationTarget" in options and "function getLiveTranslationModel" in options and "function getResolvedLiveTranslationModel" in options and "live_translation_target" in options and "live_translation_model" in options and "function _vvSetLiveTranslation" in options)
     report("voice_view_selected_mic_fallback", "Selected microphone needs an OpenAI key" in options and "if (whisperKey)" in options)
@@ -606,14 +623,16 @@ def test_model_selector():
         cognition_source = f.read()
     with open("core/js/options.js") as f:
         options_source = f.read()
+    with open("core/js/settings/model-settings.js") as f:
+        model_settings_source = f.read()
     report("aig_openai_direct_key", "openai_api_key:" in aig_source)
     report("aig_completion_token_budget", "max_completion_tokens:" in aig_source and "getModelMaxTokens()" in aig_source)
     report("cognition_openai_direct_key", "openai_api_key: authOpenAI()" in cognition_source)
     report("cognition_reviewer_token_cap", "Math.min" in cognition_source and "8192" in cognition_source and "max_completion_tokens:" in cognition_source)
-    report("provider_completion_truncation_warning", "function reportCompletionTruncation" in options_source and all("reportCompletionTruncation" in source for source in (aig_source, open("core/js/gpt-core.js").read(), open("core/js/copilot.js").read(), open("core/js/lm-studio.js").read())))
+    report("provider_completion_truncation_warning", "function reportCompletionTruncation" in model_settings_source and all("reportCompletionTruncation" in source for source in (aig_source, open("core/js/gpt-core.js").read(), open("core/js/copilot.js").read(), open("core/js/lm-studio.js").read())))
     report("lmstudio_completion_token_budget", "max_tokens:" in open("core/js/lm-studio.js").read() and "getModelMaxTokens()" in open("core/js/lm-studio.js").read())
     report("cognition_openai_direct_reviewer", "openai:gpt-5.6-luna" in cognition_source)
-    report("aig_backend_model_info_catalog", all(marker in options_source for marker in ("DIRECT_OPENAI_MODEL_INFO", "Balanced intelligence and cost", "Premium complex reasoning", "Lightweight routing and classification", "updateAIGModelInfo")))
+    report("aig_backend_model_info_catalog", all(marker in model_settings_source for marker in ("DIRECT_OPENAI_MODEL_INFO", "Balanced intelligence and cost", "Premium complex reasoning", "Lightweight routing and classification", "updateAIGModelInfo")))
 
     chats_button = re.search(r'<button id="evaChatsBtn"[^>]*title="([^"]+)"[^>]*>(.*?)</button>', html, re.DOTALL)
     report("sidebar_sessions_label", bool(chats_button and chats_button.group(1) == "Sessions" and "Sessions" in chats_button.group(2)))
@@ -656,6 +675,22 @@ def test_model_selector():
         remote_installer = f.read()
     report("workspace_installer_launcher_enabled", "--eva-workspace-terminal-v1" in remote_installer and "Created workspace-enabled launcher" in remote_installer)
     report("installer_prunes_superseded_appimages", "prune_superseded_appimages()" in installer and "keep=2" in installer and "prune_superseded_appimages \"$appimage\"; refresh_system_launcher \"$appimage\"" in installer)
+
+
+def test_model_catalog_contract():
+    """Selectable models retain their documented sender and API mapping contract."""
+    node = shutil.which("node")
+    if not node:
+        report("model_catalog_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_model_catalog.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("model_catalog_contract", result.returncode == 0, detail[:300])
 
 
 def test_protected_memory_settings_contract():
@@ -759,6 +794,8 @@ def test_reasoning_effort_contract():
         cognition_js = f.read()
     with open("core/js/options.js") as f:
         options_js = f.read()
+    with open("core/js/settings/model-settings.js") as f:
+        model_settings_js = f.read()
     with open("core/js/aig.js") as f:
         aig_js = f.read()
     with open("core/js/cognition.js") as f:
@@ -766,7 +803,7 @@ def test_reasoning_effort_contract():
     with open("core/js/options.js") as f:
         options_js = f.read()
     report("reasoning_effort_acp_payload", "payload.acp_reasoning_effort" in copilot_js)
-    report("reasoning_effort_aig_visible", "supportsReasoning" in options_js and "model === 'aig'" in options_js and "cognitionUsesCloud" in options_js)
+    report("reasoning_effort_aig_visible", "supportsReasoning" in model_settings_js and "model === 'aig'" in model_settings_js and "cognitionUsesCloud" in model_settings_js)
     report("reasoning_effort_aig_payload", "acp_reasoning_effort" in aig_js)
     report("reasoning_effort_cognition_payload", "acp_reasoning_effort" in cognition_js)
 
@@ -774,14 +811,14 @@ def test_reasoning_effort_contract():
         acp_client = f.read()
     with open("tools/bridge/core.py") as f:
         bridge_core = f.read()
-    report("reasoning_effort_js_default_high", "DEFAULT_REASONING_EFFORT = 'high'" in options_js)
+    report("reasoning_effort_js_default_high", "DEFAULT_REASONING_EFFORT = 'high'" in model_settings_js)
     report("aig_js_default_gpt_5_6_luna", "|| 'gpt-5.6-luna'" in aig_js)
     report("cognition_default_gpt_5_6_luna", "? el.value : 'gpt-5.6-luna'" in cognition_js)
     report("cognition_default_reviewer_provider_aware", "openai:gpt-5.6-luna" in cognition_js and "gpt-5.6-terra" in cognition_js and "reviewerModel.indexOf('openai:') !== 0" in cognition_js and "lsSet('cogReviewerModel', reviewerModel)" in cognition_js)
     report("cognition_adaptive_gate", "adaptiveReviewReason(userMessage)" in cognition_js and "reason: 'adaptive:' + adaptiveReason" in cognition_js)
     report("cognition_selected_turn_forces_review", "requestedReviewReason === 'phrase'" in cognition_js and "requestedReviewReason.indexOf('adaptive:') === 0" in cognition_js)
     report("cognition_legacy_eva_model_not_active", "evaModel:      def" in cognition_js and "cogModelCfg.enabled" not in aig_js)
-    report("bridge_default_gpt_5_6_luna", 'data.get("model", "gpt-5.6-luna")' in bridge_core)
+    report("bridge_default_gpt_5_6_luna", 'data.get("model", "gpt-5.6-luna")' in open("tools/bridge/aig_request.py").read())
     report("aig_default_not_overridden_by_lmstudio", "LM Studio detected, set as default backend" not in options_js)
     report("reasoning_effort_cli_flag", 'cmd.extend(["--reasoning-effort", self.reasoning_effort])' in acp_client)
     report("reasoning_effort_bridge_validation", "ACP_REASONING_EFFORTS" in bridge_core and "acp_reasoning_effort" in bridge_core)
@@ -1407,6 +1444,8 @@ def test_goals_static_contract():
         seed = f.read()
     with open(mcp_path) as f:
         mcp = f.read()
+    with open("core/js/settings/goals.js") as f:
+        goals_js = f.read()
 
     report("goals_seed_table", ".create-merge table Goals" in seed,
            "missing Goals table" if ".create-merge table Goals" not in seed else "")
@@ -1415,6 +1454,115 @@ def test_goals_static_contract():
            "Goals missing from allowed_tables" if allowed_match is None else "")
     report("goals_active_tool_method", "def _tool_eva_get_active_goals" in mcp,
            "missing _tool_eva_get_active_goals" if "def _tool_eva_get_active_goals" not in mcp else "")
+    report("goals_settings_lifecycle", all(marker in goals_js for marker in ("function readGoalForm", "async function loadGoals", "async function saveGoalFromSettings", "async function deleteGoal", "function initGoals")))
+
+
+def test_goals_settings_contract():
+    """Goals form validation remains executable without a live bridge."""
+    node = shutil.which("node")
+    if not node:
+        report("goals_settings_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_goals_settings.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("goals_settings_contract", result.returncode == 0, detail[:300])
+
+
+def test_runtime_settings_contract():
+    """Data-mode and diagnostics controls retain their local bridge contract."""
+    node = shutil.which("node")
+    if not node:
+        report("runtime_settings_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_runtime_settings.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("runtime_settings_contract", result.returncode == 0, detail[:300])
+
+
+def test_cron_settings_contract():
+    """Cron Settings CRUD requests and validation remain executable without a bridge."""
+    node = shutil.which("node")
+    if not node:
+        report("cron_settings_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_cron_settings.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("cron_settings_contract", result.returncode == 0, detail[:300])
+
+
+def test_skill_auto_learn_contract():
+    """Auto-learned Skills retain their bounded bridge request and failure behavior."""
+    node = shutil.which("node")
+    if not node:
+        report("skill_auto_learn_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_skill_auto_learn.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("skill_auto_learn_contract", result.returncode == 0, detail[:300])
+
+
+def test_frontend_script_order_contract():
+    """Feature extraction preserves ordered classic-script availability."""
+    node = shutil.which("node")
+    if not node:
+        report("frontend_script_order_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_frontend_script_order.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("frontend_script_order_contract", result.returncode == 0, detail[:300])
+
+
+def test_bridge_client_contract():
+    """Shared bridge transport preserves structured success and error semantics."""
+    node = shutil.which("node")
+    if not node:
+        report("bridge_client_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_bridge_client.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("bridge_client_contract", result.returncode == 0, detail[:300])
+
+
+def test_aig_request_contract():
+    """AIG request validation and derived routing flags remain unit-testable."""
+    result = subprocess.run(
+        [sys.executable, "tools/tests/test_aig_request.py"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("aig_request_contract", result.returncode == 0, detail[:300])
 
 
 def test_background_static_contract():
@@ -2035,10 +2183,10 @@ def main():
         ("File Integrity", [test_required_files, test_no_secrets_committed]),
         ("Config Safety", [test_config_example_clean, test_no_hardcoded_keys]),
         ("PR Automation", [test_pr_automation_workflows]),
-        ("Python Integrity", [test_python_syntax, test_artifact_filename_validation, test_bridge_health_contract]),
+        ("Python Integrity", [test_python_syntax, test_artifact_filename_validation, test_bridge_health_contract, test_aig_request_contract]),
         ("Local Speech Contract", [test_local_speech_contract, test_local_speech_http_contract]),
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
-        ("HTML Model Selector", [test_model_selector]),
+        ("HTML Model Selector", [test_model_selector, test_model_catalog_contract]),
         ("Protected Memory Settings", [test_protected_memory_settings_contract]),
         ("JS Routing Functions", [test_js_routing_functions]),
         ("Learning Contract", [test_learning_static_contract]),
@@ -2050,7 +2198,7 @@ def main():
         ("Coding Workspaces", [test_coding_workspace_contract]),
         ("Pages Comparison", [test_pages_comparison_contract]),
         ("Seed File", [test_seed_file]),
-        ("Goals Static Contract", [test_goals_static_contract]),
+        ("Goals Static Contract", [test_goals_static_contract, test_goals_settings_contract, test_runtime_settings_contract, test_cron_settings_contract, test_skill_auto_learn_contract, test_frontend_script_order_contract, test_bridge_client_contract]),
         ("Background Static Contract", [test_background_static_contract]),
         ("Agent Operations Contract", [test_agent_operations_contract, test_agent_operations_behavior]),
         ("MCP Config", [test_mcp_config]),
