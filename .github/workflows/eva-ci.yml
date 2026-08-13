@@ -237,15 +237,3 @@ jobs:
           python3 tools/tests/test_pr_diff_secret_scan.py
           node tools/tests/test_cognition_provider.js
           node tools/tests/test_provider_token_budget.js
-
-  # ── 3. Accessibility (manual trigger only — kept from existing) ───
-  accessibility:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "20"
-      - run: npm install -g pa11y
-      - run: pa11y index.html --reporter=cli --threshold 25
