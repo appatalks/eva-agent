@@ -27,6 +27,7 @@ without a documented compatibility plan.
 | Goals | `core/js/settings/goals.js` | `test_goals_settings.js` |
 | Data mode and diagnostics | `core/js/settings/runtime.js` | `test_runtime_settings.js` |
 | Cron schedules | `core/js/settings/cron.js` | `test_cron_settings.js` |
+| Background controls and proposals | `core/js/settings/background.js` | `test_background_settings.js` |
 | Remaining settings orchestration | `core/js/options.js` | static suite plus domain-focused checks |
 
 ## Features
