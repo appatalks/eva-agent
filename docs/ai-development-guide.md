@@ -46,10 +46,10 @@ Before removing a deprecated or fallback path, consult
 | Change | Read first | Focused validation |
 | --- | --- | --- |
 | Add or alter a selectable model | `index.html`, `core/js/model-routing.js`, `core/js/settings/model-settings.js`, provider adapter, `docs/contracts/provider-routing.md` | `node tools/tests/test_model_catalog.js` |
-| Direct OpenAI behavior | `core/js/gpt-core.js`, `core/js/options.js`, prompt budget | `python3 tools/tests/test_static.py` |
-| Copilot or ACP behavior | `core/js/copilot.js`, `tools/bridge/acp_client.py`, `tools/bridge/core.py` | Model catalog test plus targeted ACP test |
-| AIG request behavior | `core/js/aig.js`, `tools/bridge/aig_request.py`, `tools/bridge/core.py`, `tools/bridge/model_policy.py` | `python3 tools/tests/test_aig_request.py`, then static suite |
-| Local model or MCP behavior | `core/js/lm-studio.js`, `tools/bridge/local_mcp.py`, `tools/bridge/utils.py` | Relevant local-MCP or streaming test |
+| Direct OpenAI behavior | `core/js/providers/openai.js`, `core/js/options.js`, prompt budget | `python3 tools/tests/test_static.py` |
+| Copilot or ACP behavior | `core/js/providers/copilot.js`, `tools/bridge/acp_client.py`, `tools/bridge/core.py` | Model catalog test plus targeted ACP test |
+| AIG request behavior | `core/js/providers/aig.js`, `tools/bridge/aig_request.py`, `tools/bridge/core.py`, `tools/bridge/model_policy.py` | `python3 tools/tests/test_aig_request.py`, then static suite |
+| Local model or MCP behavior | `core/js/providers/lm-studio.js`, `tools/bridge/local_mcp.py`, `tools/bridge/utils.py` | Relevant local-MCP or streaming test |
 | Memory or learning | `tools/bridge/memory.py`, `tools/bridge/cognition.py`, `core/js/learning.js` | Memory or learning contract test |
 | Workspace UI | `core/js/features/workspaces/monitor.js`, `standalone/preload.js`, `standalone/main.js` | Relevant workspace test; packaged E2E for UI/lifecycle changes |
 | Workspace bridge lifecycle | `tools/bridge/workspaces.py`, `tools/bridge/core.py`, Electron projection | Workspace unit/e2e test and path-confinement coverage |
@@ -67,7 +67,7 @@ Before removing a deprecated or fallback path, consult
 | Runtime settings | `core/js/settings/runtime.js` | Data retrieval mode and local diagnostics |
 | Cron settings | `core/js/settings/cron.js` | Recurring-task validation, bridge CRUD, and schedule rendering |
 | Skill auto-learning | `core/js/features/skills/auto-learn.js` | Bounded post-outcome Skill draft extraction |
-| Provider adapters | `core/js/gpt-core.js`, `copilot.js`, `gl-google.js`, `lm-studio.js`, `aig.js`, `dalle3.js` | Provider request/response lifecycle |
+| Provider adapters | `core/js/providers/openai.js`, `copilot.js`, `gemini.js`, `lm-studio.js`, `aig.js`, `image-generation.js` | Provider request/response lifecycle |
 | Conversation storage | `core/js/features/sessions/explorer.js`, `idb-store.js`, `profiles.js` | Session and browser-local state |
 | Bridge HTTP and AIG orchestration | `tools/bridge/core.py` | Private loopback API and request lifecycle |
 | Fixed bridge route tables | `tools/bridge/http_routes.py` | Pure method/path matching; authorization remains in the handler |

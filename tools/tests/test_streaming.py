@@ -1064,9 +1064,9 @@ readEvaStreamingResponse(response, text => chunks.push(text)).then(data => {
         provisional = source[source.index("function createEvaStreamingBubble"):source.index("// Global Variables")]
         self.assertIn("text.textContent", provisional)
         self.assertNotIn("renderEvaResponse", provisional)
-        with open(os.path.join(REPO_DIR, "core/js/aig.js"), encoding="utf-8") as aig_file:
+        with open(os.path.join(REPO_DIR, "core/js/providers/aig.js"), encoding="utf-8") as aig_file:
             aig = aig_file.read()
-        with open(os.path.join(REPO_DIR, "core/js/copilot.js"), encoding="utf-8") as copilot_file:
+        with open(os.path.join(REPO_DIR, "core/js/providers/copilot.js"), encoding="utf-8") as copilot_file:
             copilot = copilot_file.read()
         self.assertIn("removeEvaStreamingBubble(provisional);\n    var content", aig)
         self.assertIn("removeEvaStreamingBubble(provisional);\n    await _copilotRenderResponse", copilot)

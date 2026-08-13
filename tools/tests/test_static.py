@@ -74,12 +74,12 @@ def test_required_files():
         "core/js/features/permissions/acp.js",
         "core/js/features/automation/browser-agent.js",
         "core/js/features/automation/camera.js",
-        "core/js/gpt-core.js",
-        "core/js/gl-google.js",
-        "core/js/lm-studio.js",
-        "core/js/copilot.js",
-        "core/js/aig.js",
-        "core/js/dalle3.js",
+        "core/js/providers/openai.js",
+        "core/js/providers/gemini.js",
+        "core/js/providers/lm-studio.js",
+        "core/js/providers/copilot.js",
+        "core/js/providers/aig.js",
+        "core/js/providers/image-generation.js",
         "core/js/external.js",
         "core/js/features/sessions/explorer.js",
         "core/js/features/voice/wake-listener.js",
@@ -125,6 +125,7 @@ def test_required_files():
         "tools/tests/test_sessions_api.js",
         "tools/tests/test_voice_listener_api.js",
         "tools/tests/test_voice_endpoint.js",
+        "tools/tests/test_provider_paths.js",
         "tools/tests/test_voice_view_api.js",
         "tools/tests/test_voice_interruption.js",
         "tools/tests/test_fast_route.py",
@@ -652,7 +653,7 @@ def test_model_selector():
     report("aig_backend_openai_direct_options", direct_openai_models.issubset(set(aig_values)))
     report("aig_backend_model_info_panel", all(marker in html for marker in ("aigModelInfo", "aigModelRole", "aigModelInputCost", "aigModelOutputCost")))
 
-    with open("core/js/aig.js") as f:
+    with open("core/js/providers/aig.js") as f:
         aig_source = f.read()
     with open("core/js/cognition.js") as f:
         cognition_source = f.read()
@@ -664,8 +665,8 @@ def test_model_selector():
     report("aig_completion_token_budget", "max_completion_tokens:" in aig_source and "getModelMaxTokens()" in aig_source)
     report("cognition_openai_direct_key", "openai_api_key: authOpenAI()" in cognition_source)
     report("cognition_reviewer_token_cap", "Math.min" in cognition_source and "8192" in cognition_source and "max_completion_tokens:" in cognition_source)
-    report("provider_completion_truncation_warning", "function reportCompletionTruncation" in model_settings_source and all("reportCompletionTruncation" in source for source in (aig_source, open("core/js/gpt-core.js").read(), open("core/js/copilot.js").read(), open("core/js/lm-studio.js").read())))
-    report("lmstudio_completion_token_budget", "max_tokens:" in open("core/js/lm-studio.js").read() and "getModelMaxTokens()" in open("core/js/lm-studio.js").read())
+    report("provider_completion_truncation_warning", "function reportCompletionTruncation" in model_settings_source and all("reportCompletionTruncation" in source for source in (aig_source, open("core/js/providers/openai.js").read(), open("core/js/providers/copilot.js").read(), open("core/js/providers/lm-studio.js").read())))
+    report("lmstudio_completion_token_budget", "max_tokens:" in open("core/js/providers/lm-studio.js").read() and "getModelMaxTokens()" in open("core/js/providers/lm-studio.js").read())
     report("cognition_openai_direct_reviewer", "openai:gpt-5.6-luna" in cognition_source)
     report("aig_backend_model_info_catalog", all(marker in model_settings_source for marker in ("DIRECT_OPENAI_MODEL_INFO", "Balanced intelligence and cost", "Premium complex reasoning", "Lightweight routing and classification", "updateAIGModelInfo")))
 
@@ -732,7 +733,7 @@ def test_protected_memory_settings_contract():
     """Protected-memory setup stays in Settings and gates storage controls."""
     with open("index.html") as f:
         html = f.read()
-    with open("core/js/copilot.js") as f:
+    with open("core/js/providers/copilot.js") as f:
         copilot = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
@@ -765,12 +766,12 @@ def test_protected_memory_settings_contract():
 def test_js_routing_functions():
     """Required routing functions exist in JS files."""
     required = {
-        "aigSend": "core/js/aig.js",
-        "trboSend": "core/js/gpt-core.js",
-        "geminiSend": "core/js/gl-google.js",
-        "lmsSend": "core/js/lm-studio.js",
-        "copilotSend": "core/js/copilot.js",
-        "dalle3Send": "core/js/dalle3.js",
+        "aigSend": "core/js/providers/aig.js",
+        "trboSend": "core/js/providers/openai.js",
+        "geminiSend": "core/js/providers/gemini.js",
+        "lmsSend": "core/js/providers/lm-studio.js",
+        "copilotSend": "core/js/providers/copilot.js",
+        "dalle3Send": "core/js/providers/image-generation.js",
         "renderEvaResponse": "core/js/options.js",
         "getSystemPrompt": "core/js/settings/prompts.js",
         "getLmStudioBaseUrl": "core/js/options.js",
@@ -825,7 +826,7 @@ def test_reasoning_effort_contract():
     selected_aig = re.search(r'<option value="([^"]+)" selected>', aig_match.group(1)) if aig_match else None
     report("aig_default_gpt_5_6_luna", bool(selected_aig and selected_aig.group(1) == "gpt-5.6-luna"))
 
-    with open("core/js/copilot.js") as f:
+    with open("core/js/providers/copilot.js") as f:
         copilot_js = f.read()
     with open("core/js/cognition.js") as f:
         cognition_js = f.read()
@@ -833,7 +834,7 @@ def test_reasoning_effort_contract():
         options_js = f.read()
     with open("core/js/settings/model-settings.js") as f:
         model_settings_js = f.read()
-    with open("core/js/aig.js") as f:
+    with open("core/js/providers/aig.js") as f:
         aig_js = f.read()
     with open("core/js/cognition.js") as f:
         cognition_js = f.read()
@@ -870,15 +871,15 @@ def test_signal_and_github_mcp_contract():
         options_js = f.read()
     with open("core/js/cognition.js") as f:
         cognition_js = f.read()
-    with open("core/js/copilot.js") as f:
+    with open("core/js/providers/copilot.js") as f:
         copilot_js = f.read()
-    with open("core/js/aig.js") as f:
+    with open("core/js/providers/aig.js") as f:
         aig_js = f.read()
-    with open("core/js/gpt-core.js") as f:
+    with open("core/js/providers/openai.js") as f:
         gpt_core_js = f.read()
-    with open("core/js/gl-google.js") as f:
+    with open("core/js/providers/gemini.js") as f:
         google_js = f.read()
-    with open("core/js/lm-studio.js") as f:
+    with open("core/js/providers/lm-studio.js") as f:
         lm_studio_js = f.read()
     with open("tools/bridge/core.py") as f:
         bridge_core = f.read()
@@ -1098,7 +1099,7 @@ def test_issue_130_latency_contract():
         html = f.read()
     with open("core/js/request-routing.js") as f:
         routing = f.read()
-    with open("core/js/lm-studio.js") as f:
+    with open("core/js/providers/lm-studio.js") as f:
         lm_studio = f.read()
     with open("tools/bridge/acp_client.py") as f:
         acp_client = f.read()
@@ -1130,9 +1131,9 @@ def test_streaming_contract():
         telemetry = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
-    with open("core/js/aig.js") as f:
+    with open("core/js/providers/aig.js") as f:
         aig = f.read()
-    with open("core/js/copilot.js") as f:
+    with open("core/js/providers/copilot.js") as f:
         copilot = f.read()
 
     report("stream_acp_prompt_callback", "on_chunk=None" in acp_client and "_active_prompts" in acp_client and "session_id" in acp_client)
@@ -1151,8 +1152,8 @@ def test_prompt_budget_contract():
     with open("core/js/prompt-budget.js") as f:
         budget_js = f.read()
     provider_sources = []
-    for path in ("core/js/gpt-core.js", "core/js/copilot.js", "core/js/gl-google.js",
-                 "core/js/lm-studio.js", "core/js/aig.js", "core/js/cognition.js"):
+    for path in ("core/js/providers/openai.js", "core/js/providers/copilot.js", "core/js/providers/gemini.js",
+                 "core/js/providers/lm-studio.js", "core/js/providers/aig.js", "core/js/cognition.js"):
         with open(path) as f:
             provider_sources.append(f.read())
     with open("tools/bridge/core.py") as f:
@@ -1161,7 +1162,7 @@ def test_prompt_budget_contract():
         bridge_utils = f.read()
 
     script_index = html.find('src="core/js/prompt-budget.js')
-    provider_index = html.find('src="core/js/gpt-core.js')
+    provider_index = html.find('src="core/js/providers/openai.js')
     report("prompt_budget_loaded_before_providers", script_index >= 0 and provider_index > script_index)
     report("prompt_budget_exports_compactor", all(value in budget_js for value in (
         "compactMessages", "compactGeminiContents", "estimateTokens", "telemetry", "droppedMessages",
@@ -1195,15 +1196,15 @@ def test_security_alert_contract():
         bridge_utils = f.read()
     with open("tools/bridge/acp_client.py") as f:
         acp_client = f.read()
-    with open("core/js/gl-google.js") as f:
+    with open("core/js/providers/gemini.js") as f:
         google_js = f.read()
-    with open("core/js/gpt-core.js") as f:
+    with open("core/js/providers/openai.js") as f:
         gpt_js = f.read()
-    with open("core/js/lm-studio.js") as f:
+    with open("core/js/providers/lm-studio.js") as f:
         lm_studio_js = f.read()
     with open("core/js/pandora.js") as f:
         pandora_js = f.read()
-    with open("core/js/copilot.js") as f:
+    with open("core/js/providers/copilot.js") as f:
         copilot_js = f.read()
     with open("core/js/cognition.js") as f:
         cognition_js = f.read()
@@ -1412,7 +1413,7 @@ def test_coding_workspace_contract():
     report("coding_workspace_mcp_isolation", "project_mcp_preferences" in workspaces and "approved_digest" in workspaces and "_mcp_config_digest" in workspaces and "_MCP_RESERVED_ENV_KEYS" in workspaces and "BASH_ENV" in workspaces and "key.startswith(\"LD_\")" in workspaces and "mcp_config_for_run" in workspaces and "_workspace_mcp_config" in bridge_core and "workspace_mcp_prefix" in bridge_core and "_subagent_mcp_config(template, task)" in workspace_utils and "return copy.deepcopy(workspace_config)" in workspace_utils and "workspaceSetMcpServer" in workspace_ui and "Any configuration change will revoke this approval" in workspace_ui and "envKeys" in renderer_project and "headerKeys" in renderer_project and "env:" not in renderer_project and "headers:" not in renderer_project)
     report("coding_workspace_github_prompt_visible", ":not(#workspaceWorkbench):not(#textToSynth)" in style_css and "#textToSynth > :not(#evaTextPrompt)" in style_css and "workspaceImportGitHub" in workspace_ui and "evaTextPrompt('GitHub repository URL'" in workspace_ui)
     report("coding_workspace_github_native_api", "importGitHub: importGitHubProject" in workspace_ui and "authorizeGitHub: authorizeGitHub" in workspace_ui and "setProjectMcpServerByName" in workspace_ui and "authGitHubCliBtn" in html and "workspaceCollapseGitHubBtn" in html and "workspaceGitHubAuthStart" in standalone_main and "'auth', 'refresh'" in standalone_main and "'auth', 'login'" in standalone_main and "workspaceGitHubImportErrorMessage" in standalone_main and "return { error: workspaceGitHubImportErrorMessage(error) }" in standalone_main and "importResult && importResult.error" in workspace_ui)
-    report("coding_workspace_mcp_context_on_demand", "function mcpContext" in workspace_ui and "WORKSPACE MCP MODULE SNAPSHOT" in workspace_ui and "workspaceMcpRequest" in open("core/js/aig.js").read() and "EvaWorkspaces.mcpContext" in open("core/js/aig.js").read() and "safe metadata only" in workspace_ui)
+    report("coding_workspace_mcp_context_on_demand", "function mcpContext" in workspace_ui and "WORKSPACE MCP MODULE SNAPSHOT" in workspace_ui and "workspaceMcpRequest" in open("core/js/providers/aig.js").read() and "EvaWorkspaces.mcpContext" in open("core/js/providers/aig.js").read() and "safe metadata only" in workspace_ui)
     report("coding_workspace_github_retry_prompt", "while (repositoryUrl)" in workspace_ui and "Correct GitHub repository URL" in workspace_ui and "The URL is back in the prompt so you can correct it." in workspace_ui and "GitHub workspace imported." in workspace_ui)
     report("coding_workspace_native_description", "async function describeCurrent" in workspace_ui and "Promise.all([api().workspaceListProjects(), api().workspaceListRuns()])" in workspace_ui and "describe: describeCurrent" in workspace_ui)
     report("coding_workspace_project_navigation", "list_project_files" in workspaces and "resolve_project_file" in workspaces and "workspaceListProjectFiles" in standalone_preload and "workspaceOpenProjectFile" in standalone_preload and "workspaceProjectFiles" in workspace_ui and "Open project terminal" in workspace_ui and "['source', 'worktree'].includes(checkout.kind)" in standalone_main)
@@ -1823,6 +1824,22 @@ def test_voice_module_contracts():
         report(name, result.returncode == 0, detail[:300])
 
 
+def test_provider_paths_contract():
+    """Moved provider adapters retain load order and sender entry points."""
+    node = shutil.which("node")
+    if not node:
+        report("provider_paths_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_provider_paths.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("provider_paths_contract", result.returncode == 0, detail[:300])
+
+
 def test_aig_request_contract():
     """AIG request validation and derived routing flags remain unit-testable."""
     result = subprocess.run(
@@ -1968,13 +1985,13 @@ def test_agent_operations_contract():
     report("agent_operations_repeat_requires_agent_words", "(?:agents?|subagents?|batch|agent\\s+(?:batch|run|workflow))" in cognition and "do\\s+it\\s+again" not in cognition)
     report("agent_operations_deterministic_fallback", "async function ensureAgentLaunch" in cognition and "_fallbackAgentTasks" in cognition)
     report("agent_operations_nonempty_action_success", "Array.isArray(action.result.tasks) && action.result.tasks.length > 0" in cognition)
-    report("agent_operations_deferred_signal", "deferredSignal" in cognition and "!deferredSignal && !!(signalContext && signalContext.authorized)" in open("core/js/aig.js").read())
+    report("agent_operations_deferred_signal", "deferredSignal" in cognition and "!deferredSignal && !!(signalContext && signalContext.authorized)" in open("core/js/providers/aig.js").read())
     report("agent_operations_collaboration_metadata", "synthesis[\"depends_on\"]" in bridge and "signal_on_complete" in cognition)
     report("agent_operations_signal_authorized", "getBridgeCapabilityHeaders" in cognition and "signal_on_complete and not self._require_bridge_capability()" in bridge)
     report("agent_operations_signal_fails_closed", "typeof canAuthorizeSignalDelivery === 'function'" in cognition and ": false;" in cognition)
     report("agent_operations_scoped_action_context", "actionContext = { userMessage:" in cognition and "cap.run(spec.args || {}, actionContext)" in cognition)
     report("agent_operations_no_shared_user_context", "_activeAgentUserMessage" not in cognition)
-    report("agent_operations_lm_context", "Cognition.executeActions(candidate, { userMessage: sQuestion })" in open("core/js/lm-studio.js").read())
+    report("agent_operations_lm_context", "Cognition.executeActions(candidate, { userMessage: sQuestion })" in open("core/js/providers/lm-studio.js").read())
     report("agent_operations_finalizing_steer_rejected", 'task.get("status") == "finalizing"' in bridge and "task is finalizing completion delivery" in bridge)
     report("agent_operations_dismiss_endpoint", 'parsed_path.startswith("/v1/subagent/")' in bridge and "def _subagent_dismiss" in bridge)
     report("agent_operations_dismiss_control", "function dismissAgent" in ui and "agent-card-dismiss" in ui)
@@ -2481,7 +2498,7 @@ def main():
         ("Python Integrity", [test_python_syntax, test_artifact_filename_validation, test_bridge_health_contract, test_aig_request_contract, test_aig_preflight_contract, test_http_routes_contract]),
         ("Local Speech Contract", [test_local_speech_contract, test_local_speech_http_contract, test_voice_module_contracts]),
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
-        ("HTML Model Selector", [test_model_selector, test_model_catalog_contract]),
+        ("HTML Model Selector", [test_model_selector, test_model_catalog_contract, test_provider_paths_contract]),
         ("Protected Memory Settings", [test_protected_memory_settings_contract]),
         ("JS Routing Functions", [test_js_routing_functions]),
         ("Learning Contract", [test_learning_static_contract]),

@@ -39,7 +39,7 @@ publisher/model API identifier. The current mappings are intentionally present
 in both places below because the browser direct-provider route and AIG bridge
 route run in different processes:
 
-- `core/js/copilot.js` maps direct GitHub Models requests.
+- `core/js/providers/copilot.js` maps direct GitHub Models requests.
 - `tools/bridge/core.py` maps AIG's GitHub Models-compatible responder route.
 
 For every selectable direct GitHub Models value, both mappings must agree on the

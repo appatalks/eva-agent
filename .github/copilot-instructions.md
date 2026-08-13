@@ -11,10 +11,10 @@ This project is a simple web UI for interacting with OpenAI, Google Generative m
 ## Key Files
 - `index.html`: UI, settings, and script wiring.
 - `core/js/options.js`: Model routing and UI behavior.
-- `core/js/gpt-core.js`: OpenAI chat/completions logic.
-- `core/js/gl-google.js`: Gemini logic.
-- `core/js/lm-studio.js`: Local inference via lm-studio OpenAI-compatible API.
-- `core/js/dalle3.js`: Image generation.
+- `core/js/providers/openai.js`: OpenAI chat/completions logic.
+- `core/js/providers/gemini.js`: Gemini logic.
+- `core/js/providers/lm-studio.js`: Local inference via lm-studio OpenAI-compatible API.
+- `core/js/providers/image-generation.js`: Image generation.
 - `config.json`: Local API keys (not committed).
 
 ## Model Routing
@@ -23,8 +23,8 @@ This project is a simple web UI for interacting with OpenAI, Google Generative m
 - If a model uses the OpenAI Chat Completions API, route to `trboSend()`.
 - If a model uses a different API, create a new send function in `core/js/*.js` and route accordingly.
  - `gpt-5-mini`: treated like other OpenAI chat models unless documentation calls for different parameters.
- - `latest` alias: allowed in the selector; treated as an OpenAI model value. If OpenAI updates how `latest` resolves (e.g., via Responses API), adjust `gpt-core.js` accordingly.
-- **GitHub Copilot models** (`copilot-*` prefix): route to `copilotSend()` in `core/js/copilot.js`. Uses GitHub Models API (`models.inference.ai.azure.com`) with a GitHub PAT. The `copilot-` prefix is stripped before sending to the API.
+ - `latest` alias: allowed in the selector; treated as an OpenAI model value. If OpenAI updates how `latest` resolves (e.g., via Responses API), adjust `core/js/providers/openai.js` accordingly.
+- **GitHub Copilot models** (`copilot-*` prefix): route to `copilotSend()` in `core/js/providers/copilot.js`. Uses GitHub Models API (`models.inference.ai.azure.com`) with a GitHub PAT. The `copilot-` prefix is stripped before sending to the API.
 - **Copilot ACP** (`copilot-acp`): route to `copilotSend()` which detects ACP mode and proxies through `tools/acp_bridge.py` (local Python server bridging Copilot CLI's Agent Client Protocol). Uses whatever model the Copilot CLI is configured for (GPT-4o, Claude, Gemini, etc.). No PAT needed — auth is handled by `copilot auth login`.
 
 ## Settings Panel
@@ -99,4 +99,4 @@ This project is a simple web UI for interacting with OpenAI, Google Generative m
   - Node.js is `>= 24`.
   - Python is `>= 3.12`.
   - Copilot CLI authentication is active (`copilot auth login` completed).
-- Do not remove localhost ACP fallback behavior in `core/js/copilot.js` until the single-host milestone is marked complete.
+- Do not remove localhost ACP fallback behavior in `core/js/providers/copilot.js` until the single-host milestone is marked complete.

@@ -123,11 +123,11 @@ class ACPConversationSessionTests(unittest.TestCase):
             with open(os.path.join(REPO_DIR, relative_path), encoding="utf-8") as handle:
                 return handle.read()
 
-        aig_source = source("core/js/aig.js")
+        aig_source = source("core/js/providers/aig.js")
         cognition_source = source("core/js/cognition.js")
-        copilot_source = source("core/js/copilot.js")
-        gpt_source = source("core/js/gpt-core.js")
-        lm_source = source("core/js/lm-studio.js")
+        copilot_source = source("core/js/providers/copilot.js")
+        gpt_source = source("core/js/providers/openai.js")
+        lm_source = source("core/js/providers/lm-studio.js")
 
         self.assertIn("sessionId: sessionId", aig_source)
         self.assertIn("session_id: sessionId", aig_source)

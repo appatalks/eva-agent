@@ -5,7 +5,7 @@ const vm = require('vm');
 
 const html = fs.readFileSync('index.html', 'utf8');
 const options = fs.readFileSync('core/js/options.js', 'utf8');
-const copilot = fs.readFileSync('core/js/copilot.js', 'utf8');
+const copilot = fs.readFileSync('core/js/providers/copilot.js', 'utf8');
 const bridge = fs.readFileSync('tools/bridge/core.py', 'utf8');
 const routingSource = fs.readFileSync('core/js/model-routing.js', 'utf8');
 
@@ -100,7 +100,7 @@ assert.ok(directCopilot.length > 0, 'at least one direct GitHub Models value mus
 const browserMap = objectMap(copilot, 'var _modelMap = {', 'single');
 const bridgeMap = objectMap(bridge, '_github_model_map = {', 'double');
 for (const model of directCopilot) {
-  assert.ok(browserMap.has(model), `${model} must map in core/js/copilot.js`);
+  assert.ok(browserMap.has(model), `${model} must map in core/js/providers/copilot.js`);
   assert.ok(bridgeMap.has(model), `${model} must map in tools/bridge/core.py`);
   assert.strictEqual(browserMap.get(model), bridgeMap.get(model),
     `${model} must use the same GitHub Models API identifier in browser and bridge routes`);

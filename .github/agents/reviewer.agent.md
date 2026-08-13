@@ -39,7 +39,7 @@ Apply high reasoning effort. This is the deepest analysis role in the loop.
 - OpenAI Chat Completions models should route to `trboSend()` unless documentation requires a different API.
 - Preserve OpenAI special cases: `o1*` filters developer messages and uses `temperature = 1`; `o3-mini` includes `reasoning_effort` and omits temperature; `gpt-5*` uses `max_completion_tokens`, may use `top_p`, and omits `temperature` and `stop`.
 - `copilot-*` models route through `copilotSend()` and strip the prefix for GitHub Models API calls.
-- `copilot-acp` routes through the ACP bridge and must preserve localhost fallback behavior in `core/js/copilot.js`.
+- `copilot-acp` routes through the ACP bridge and must preserve localhost fallback behavior in `core/js/providers/copilot.js`.
 - Eva AIG changes must preserve `/v1/aig/chat`, memory injection, ACP fallback, and GitHub PAT injection behavior unless the request explicitly changes them.
 
 ### Browser UI And State

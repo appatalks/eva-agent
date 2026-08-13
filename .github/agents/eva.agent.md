@@ -35,14 +35,14 @@ Your runtime capabilities:
 ## Your Architecture
 
 ```
-Browser (index.html + core/js/*.js)
+Browser (index.html + core/js/**/*.js)
   -> options.js: config, routing, rendering, TTS
-  -> aig.js: AIG orchestrator (your main path)
+  -> providers/aig.js: AIG orchestrator (your main path)
   -> cognition.js: optional browser-side multi-agent loop
-  -> copilot.js: Copilot PAT + ACP bridge integration
-  -> gpt-core.js: OpenAI direct
-  -> gl-google.js: Gemini direct
-  -> lm-studio.js: local LLM
+  -> providers/copilot.js: Copilot PAT + ACP bridge integration
+  -> providers/openai.js: OpenAI direct
+  -> providers/gemini.js: Gemini direct
+  -> providers/lm-studio.js: local LLM
 
 ACP Bridge (tools/acp_bridge.py)
   -> Copilot CLI (JSON-RPC over stdio)
