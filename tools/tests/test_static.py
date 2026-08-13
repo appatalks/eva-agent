@@ -65,6 +65,7 @@ def test_required_files():
         "core/js/settings/goals.js",
         "core/js/settings/runtime.js",
         "core/js/settings/cron.js",
+        "core/js/settings/background.js",
         "core/js/features/skills/auto-learn.js",
         "core/js/gpt-core.js",
         "core/js/gl-google.js",
@@ -96,6 +97,7 @@ def test_required_files():
         "tools/tests/test_aig_request.py",
         "tools/tests/test_frontend_script_order.js",
         "tools/tests/test_bridge_client.js",
+        "tools/tests/test_background_settings.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -1553,6 +1555,22 @@ def test_bridge_client_contract():
     report("bridge_client_contract", result.returncode == 0, detail[:300])
 
 
+def test_background_settings_ui_contract():
+    """Background control payloads and explicit proposal approval remain stable."""
+    node = shutil.which("node")
+    if not node:
+        report("background_settings_ui_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_background_settings.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("background_settings_ui_contract", result.returncode == 0, detail[:300])
+
+
 def test_aig_request_contract():
     """AIG request validation and derived routing flags remain unit-testable."""
     result = subprocess.run(
@@ -2199,7 +2217,7 @@ def main():
         ("Pages Comparison", [test_pages_comparison_contract]),
         ("Seed File", [test_seed_file]),
         ("Goals Static Contract", [test_goals_static_contract, test_goals_settings_contract, test_runtime_settings_contract, test_cron_settings_contract, test_skill_auto_learn_contract, test_frontend_script_order_contract, test_bridge_client_contract]),
-        ("Background Static Contract", [test_background_static_contract]),
+        ("Background Static Contract", [test_background_static_contract, test_background_settings_ui_contract]),
         ("Agent Operations Contract", [test_agent_operations_contract, test_agent_operations_behavior]),
         ("MCP Config", [test_mcp_config]),
         ("Behavioral Eval", [test_eval_contract]),
