@@ -5,7 +5,7 @@ const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
 
-const source = fs.readFileSync('core/js/sessions.js', 'utf8');
+const source = fs.readFileSync('core/js/features/sessions/explorer.js', 'utf8');
 const start = source.indexOf('function evaPlannedTerminalCommandIsSafe');
 const end = source.indexOf('\nfunction initTerminal', start);
 assert.ok(start >= 0 && end > start);

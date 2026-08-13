@@ -47,7 +47,7 @@ without a documented compatibility plan.
 | Workspaces | `core/js/features/workspaces/monitor.js` | Electron preload/main and bridge workspaces are immediate collaborators |
 | Assets library | `core/js/features/assets/library.js` | Generated and workspace file library |
 | Agent Operations | `core/js/features/agents/operations.js` | Agent cards and memory topology view |
-| Sessions and profiles | `core/js/sessions.js`, `idb-store.js`, `profiles.js` | Storage contracts are compatibility-sensitive |
+| Sessions and profiles | `core/js/features/sessions/explorer.js`, `idb-store.js`, `profiles.js` | Storage contracts are compatibility-sensitive |
 
 ## Migration Rules
 

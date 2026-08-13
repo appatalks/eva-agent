@@ -292,7 +292,8 @@ core/
     dialogs.js             Promise-based in-app text prompt for Electron
     dalle3.js              Image generation via gpt-image-1 (dalle3Send)
     idb-store.js           IndexedDB storage backend (sessions + blobs)
-    sessions.js            Session persistence, legacy-visible restoration,
+    features/sessions/explorer.js
+                 Session persistence, legacy-visible restoration,
                  terminal/xterm renderer and dock navigation
     voice.js               Wake-word "Eva" via Web Speech API
     features/automation/camera.js
@@ -1901,7 +1902,7 @@ refusal, recall, routing, capability, injection_resistance. Mock mode reads
 
 ## Session Explorer
 
-`core/js/sessions.js` + `core/js/idb-store.js`:
+`core/js/features/sessions/explorer.js` + `core/js/idb-store.js`:
 
 - **Storage:** IndexedDB (`eva_sessions_db`) with `sessions` + `blobs` object stores
 - **Auto-save** after every response; each launch starts a fresh chat while saved

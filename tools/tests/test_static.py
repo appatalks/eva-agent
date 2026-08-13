@@ -81,7 +81,7 @@ def test_required_files():
         "core/js/aig.js",
         "core/js/dalle3.js",
         "core/js/external.js",
-        "core/js/sessions.js",
+        "core/js/features/sessions/explorer.js",
         "core/js/voice.js",
         "core/js/features/agents/operations.js",
         "core/js/features/assets/library.js",
@@ -116,6 +116,7 @@ def test_required_files():
         "tools/tests/test_agents_api.js",
         "tools/tests/test_skills_api.js",
         "tools/tests/test_workspaces_api.js",
+        "tools/tests/test_sessions_api.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -322,7 +323,7 @@ def test_local_speech_contract():
         options = f.read()
     with open("core/js/settings/audio.js") as f:
         audio_settings = f.read()
-    with open("core/js/sessions.js") as f:
+    with open("core/js/features/sessions/explorer.js") as f:
         session_ui = f.read()
     with open("install.sh") as f:
         installer = f.read()
@@ -782,7 +783,7 @@ def test_learning_static_contract():
         browser = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
-    with open("core/js/sessions.js") as f:
+    with open("core/js/features/sessions/explorer.js") as f:
         session_ui = f.read()
     with open("index.html") as f:
         html = f.read()
@@ -888,7 +889,7 @@ def test_signal_and_github_mcp_contract():
     report("signal_deterministic_fallback", "function requestedSignalMessage" in options_js and "renderOptions.signalMessage" in options_js)
     report("signal_repeat_memory", "var _lastDeliveredSignal = null;" in options_js and "var _signalDeliveryGeneration = 0;" in options_js and "function captureSignalDeliveryContext" in options_js and "function isSignalDeliveryContextValid" in options_js)
     report("signal_repeat_marker_precedence", "var forceSignalRepeat = !!(signalContext && signalContext.repeat);" in options_js and "if (forceSignalRepeat) return '';" in options_js)
-    with open("core/js/sessions.js") as f:
+    with open("core/js/features/sessions/explorer.js") as f:
         sessions_js = f.read()
     with open("core/js/learning.js") as f:
         learning_js = f.read()
@@ -1196,7 +1197,7 @@ def test_security_alert_contract():
         mcp_json = f.read()
     with open("tools/sqlite_memory.py") as f:
         sqlite_memory = f.read()
-    with open("core/js/sessions.js") as f:
+    with open("core/js/features/sessions/explorer.js") as f:
         sessions_js = f.read()
     with open("tools/web_search_mcp.py") as f:
         web_search = f.read()
@@ -1229,7 +1230,7 @@ def test_sidebar_workflow_contract():
     """Sidebar workflows remain editable, collapsible, and profile-aware."""
     with open("index.html") as f:
         html = f.read()
-    with open("core/js/sessions.js") as f:
+    with open("core/js/features/sessions/explorer.js") as f:
         sessions_js = f.read()
     with open("core/js/features/skills/library.js") as f:
         skills_js = f.read()
@@ -1293,7 +1294,7 @@ def test_sidebar_workflow_contract():
     report("workflow_native_harness_api", "core/js/harness-control.js" in html and "var EvaHarness" in harness_js and "function execute" in harness_js and "function capabilities" in harness_js and "function resolveSurface" in harness_js and "function resolveNavigationRequest" in harness_js and "nativeOnly: true" in harness_js and all(target in harness_js for target in ("agent_operations", "voice_control", "models", "personality", "goals", "background_jobs", "schedules", "accounts", "tools_memory", "learning", "profile")))
     report("workflow_native_harness_marker", "EVA_HARNESS" in options_js and "EvaHarness.execute" in options_js and "browserLaunch = null;" in options_js and "desktopLaunch = null;" in options_js and "EvaHarness.promptContract" in prompts_js and options_js.find("var desktopLaunch = null;") < options_js.find("if (harnessActions.length) {\n    browserLaunch = null;"))
     report("workflow_native_github_import", "import_github" in harness_js and "repository_url" in harness_js and "EvaWorkspaces.importGitHub" in harness_js and "nativeRoute.action && nativeRoute.action !== 'navigate'" in options_js and "route.action && route.action !== 'navigate'" in voice_js)
-    report("workflow_native_terminal_command", "run_terminal_command" in harness_js and "runEvaTerminalCommand" in harness_js and "function runEvaTerminalCommand" in open("core/js/sessions.js").read())
+    report("workflow_native_terminal_command", "run_terminal_command" in harness_js and "runEvaTerminalCommand" in harness_js and "function runEvaTerminalCommand" in open("core/js/features/sessions/explorer.js").read())
     report("workflow_native_workspace_description", "describe_workspaces" in harness_js and "EvaWorkspaces.describe" in harness_js and "Promise.resolve(EvaWorkspaces.describe())" in harness_js and "await Promise.resolve" in options_js and "Promise.resolve(pendingResult)" in voice_js and "evaTextPromptCancel()" in voice_js)
 
 
@@ -1305,7 +1306,7 @@ def test_workspace_terminal_contract():
         standalone_preload = f.read()
     with open("standalone/terminal-broker.js") as f:
         broker = f.read()
-    with open("core/js/sessions.js") as f:
+    with open("core/js/features/sessions/explorer.js") as f:
         sessions_js = f.read()
     with open("standalone/package.json") as f:
         package = json.load(f)
@@ -1342,7 +1343,7 @@ def test_coding_workspace_contract():
     permission_ui = open("core/js/features/permissions/acp.js").read()
     with open("core/js/features/assets/library.js") as f:
         assets_ui = f.read()
-    with open("core/js/sessions.js") as f:
+    with open("core/js/features/sessions/explorer.js") as f:
         sessions_js = f.read()
     with open("core/style.css") as f:
         style_css = f.read()
@@ -1770,6 +1771,22 @@ def test_workspaces_api_contract():
     report("workspaces_api_contract", result.returncode == 0, detail[:300])
 
 
+def test_sessions_api_contract():
+    """Moved Sessions Explorer retains global session and terminal entry points."""
+    node = shutil.which("node")
+    if not node:
+        report("sessions_api_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_sessions_api.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("sessions_api_contract", result.returncode == 0, detail[:300])
+
+
 def test_aig_request_contract():
     """AIG request validation and derived routing flags remain unit-testable."""
     result = subprocess.run(
@@ -1830,12 +1847,12 @@ def test_agent_operations_contract():
         cognition = f.read()
     with open("core/js/profiles.js") as f:
         profiles = f.read()
-    with open("core/js/sessions.js") as f:
+    with open("core/js/features/sessions/explorer.js") as f:
         sessions = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
     permission_ui = open("core/js/features/permissions/acp.js").read()
-    with open("core/js/sessions.js") as f:
+    with open("core/js/features/sessions/explorer.js") as f:
         session_ui = f.read()
     with open("index.html") as f:
         html = f.read()
@@ -2411,7 +2428,7 @@ def main():
         ("Reasoning Effort", [test_reasoning_effort_contract]),
         ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract, test_issue_130_latency_contract, test_prompt_budget_contract, test_streaming_contract, test_acp_permissions_ui_contract]),
         ("Security Alerts", [test_security_alert_contract, test_alerts_settings_ui_contract, test_proactive_notifications_contract]),
-        ("Sidebar Workflows", [test_sidebar_workflow_contract, test_browser_agent_api_contract, test_camera_api_contract, test_assets_api_contract, test_agents_api_contract, test_skills_api_contract, test_workspaces_api_contract]),
+        ("Sidebar Workflows", [test_sidebar_workflow_contract, test_browser_agent_api_contract, test_camera_api_contract, test_assets_api_contract, test_agents_api_contract, test_skills_api_contract, test_workspaces_api_contract, test_sessions_api_contract]),
         ("Workspace Terminal", [test_workspace_terminal_contract]),
         ("Coding Workspaces", [test_coding_workspace_contract]),
         ("Pages Comparison", [test_pages_comparison_contract]),
