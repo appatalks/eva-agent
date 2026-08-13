@@ -1,4 +1,4 @@
-// core/js/camera.js
+// core/js/features/automation/camera.js
 // Eva's "eyes": a thin frontend controller over the bridge camera sensor.
 //
 //   POST /v1/camera/start   -> start the local presence worker
