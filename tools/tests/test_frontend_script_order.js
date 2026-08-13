@@ -17,6 +17,7 @@ const optionsIndex = scriptIndex('core/js/options.js');
   'core/js/model-routing.js',
   'core/js/runtime/bridge-client.js',
   'core/js/settings/model-settings.js',
+  'core/js/settings/prompts.js',
   'core/js/settings/goals.js',
   'core/js/settings/runtime.js',
   'core/js/settings/cron.js',
@@ -38,6 +39,7 @@ const extractedSources = [
   'core/js/model-routing.js',
   'core/js/runtime/bridge-client.js',
   'core/js/settings/model-settings.js',
+  'core/js/settings/prompts.js',
   'core/js/settings/goals.js',
   'core/js/settings/runtime.js',
   'core/js/settings/cron.js',
@@ -62,7 +64,12 @@ extractedSources.forEach((path) => {
   vm.runInNewContext(fs.readFileSync(path, 'utf8'), sandbox, { filename: path });
 });
 assert.ok(sandbox.EvaModelRouting, 'model routing module must export EvaModelRouting');
+assert.ok(sandbox.PERSONALITY_PRESETS, 'prompt settings must export PERSONALITY_PRESETS');
+assert.ok(sandbox._STALE_PRESETS, 'prompt settings must export _STALE_PRESETS');
 [
+  'getSystemPrompt',
+  'applyPersonalityPreset',
+  'initSystemPrompt',
   'backgroundBridgeRequest',
   'getModelMaxTokens',
   'initGoals',
@@ -94,5 +101,15 @@ assert.ok(!optionsSource.includes('function initACPPermissions()'),
   'options.js must not shadow the extracted ACP permission owner');
 assert.ok(!optionsSource.includes('var _acpPermissionState ='),
   'options.js must not recreate extracted ACP permission state');
+assert.ok(!optionsSource.includes('var PERSONALITY_PRESETS ='),
+  'options.js must not shadow the extracted prompt presets owner');
+assert.ok(!optionsSource.includes('function getSystemPrompt()'),
+  'options.js must not shadow the extracted system prompt owner');
+assert.ok(!optionsSource.includes('function applyPersonalityPreset()'),
+  'options.js must not shadow the extracted personality preset owner');
+assert.ok(!optionsSource.includes('var _STALE_PRESETS ='),
+  'options.js must not recreate stale prompt migration state');
+assert.ok(!optionsSource.includes('function initSystemPrompt()'),
+  'options.js must not shadow the extracted prompt initialization owner');
 
 console.log(`frontend script-order tests: PASS (${scriptSources.length} scripts)`);

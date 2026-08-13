@@ -62,6 +62,7 @@ def test_required_files():
         "core/js/model-routing.js",
         "core/js/runtime/bridge-client.js",
         "core/js/settings/model-settings.js",
+        "core/js/settings/prompts.js",
         "core/js/settings/goals.js",
         "core/js/settings/runtime.js",
         "core/js/settings/cron.js",
@@ -93,6 +94,7 @@ def test_required_files():
         "tools/tests/test_cognition_provider.js",
         "tools/tests/test_provider_token_budget.js",
         "tools/tests/test_model_catalog.js",
+        "tools/tests/test_prompts_settings.js",
         "tools/tests/test_goals_settings.js",
         "tools/tests/test_runtime_settings.js",
         "tools/tests/test_cron_settings.js",
@@ -743,7 +745,7 @@ def test_js_routing_functions():
         "copilotSend": "core/js/copilot.js",
         "dalle3Send": "core/js/dalle3.js",
         "renderEvaResponse": "core/js/options.js",
-        "getSystemPrompt": "core/js/options.js",
+        "getSystemPrompt": "core/js/settings/prompts.js",
         "getLmStudioBaseUrl": "core/js/options.js",
         "getLmStudioModel": "core/js/options.js",
     }
@@ -1263,6 +1265,7 @@ def test_sidebar_workflow_contract():
     dialogs_js = open("core/js/dialogs.js").read()
     voice_js = open("core/js/voice.js").read()
     harness_js = open("core/js/harness-control.js").read()
+    prompts_js = open("core/js/settings/prompts.js").read()
     report("workflow_text_prompt_lazy_binding", "function _bindEvaTextPrompt" in dialogs_js and "_bindEvaTextPrompt();" in dialogs_js and "dialog.dataset.bound" in dialogs_js)
     report("workflow_text_prompt_voice_handoff", "function evaTextPromptConsumeVoice" in dialogs_js and "function evaTextPromptIsOpen" in dialogs_js and "function _evaGithubPromptCorrection" in dialogs_js and "github_repository_url" in dialogs_js and "Say the corrected repository name" in dialogs_js and "form.requestSubmit()" in dialogs_js and "dispatchEvent(new Event('input'" in dialogs_js and "evaTextPromptConsumeVoice(transcript)" in options_js and "evaTextPromptConsumeVoice(transcript)" in voice_js)
     report("workflow_native_field_control", "function evaTextPromptDescribe" in dialogs_js and "function evaTextPromptSetField" in dialogs_js and "function evaTextPromptSubmit" in dialogs_js and "inspect_form" in harness_js and "set_field" in harness_js and "submit_form" in harness_js and "CURRENT NATIVE FORM" in harness_js)
@@ -1275,7 +1278,7 @@ def test_sidebar_workflow_contract():
     report("workflow_voice_graph_disabled", "VOICE_MEMORY_GRAPH_ENABLED = false" in options_js and "if (VOICE_MEMORY_GRAPH_ENABLED) _vvStartMemoryGraph();" in options_js and ".vv-memory-graph" in eva_theme and "display: none" in eva_theme)
     report("workflow_compact_voice_reduced_motion", "@media (prefers-reduced-motion: reduce)" in eva_theme and ".eva-sidebar-voice-shell-scan" in eva_theme and "animation: none;" in eva_theme)
     report("workflow_native_harness_api", "core/js/harness-control.js" in html and "var EvaHarness" in harness_js and "function execute" in harness_js and "function capabilities" in harness_js and "function resolveSurface" in harness_js and "function resolveNavigationRequest" in harness_js and "nativeOnly: true" in harness_js and all(target in harness_js for target in ("agent_operations", "voice_control", "models", "personality", "goals", "background_jobs", "schedules", "accounts", "tools_memory", "learning", "profile")))
-    report("workflow_native_harness_marker", "EVA_HARNESS" in options_js and "EvaHarness.execute" in options_js and "browserLaunch = null;" in options_js and "desktopLaunch = null;" in options_js and "EvaHarness.promptContract" in options_js and options_js.find("var desktopLaunch = null;") < options_js.find("if (harnessActions.length) {\n    browserLaunch = null;"))
+    report("workflow_native_harness_marker", "EVA_HARNESS" in options_js and "EvaHarness.execute" in options_js and "browserLaunch = null;" in options_js and "desktopLaunch = null;" in options_js and "EvaHarness.promptContract" in prompts_js and options_js.find("var desktopLaunch = null;") < options_js.find("if (harnessActions.length) {\n    browserLaunch = null;"))
     report("workflow_native_github_import", "import_github" in harness_js and "repository_url" in harness_js and "EvaWorkspaces.importGitHub" in harness_js and "nativeRoute.action && nativeRoute.action !== 'navigate'" in options_js and "route.action && route.action !== 'navigate'" in voice_js)
     report("workflow_native_terminal_command", "run_terminal_command" in harness_js and "runEvaTerminalCommand" in harness_js and "function runEvaTerminalCommand" in open("core/js/sessions.js").read())
     report("workflow_native_workspace_description", "describe_workspaces" in harness_js and "EvaWorkspaces.describe" in harness_js and "Promise.resolve(EvaWorkspaces.describe())" in harness_js and "await Promise.resolve" in options_js and "Promise.resolve(pendingResult)" in voice_js and "evaTextPromptCancel()" in voice_js)
@@ -1512,6 +1515,22 @@ def test_cron_settings_contract():
     )
     detail = (result.stderr or result.stdout).strip()
     report("cron_settings_contract", result.returncode == 0, detail[:300])
+
+
+def test_prompts_settings_contract():
+    """System prompt presets retain storage, migration, and harness behavior."""
+    node = shutil.which("node")
+    if not node:
+        report("prompts_settings_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_prompts_settings.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("prompts_settings_contract", result.returncode == 0, detail[:300])
 
 
 def test_skill_auto_learn_contract():
@@ -2272,7 +2291,7 @@ def main():
         ("Coding Workspaces", [test_coding_workspace_contract]),
         ("Pages Comparison", [test_pages_comparison_contract]),
         ("Seed File", [test_seed_file]),
-        ("Goals Static Contract", [test_goals_static_contract, test_goals_settings_contract, test_runtime_settings_contract, test_cron_settings_contract, test_skill_auto_learn_contract, test_frontend_script_order_contract, test_bridge_client_contract]),
+        ("Goals Static Contract", [test_goals_static_contract, test_goals_settings_contract, test_runtime_settings_contract, test_cron_settings_contract, test_prompts_settings_contract, test_skill_auto_learn_contract, test_frontend_script_order_contract, test_bridge_client_contract]),
         ("Background Static Contract", [test_background_static_contract, test_background_settings_ui_contract]),
         ("Agent Operations Contract", [test_agent_operations_contract, test_agent_operations_behavior]),
         ("MCP Config", [test_mcp_config]),
