@@ -641,27 +641,6 @@ async function syncLocalVoicesEngine(restartForProfile) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Proactive notifications — poll the bridge and surface findings in the chat
-// ---------------------------------------------------------------------------
-var _notifState = { polling: false, timer: null, intervalMs: 60000 };
-
-function injectProactiveBubble(notif) {
-  var txtOutput = document.getElementById('txtOutput');
-  if (!txtOutput) return;
-  if (typeof hideEvaWelcome === 'function') hideEvaWelcome();
-  var title = escapeHtml(String(notif.title || 'Eva'));
-  var body = escapeHtml(String(notif.body || '')).replace(/\n/g, '<br>');
-  var bubble =
-    '<div class="chat-bubble eva-bubble eva-proactive">' +
-    '<span class="eva">Eva:</span> ' +
-    '<span class="eva-proactive-badge">Proactive</span> ' +
-    '<strong>' + title + '</strong>' +
-    '<div class="md">' + body + '</div></div>';
-  txtOutput.innerHTML += bubble;
-  txtOutput.scrollTop = txtOutput.scrollHeight;
-}
-
 function injectWorkspaceStatusBubble(message, kind) {
   message = String(message || '').trim();
   if (!message) return;
@@ -954,54 +933,6 @@ function _agentConfirmEcho(userMsg, decision) {
       speakText(reply);
     }
   } catch (_) {}
-}
-
-async function pollNotifications() {
-  if (_notifState.polling) return;
-  _notifState.polling = true;
-  try {
-    var options = { method: 'GET' };
-    if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
-      options.signal = AbortSignal.timeout(4000);
-    }
-    var data = await backgroundBridgeRequest('/v1/notifications?unseen_only=1&limit=10', options);
-    var items = (data && Array.isArray(data.notifications)) ? data.notifications : [];
-    if (!items.length) return;
-    var seenIds = [];
-    var voiceText = [];
-    items.forEach(function(notif) {
-      injectProactiveBubble(notif);
-      var channels = Array.isArray(notif.channels) ? notif.channels : ['chat'];
-      if (channels.indexOf('voice') !== -1 && notif.body) {
-        voiceText.push(String(notif.title || '') + '. ' + String(notif.body || ''));
-      }
-      if (notif.id) seenIds.push(notif.id);
-    });
-    // Speak queued voice notifications one combined utterance to avoid overlap.
-    if (voiceText.length && typeof speakText === 'function') {
-      try { speakText(voiceText.join('. ')); } catch (_) {}
-    }
-    if (seenIds.length) {
-      try {
-        await backgroundBridgeRequest('/v1/notifications/seen', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ids: seenIds })
-        });
-      } catch (_) {}
-    }
-  } catch (_) {
-    // Bridge unreachable or notifications unavailable; stay quiet and retry next tick.
-  } finally {
-    _notifState.polling = false;
-  }
-}
-
-function initNotifications() {
-  if (_notifState.timer) return;
-  // First poll shortly after load, then on a steady cadence.
-  setTimeout(pollNotifications, 8000);
-  _notifState.timer = setInterval(pollNotifications, _notifState.intervalMs);
 }
 
 var _acpPermissionState = {

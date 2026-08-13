@@ -68,6 +68,7 @@ def test_required_files():
         "core/js/settings/background.js",
         "core/js/settings/alerts.js",
         "core/js/features/skills/auto-learn.js",
+        "core/js/features/notifications/proactive.js",
         "core/js/gpt-core.js",
         "core/js/gl-google.js",
         "core/js/lm-studio.js",
@@ -100,6 +101,7 @@ def test_required_files():
         "tools/tests/test_bridge_client.js",
         "tools/tests/test_background_settings.js",
         "tools/tests/test_alerts_settings.js",
+        "tools/tests/test_proactive_notifications.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -1589,6 +1591,22 @@ def test_alerts_settings_ui_contract():
     report("alerts_settings_ui_contract", result.returncode == 0, detail[:300])
 
 
+def test_proactive_notifications_contract():
+    """Notification polling, voice batching, and seen acknowledgment remain stable."""
+    node = shutil.which("node")
+    if not node:
+        report("proactive_notifications_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_proactive_notifications.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("proactive_notifications_contract", result.returncode == 0, detail[:300])
+
+
 def test_aig_request_contract():
     """AIG request validation and derived routing flags remain unit-testable."""
     result = subprocess.run(
@@ -2228,7 +2246,7 @@ def main():
         ("Learning Contract", [test_learning_static_contract]),
         ("Reasoning Effort", [test_reasoning_effort_contract]),
         ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract, test_issue_130_latency_contract, test_prompt_budget_contract, test_streaming_contract]),
-        ("Security Alerts", [test_security_alert_contract, test_alerts_settings_ui_contract]),
+        ("Security Alerts", [test_security_alert_contract, test_alerts_settings_ui_contract, test_proactive_notifications_contract]),
         ("Sidebar Workflows", [test_sidebar_workflow_contract]),
         ("Workspace Terminal", [test_workspace_terminal_contract]),
         ("Coding Workspaces", [test_coding_workspace_contract]),
