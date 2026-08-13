@@ -283,7 +283,8 @@ core/
                            - Built-in PDF generator (Helvetica, Latin-1, multi-page)
                            - Marker protocol: [[EVA_BROWSER]], [[EVA_DESKTOP]],
                              [[EVA_LOOK]], [[EVA_FILE]]
-    agents.js              Agent Operations scorecard, task detail, steering,
+    features/agents/operations.js
+                 Agent Operations scorecard, task detail, steering,
                            keyed card updates, and memory topology canvas
     features/assets/library.js
                  Main Assets library: generated artifacts plus
@@ -1087,7 +1088,7 @@ Local webcam face and motion detection.
 The **Agents** sidebar destination replaces the chat workspace with a live
 operations scorecard. On screens narrower than 600 px, the Eva theme hides its
 sidebar and exposes the same destination through a compact grid button. The view
-is implemented by `core/js/agents.js`, with structure in `index.html` and styles
+is implemented by `core/js/features/agents/operations.js`, with structure in `index.html` and styles
 in `core/style.css`.
 
 The client polls `GET /v1/agents/overview` every two seconds while the view is
