@@ -6,12 +6,12 @@ const fs = require('fs');
 const vm = require('vm');
 
 async function main() {
-  const optionsSource = fs.readFileSync('core/js/options.js', 'utf8');
-  const helperStart = optionsSource.indexOf('function normalizeModelMaxTokens');
-  const helperEnd = optionsSource.indexOf('function getModelMaxTokens', helperStart);
+  const modelSettingsSource = fs.readFileSync('core/js/settings/model-settings.js', 'utf8');
+  const helperStart = modelSettingsSource.indexOf('function normalizeModelMaxTokens');
+  const helperEnd = modelSettingsSource.indexOf('function getModelMaxTokens', helperStart);
   assert(helperStart >= 0 && helperEnd > helperStart);
   const helperContext = {};
-  vm.runInNewContext(optionsSource.slice(helperStart, helperEnd), helperContext);
+  vm.runInNewContext(modelSettingsSource.slice(helperStart, helperEnd), helperContext);
   assert.strictEqual(helperContext.normalizeModelMaxTokens('32768'), 32768);
   assert.strictEqual(helperContext.normalizeModelMaxTokens('1e2'), null);
   assert.strictEqual(helperContext.normalizeModelMaxTokens('1.0'), null);
