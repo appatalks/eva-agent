@@ -45,6 +45,12 @@ Settings > MCP, and an OpenAI key enables semantic recall with keyword fallback 
 key is configured. Signal delivery requires [signal-cli](https://github.com/AsamK/signal-cli),
 linked with `signal-cli link -n "Eva"`, plus configured sender and recipient numbers.
 
+On Linux, the rebuildable installed source lives in `~/.eva`; mutable standalone
+state defaults to `~/.config/eva-standalone` and can be relocated with
+`EVA_CONFIG_DIR`. This runtime root owns bridge preferences, workspace records,
+browser/desktop agent state, and generated artifacts. The browser-agent profile is
+intentionally persistent so its isolated sign-ins survive across runs.
+
 ### Local Voices and Learning
 
 Install optional local speech dependencies with `./install.sh --voice-deps`. This creates
@@ -674,15 +680,19 @@ class MCPServer:
   3. A valid discovery response selects `2026-07-28` or falls back to
     `2024-11-05` when the server advertises that legacy version. An incompatible
     modern-only server fails clearly. Other unrecognized probe errors or timeouts
-    use the specification's dual-era fallback; if a delayed modern probe causes
-    legacy initialization to return modern `-32022`, Eva retries discovery once.
+    use the specification's dual-era fallback. If an initialization-era server
+    exits after the unsupported modern probe, Eva starts a fresh subprocess before
+    attempting legacy initialization; if a delayed modern probe causes legacy
+    initialization to return modern `-32022`, Eva retries discovery once.
   4. `call_tool(name, arguments, timeout)`: Send `tools/call` JSON-RPC and
     parse content responses. Interactive `input_required` responses are surfaced
     as unavailable until Eva's approval continuation support is implemented.
   5. `stop()`: Terminate the process; failed startup also reaps the child before
     surfacing the error.
 
-**Threading:** Background reader thread per server matches JSON-RPC responses by ID. Stderr is logged to bridge debug log.
+**Threading:** Each spawned process owns its reader and stderr threads. Reader
+generations match JSON-RPC responses by ID and prevent a retired process from
+changing the liveness of its replacement. Stderr is logged to bridge debug log.
 
   **Compatibility scope:** This local path is tested against the official MCP
   Python SDK v2 and TypeScript SDK v2 in addition to a deterministic legacy
@@ -1371,6 +1381,10 @@ crosses preload.
 `core/js/workspaces.js` implements the full main-window monitor:
 
 - run list with project, objective, agent state, branch, and dirty count;
+- context actions to remove a workspace and clear/show Coding Runs, activity,
+  and displayed run results without deleting durable run records;
+- keyboard-accessible Clear/Show controls in the Coding Runs, Activity, and
+  Run Results pane headers;
 - selected run context, policy, linked session, terminal/chat actions, and
   bounded final report;
 - activity history capped at 60 events;
@@ -1715,6 +1729,11 @@ npm run dist
 npm run start:workspace
 ```
 
+After a successful `./install.sh --build`, Eva keeps the newly built AppImage
+plus one rollback build, refreshes the launcher to the exact new artifact, and
+removes older AppImages. The unpacked `linux-unpacked` directory remains a local
+packaging and packaged-E2E target.
+
 **Electron lifecycle:**
 1. `getFreeLocalPort()`: OS-allocated free port
 2. Generate private bridge and workspace capability tokens.
@@ -1879,7 +1898,8 @@ refusal, recall, routing, capability, injection_resistance. Mock mode reads
 `core/js/sessions.js` + `core/js/idb-store.js`:
 
 - **Storage:** IndexedDB (`eva_sessions_db`) with `sessions` + `blobs` object stores
-- **Auto-save** after every response, auto-restore on page load
+- **Auto-save** after every response; each launch starts a fresh chat while saved
+  sessions remain available from Session Explorer
 - **Session index** in localStorage (lightweight), full snapshots in IndexedDB
 - **Migration** from localStorage on first load, plus per-session fallback when a
   legacy `session_<id>` snapshot remains after migration
