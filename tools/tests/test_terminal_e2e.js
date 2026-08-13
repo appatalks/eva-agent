@@ -211,14 +211,14 @@ async function run() {
   await page.keyboard.type("printf '\\033[31mEVA_E2E_ANSI\\033[0m\\n'");
   await page.keyboard.press('Enter');
   await page.waitForFunction(function() {
-    return document.querySelector('.workspace-terminal-host').innerText.includes('EVA_E2E_ANSI');
+    return document.querySelector('.workspace-terminal-host').innerText.split('EVA_E2E_ANSI').length >= 3;
   });
 
   await page.evaluate(function() {
     return window.EvaTerminal.runCommand("printf 'EVA_E2E_DIRECT_COMMAND\\n'");
   });
   await page.waitForFunction(function() {
-    return document.querySelector('.workspace-terminal-host').innerText.includes('EVA_E2E_DIRECT_COMMAND');
+    return document.querySelector('.workspace-terminal-host').innerText.split('EVA_E2E_DIRECT_COMMAND').length >= 3;
   });
 
   const typedCommand = "printf 'EVA_E2E_TYPED_ONLY\\n'";
@@ -230,7 +230,7 @@ async function run() {
   }, typedCommand);
   await page.keyboard.press('Enter');
   await page.waitForFunction(function() {
-    return document.querySelector('.workspace-terminal-host').innerText.includes('EVA_E2E_TYPED_ONLY');
+    return document.querySelector('.workspace-terminal-host').innerText.split('EVA_E2E_TYPED_ONLY').length >= 3;
   });
 
   const beforeReload = await terminalText(page);
