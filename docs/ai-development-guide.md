@@ -48,7 +48,7 @@ local inspection and its privacy implications have been established.
 | AIG request behavior | `core/js/aig.js`, `tools/bridge/aig_request.py`, `tools/bridge/core.py`, `tools/bridge/model_policy.py` | `python3 tools/tests/test_aig_request.py`, then static suite |
 | Local model or MCP behavior | `core/js/lm-studio.js`, `tools/bridge/local_mcp.py`, `tools/bridge/utils.py` | Relevant local-MCP or streaming test |
 | Memory or learning | `tools/bridge/memory.py`, `tools/bridge/cognition.py`, `core/js/learning.js` | Memory or learning contract test |
-| Workspace UI | `core/js/workspaces.js`, `standalone/preload.js`, `standalone/main.js` | Relevant workspace test; packaged E2E for UI/lifecycle changes |
+| Workspace UI | `core/js/features/workspaces/monitor.js`, `standalone/preload.js`, `standalone/main.js` | Relevant workspace test; packaged E2E for UI/lifecycle changes |
 | Workspace bridge lifecycle | `tools/bridge/workspaces.py`, `tools/bridge/core.py`, Electron projection | Workspace unit/e2e test and path-confinement coverage |
 | Voice, camera, browser, or desktop | Owning `core/js/` module plus matching `tools/` worker | Feature-specific focused test or manual capability check |
 
