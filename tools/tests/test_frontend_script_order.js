@@ -23,6 +23,7 @@ const optionsIndex = scriptIndex('core/js/options.js');
   'core/js/settings/cron.js',
   'core/js/settings/background.js',
   'core/js/settings/alerts.js',
+  'core/js/settings/audio.js',
   'core/js/features/skills/auto-learn.js',
   'core/js/features/notifications/proactive.js',
   'core/js/features/permissions/acp.js'
@@ -45,6 +46,7 @@ const extractedSources = [
   'core/js/settings/cron.js',
   'core/js/settings/background.js',
   'core/js/settings/alerts.js',
+  'core/js/settings/audio.js',
   'core/js/features/skills/auto-learn.js',
   'core/js/features/notifications/proactive.js',
   'core/js/features/permissions/acp.js'
@@ -77,6 +79,15 @@ assert.ok(sandbox._STALE_PRESETS, 'prompt settings must export _STALE_PRESETS');
   'cronAdd',
   'initBackground',
   'initAlerts',
+  'getLiveTranslationTarget',
+  'getLiveTranslationModel',
+  'getPreferredAudioInputDeviceId',
+  'getPreferredAudioOutputDeviceId',
+  'refreshAudioDevicePreferences',
+  'applyPreferredAudioOutputDevice',
+  'getPreferredMicrophoneConstraints',
+  'initAudioDevicePreferences',
+  'initAudioPreferences',
   'autoLearnSkill',
   'initNotifications',
   'initACPPermissions'
@@ -111,5 +122,22 @@ assert.ok(!optionsSource.includes('var _STALE_PRESETS ='),
   'options.js must not recreate stale prompt migration state');
 assert.ok(!optionsSource.includes('function initSystemPrompt()'),
   'options.js must not shadow the extracted prompt initialization owner');
+
+[
+  'getLiveTranslationTarget',
+  'getLiveTranslationModel',
+  'getPreferredAudioInputDeviceId',
+  'getPreferredAudioOutputDeviceId',
+  '_audioDeviceStatus',
+  '_addAudioDeviceOptions',
+  'refreshAudioDevicePreferences',
+  'applyPreferredAudioOutputDevice',
+  'getPreferredMicrophoneConstraints',
+  'initAudioDevicePreferences',
+  'initAudioPreferences'
+].forEach((name) => {
+  assert.ok(!optionsSource.includes(`function ${name}(`),
+    `options.js must not shadow the extracted Audio owner: ${name}`);
+});
 
 console.log(`frontend script-order tests: PASS (${scriptSources.length} scripts)`);

@@ -68,6 +68,7 @@ def test_required_files():
         "core/js/settings/cron.js",
         "core/js/settings/background.js",
         "core/js/settings/alerts.js",
+        "core/js/settings/audio.js",
         "core/js/features/skills/auto-learn.js",
         "core/js/features/notifications/proactive.js",
         "core/js/features/permissions/acp.js",
@@ -104,6 +105,7 @@ def test_required_files():
         "tools/tests/test_bridge_client.js",
         "tools/tests/test_background_settings.js",
         "tools/tests/test_alerts_settings.js",
+        "tools/tests/test_audio_settings.js",
         "tools/tests/test_proactive_notifications.js",
         "tools/tests/test_acp_permissions.js",
         "tools/tests/test_fast_route.py",
@@ -310,6 +312,8 @@ def test_local_speech_contract():
         standalone = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
+    with open("core/js/settings/audio.js") as f:
+        audio_settings = f.read()
     with open("core/js/sessions.js") as f:
         session_ui = f.read()
     with open("install.sh") as f:
@@ -354,7 +358,7 @@ def test_local_speech_contract():
     aig_request = open("tools/bridge/aig_request.py").read()
     report("live_translation_dedicated_bridge", "def _translate(self):" in core_bridge and 'elif parsed_path == "/v1/translate":' in core_bridge and "translation_mode = bool(data.get(\"translation_mode\"))" in aig_request)
     report("live_translation_lmstudio_isolation", "if translation_mode:" in core_bridge and "not translation_mode and any(kw in user_message.lower()" in core_bridge and "if not translation_mode:" in core_bridge)
-    report("live_translation_persisted_target", "function getLiveTranslationTarget" in options and "function getLiveTranslationModel" in options and "function getResolvedLiveTranslationModel" in options and "live_translation_target" in options and "live_translation_model" in options and "function _vvSetLiveTranslation" in options)
+    report("live_translation_persisted_target", "function getLiveTranslationTarget" in audio_settings and "function getLiveTranslationModel" in audio_settings and "function getResolvedLiveTranslationModel" in options and "live_translation_target" in audio_settings and "live_translation_model" in audio_settings and "function _vvSetLiveTranslation" in options)
     report("voice_view_selected_mic_fallback", "Selected microphone needs an OpenAI key" in options and "if (whisperKey)" in options)
     report("voice_view_restores_listener_after_translation", "_vvStopListening();\n      _vvStartListening();" in options)
     report("local_speech_recorder_exclusive", "if (_vv._capture) return;" in options and "_vv._capture === capture" in options)
@@ -1261,7 +1265,8 @@ def test_sidebar_workflow_contract():
     report("workflow_http_navigation_blocked", "event.preventDefault()" in standalone_main and "if (!url.startsWith('http://127.0.0.1')" in standalone_main)
     report("workflow_native_context_menu", "webContents.on('context-menu'" in standalone_main and "buildContextMenuTemplate" in standalone_main and os.path.isfile("standalone/context-menu.js") and os.path.isfile("tools/tests/test_context_menu.js"))
     report("workflow_skills_database_copy", "stores it in the database" in html and "stores it in ADX" not in html)
-    report("workflow_audio_settings_persist", "function initAudioPreferences" in options_js and "tts_engine" in options_js and "tts_auto_speak" in options_js and "tts_voice" in options_js)
+    audio_js = open("core/js/settings/audio.js").read()
+    report("workflow_audio_settings_persist", "function initAudioPreferences" in audio_js and "tts_engine" in audio_js and "tts_auto_speak" in audio_js and "tts_voice" in audio_js and "function initAudioPreferences" not in options_js)
     dialogs_js = open("core/js/dialogs.js").read()
     voice_js = open("core/js/voice.js").read()
     harness_js = open("core/js/harness-control.js").read()
@@ -1531,6 +1536,22 @@ def test_prompts_settings_contract():
     )
     detail = (result.stderr or result.stdout).strip()
     report("prompts_settings_contract", result.returncode == 0, detail[:300])
+
+
+def test_audio_settings_contract():
+    """Audio device and voice preference behavior remains executable without browser hardware."""
+    node = shutil.which("node")
+    if not node:
+        report("audio_settings_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_audio_settings.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("audio_settings_contract", result.returncode == 0, detail[:300])
 
 
 def test_skill_auto_learn_contract():
@@ -2291,7 +2312,7 @@ def main():
         ("Coding Workspaces", [test_coding_workspace_contract]),
         ("Pages Comparison", [test_pages_comparison_contract]),
         ("Seed File", [test_seed_file]),
-        ("Goals Static Contract", [test_goals_static_contract, test_goals_settings_contract, test_runtime_settings_contract, test_cron_settings_contract, test_prompts_settings_contract, test_skill_auto_learn_contract, test_frontend_script_order_contract, test_bridge_client_contract]),
+        ("Goals Static Contract", [test_goals_static_contract, test_goals_settings_contract, test_runtime_settings_contract, test_cron_settings_contract, test_prompts_settings_contract, test_audio_settings_contract, test_skill_auto_learn_contract, test_frontend_script_order_contract, test_bridge_client_contract]),
         ("Background Static Contract", [test_background_static_contract, test_background_settings_ui_contract]),
         ("Agent Operations Contract", [test_agent_operations_contract, test_agent_operations_behavior]),
         ("MCP Config", [test_mcp_config]),
