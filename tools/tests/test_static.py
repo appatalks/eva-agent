@@ -82,7 +82,8 @@ def test_required_files():
         "core/js/dalle3.js",
         "core/js/external.js",
         "core/js/features/sessions/explorer.js",
-        "core/js/voice.js",
+        "core/js/features/voice/wake-listener.js",
+        "core/js/features/voice/endpoint.js",
         "core/js/features/agents/operations.js",
         "core/js/features/assets/library.js",
         "core/js/dialogs.js",
@@ -117,6 +118,8 @@ def test_required_files():
         "tools/tests/test_skills_api.js",
         "tools/tests/test_workspaces_api.js",
         "tools/tests/test_sessions_api.js",
+        "tools/tests/test_voice_listener_api.js",
+        "tools/tests/test_voice_endpoint.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -1256,7 +1259,7 @@ def test_sidebar_workflow_contract():
     report("workflow_session_legacy_visible_restore", "function _restoreLegacySessionOutput" in sessions_js and "Restorable transcript" not in sessions_js and "closeWorkbench" in sessions_js)
     report("workflow_session_reveals_chat", "EvaAgents.close" in sessions_js and "Session loaded." in sessions_js)
     report("workflow_session_recovery_copy", "_saveSessionRecoveryCopy" in sessions_js and "session_' + id" in sessions_js and "IDB load failed" in sessions_js and "localStorage.removeItem('session_' + entry.id)" not in open("core/js/idb-store.js").read())
-    report("workflow_voice_conversation_record", "voiceMessages" in sessions_js and "function recordConversationTurn" in sessions_js and "function recordSpokenEvaText" in sessions_js and "recordConversationTurn(command, reply)" in open("core/js/voice.js").read() and "recordConversationTurn(protectedRawText, nativeResult.message)" in options_js)
+    report("workflow_voice_conversation_record", "voiceMessages" in sessions_js and "function recordConversationTurn" in sessions_js and "function recordSpokenEvaText" in sessions_js and "recordConversationTurn(command, reply)" in open("core/js/features/voice/wake-listener.js").read() and "recordConversationTurn(protectedRawText, nativeResult.message)" in options_js)
     report("workflow_sidebar_session_provider", "function getAllSessions" in sessions_js and "updatedAt:" in sessions_js)
     report("workflow_new_session_on_launch", "startFreshSessionOnLaunch();\n\n  // Migrate saved sessions" in sessions_js and "function startFreshSessionOnLaunch()" in sessions_js)
     report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "opens a fresh chat on launch" in options_js)
@@ -1277,7 +1280,7 @@ def test_sidebar_workflow_contract():
     audio_js = open("core/js/settings/audio.js").read()
     report("workflow_audio_settings_persist", "function initAudioPreferences" in audio_js and "tts_engine" in audio_js and "tts_auto_speak" in audio_js and "tts_voice" in audio_js and "function initAudioPreferences" not in options_js)
     dialogs_js = open("core/js/dialogs.js").read()
-    voice_js = open("core/js/voice.js").read()
+    voice_js = open("core/js/features/voice/wake-listener.js").read()
     harness_js = open("core/js/harness-control.js").read()
     prompts_js = open("core/js/settings/prompts.js").read()
     report("workflow_text_prompt_lazy_binding", "function _bindEvaTextPrompt" in dialogs_js and "_bindEvaTextPrompt();" in dialogs_js and "dialog.dataset.bound" in dialogs_js)
@@ -1785,6 +1788,22 @@ def test_sessions_api_contract():
     )
     detail = (result.stderr or result.stdout).strip()
     report("sessions_api_contract", result.returncode == 0, detail[:300])
+
+
+def test_voice_module_contracts():
+    """Moved Voice modules retain wake-listener globals and endpoint behavior."""
+    node = shutil.which("node")
+    if not node:
+        report("voice_listener_api_contract", None, "node is unavailable")
+        report("voice_endpoint_contract", None, "node is unavailable")
+        return
+    for name, path in (
+        ("voice_listener_api_contract", "tools/tests/test_voice_listener_api.js"),
+        ("voice_endpoint_contract", "tools/tests/test_voice_endpoint.js"),
+    ):
+        result = subprocess.run([node, path], capture_output=True, text=True, check=False)
+        detail = (result.stderr or result.stdout).strip()
+        report(name, result.returncode == 0, detail[:300])
 
 
 def test_aig_request_contract():
@@ -2419,7 +2438,7 @@ def main():
         ("Config Safety", [test_config_example_clean, test_no_hardcoded_keys]),
         ("PR Automation", [test_pr_automation_workflows]),
         ("Python Integrity", [test_python_syntax, test_artifact_filename_validation, test_bridge_health_contract, test_aig_request_contract]),
-        ("Local Speech Contract", [test_local_speech_contract, test_local_speech_http_contract]),
+        ("Local Speech Contract", [test_local_speech_contract, test_local_speech_http_contract, test_voice_module_contracts]),
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
         ("HTML Model Selector", [test_model_selector, test_model_catalog_contract]),
         ("Protected Memory Settings", [test_protected_memory_settings_contract]),

@@ -13,6 +13,8 @@ function scriptIndex(path) {
 }
 
 const optionsIndex = scriptIndex('core/js/options.js');
+assert.ok(scriptIndex('core/js/features/voice/endpoint.js') < optionsIndex,
+  'Voice endpoint must load before options.js because Voice View constructs it');
 [
   'core/js/model-routing.js',
   'core/js/runtime/bridge-client.js',
@@ -43,6 +45,8 @@ assert.ok(scriptIndex('core/js/features/workspaces/monitor.js') > optionsIndex,
   'Workspace Monitor must load after options.js because it consumes shared navigation and bridge helpers');
 assert.ok(scriptIndex('core/js/features/sessions/explorer.js') > optionsIndex,
   'Sessions Explorer must load after options.js because it consumes provider and navigation state');
+assert.ok(scriptIndex('core/js/features/voice/wake-listener.js') > optionsIndex,
+  'wake listener must load after options.js because it consumes shared voice command helpers');
 assert.ok(scriptIndex('core/js/features/skills/library.js') > optionsIndex,
   'Skills library must load after options.js because it consumes shared bridge helpers');
 
