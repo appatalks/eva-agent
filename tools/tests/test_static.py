@@ -641,6 +641,8 @@ def test_model_selector():
         architecture_readme = f.read()
     with open("standalone/README.md") as f:
         standalone_readme = f.read()
+    with open("install.sh") as f:
+        installer = f.read()
     artifact_name = f"Eva Standalone-{release_version}.AppImage"
     docs_consistent = (
         artifact_name in readme
@@ -653,6 +655,7 @@ def test_model_selector():
     with open("get-eva.sh") as f:
         remote_installer = f.read()
     report("workspace_installer_launcher_enabled", "--eva-workspace-terminal-v1" in remote_installer and "Created workspace-enabled launcher" in remote_installer)
+    report("installer_prunes_superseded_appimages", "function prune_superseded_appimages" in installer and "keep=2" in installer and "prune_superseded_appimages; refresh_system_launcher" in installer)
 
 
 def test_protected_memory_settings_contract():
@@ -1195,8 +1198,8 @@ def test_sidebar_workflow_contract():
     report("workflow_session_recovery_copy", "_saveSessionRecoveryCopy" in sessions_js and "session_' + id" in sessions_js and "IDB load failed" in sessions_js and "localStorage.removeItem('session_' + entry.id)" not in open("core/js/idb-store.js").read())
     report("workflow_voice_conversation_record", "voiceMessages" in sessions_js and "function recordConversationTurn" in sessions_js and "function recordSpokenEvaText" in sessions_js and "recordConversationTurn(command, reply)" in open("core/js/voice.js").read() and "recordConversationTurn(protectedRawText, nativeResult.message)" in options_js)
     report("workflow_sidebar_session_provider", "function getAllSessions" in sessions_js and "updatedAt:" in sessions_js)
-    report("workflow_new_session_on_launch", "idbMigrateFromLocalStorage().then(function() {\n    newSession();" in sessions_js)
-    report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "newSession();\n      else" in options_js)
+    report("workflow_new_session_on_launch", "idbMigrateFromLocalStorage().then(function() {\n    startFreshSessionOnLaunch();" in sessions_js and "function startFreshSessionOnLaunch()" in sessions_js)
+    report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "opens a fresh chat on launch" in options_js)
     report("workflow_side_panels_click_outside", "function closeSidePanels" in sessions_js and "EVA_SIDE_PANEL_IDS" in sessions_js and "document.addEventListener('click'" in sessions_js)
     report("workflow_workspace_navigation", "function closeAgentOperationsForNavigation" in sessions_js and "#evaAgentsBtn, #evaWorkspacesBtn" in sessions_js and 'id="evaAgentsBtn"' in html and 'id="lcarsWorkspacesBtn"' in html and "EvaAgents.open()" in html and "EvaWorkspaces.openWorkbench()" in html and "!target.closest('#lcarsWorkspacesBtn')" in sessions_js)
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)

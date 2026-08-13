@@ -17,7 +17,9 @@ import urllib.request
 import urllib.error
 from bridge.utils import _safe_child_environment
 
-_ARTIFACTS_DIR = os.path.expanduser("~/.config/eva-standalone/artifacts")
+_ARTIFACTS_DIR = os.path.join(
+    os.path.expanduser(os.environ.get("EVA_CONFIG_DIR", "~/.config/eva-standalone")), "artifacts"
+)
 _TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MCP_MODERN_PROTOCOL_VERSION = "2026-07-28"
 _MCP_LEGACY_PROTOCOL_VERSION = "2024-11-05"

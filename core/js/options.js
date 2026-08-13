@@ -5698,10 +5698,10 @@ function _vvWaitForSpeechEnd(callback) {
 }
 
 function OnLoad() {
-    // Initialize session manager (restores active session if any)
+  // Initialize the session manager, which opens a fresh chat on launch.
     if (typeof initSessions === 'function') initSessions();
 
-    // Only show the welcome message if no session was restored
+  // Show the welcome message until the session manager completes startup.
     var txtOutput = document.getElementById("txtOutput");
     if (!txtOutput.innerHTML.trim()) {
       showWelcome();

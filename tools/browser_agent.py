@@ -28,12 +28,13 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 
-_TRAJ_DIR = os.path.expanduser("~/.config/eva-standalone/browser_trajectories")
+_EVA_CONFIG_DIR = os.path.expanduser(os.environ.get("EVA_CONFIG_DIR", "~/.config/eva-standalone"))
+_TRAJ_DIR = os.path.join(_EVA_CONFIG_DIR, "browser_trajectories")
 # Dedicated, persistent Chrome profile for the agent. Logins (e.g. Amazon) made
 # once in the agent window persist here across runs, so the agent is not a fresh
 # unauthenticated session every time. Kept separate from the user's real Chrome
 # profile so it can run alongside an already-open Chrome.
-_PROFILE_DIR = os.path.expanduser("~/.config/eva-standalone/browser_profile")
+_PROFILE_DIR = os.path.join(_EVA_CONFIG_DIR, "browser_profile")
 # A long-lived Chrome we launch once with a remote-debugging port and reuse: the
 # agent connects over CDP and opens a NEW TAB in that existing window each run,
 # instead of spawning a fresh browser. The window stays open between runs so the

@@ -422,6 +422,21 @@ refresh_system_launcher() {
   ok "System launcher refreshed: $launcher"
 }
 
+prune_superseded_appimages() {
+  local keep=2
+  local appimages=()
+  local appimage
+  while IFS= read -r appimage; do
+    appimages+=("$appimage")
+  done < <(find "$SCRIPT_DIR/standalone/dist" -maxdepth 1 -type f -name 'Eva Standalone-*.AppImage' -print | sort -V)
+  while [ "${#appimages[@]}" -gt "$keep" ]; do
+    appimage="${appimages[0]}"
+    rm -f -- "$appimage"
+    appimages=("${appimages[@]:1}")
+    info "Removed superseded AppImage: $(basename "$appimage")"
+  done
+}
+
 build_appimage() {
   [ -d "$SCRIPT_DIR/standalone" ] || { warn "No standalone/ directory; skipping build."; return; }
   have_cmd npm || { warn "npm not available; cannot build the AppImage."; return; }
@@ -429,7 +444,7 @@ build_appimage() {
   ( cd "$SCRIPT_DIR/standalone" \
       && { [ -d node_modules ] || npm install; } \
       && npm run dist ) \
-    && { ok "AppImage rebuilt under standalone/dist/"; refresh_system_launcher; } \
+    && { ok "AppImage rebuilt under standalone/dist/"; prune_superseded_appimages; refresh_system_launcher; } \
     || err "AppImage build failed (see output above)."
 }
 

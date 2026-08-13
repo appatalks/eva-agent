@@ -94,7 +94,6 @@ var EvaWorkspaces = (function() {
 
   function selectProject(projectId) {
     state.selectedProjectId = projectId || '';
-    delete state.clearedCodingRunProjectIds[state.selectedProjectId];
     var selectedRun = state.runs.find(function(run) { return run.id === state.selectedRunId; });
     if (selectedRun && selectedRun.projectId !== state.selectedProjectId) state.selectedRunId = '';
     var select = document.getElementById('workspaceProjectSelect');
@@ -555,6 +554,14 @@ var EvaWorkspaces = (function() {
     status('Cleared the coding runs display for ' + project.name + '.', 'success');
   }
 
+  function showSelectedProjectRuns() {
+    var project = projectById(state.selectedProjectId);
+    if (!project) return;
+    delete state.clearedCodingRunProjectIds[project.id];
+    renderWorkbench();
+    status('Restored the coding runs display for ' + project.name + '.', 'success');
+  }
+
   function bindWorkbenchContextMenus() {
     var workbench = document.getElementById('workspaceWorkbench');
     if (!workbench) return;
@@ -581,9 +588,10 @@ var EvaWorkspaces = (function() {
         return;
       }
       if (event.target.closest('#workspaceWorkbenchRuns') && state.selectedProjectId) {
+        var runsCleared = state.clearedCodingRunProjectIds[state.selectedProjectId] === true;
         showWorkspaceContextMenu(event, [{
-          label: 'Clear coding runs display',
-          action: clearSelectedProjectRuns
+          label: runsCleared ? 'Show coding runs' : 'Clear coding runs display',
+          action: runsCleared ? showSelectedProjectRuns : clearSelectedProjectRuns
         }]);
         return;
       }
@@ -962,7 +970,7 @@ var EvaWorkspaces = (function() {
       var empty = document.createElement('p');
       empty.className = 'workspace-monitor-empty';
       empty.textContent = state.selectedProjectId && state.clearedCodingRunProjectIds[state.selectedProjectId]
-        ? 'Coding runs display cleared. Select this workspace to restore it.'
+        ? 'Coding runs display cleared. Right-click here to show it again.'
         : state.selectedProjectId ? 'No coding runs' : 'Select a workspace';
       runList.appendChild(empty);
     }

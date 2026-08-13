@@ -309,7 +309,13 @@ async function main() {
     await page.locator('#workspaceWorkbenchRuns').click({ button: 'right' });
     await page.locator('#workspaceContextMenu button').filter({ hasText: 'Clear coding runs display' }).click();
     await page.locator('#workspaceWorkbenchRuns').filter({ hasText: 'Coding runs display cleared.' }).waitFor();
-    await projectWorkspace.click();
+    await page.locator('#evaAssetsBtn').click();
+    await page.locator('#assetsView').waitFor({ state: 'visible' });
+    await page.locator('#evaWorkspacesBtn').click();
+    await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
+    await page.locator('#workspaceWorkbenchRuns').filter({ hasText: 'Coding runs display cleared.' }).waitFor();
+    await page.locator('#workspaceWorkbenchRuns').click({ button: 'right' });
+    await page.locator('#workspaceContextMenu button').filter({ hasText: 'Show coding runs' }).click();
     await monitoredRun.waitFor();
     await page.locator('#workspaceMonitorFeed').click({ button: 'right' });
     await page.locator('#workspaceContextMenu button').filter({ hasText: 'Clear activity display' }).click();
