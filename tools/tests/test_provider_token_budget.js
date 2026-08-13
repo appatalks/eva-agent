@@ -18,7 +18,12 @@ async function main() {
   assert.strictEqual(helperContext.normalizeModelMaxTokens('128001'), 128000);
 
   const storage = new Map();
-  const txtMsg = { innerHTML: 'hello Eva', focus() {} };
+  const txtMsg = {
+    innerHTML: '<scr<script>ipt>alert(1)</scr<script>ipt>',
+    innerText: 'hello Eva',
+    textContent: 'hello Eva',
+    focus() {},
+  };
   const txtOutput = { innerHTML: '', innerText: '', scrollTop: 0, scrollHeight: 0 };
   const autoSpeak = { checked: false };
   let capturedPayload = null;
@@ -103,6 +108,8 @@ async function main() {
 
   assert.strictEqual(capturedPayload.max_tokens, 32768);
   assert.strictEqual(capturedPayload.model, 'test-local-model');
+  assert.strictEqual(capturedPayload.messages.at(-1).content, 'hello Eva');
+  assert.ok(!JSON.stringify(capturedPayload).includes('<script'));
   assert.ok(memoryContextUrl.includes('session_id=session-provider'));
   assert.strictEqual(reflectionPayload.session_id, 'session-provider');
   assert.strictEqual(sessionCalls, 1);
@@ -294,7 +301,12 @@ async function testGitHubModelsTurnSessionRetention() {
 async function testGeminiMemoryLifecycle(configuredSystemPrompt, userPrompt) {
   const storage = new Map();
   const requestText = userPrompt || 'remember this project';
-  const txtMsg = { innerHTML: requestText, focus() {} };
+  const txtMsg = {
+    innerHTML: '<scr<script>ipt>alert(1)</scr<script>ipt>',
+    innerText: requestText,
+    textContent: requestText,
+    focus() {},
+  };
   const txtOutput = { innerHTML: '', innerText: '', scrollTop: 0, scrollHeight: 0 };
   let contextUrl = '';
   let geminiPayload = null;
@@ -362,6 +374,7 @@ async function testGeminiMemoryLifecycle(configuredSystemPrompt, userPrompt) {
   await reflectionCaptured;
 
   assert.ok(contextUrl.includes('session_id=gemini-session'));
+  assert.ok(!JSON.stringify(geminiPayload).includes('<script'));
   if (!configuredSystemPrompt) {
     assert.ok(geminiPayload.systemInstruction.parts[0].text.startsWith('[Core Memory]'));
   } else if (configuredSystemPrompt.length <= 1000) {
