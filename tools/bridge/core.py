@@ -51,6 +51,7 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from bridge import config as _cfg
 from bridge import state as _st
 from bridge.aig_request import normalize_aig_request
+from bridge.http_routes import match_patch_route
 from protected_memory import (
     ProtectedMemoryError,
     ProtectedVault,
@@ -1321,16 +1322,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         parsed_path = urllib.parse.urlparse(self.path).path
         if not self._require_private_route():
             return
-        if parsed_path.startswith("/v1/goals/"):
-            self._goals_patch(urllib.parse.unquote(parsed_path.split("/v1/goals/", 1)[1]))
-        elif parsed_path.startswith("/v1/memory/atoms/"):
-            self._memory_atom_patch(urllib.parse.unquote(parsed_path.split("/v1/memory/atoms/", 1)[1]))
-        elif parsed_path.startswith("/v1/skills/"):
-            self._skills_patch(urllib.parse.unquote(parsed_path.split("/v1/skills/", 1)[1]))
-        elif parsed_path.startswith("/v1/cron/"):
-            self._cron_update(urllib.parse.unquote(parsed_path.split("/v1/cron/", 1)[1]))
-        else:
+        route = match_patch_route(parsed_path)
+        if route is None:
             self.send_error(404, "Not Found")
+            return
+        handler_name, resource_id = route
+        getattr(self, handler_name)(resource_id)
 
     def do_DELETE(self):
         parsed_path = urllib.parse.urlparse(self.path).path

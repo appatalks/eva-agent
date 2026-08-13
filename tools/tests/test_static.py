@@ -92,6 +92,7 @@ def test_required_files():
         "tools/acp_bridge.py",
         "tools/bridge/workspaces.py",
         "tools/bridge/aig_request.py",
+        "tools/bridge/http_routes.py",
         "tools/kusto_mcp.py",
         "tools/tests/test_prompt_budget.js",
         "tools/tests/test_request_routing.js",
@@ -104,6 +105,7 @@ def test_required_files():
         "tools/tests/test_cron_settings.js",
         "tools/tests/test_skill_auto_learn.js",
         "tools/tests/test_aig_request.py",
+        "tools/tests/test_http_routes.py",
         "tools/tests/test_frontend_script_order.js",
         "tools/tests/test_bridge_client.js",
         "tools/tests/test_background_settings.js",
@@ -1818,6 +1820,18 @@ def test_aig_request_contract():
     report("aig_request_contract", result.returncode == 0, detail[:300])
 
 
+def test_http_routes_contract():
+    """Fixed PATCH route table matches known handlers without changing auth ownership."""
+    result = subprocess.run(
+        [sys.executable, "tools/tests/test_http_routes.py"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("http_routes_contract", result.returncode == 0, detail[:300])
+
+
 def test_background_static_contract():
     """Background proposal schema and bridge routes are wired."""
     seed_path = "tools/eva_seed.kql"
@@ -2437,7 +2451,7 @@ def main():
         ("File Integrity", [test_required_files, test_no_secrets_committed]),
         ("Config Safety", [test_config_example_clean, test_no_hardcoded_keys]),
         ("PR Automation", [test_pr_automation_workflows]),
-        ("Python Integrity", [test_python_syntax, test_artifact_filename_validation, test_bridge_health_contract, test_aig_request_contract]),
+        ("Python Integrity", [test_python_syntax, test_artifact_filename_validation, test_bridge_health_contract, test_aig_request_contract, test_http_routes_contract]),
         ("Local Speech Contract", [test_local_speech_contract, test_local_speech_http_contract, test_voice_module_contracts]),
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
         ("HTML Model Selector", [test_model_selector, test_model_catalog_contract]),

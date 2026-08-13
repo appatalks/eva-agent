@@ -66,6 +66,7 @@ local inspection and its privacy implications have been established.
 | Provider adapters | `core/js/gpt-core.js`, `copilot.js`, `gl-google.js`, `lm-studio.js`, `aig.js`, `dalle3.js` | Provider request/response lifecycle |
 | Conversation storage | `core/js/features/sessions/explorer.js`, `idb-store.js`, `profiles.js` | Session and browser-local state |
 | Bridge HTTP and AIG orchestration | `tools/bridge/core.py` | Private loopback API and request lifecycle |
+| Fixed bridge route tables | `tools/bridge/http_routes.py` | Pure method/path matching; authorization remains in the handler |
 | Bridge domains | `tools/bridge/*.py` | Memory, skills, MCP, background, workspaces, telemetry, policy |
 | Privileged desktop boundary | `standalone/main.js`, `preload.js` | IPC, path-bearing operations, PTY ownership, secure storage |
 | Test contracts | `tools/tests/` | Curated regression checks; not bundled into the app |
