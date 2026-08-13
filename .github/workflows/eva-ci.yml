@@ -102,17 +102,16 @@ jobs:
           FAIL=0
 
           # Check syntax with Node.js (parse only, no execution)
-          for f in core/js/*.js; do
-            if [[ "$f" == *".min.js" ]]; then continue; fi
+          while IFS= read -r -d '' f; do
             if ! node --check "$f" 2>/dev/null; then
               echo "::error::Syntax error in $f"
               FAIL=1
             fi
-          done
+          done < <(find core/js -type f -name '*.js' ! -name '*.min.js' -print0)
 
           # Verify model routing functions exist
           for fn in aigSend trboSend geminiSend lmsSend copilotSend; do
-            found=$(grep -rl "function $fn\b\|async function $fn\b" core/js/*.js || true)
+            found=$(grep -rlE "function[[:space:]]+$fn\\b|async[[:space:]]+function[[:space:]]+$fn\\b" core/js || true)
             if [ -z "$found" ]; then
               echo "::error::Missing required function $fn()"
               FAIL=1
@@ -120,7 +119,7 @@ jobs:
           done
 
           # Check no console.log dumps auth data
-          if grep -rn 'console\.log.*\(.*[Tt]oken\|[Kk]ey\|[Ss]ecret\|[Pp]assword\|Authorization' core/js/*.js; then
+          if grep -rnE --exclude='*.min.js' 'console\.log.*([Tt]oken|[Kk]ey|[Ss]ecret|[Pp]assword|Authorization)' core/js; then
             echo "::warning::console.log may expose sensitive data"
           fi
 
