@@ -93,6 +93,7 @@ def test_required_files():
         "tools/acp_bridge.py",
         "tools/bridge/workspaces.py",
         "tools/bridge/aig_request.py",
+        "tools/bridge/aig_preflight.py",
         "tools/bridge/http_routes.py",
         "tools/kusto_mcp.py",
         "tools/tests/test_prompt_budget.js",
@@ -106,6 +107,7 @@ def test_required_files():
         "tools/tests/test_cron_settings.js",
         "tools/tests/test_skill_auto_learn.js",
         "tools/tests/test_aig_request.py",
+        "tools/tests/test_aig_preflight.py",
         "tools/tests/test_http_routes.py",
         "tools/tests/test_frontend_script_order.js",
         "tools/tests/test_bridge_client.js",
@@ -1016,7 +1018,8 @@ process.stdout.write(JSON.stringify(matrix.map(([text]) => sandbox.isAffirmative
         telemetry_py = f.read()
     report("telemetry_aig_stage_budget", all(field in telemetry_py for field in ("aig_memory_ms", "aig_preflight_ms", "aig_responder_ms", "aig_preflight", "attempt_rate")))
     report("telemetry_profile_cache_aggregation", all(field in telemetry_py for field in ("pool_profiles", "kusto_metadata_cache", "cache_kinds")))
-    report("aig_general_bypasses_preflight", '_acp_route = "direct/general"' in bridge_core and "_needs_acp_preflight(msg_lower, _request_type)" in bridge_core and "def _needs_acp_preflight" in bridge_utils)
+    aig_preflight = open("tools/bridge/aig_preflight.py").read()
+    report("aig_general_bypasses_preflight", 'acp_route = "direct/general"' in aig_preflight and "needs_preflight(message_lower, request_type)" in aig_preflight and "def _needs_acp_preflight" in bridge_utils)
     report("aig_github_models_responder_removed", 'github_pat = ""' in bridge_core and 'return "acp", requested' in bridge_core and "models.github.ai/inference/chat/completions" not in bridge_core)
     report("aig_preflight_attempt_telemetry", "preflight_attempted=_preflight_attempted" in bridge_core and "preflight_succeeded=_preflight_succeeded" in bridge_core)
     report("aig_lmstudio_latency_telemetry", bridge_core.count('"aig_turn"') >= 2 and 'model_used = "aig:lmstudio:" + lms_model' in bridge_core)
@@ -1167,7 +1170,8 @@ def test_prompt_budget_contract():
     report("prompt_budget_all_provider_routes", all("EvaPromptBudget.compact" in source for source in provider_sources))
     report("prompt_budget_aig_metadata", "prompt_budget: EvaPromptBudget.telemetry(aigPromptBudget)" in provider_sources[4] and "prompt_budget: EvaPromptBudget.telemetry(promptBudget)" in provider_sources[5])
     report("prompt_budget_fast_route_classifier", "def _classify_fast_route" in bridge_utils and "_fast_route = _classify_fast_route" in bridge_core)
-    report("prompt_budget_skips_memory_and_preflight", "Fast route: skipping memory assembly" in bridge_core and 'fast/" + _fast_route' in bridge_core)
+    aig_preflight = open("tools/bridge/aig_preflight.py").read()
+    report("prompt_budget_skips_memory_and_preflight", "Fast route: skipping memory assembly" in bridge_core and '"fast/" + fast_route' in aig_preflight)
     report("prompt_budget_telemetry_fields", all(value in bridge_core for value in (
         "def _prompt_budget_fields", "fast_route=_fast_route", "escalation=_escalation",
         "**_prompt_fields",
@@ -1831,6 +1835,18 @@ def test_aig_request_contract():
     report("aig_request_contract", result.returncode == 0, detail[:300])
 
 
+def test_aig_preflight_contract():
+    """AIG ACP preflight planning remains deterministic and I/O-free."""
+    result = subprocess.run(
+        [sys.executable, "tools/tests/test_aig_preflight.py"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("aig_preflight_contract", result.returncode == 0, detail[:300])
+
+
 def test_http_routes_contract():
     """Fixed PATCH route table matches known handlers without changing auth ownership."""
     result = subprocess.run(
@@ -2462,7 +2478,7 @@ def main():
         ("File Integrity", [test_required_files, test_no_secrets_committed]),
         ("Config Safety", [test_config_example_clean, test_no_hardcoded_keys]),
         ("PR Automation", [test_pr_automation_workflows]),
-        ("Python Integrity", [test_python_syntax, test_artifact_filename_validation, test_bridge_health_contract, test_aig_request_contract, test_http_routes_contract]),
+        ("Python Integrity", [test_python_syntax, test_artifact_filename_validation, test_bridge_health_contract, test_aig_request_contract, test_aig_preflight_contract, test_http_routes_contract]),
         ("Local Speech Contract", [test_local_speech_contract, test_local_speech_http_contract, test_voice_module_contracts]),
         ("Kusto CSV Logic", [test_csv_quoting_logic]),
         ("HTML Model Selector", [test_model_selector, test_model_catalog_contract]),

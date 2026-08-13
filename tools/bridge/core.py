@@ -51,6 +51,7 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from bridge import config as _cfg
 from bridge import state as _st
 from bridge.aig_request import normalize_aig_request
+from bridge.aig_preflight import plan_aig_preflight
 from bridge.http_routes import match_patch_route
 from protected_memory import (
     ProtectedMemoryError,
@@ -4137,54 +4138,30 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Step 2: ACP-first routing — ACP is the default path (it has MCP tools).
         # Skip ACP data retrieval for internal calls (cognition sub-calls)
         # and for trivial conversational messages with high confidence.
-        msg_stripped = _re.sub(r'[^\w\s]', '', msg_lower).strip()
-        msg_words = msg_stripped.split()
-
-        skip_acp = False
-        _acp_route = "default"
-
-        # retrieve_data: cognition draft calls set this to opt in to data
-        # retrieval even though they are internal. Without it the draft model
-        # never sees [Data Retrieved] and fabricates everything.
-        force_retrieve = bool(data.get("retrieve_data"))
-        if _fast_route:
-            skip_acp = True
-            _acp_route = "fast/" + _fast_route
-        elif internal and not force_retrieve:
-            skip_acp = True
-            _acp_route = "internal-cognition"
-        elif not (_st.acp_client and _st.acp_client.alive) and not _st.local_mode:
-            skip_acp = True
-            _acp_route = "acp-unavailable"
-        elif len(msg_words) <= 4 and _re.match(
-            r'^(hi|hey|hello|howdy|yo|sup|good morning|good evening|good afternoon|thanks|thank you|ok|okay|bye|goodbye|see you|great|cool|nice|sure|yes|no|nah|yep|nope)\b',
-            msg_stripped
-        ):
-            skip_acp = True
-            _acp_route = "greeting/trivial"
-        elif len(msg_words) <= 6 and _re.match(
-            r'^(how are you|how do you feel|what is your name|who are you|what can you do|tell me about yourself)\b',
-            msg_stripped
-        ):
-            skip_acp = True
-            _acp_route = "meta-question"
-
-        # ACP pre-retrieval is useful only when the classifier identified a
-        # live-data/query request. Running an agentic ACP pass for every
-        # ordinary question serializes two model turns before Eva can answer.
-        # General chat, advice, writing, and browser/renderer action markers
-        # go directly to the selected responder; their local capability routes
-        # remain available in the final response.
-        _briefing_request = bool(_re.search(r"\b(?:morning|daily)\s+briefing\b", msg_lower))
+        # retrieve_data: cognition draft calls opt in to live-data retrieval.
+        preflight = plan_aig_preflight(
+            _routing_message,
+            _request_type,
+            _fast_route,
+            internal,
+            bool(data.get("retrieve_data")),
+            bool(_st.acp_client and _st.acp_client.alive),
+            _st.local_mode,
+            no_tools,
+            _needs_acp_preflight,
+            _select_acp_tool_profile,
+        )
+        skip_acp = preflight["skip_acp"]
+        _acp_route = preflight["acp_route"]
+        _briefing_request = preflight["briefing_request"]
+        needs_acp_tools = preflight["needs_acp_tools"]
+        _tool_profile = preflight["tool_profile"]
+        _escalation = preflight["escalation"]
         _briefing_status = briefing_status() if _briefing_request else {}
         _briefing_state = _briefing_status.get("status", "idle")
         _briefing_preparing = _briefing_state == "preparing"
         _briefing_unavailable = briefing_unavailable_sources(_briefing_status) if _briefing_request else []
         _briefing_context = briefing_prompt_context(allow_partial=_briefing_request) if _briefing_request else ""
-        needs_acp_tools = not _briefing_request and not skip_acp and _needs_acp_preflight(msg_lower, _request_type)
-        _tool_profile = _select_acp_tool_profile(
-            _routing_message, _request_type, fast_route=_fast_route, no_tools=no_tools
-        ) if needs_acp_tools else "none"
         _policy_mode = str(data.get("model_policy_mode") or "pinned").strip().lower()
         if _policy_mode not in {"pinned", "auto-balanced", "auto-fast"}:
             _policy_mode = "pinned"
@@ -4229,12 +4206,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
         )
         if _briefing_request:
             audit_event("briefing.cache", turn_id, "used", prepared_chars=len(_briefing_context))
-        _escalation = "fast-responder" if _fast_route else (
-            "acp-preflight" if needs_acp_tools else "direct-responder"
-        )
-        if not skip_acp and not needs_acp_tools:
-            skip_acp = True
-            _acp_route = "direct/general"
         if skip_acp:
             print(f"[AIG] Skipping ACP ({_acp_route})")
         else:
