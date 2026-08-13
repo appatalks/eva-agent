@@ -37,7 +37,7 @@ without a documented compatibility plan.
 
 | Feature | Current owner | Notes |
 | --- | --- | --- |
-| Skill import and library | `core/js/skills.js` | Manual import/edit lifecycle |
+| Skill import and library | `core/js/features/skills/library.js` | Manual import/edit lifecycle |
 | Skill auto-learning | `core/js/features/skills/auto-learn.js` | Bounded post-outcome draft extraction |
 | Proactive notifications | `core/js/features/notifications/proactive.js` | Polling, chat/voice delivery, and seen acknowledgment |
 | ACP permissions | `core/js/features/permissions/acp.js` | Adaptive polling, capability headers, and one-time decisions |

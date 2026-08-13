@@ -114,6 +114,7 @@ def test_required_files():
         "tools/tests/test_camera_api.js",
         "tools/tests/test_assets_api.js",
         "tools/tests/test_agents_api.js",
+        "tools/tests/test_skills_api.js",
         "tools/tests/test_fast_route.py",
         "tools/tests/test_tool_profiles.py",
         "tools/tests/test_kusto_cache.py",
@@ -1229,7 +1230,7 @@ def test_sidebar_workflow_contract():
         html = f.read()
     with open("core/js/sessions.js") as f:
         sessions_js = f.read()
-    with open("core/js/skills.js") as f:
+    with open("core/js/features/skills/library.js") as f:
         skills_js = f.read()
     with open("core/js/profiles.js") as f:
         profiles_js = f.read()
@@ -1734,6 +1735,22 @@ def test_agents_api_contract():
     )
     detail = (result.stderr or result.stdout).strip()
     report("agents_api_contract", result.returncode == 0, detail[:300])
+
+
+def test_skills_api_contract():
+    """Moved Skills library retains its public API and CRUD endpoint contract."""
+    node = shutil.which("node")
+    if not node:
+        report("skills_api_contract", None, "node is unavailable")
+        return
+    result = subprocess.run(
+        [node, "tools/tests/test_skills_api.js"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    detail = (result.stderr or result.stdout).strip()
+    report("skills_api_contract", result.returncode == 0, detail[:300])
 
 
 def test_aig_request_contract():
@@ -2377,7 +2394,7 @@ def main():
         ("Reasoning Effort", [test_reasoning_effort_contract]),
         ("Signal and GitHub MCP", [test_signal_and_github_mcp_contract, test_latency_telemetry_contract, test_issue_130_latency_contract, test_prompt_budget_contract, test_streaming_contract, test_acp_permissions_ui_contract]),
         ("Security Alerts", [test_security_alert_contract, test_alerts_settings_ui_contract, test_proactive_notifications_contract]),
-        ("Sidebar Workflows", [test_sidebar_workflow_contract, test_browser_agent_api_contract, test_camera_api_contract, test_assets_api_contract, test_agents_api_contract]),
+        ("Sidebar Workflows", [test_sidebar_workflow_contract, test_browser_agent_api_contract, test_camera_api_contract, test_assets_api_contract, test_agents_api_contract, test_skills_api_contract]),
         ("Workspace Terminal", [test_workspace_terminal_contract]),
         ("Coding Workspaces", [test_coding_workspace_contract]),
         ("Pages Comparison", [test_pages_comparison_contract]),
