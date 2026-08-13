@@ -2,7 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
 
-const source = fs.readFileSync('core/js/voice-endpoint.js', 'utf8');
+const source = fs.readFileSync('core/js/features/voice/endpoint.js', 'utf8');
 const scheduled = [];
 const sandbox = {
   globalThis: {},

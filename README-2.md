@@ -295,7 +295,10 @@ core/
     features/sessions/explorer.js
                  Session persistence, legacy-visible restoration,
                  terminal/xterm renderer and dock navigation
-    voice.js               Wake-word "Eva" via Web Speech API
+    features/voice/wake-listener.js
+                 Wake-word "Eva" via Web Speech API
+    features/voice/endpoint.js
+                 Speech endpoint buffering and transcript merging
     features/automation/camera.js
                  Webcam capture for [[EVA_LOOK]] vision
     features/automation/browser-agent.js

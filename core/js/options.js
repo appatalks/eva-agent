@@ -6258,4 +6258,4 @@ function restoreEvaWelcome() {
     + '</div></div>';
 }
 
-// Text-to-Speech (voice recognition moved to voice.js)
+// Text-to-Speech (wake-word recognition lives in features/voice/wake-listener.js)
