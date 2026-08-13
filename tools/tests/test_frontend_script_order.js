@@ -33,6 +33,8 @@ const optionsIndex = scriptIndex('core/js/options.js');
 
 assert.ok(scriptIndex('core/js/features/automation/browser-agent.js') > optionsIndex,
   'browser automation controller must load after options.js because it consumes shared UI helpers');
+assert.ok(scriptIndex('core/js/features/automation/camera.js') > optionsIndex,
+  'camera controller must load after options.js because it consumes shared auth and bridge helpers');
 assert.ok(scriptIndex('core/js/skills.js') > optionsIndex,
   'skills.js must load after options.js because it consumes shared bridge helpers');
 

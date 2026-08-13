@@ -42,7 +42,7 @@ without a documented compatibility plan.
 | Proactive notifications | `core/js/features/notifications/proactive.js` | Polling, chat/voice delivery, and seen acknowledgment |
 | ACP permissions | `core/js/features/permissions/acp.js` | Adaptive polling, capability headers, and one-time decisions |
 | Browser and desktop automation controller | `core/js/features/automation/browser-agent.js` | Shared popup, polling, confirmation, and cancellation API |
-| Camera and desktop interaction | `core/js/camera.js`, renderer logic in `options.js` | Permission and agent-confirmation boundaries remain explicit |
+| Camera sensing and vision | `core/js/features/automation/camera.js` | Camera lifecycle and `[[EVA_LOOK]]` vision routing |
 | Voice | `core/js/voice.js`, `voice-endpoint.js`, voice-view logic in `options.js` | Split only behind focused lifecycle tests |
 | Workspaces | `core/js/workspaces.js` | Electron preload/main and bridge workspaces are immediate collaborators |
 | Agents and Assets | `core/js/agents.js`, `assets.js` | Main view owners |

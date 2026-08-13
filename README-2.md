@@ -293,7 +293,8 @@ core/
     sessions.js            Session persistence, legacy-visible restoration,
                  terminal/xterm renderer and dock navigation
     voice.js               Wake-word "Eva" via Web Speech API
-    camera.js              Webcam capture for [[EVA_LOOK]] vision
+    features/automation/camera.js
+                 Webcam capture for [[EVA_LOOK]] vision
     features/automation/browser-agent.js
                  Frontend integration for browser and desktop agent runs
     pandora.js             Pandora box / Easter egg system
