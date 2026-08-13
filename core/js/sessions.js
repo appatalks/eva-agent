@@ -327,6 +327,24 @@ function newSession() {
   renderSessionList();
 }
 
+function startFreshSessionOnLaunch() {
+  // Startup intentionally begins a new chat. Do not snapshot provider-local
+  // state left by a prior renderer before it has been associated with a session.
+  localStorage.removeItem(SESSION_ACTIVE_KEY);
+  SESSION_MSG_KEYS.forEach(function(key) { localStorage.removeItem(key); });
+  localStorage.removeItem('masterOutput');
+  if (typeof masterOutput !== 'undefined') masterOutput = '';
+  if (typeof lastResponse !== 'undefined') lastResponse = '';
+
+  var txtOutput = document.getElementById('txtOutput');
+  if (txtOutput) {
+    if (typeof restoreEvaWelcome === 'function') restoreEvaWelcome();
+    else if (typeof showWelcome === 'function') showWelcome();
+    else txtOutput.innerHTML = '';
+  }
+  renderSessionList();
+}
+
 /** Load a session by id */
 function loadSession(id) {
   // Finish saving the current session before reading another record. This
@@ -709,12 +727,15 @@ function initSessions() {
     if (window.EvaSkills && typeof window.EvaSkills.close === 'function') window.EvaSkills.close();
   });
 
-  // Migrate localStorage sessions, preserve the previous turn, and always
-  // present a fresh session when Eva launches.
+  // Clear volatile provider state before IndexedDB work yields to the user.
+  // Saved session snapshots remain intact for migration and later loading.
+  startFreshSessionOnLaunch();
+
+  // Migrate saved sessions in the background without touching the fresh chat.
   idbMigrateFromLocalStorage().then(function() {
-    newSession();
+    renderSessionList();
   }).catch(function() {
-    newSession();
+    renderSessionList();
   });
 
   document.addEventListener('click', function(event) {

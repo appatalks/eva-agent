@@ -35,9 +35,11 @@ for raw_line in sys.stdin:
             payload["result"] = result
         print(json.dumps(payload), flush=True)
 
-    if mode in {"legacy", "legacy-generic-error", "modern-legacy-advertised", "modern-reject-legacy-advertised", "modern-missing-result-type", "modern-probe-error-32020", "modern-probe-error-32021"}:
+    if mode in {"legacy", "legacy-generic-error", "legacy-exits-discover", "modern-legacy-advertised", "modern-reject-legacy-advertised", "modern-missing-result-type", "modern-probe-error-32020", "modern-probe-error-32021"}:
         if method == "server/discover":
-            if mode == "modern-legacy-advertised":
+            if mode == "legacy-exits-discover":
+                sys.exit(0)
+            elif mode == "modern-legacy-advertised":
                 reply({"resultType": "complete", "supportedVersions": ["2024-11-05"]})
             elif mode == "modern-reject-legacy-advertised":
                 reply(error={"code": -32022, "message": "Unsupported protocol version", "data": {"supported": ["2024-11-05"]}})
@@ -147,6 +149,7 @@ def assert_start_failure(mode, error_fragment):
 def main():
     test_server("legacy", "legacy", "legacy_echo", "legacy:ok")
     test_server("legacy-generic-error", "legacy", "legacy_echo", "legacy:ok")
+    test_server("legacy-exits-discover", "legacy", "legacy_echo", "legacy:ok")
     test_server("modern-legacy-advertised", "legacy", "legacy_echo", "legacy:ok")
     test_server("modern-reject-legacy-advertised", "legacy", "legacy_echo", "legacy:ok")
     test_server("modern-missing-result-type", "legacy", "legacy_echo", "legacy:ok")

@@ -31,7 +31,8 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
-_TRAJ_DIR = os.path.expanduser("~/.config/eva-standalone/desktop_trajectories")
+_EVA_CONFIG_DIR = os.path.expanduser(os.environ.get("EVA_CONFIG_DIR", "~/.config/eva-standalone"))
+_TRAJ_DIR = os.path.join(_EVA_CONFIG_DIR, "desktop_trajectories")
 _DEFAULT_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o")
 _MAX_STEPS_DEFAULT = 25
 _DIRECTOR_INTERVAL = 4  # re-consult the director every N executor steps

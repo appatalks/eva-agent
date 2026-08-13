@@ -17,7 +17,9 @@ import urllib.request
 import urllib.error
 from bridge.utils import _safe_child_environment
 
-_ARTIFACTS_DIR = os.path.expanduser("~/.config/eva-standalone/artifacts")
+_ARTIFACTS_DIR = os.path.join(
+    os.path.expanduser(os.environ.get("EVA_CONFIG_DIR", "~/.config/eva-standalone")), "artifacts"
+)
 _TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MCP_MODERN_PROTOCOL_VERSION = "2026-07-28"
 _MCP_LEGACY_PROTOCOL_VERSION = "2024-11-05"
@@ -115,6 +117,7 @@ class MCPServer:
         self._request_id = 0
         self._pending = {}        # id -> {"event": Event, "result": ...}
         self._reader = None
+        self._generation = 0
         self.alive = False
         self.protocol_era = "legacy"
         self.protocol_version = _MCP_LEGACY_PROTOCOL_VERSION
@@ -124,12 +127,24 @@ class MCPServer:
 
     def start(self):
         """Spawn the MCP server process and initialize."""
+        self._spawn()
+
+        try:
+            self._negotiate_protocol()
+            self.tools = self._discover_tools()
+            print(f"[LocalMCP] {self.name}: {len(self.tools)} tools discovered ({self.protocol_era})")
+        except Exception:
+            self.stop()
+            raise
+
+    def _spawn(self):
+        """Start a fresh server process and its stdio readers."""
         cmd = [self.command] + self.args
         process_env = _safe_child_environment({"EVA_ARTIFACTS_DIR": _ARTIFACTS_DIR})
         process_env.update(_safe_child_environment(self.env))
         process_env.pop("EVA_BRIDGE_TOKEN", None)
         try:
-            self.process = subprocess.Popen(
+            process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -140,19 +155,14 @@ class MCPServer:
         except FileNotFoundError:
             raise RuntimeError(f"MCP server '{self.name}': command not found: {self.command}")
 
+        self._generation += 1
+        generation = self._generation
+        self.process = process
         self.alive = True
-        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader = threading.Thread(target=self._read_loop, args=(process, generation), daemon=True)
         self._reader.start()
         # stderr drain
-        threading.Thread(target=self._stderr_loop, daemon=True).start()
-
-        try:
-            self._negotiate_protocol()
-            self.tools = self._discover_tools()
-            print(f"[LocalMCP] {self.name}: {len(self.tools)} tools discovered ({self.protocol_era})")
-        except Exception:
-            self.stop()
-            raise
+        threading.Thread(target=self._stderr_loop, args=(process,), daemon=True).start()
 
     def call_tool(self, tool_name, arguments, timeout=60):
         """Call an MCP tool and return the result text."""
@@ -193,6 +203,11 @@ class MCPServer:
             self._raise_unsupported_protocol(supported)
 
         # An unrecognized response may be from an initialization-era server.
+        # Some legacy servers exit after receiving an unknown modern request, so
+        # their legacy handshake must begin in a fresh process.
+        if not self.alive or not self.process or self.process.poll() is not None:
+            self.stop()
+            self._spawn()
         self._initialize_legacy()
 
     def _modern_discover(self):
@@ -332,16 +347,18 @@ class MCPServer:
         return {"_mcp_error": f"Modern MCP server returned an unsupported {method} result type."}
 
     def stop(self):
+        self._generation += 1
         self.alive = False
-        if self.process:
+        process = self.process
+        if process:
             try:
-                if self.process.poll() is None:
-                    self.process.terminate()
-                    self.process.wait(timeout=5)
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
             except (OSError, subprocess.SubprocessError):
                 try:
-                    self.process.kill()
-                    self.process.wait(timeout=5)
+                    process.kill()
+                    process.wait(timeout=5)
                 except Exception:
                     pass
 
@@ -350,14 +367,16 @@ class MCPServer:
         return self._request_id
 
     def _write(self, msg):
-        if not self.process or not self.process.stdin:
+        process = self.process
+        if not process or not process.stdin:
             return
         line = json.dumps(msg) + "\n"
         try:
-            self.process.stdin.write(line.encode())
-            self.process.stdin.flush()
+            process.stdin.write(line.encode())
+            process.stdin.flush()
         except (BrokenPipeError, OSError):
-            self.alive = False
+            if process is self.process:
+                self.alive = False
 
     def _send(self, msg, timeout=30):
         rid = msg.get("id")
@@ -371,10 +390,10 @@ class MCPServer:
         entry = self._pending.pop(rid, {})
         return entry.get("result")
 
-    def _read_loop(self):
+    def _read_loop(self, process, generation):
         try:
-            while self.alive and self.process and self.process.stdout:
-                line = self.process.stdout.readline()
+            while generation == self._generation and self.alive and process.stdout:
+                line = process.stdout.readline()
                 if not line:
                     break
                 line = line.strip()
@@ -394,12 +413,13 @@ class MCPServer:
                     self._pending[rid]["event"].set()
         except Exception:
             pass
-        self.alive = False
+        if generation == self._generation and process is self.process:
+            self.alive = False
 
-    def _stderr_loop(self):
+    def _stderr_loop(self, process):
         try:
-            while self.process and self.process.stderr:
-                line = self.process.stderr.readline()
+            while process.stderr:
+                line = process.stderr.readline()
                 if not line:
                     break
                 print(f"[MCP:{self.name}] {line.decode(errors='replace').rstrip()}")
