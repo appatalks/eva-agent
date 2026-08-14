@@ -725,8 +725,9 @@ class ACPClient:
                 state for state in self._active_prompts.values()
                 if state.get("session_id") == session_id
             ]
+            has_active_prompt = bool(self._active_prompts)
         permission_mode = prompt_states[0].get("permission_mode", "workspace_auto") \
-            if len(prompt_states) == 1 else "interactive"
+            if len(prompt_states) == 1 else ("workspace_auto" if has_active_prompt else "interactive")
         workspace_mode = permission_mode in {"workspace_write", "workspace_auto"}
         execute_category = _workspace_execute_category(tool_call, self.cwd) \
             if workspace_mode and tool_kind == "execute" else ""

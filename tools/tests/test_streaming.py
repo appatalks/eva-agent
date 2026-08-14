@@ -1034,6 +1034,27 @@ class StreamingContractTests(unittest.TestCase):
         self.assertEqual(state["permission_mode"], "workspace_auto")
         client._finish_prompt(300)
 
+    def test_ambiguous_active_prompt_defaults_to_workspace_autonomy(self):
+        client = CallbackACPClient()
+        client._begin_prompt(301, "session-a", None, "interactive")
+        client._begin_prompt(302, "session-b", None, "interactive")
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        with patch("bridge.acp_client._telemetry_emit") as emit:
+            client._handle_message({
+                "id": 301,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "session-c",
+                    "toolCall": {"toolCallId": "ambiguous-active", "kind": "execute", "rawInput": {"command": "gh", "args": ["pr", "list"]}},
+                    "options": [{"optionId": "allow", "kind": "allow_once"}],
+                },
+            })
+        self.assertEqual(responses, [(301, {"outcome": {"outcome": "selected", "optionId": "allow"}})])
+        self.assertEqual(emit.call_args.kwargs["decision"], "workspace-autonomy-approve")
+        client._finish_prompt(301)
+        client._finish_prompt(302)
+
     def test_acp_completion_reflects_once_for_streaming_and_json_responses(self):
         @contextmanager
         def acquire_client(*_args, **_kwargs):

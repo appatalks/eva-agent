@@ -1371,9 +1371,9 @@ worktree, unparseable commands, Git configuration overrides, privilege escalatio
 destructive filesystem commands, service control, and destructive Git actions.
 The rejection is returned to ACP immediately so Eva can select a safer direct
 alternative instead of leaving a stale approval card.
-Tracked ACP prompts also default to this autonomous policy. Only a permission
-request that cannot be matched to a live prompt remains fail-closed and
-interactive.
+Tracked ACP prompts, including requests ambiguously associated with concurrent
+live prompts, default to this autonomous policy. Only a permission request
+with no live prompt remains fail-closed and interactive.
 For an explicit GitHub Issues objective, Eva may use the authenticated `gh`
 CLI. A named issue receives a comment; when no target is named and no matching
 open issue exists, Eva creates a new issue containing the requested report. The
