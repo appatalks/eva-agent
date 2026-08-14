@@ -148,6 +148,18 @@ async function main() {
         inputParent: document.querySelector('.chat-input-container').parentElement.id,
       };
     }), { outputParent: 'workspaceChatOutputHost', inputParent: 'workspaceChatInputHost' }, 'Workspace chat drawer did not reuse the live chat nodes');
+    assert.deepStrictEqual(await page.evaluate(function() {
+      const workbench = document.getElementById('workspaceWorkbench').getBoundingClientRect();
+      const drawer = document.getElementById('workspaceChatDrawer').getBoundingClientRect();
+      const output = document.getElementById('workspaceChatOutputHost').getBoundingClientRect();
+      const input = document.getElementById('workspaceChatInputHost').getBoundingClientRect();
+      return {
+        inside: drawer.top >= workbench.top && drawer.right <= workbench.right + 1 && drawer.bottom <= workbench.bottom + 1,
+        usableOutput: output.width > 280 && output.height > 160,
+        usableInput: input.width > 280 && input.height > 70,
+        ordered: output.bottom <= input.top + 1,
+      };
+    }), { inside: true, usableOutput: true, usableInput: true, ordered: true }, 'Workspace chat drawer layout is clipped or overlapping');
     await page.evaluate(function() { window.EvaWorkspaces.closeWorkbench(); });
     assert.strictEqual(await page.evaluate(function() { return document.getElementById('workspaceChatDrawer').contains(document.getElementById('txtOutput')); }), false, 'Closing Workspaces did not restore the live chat output');
     await page.evaluate(function() { document.getElementById('lcarsWorkspacesBtn').click(); });
@@ -333,7 +345,7 @@ async function main() {
     await page.locator('#workspaceRunsDisplayBtn').click();
     await monitoredRun.waitFor();
     await page.locator('#workspaceActivityDisplayBtn').click();
-    await page.locator('#workspaceMonitorFeed').filter({ hasText: 'No Eva activity recorded for this workspace.' }).waitFor();
+    await page.locator('#workspaceMonitorFeed').filter({ hasText: 'Activity display cleared. Click Show to restore it.' }).waitFor();
     await page.locator('#workspaceResultsDisplayBtn').click();
     await page.locator('#workspaceWorkbenchResults').filter({ hasText: 'Run result display cleared.' }).waitFor();
     await page.locator('#workspaceResultsDisplayBtn').click();
