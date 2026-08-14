@@ -160,6 +160,13 @@ async function main() {
   assert.strictEqual(remediationResult.ok, true);
   assert.strictEqual(remediationResult.data.runId, 'run-remediation');
   assert.deepStrictEqual(remediationRequest, { repositoryName: 'appatalks/cs-proxy', objective: 'Resolve Dependabot alerts in appatalks/cs-proxy' });
+  const dependabotUrlRequest = 'Eva please review the Dependabot alerts at: https://github.com/appatalks/cs-proxy/security/dependabot and then please address them in a Pull request';
+  const dependabotUrlRoute = harness.resolveNavigationRequest(dependabotUrlRequest, { directUser: true });
+  assert.strictEqual(dependabotUrlRoute.action, 'run_repository_remediation');
+  assert.strictEqual(dependabotUrlRoute.repositoryName, 'appatalks/cs-proxy');
+  const dependabotUrlResult = await harness.execute(dependabotUrlRoute, { source: 'model', userRequest: dependabotUrlRequest });
+  assert.strictEqual(dependabotUrlResult.ok, true);
+  assert.deepStrictEqual(remediationRequest, { repositoryName: 'appatalks/cs-proxy', objective: dependabotUrlRequest });
   const shortRemediationRoute = harness.resolveNavigationRequest('Fix dependency alerts with cs-proxy repo.', { directUser: true });
   assert.strictEqual(shortRemediationRoute.action, 'run_repository_remediation');
   assert.strictEqual(shortRemediationRoute.repositoryName, 'cs-proxy');

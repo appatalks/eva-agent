@@ -80,11 +80,21 @@ var EvaHarness = (function() {
   }
 
   function repositoryRemediationRoute(rawPhrase) {
-    var match = String(rawPhrase || '').trim().match(/^(?:please\s+)?(?:try\s+to\s+)?(?:resolve|fix|remediate|address|update)\b[\s\S]{0,180}\b(?:dependabot|dependency|dependencies|codeql|security|alerts?)\b[\s\S]{0,100}\b(?:in|for|on|with)\s+(?:the\s+)?([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?)(?:\s+(?:repo|repository))?[.!?]*$/i);
+    var request = String(rawPhrase || '').trim();
+    var githubRepository = request.match(/https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:\/[A-Za-z0-9_./-]*)?/i);
+    var securityRequest = /\b(?:dependabot|dependency|dependencies|codeql|security|alerts?)\b/i.test(request);
+    var remediationAction = /\b(?:resolve|fix|remediate|address|update)\b/i.test(request);
+    if (githubRepository && securityRequest && remediationAction) {
+      return {
+        action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Remediation',
+        repositoryName: githubRepository[1], objective: request.replace(/[.!?]+$/g, '').trim()
+      };
+    }
+    var match = request.match(/^(?:please\s+)?(?:try\s+to\s+)?(?:resolve|fix|remediate|address|update)\b[\s\S]{0,180}\b(?:dependabot|dependency|dependencies|codeql|security|alerts?)\b[\s\S]{0,100}\b(?:in|for|on|with)\s+(?:the\s+)?([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?)(?:\s+(?:repo|repository))?[.!?]*$/i);
     if (!match) return null;
     return {
       action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Remediation',
-      repositoryName: String(match[1] || '').replace(/[.!?]+$/g, ''), objective: String(rawPhrase || '').replace(/[.!?]+$/g, '').trim()
+      repositoryName: String(match[1] || '').replace(/[.!?]+$/g, ''), objective: request.replace(/[.!?]+$/g, '').trim()
     };
   }
 
