@@ -560,6 +560,12 @@ async function _applySavedMCPConfig(githubPat) {
   }
 }
 
+if (isEvaStandalone() && window.evaStandalone && typeof window.evaStandalone.onGitHubAuthComplete === 'function') {
+  window.evaStandalone.onGitHubAuthComplete(function() {
+    autoApplySavedMCPConfig().catch(function() {});
+  });
+}
+
 async function applyMCPConfig() {
   var bridgeUrl = await detectACPBridge();
   var mcpServers = {};

@@ -1017,6 +1017,26 @@ class StreamingContractTests(unittest.TestCase):
         self.assertEqual(events[0][0], "acp_usage")
         self.assertNotIn("content", events[0][1])
 
+    def test_github_write_denial_starts_authorization_notification_once(self):
+        client = CallbackACPClient()
+        update = {
+            "sessionId": "session-1",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "kind": "mcp",
+                "status": "failed",
+                "title": "GitHub pull request review",
+                "error": "GitHub App does not have write access to this repository",
+            },
+        }
+        with patch("bridge.alerts._notify_enqueue") as notify:
+            client._handle_session_update(update)
+            client._handle_session_update(update)
+        notify.assert_called_once()
+        self.assertEqual(notify.call_args.args[0], "GitHub authorization needed")
+        self.assertEqual(notify.call_args.args[2], "github-auth-needed")
+        self.assertEqual(notify.call_args.args[4], ["chat", "voice"])
+
     def test_callback_receives_chunks_and_prompt_keeps_accumulation(self):
         client = CallbackACPClient()
         chunks = []

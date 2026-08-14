@@ -1,5 +1,18 @@
 // Proactive notification polling, rendering, voice batching, and acknowledgment.
-var _notifState = { polling: false, timer: null, intervalMs: 60000 };
+var _notifState = { polling: false, timer: null, intervalMs: 15000, githubAuthStarting: false };
+
+async function startGitHubAuthorizationForNotification(notification) {
+  if (!notification || notification.source !== 'github-auth-needed' || _notifState.githubAuthStarting) return;
+  if (typeof EvaWorkspaces === 'undefined' || typeof EvaWorkspaces.authorizeGitHub !== 'function') return;
+  _notifState.githubAuthStarting = true;
+  try {
+    await EvaWorkspaces.authorizeGitHub();
+  } catch (_) {
+    // The notification remains visible with the pending authorization reason.
+  } finally {
+    _notifState.githubAuthStarting = false;
+  }
+}
 
 function injectProactiveBubble(notification) {
   var txtOutput = document.getElementById('txtOutput');
@@ -30,6 +43,7 @@ async function pollNotifications() {
     var voiceText = [];
     items.forEach(function(notification) {
       injectProactiveBubble(notification);
+      startGitHubAuthorizationForNotification(notification);
       var channels = Array.isArray(notification.channels) ? notification.channels : ['chat'];
       if (channels.indexOf('voice') !== -1 && notification.body) {
         voiceText.push(String(notification.title || '') + '. ' + String(notification.body || ''));

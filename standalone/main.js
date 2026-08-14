@@ -162,7 +162,16 @@ function workspaceGitHubAuthStart(event) {
       githubAuthState = code === 0
         ? { state: 'complete', message: 'GitHub authorization complete. Private repository imports can now use the GitHub CLI credential.' }
         : { state: 'failed', message: 'GitHub device authorization did not complete.' };
-      if (code === 0) githubCliAuthPreferred = true;
+      if (code === 0) {
+        githubCliAuthPreferred = true;
+        githubCliToken().then(function(token) {
+          if (!token) return;
+          const auth = loadEncryptedAuth();
+          auth.GITHUB_PAT = token;
+          saveEncryptedAuth(auth);
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('github-auth-complete');
+        }).catch(function() {});
+      }
     });
     return child;
   }

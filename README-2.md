@@ -1391,7 +1391,12 @@ persistent `allow_always` authority.
 
 Settings > Auth launches GitHub CLI device authorization, opens GitHub's device
 page, copies the one-time code when possible, and keeps the code visible with a
-Copy code button until authorization completes.
+Copy code button until authorization completes. When a GitHub MCP action is
+explicitly rejected for missing authentication or write access, Eva creates a
+critical pending-auth notification and starts this same device flow
+automatically. Completing the GitHub device prompt stores the refreshed
+credential in Eva's encrypted Auth store and reapplies the configured GitHub
+MCP connection; the device-code step remains the user's explicit GitHub consent.
 
 Live ACP chunks update the task and periodically persist a bounded report.
 Plan/tool events update activity. Completion persists the final report and

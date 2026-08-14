@@ -54,6 +54,28 @@ _WORKSPACE_SENSITIVE_PATH_RE = re.compile(
     r"config\.json|config\.local\.(?:js|json))(?:[/\s]|$)",
     re.IGNORECASE,
 )
+_GITHUB_AUTH_FAILURE_RE = re.compile(
+    r"(?:does not have write access|write access (?:is )?denied|resource not accessible|bad credentials|"
+    r"(?:authentication|authorization) (?:is )?(?:required|failed|rejected)|permission denied|"
+    r"must authenticate|http (?:401|403))",
+    re.IGNORECASE,
+)
+_GITHUB_TOOL_CONTEXT_RE = re.compile(r"(?:github|\bgh\b|repository|pull request|\bissue\b)", re.IGNORECASE)
+
+
+def _github_authorization_needed(update):
+    """Return true only for an explicit GitHub tool authorization failure."""
+    if not isinstance(update, dict):
+        return False
+    details = []
+    for key in ("title", "message", "error", "content", "output", "status"):
+        value = update.get(key)
+        if isinstance(value, str):
+            details.append(value[:2000])
+        elif isinstance(value, dict):
+            details.extend(str(item)[:2000] for item in value.values() if isinstance(item, str))
+    text = "\n".join(details)
+    return bool(_GITHUB_TOOL_CONTEXT_RE.search(text) and _GITHUB_AUTH_FAILURE_RE.search(text))
 
 
 def _tool_call_command(tool_call):
@@ -357,6 +379,7 @@ class ACPClient:
         self.terminals = {}  # terminal_id -> {"process": Popen, "output": str}
         self.permission_lock = threading.RLock()
         self.pending_permissions = {}
+        self._github_auth_notified = False
 
     # --- Lifecycle ---
 
@@ -665,6 +688,14 @@ class ACPClient:
             kind = str(update.get("kind") or "other")[:32]
             if status:
                 print(f"[ACP] Tool update: kind={kind} status={str(status)[:24]}")
+            if not self._github_auth_notified and _github_authorization_needed(update):
+                self._github_auth_notified = True
+                from bridge.alerts import _notify_enqueue
+                _notify_enqueue(
+                    "GitHub authorization needed",
+                    "Eva needs GitHub write access to continue the requested work. Starting device authorization now; complete the GitHub prompt when it appears.",
+                    "github-auth-needed", 0.95, ["chat", "voice"],
+                )
                 self._dispatch_prompt_event(params, {
                     "kind": "tool",
                     "label": "Using " + kind.replace("_", " ") + " (" + str(status)[:24] + ")",
