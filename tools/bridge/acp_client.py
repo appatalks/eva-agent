@@ -381,6 +381,8 @@ class ACPClient:
         self.session_usage = {}     # session_id -> latest context usage metadata
         self._prompt_state_lock = threading.RLock()
         self._active_prompts = {}   # prompt_id -> session/callback/timing state
+        self._session_permission_modes = {}  # session_id -> last explicit prompt policy
+        self._session_permission_mode_order = []
         self.reader_thread = None
         self.agent_info = {}
         self.alive = False
@@ -766,8 +768,9 @@ class ACPClient:
                 if state.get("session_id") == session_id
             ]
             has_active_prompt = bool(self._active_prompts)
+            remembered_mode = self._session_permission_modes.get(session_id, "interactive")
         permission_mode = prompt_states[0].get("permission_mode", "workspace_auto") \
-            if len(prompt_states) == 1 else ("workspace_auto" if has_active_prompt else "interactive")
+            if len(prompt_states) == 1 else ("workspace_auto" if has_active_prompt else remembered_mode)
         workspace_mode = permission_mode in {"workspace_write", "workspace_auto"}
         execute_category = _workspace_execute_category(tool_call, self.cwd) \
             if workspace_mode and tool_kind == "execute" else ""
@@ -1034,6 +1037,15 @@ class ACPClient:
     def _begin_prompt(self, prompt_id, session_id, on_chunk, permission_mode="workspace_auto", on_event=None):
         with self._prompt_state_lock:
             self.response_chunks[prompt_id] = ""
+            self._session_permission_modes[session_id] = permission_mode
+            try:
+                self._session_permission_mode_order.remove(session_id)
+            except ValueError:
+                pass
+            self._session_permission_mode_order.append(session_id)
+            while len(self._session_permission_mode_order) > _ACP_SESSION_MAX:
+                evicted_session_id = self._session_permission_mode_order.pop(0)
+                self._session_permission_modes.pop(evicted_session_id, None)
             self._active_prompts[prompt_id] = {
                 "session_id": session_id,
                 "on_chunk": on_chunk,

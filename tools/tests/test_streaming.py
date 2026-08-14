@@ -1054,6 +1054,58 @@ class StreamingContractTests(unittest.TestCase):
         self.assertEqual(state["permission_mode"], "workspace_auto")
         client._finish_prompt(300)
 
+    def test_late_permission_inherits_known_session_autonomy(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        client._begin_prompt(301, "late-workspace-session", None, "workspace_auto")
+        client._finish_prompt(301)
+        with patch("bridge.acp_client._telemetry_emit") as emit:
+            client._handle_message({
+                "id": 91,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "late-workspace-session",
+                    "toolCall": {
+                        "toolCallId": "late-execute",
+                        "kind": "execute",
+                        "rawInput": {"command": "gh", "args": ["pr", "create", "--fill"]},
+                    },
+                    "options": [
+                        {"optionId": "allow-once", "kind": "allow_once"},
+                        {"optionId": "reject", "kind": "reject_once"},
+                    ],
+                },
+            })
+        self.assertEqual(responses, [(91, {
+            "outcome": {"outcome": "selected", "optionId": "allow-once"}
+        })])
+        self.assertEqual(client.list_pending_permissions(), [])
+        self.assertEqual(emit.call_args.kwargs["decision"], "workspace-autonomy-approve")
+
+    def test_unknown_session_permission_remains_interactive(self):
+        client = CallbackACPClient()
+        responses = []
+        client._send_response = lambda request_id, result: responses.append((request_id, result))
+        with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": False}), \
+                patch("bridge.acp_client._telemetry_emit"), \
+                patch("bridge.acp_client.threading.Timer"):
+            client._handle_message({
+                "id": 92,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "unknown-session",
+                    "toolCall": {
+                        "toolCallId": "unknown-execute",
+                        "kind": "execute",
+                        "rawInput": {"command": "gh", "args": ["pr", "create", "--fill"]},
+                    },
+                    "options": [{"optionId": "allow-once", "kind": "allow_once"}],
+                },
+            })
+        self.assertEqual(responses, [])
+        self.assertEqual(len(client.list_pending_permissions()), 1)
+
     def test_ambiguous_active_prompt_defaults_to_workspace_autonomy(self):
         client = CallbackACPClient()
         client._begin_prompt(301, "session-a", None, "interactive")

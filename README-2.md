@@ -1387,7 +1387,10 @@ including dispatch-delayed runs that have no `AgentRun` record yet. ACP
 permission polling works in authorized hosted renderers as well as Standalone;
 file-origin and unauthenticated clients remain blocked by bridge authorization.
 Passive recall continues to reject tools. Neither workspace mode accepts
-persistent `allow_always` authority.
+persistent `allow_always` authority. A late permission request from a known ACP
+session inherits that session's last explicit capability policy, preventing a
+completed autonomous turn from silently falling back to an interactive card;
+requests from unknown sessions remain interactive and fail closed.
 
 Settings > Auth launches GitHub CLI device authorization, opens GitHub's device
 page, copies the one-time code when possible, and keeps the code visible with a
