@@ -1026,6 +1026,14 @@ class StreamingContractTests(unittest.TestCase):
         self.assertEqual(result["stop_reason"], "end_turn")
         self.assertEqual(client.created_sessions, ["session-1"])
 
+    def test_acp_prompt_defaults_to_workspace_autonomy(self):
+        client = CallbackACPClient()
+        client._begin_prompt(300, "workspace-default-session", None)
+        with client._prompt_state_lock:
+            state = client._active_prompts[300]
+        self.assertEqual(state["permission_mode"], "workspace_auto")
+        client._finish_prompt(300)
+
     def test_acp_completion_reflects_once_for_streaming_and_json_responses(self):
         @contextmanager
         def acquire_client(*_args, **_kwargs):

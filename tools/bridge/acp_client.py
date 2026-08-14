@@ -725,7 +725,7 @@ class ACPClient:
                 state for state in self._active_prompts.values()
                 if state.get("session_id") == session_id
             ]
-        permission_mode = prompt_states[0].get("permission_mode", "interactive") \
+        permission_mode = prompt_states[0].get("permission_mode", "workspace_auto") \
             if len(prompt_states) == 1 else "interactive"
         workspace_mode = permission_mode in {"workspace_write", "workspace_auto"}
         execute_category = _workspace_execute_category(tool_call, self.cwd) \
@@ -983,14 +983,14 @@ class ACPClient:
     # --- Public API ---
 
     def prompt(self, text, timeout=120, conversation_id=None, on_chunk=None,
-               permission_mode="interactive", on_event=None):
+               permission_mode="workspace_auto", on_event=None):
         with _pin_acp_client(self) as acquired:
             if not acquired:
                 return {"error": "ACP client is unavailable"}
             with self.prompt_lock:
                 return self._prompt(text, timeout, conversation_id, on_chunk, permission_mode, on_event)
 
-    def _begin_prompt(self, prompt_id, session_id, on_chunk, permission_mode="interactive", on_event=None):
+    def _begin_prompt(self, prompt_id, session_id, on_chunk, permission_mode="workspace_auto", on_event=None):
         with self._prompt_state_lock:
             self.response_chunks[prompt_id] = ""
             self._active_prompts[prompt_id] = {
@@ -1020,7 +1020,7 @@ class ACPClient:
         }
 
     def _prompt(self, text, timeout=120, conversation_id=None, on_chunk=None,
-                permission_mode="interactive", on_event=None):
+                permission_mode="workspace_auto", on_event=None):
         """Send a text prompt and return the accumulated response text."""
         session_id = self._session_for_conversation(conversation_id)
         if not session_id:
