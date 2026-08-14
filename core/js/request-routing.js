@@ -22,6 +22,12 @@
     if (/\b(count|summarize|filter by|group by|join|distinct|top \d|take \d)\b/.test(text)) {
       return 'kusto-operator';
     }
+    var githubOperation = /\b(?:search|find|list|check|review|show|get|open|create|update|close|comment|manage|run|query|merge|delete|push|compare|monitor|trigger)\b/.test(text);
+    var githubSubject = /\b(?:github|github\.com)\b/.test(text);
+    var githubExplanation = /^\s*(?:what|how|why|explain|describe)\b/.test(text) || /^\s*tell me about\b/.test(text);
+    if (githubSubject && githubOperation && !githubExplanation) {
+      return 'github-data';
+    }
     if (/\b(search the web|web search|look up|google|what happened|who won|search for)\b/.test(text)) {
       return 'web-search';
     }
@@ -31,7 +37,7 @@
   function needsAcpPreflight(message, requestType) {
     var text = String(message || '').toLowerCase();
     var type = requestType || classifyRequestType(text);
-    if (['news-search', 'weather-search', 'financial-data', 'web-search', 'kusto-query', 'kusto-operator'].indexOf(type) >= 0) {
+    if (['news-search', 'weather-search', 'financial-data', 'web-search', 'github-data', 'kusto-query', 'kusto-operator'].indexOf(type) >= 0) {
       return true;
     }
     var explanatory = /^\s*(?:what|how|why|explain|describe|tell\s+me\s+about)\b/.test(text);
@@ -49,6 +55,7 @@
 
   root.EvaRequestRouting = {
     classifyRequestType: classifyRequestType,
+    isGitHubOperation: function(message) { return classifyRequestType(message) === 'github-data'; },
     needsAcpPreflight: needsAcpPreflight,
     createTurnId: createTurnId,
     needsDataRetrieval: function (message) {

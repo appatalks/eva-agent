@@ -4369,10 +4369,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 )
             elif _request_type == "github-data":
                 acp_prompt = (
-                    "You are a GitHub data retrieval assistant. Use the available GitHub MCP tools to answer the user's "
-                    "request. Do not use browser or desktop automation. Return factual GitHub results with repository, issue, "
-                    "pull request, workflow, release, or branch identifiers when available. If the requested GitHub data is "
-                    "unavailable, say so without inventing it.\n\n"
+                    "You are a GitHub MCP/gh operations assistant. Use the available GitHub MCP tools or authenticated gh "
+                    "capabilities to answer or perform the user's request. Never use browser or desktop automation for GitHub "
+                    "API, repository, issue, pull request, workflow, release, branch, or comment operations. For a mutation, "
+                    "honor the existing permission flow and report the real MCP/gh result only after it completes. If GitHub "
+                    "MCP or gh is unavailable, say so plainly without opening a browser.\n\n"
                     f"{user_message}"
                 )
             else:
@@ -4846,10 +4847,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         )
         if _request_type == "github-data":
             eva_system += (
-                "GITHUB DATA ROUTE:\n"
-                "- Use [Data Retrieved] and GitHub MCP results for this request.\n"
-                "- Do not emit browser or desktop markers to research GitHub.\n"
-                "- If GitHub data is unavailable, state that plainly rather than opening a browser.\n\n"
+                "GITHUB NATIVE ROUTE:\n"
+                "- Use [Data Retrieved] and GitHub MCP/gh results for this request.\n"
+                "- Never emit browser or desktop markers for GitHub API, repository, issue, pull request, workflow, release, branch, or comment operations.\n"
+                "- For a mutation, honor the existing permission flow and claim success only after a real MCP/gh result.\n"
+                "- If GitHub MCP or gh is unavailable, state that plainly rather than opening a browser.\n\n"
             )
 
         if responder_provider == "openai" and not response_text:
@@ -5837,6 +5839,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "Answer only from injected memory and untrusted prior-conversation excerpts. "
                 "Do not invoke tools, shell commands, MCP operations, database queries, or permission requests. "
                 "Ask for confirmation when a fact is not durable Knowledge.\n\n"
+                + prompt_text
+            )
+
+        if direct_request_type == "github-data":
+            prompt_text = (
+                "[GitHub Native Tool Policy - AUTHORITATIVE]\n"
+                "Use GitHub MCP tools or authenticated gh capabilities for GitHub API, repository, issue, pull request, workflow, release, branch, and comment operations. "
+                "Never use browser or desktop automation for GitHub. For a mutation, honor the existing permission flow and report only the real result. "
+                "If GitHub MCP or gh is unavailable, say so plainly.\n\n"
                 + prompt_text
             )
 

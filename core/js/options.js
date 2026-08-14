@@ -1799,6 +1799,16 @@ async function sendData() {
         }
       }
     }
+    if (window.EvaRequestRouting && typeof EvaRequestRouting.isGitHubOperation === 'function' &&
+        EvaRequestRouting.isGitHubOperation(protectedRawText)) {
+      evaAuditEvent('github_mcp_route', 'started', {
+        correlation_id: auditTurnId,
+        action: 'github_mcp',
+        label: 'aig_acp'
+      });
+      if (typeof setStatus === 'function') setStatus('info', 'Routing GitHub operation through native GitHub MCP...');
+      return aigSend();
+    }
     // Hide Eva welcome MOTD on first send
     hideEvaWelcome();
   applyStandaloneSimplifications();
