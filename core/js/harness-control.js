@@ -198,7 +198,7 @@ var EvaHarness = (function() {
   function savedPullRequestContext() {
     try {
       var saved = JSON.parse(localStorage.getItem(GITHUB_PULL_REQUEST_CONTEXT_KEY) || 'null');
-      if (saved && Number.isInteger(Number(saved.number)) && Number(saved.number) > 0 && normalizeGitHubRepository(saved.repository)) {
+      if (saved && saved.provenance === 'direct_native_inspection' && Number.isInteger(Number(saved.number)) && Number(saved.number) > 0 && normalizeGitHubRepository(saved.repository)) {
         return { number: Number(saved.number), repository: normalizeGitHubRepository(saved.repository) };
       }
     } catch (_) {}
@@ -209,7 +209,8 @@ var EvaHarness = (function() {
     if (!context || !Number.isInteger(Number(context.number)) || !normalizeGitHubRepository(context.repository)) return;
     try {
       localStorage.setItem(GITHUB_PULL_REQUEST_CONTEXT_KEY, JSON.stringify({
-        number: Number(context.number), repository: normalizeGitHubRepository(context.repository)
+        number: Number(context.number), repository: normalizeGitHubRepository(context.repository),
+        provenance: 'direct_native_inspection'
       }));
     } catch (_) {}
   }
@@ -220,18 +221,6 @@ var EvaHarness = (function() {
     var saved = savedPullRequestContext();
     if (saved && (!direct || saved.number === direct.number)) return saved;
     if (direct) return direct;
-    var candidates = [];
-    try {
-      var messages = JSON.parse(localStorage.getItem('aigMessages') || '[]');
-      if (Array.isArray(messages)) candidates = candidates.concat(messages.map(function(message) { return message && message.content; }));
-    } catch (_) {}
-    try {
-      candidates = candidates.concat(Array.prototype.map.call(document.querySelectorAll('.chat-bubble'), function(bubble) { return bubble.textContent; }));
-    } catch (_) {}
-    for (var index = candidates.length - 1; index >= 0; index--) {
-      var context = pullRequestReference(candidates[index]);
-      if (context) return context;
-    }
     return null;
   }
 
@@ -654,7 +643,10 @@ var EvaHarness = (function() {
         if (checks.length) summary += ' Checks: ' + checks.join(', ') + '.';
         if (pull && pull.url) summary += ' ' + String(pull.url);
         var inferredRepository = String(pull && pull.url || '').replace(/^https:\/\/github\.com\//, '').replace(/\/pull\/\d+.*$/, '');
-        persistPullRequestContext({ number: pullNumber, repository: String(request.repository || '') || inferredRepository });
+        var directPullRequest = context.source !== 'model' ? pullRequestReference(context.userRequest) : null;
+        if (directPullRequest && directPullRequest.number === pullNumber) {
+          persistPullRequestContext({ number: pullNumber, repository: String(request.repository || '') || inferredRepository });
+        }
         return result(true, 'describe_github_pull_request', summary, {
           outcome: 'completed', url: String(pull && pull.url || ''), state: String(pull && pull.state || ''), mergeState: String(pull && pull.mergeState || '')
         });

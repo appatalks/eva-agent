@@ -268,8 +268,12 @@ async function githubDeletePullRequestBranch(event, request) {
   const headRepositoryName = owner && headRepository ? owner + '/' + headRepository : '';
   const base = String(pull && pull.baseRefName || '');
   if (!pull || pull.state !== 'MERGED') throw new Error('Pull request #' + number + ' must be merged before deleting its branch.');
-  if (!validGitHubRepository(headRepositoryName) || !validGitHubBranch(branch)) throw new Error('GitHub returned an invalid pull request branch.');
-  if (branch === base || /^(?:main|master)$/i.test(branch)) throw new Error('Eva will not delete a default or base branch.');
+  if (!headRepositoryName || !validGitHubRepository(headRepositoryName) || !validGitHubBranch(branch)) throw new Error('GitHub returned an invalid pull request branch.');
+  const defaultBranch = String(await runGitHubCli([
+    'api', 'repos/' + headRepositoryName, '--jq', '.default_branch'
+  ], 30000)).trim();
+  if (!validGitHubBranch(defaultBranch)) throw new Error('GitHub returned an invalid default branch.');
+  if (branch === base || branch === defaultBranch || /^(?:main|master)$/i.test(branch)) throw new Error('Eva will not delete a default or base branch.');
   const encodedBranch = branch.split('/').map(encodeURIComponent).join('/');
   const referencePath = 'repos/' + headRepositoryName + '/git/refs/heads/' + encodedBranch;
   const matchingPath = 'repos/' + headRepositoryName + '/git/matching-refs/heads/' + encodedBranch;
