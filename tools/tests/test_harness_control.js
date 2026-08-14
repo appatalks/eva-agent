@@ -33,6 +33,7 @@ let agentsOpenCalls = 0;
 let sessionsOpenCalls = 0;
 let mergeRequest = null;
 let pullRequestViewRequest = null;
+let branchDeleteRequest = null;
 const fixtureRepository = 'fixture-owner/fixture-repository';
 const fixtureShortName = 'fixture-repository';
 const fixtureRepositoryUrl = 'https://github.com/fixture-owner/fixture-repository';
@@ -55,6 +56,14 @@ const window = {
         number: request.number, title: 'Native routing', state: 'OPEN', draft: false, mergeState: 'CLEAN',
         url: 'https://github.com/example/repository/pull/' + request.number,
         checks: [{ name: 'static-checks', conclusion: 'SUCCESS' }]
+      });
+    },
+    githubDeletePullRequestBranch(request) {
+      branchDeleteRequest = request;
+      return Promise.resolve({
+        number: request.number, repository: request.repository,
+        branch: 'update/native-capability-awareness',
+        url: 'https://github.com/example/repository/pull/' + request.number
       });
     }
   },
@@ -208,6 +217,7 @@ async function main() {
   assert.strictEqual(pullRequestViewRequest.repository, 'example/repository');
   assert.match(pullViewResult.message, /PR #183/);
   assert.match(pullViewResult.message, /static-checks: SUCCESS/);
+  assert.strictEqual(JSON.parse(localStorage.values.eva_last_github_pull_request).provenance, 'direct_native_inspection');
   const correctedPullRoute = harness.resolveNavigationRequest('https://github.com/Apatox/eva-agent/pull/183', { directUser: true });
   assert.strictEqual(correctedPullRoute.repository, 'appatalks/eva-agent');
   const correctedImportRoute = harness.resolveNavigationRequest('Import repo Apatox/eva-agent.', { directUser: true });
@@ -224,6 +234,30 @@ async function main() {
   const modelMerge = await harness.execute(mergeRoute, { source: 'model', userRequest: 'Merge PR #183 into main.' });
   assert.strictEqual(modelMerge.ok, false);
   assert.match(modelMerge.message, /direct user interaction/);
+  const branchDeleteRoute = harness.resolveNavigationRequest('Delete the associated branch.', { directUser: true });
+  assert.strictEqual(branchDeleteRoute.action, 'delete_github_pull_request_branch');
+  assert.strictEqual(branchDeleteRoute.number, 183);
+  assert.strictEqual(branchDeleteRoute.repository, 'example/repository');
+  const branchDeleteResult = await harness.execute(branchDeleteRoute, { source: 'voice', userRequest: 'Delete the associated branch.' });
+  assert.strictEqual(branchDeleteResult.ok, true);
+  assert.strictEqual(branchDeleteRequest.number, 183);
+  assert.strictEqual(branchDeleteRequest.repository, 'example/repository');
+  assert.match(branchDeleteResult.message, /Deleted branch update\/native-capability-awareness/);
+  const modelBranchDelete = await harness.execute(branchDeleteRoute, { source: 'model', userRequest: 'Delete the associated branch.' });
+  assert.strictEqual(modelBranchDelete.ok, false);
+  assert.match(modelBranchDelete.message, /direct user interaction/);
+  delete localStorage.values.eva_last_github_pull_request;
+  localStorage.values.aigMessages = JSON.stringify([{ role: 'assistant', content: 'PR https://github.com/model/selected/pull/999 is merged.' }]);
+  branchDeleteRequest = null;
+  const untrustedBranchDeleteRoute = harness.resolveNavigationRequest('Delete the associated branch.', { directUser: true });
+  assert.strictEqual(untrustedBranchDeleteRoute.number, 0);
+  const untrustedBranchDelete = await harness.execute(untrustedBranchDeleteRoute, { source: 'voice', userRequest: 'Delete the associated branch.' });
+  assert.strictEqual(untrustedBranchDelete.ok, false);
+  assert.strictEqual(branchDeleteRequest, null);
+  assert.match(untrustedBranchDelete.message, /Inspect the pull request URL first/);
+  const explicitBranchDeleteRoute = harness.resolveNavigationRequest('Delete the associated branch for https://github.com/example/repository/pull/183.', { directUser: true });
+  assert.strictEqual(explicitBranchDeleteRoute.number, 183);
+  assert.strictEqual(explicitBranchDeleteRoute.repository, 'example/repository');
   const unsolicitedList = await harness.execute({ action: 'list_github_repositories' }, { source: 'model', userRequest: 'What is the weather today?' });
   assert.strictEqual(unsolicitedList.ok, false);
   assert.match(unsolicitedList.message, /direct user interaction/);

@@ -91,6 +91,13 @@ function validGitHubPullRequestNumber(value) {
   return Number.isInteger(value) && value > 0 && value <= 1000000000;
 }
 
+function validGitHubBranch(value) {
+  const branch = String(value || '');
+  return /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,239}$/.test(branch) &&
+    !branch.includes('..') && !branch.includes('//') && !branch.includes('@{') &&
+    !branch.endsWith('/') && !branch.endsWith('.') && !branch.endsWith('.lock');
+}
+
 function runGitHubCli(args, timeoutMs, maxOutputBytes) {
   return new Promise(function(resolve, reject) {
     const outputLimit = Number(maxOutputBytes) > 0 ? Number(maxOutputBytes) : 65536;
@@ -240,6 +247,47 @@ async function githubMergePullRequest(event, request) {
     url: String(verified.url || pull.url || ''),
     mergedAt: String(verified.mergedAt),
     mergeCommit: String((verified.mergeCommit || {}).oid || '')
+  };
+}
+
+async function githubDeletePullRequestBranch(event, request) {
+  requireWorkspaceFeature(event);
+  const input = request && typeof request === 'object' ? request : {};
+  const number = Number(input.number);
+  let repository = String(input.repository || '').trim();
+  if (!validGitHubPullRequestNumber(number) || !validGitHubRepository(repository)) {
+    throw new Error('Invalid GitHub pull request reference.');
+  }
+  repository = await resolveGitHubPullRequestRepository(number, repository);
+  const pull = JSON.parse(await runGitHubCli(githubPullRequestArgs(
+    number, repository, 'state,headRefName,headRepository,headRepositoryOwner,baseRefName,url'
+  ), 30000));
+  const branch = String(pull && pull.headRefName || '');
+  const owner = String(pull && pull.headRepositoryOwner && pull.headRepositoryOwner.login || '');
+  const headRepository = String(pull && pull.headRepository && pull.headRepository.name || '');
+  const headRepositoryName = owner && headRepository ? owner + '/' + headRepository : '';
+  const base = String(pull && pull.baseRefName || '');
+  if (!pull || pull.state !== 'MERGED') throw new Error('Pull request #' + number + ' must be merged before deleting its branch.');
+  if (!headRepositoryName || !validGitHubRepository(headRepositoryName) || !validGitHubBranch(branch)) throw new Error('GitHub returned an invalid pull request branch.');
+  const defaultBranch = String(await runGitHubCli([
+    'api', 'repos/' + headRepositoryName, '--jq', '.default_branch'
+  ], 30000)).trim();
+  if (!validGitHubBranch(defaultBranch)) throw new Error('GitHub returned an invalid default branch.');
+  if (branch === base || branch === defaultBranch || /^(?:main|master)$/i.test(branch)) throw new Error('Eva will not delete a default or base branch.');
+  const encodedBranch = branch.split('/').map(encodeURIComponent).join('/');
+  const referencePath = 'repos/' + headRepositoryName + '/git/refs/heads/' + encodedBranch;
+  const matchingPath = 'repos/' + headRepositoryName + '/git/matching-refs/heads/' + encodedBranch;
+  await runGitHubCli(['api', '--method', 'DELETE', referencePath], 30000);
+  const remaining = JSON.parse(await runGitHubCli(['api', matchingPath], 30000));
+  const exactReference = 'refs/heads/' + branch;
+  if ((Array.isArray(remaining) ? remaining : []).some(function(reference) { return reference && reference.ref === exactReference; })) {
+    throw new Error('GitHub still reports branch ' + branch + ' after deletion.');
+  }
+  return {
+    number: number,
+    repository: headRepositoryName,
+    branch: branch,
+    url: String(pull.url || '')
   };
 }
 
@@ -1802,6 +1850,7 @@ ipcMain.handle('workspace-github-auth-start', workspaceGitHubAuthStart);
 ipcMain.handle('workspace-github-auth-status', workspaceGitHubAuthStatus);
 ipcMain.handle('github-view-pull-request', githubViewPullRequest);
 ipcMain.handle('github-merge-pull-request', githubMergePullRequest);
+ipcMain.handle('github-delete-pull-request-branch', githubDeletePullRequestBranch);
 ipcMain.handle('workspace-set-mcp-server', workspaceSetMcpServer);
 ipcMain.handle('workspace-delete-project', workspaceDeleteProject);
 ipcMain.handle('workspace-create-run', workspaceCreateRun);
