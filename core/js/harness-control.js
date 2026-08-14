@@ -92,6 +92,7 @@ var EvaHarness = (function() {
     { id: 'import_github_selection', description: 'Import a named repository selected from a native GitHub listing.' },
     { id: 'describe_github_pull_request', description: 'Inspect a GitHub pull request through authenticated gh. args: {number, repository?}. Read-only.' },
     { id: 'merge_github_pull_request', description: 'Verify and merge a pull request through authenticated gh only after a direct user request and typed MERGE confirmation.' },
+    { id: 'delete_github_pull_request_branch', description: 'Delete only the verified head branch of a merged pull request after an explicit direct user request.' },
     { id: 'remove_workspace', description: 'Remove a named workspace only after a direct user request.' },
     { id: 'run_terminal_command', description: 'Submit an exact terminal command only after a direct user request.' },
     { id: 'type_terminal_command', description: 'Type an exact terminal command for review only after a direct user request.' },
@@ -331,6 +332,15 @@ var EvaHarness = (function() {
             number: pullRequest.number, repository: pullRequest.repository
           };
         }
+      }
+      var associatedBranchDelete = /\b(?:delete|remove)\b[\s\S]{0,48}\b(?:associated|source|pull\s+request|pr|merged)\b[\s\S]{0,32}\bbranch\b|\b(?:delete|remove)\s+(?:the\s+)?branch\b/i.test(rawPhrase);
+      if (associatedBranchDelete) {
+        var branchPullRequest = recentPullRequestContext(rawPhrase);
+        return {
+          action: 'delete_github_pull_request_branch', target: 'workspaces', label: 'GitHub Branch Deletion',
+          number: branchPullRequest ? branchPullRequest.number : 0,
+          repository: branchPullRequest ? branchPullRequest.repository : ''
+        };
       }
       if (/\b(?:try|retry|rerun|resume|continue)\s+(?:again|it|that|the\s+(?:task|work|remediation))\b/i.test(rawPhrase)) {
         var retryRemediation = lastRemediation || recentRemediationContext();
@@ -673,6 +683,20 @@ var EvaHarness = (function() {
         });
       }).catch(function(error) {
         return result(false, 'merge_github_pull_request', error && error.message ? error.message : 'Pull request merge failed.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'delete_github_pull_request_branch') {
+      if (!window.evaStandalone || typeof window.evaStandalone.githubDeletePullRequestBranch !== 'function') return Promise.resolve(result(false, 'delete_github_pull_request_branch', 'Native GitHub branch deletion is unavailable in this Eva build.'));
+      var branchPullNumber = Number(request.number);
+      if (!Number.isInteger(branchPullNumber) || branchPullNumber <= 0) return Promise.resolve(result(false, 'delete_github_pull_request_branch', 'Inspect the pull request URL first so Eva can identify the exact associated branch.'));
+      return window.evaStandalone.githubDeletePullRequestBranch({
+        number: branchPullNumber, repository: String(request.repository || '').trim()
+      }).then(function(deleted) {
+        return result(true, 'delete_github_pull_request_branch', 'Deleted branch ' + String(deleted.branch) + ' from ' + String(deleted.repository) + '.', {
+          outcome: 'completed', branch: String(deleted.branch), repository: String(deleted.repository), url: String(deleted.url || '')
+        });
+      }).catch(function(error) {
+        return result(false, 'delete_github_pull_request_branch', error && error.message ? error.message : 'Associated branch deletion failed.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
     if (action === 'remove_workspace') {

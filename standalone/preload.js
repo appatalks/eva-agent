@@ -46,6 +46,7 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   workspaceGitHubAuthStatus: function() { return ipcRenderer.invoke('workspace-github-auth-status'); },
   githubViewPullRequest: function(request) { return ipcRenderer.invoke('github-view-pull-request', request); },
   githubMergePullRequest: function(request) { return ipcRenderer.invoke('github-merge-pull-request', request); },
+  githubDeletePullRequestBranch: function(request) { return ipcRenderer.invoke('github-delete-pull-request-branch', request); },
   workspaceRemediationContextLoad: function() { return ipcRenderer.sendSync('workspace-remediation-context-load'); },
   workspaceRemediationContextSave: function(value) { return ipcRenderer.invoke('workspace-remediation-context-save', value); },
   onGitHubAuthComplete: function(listener) {
