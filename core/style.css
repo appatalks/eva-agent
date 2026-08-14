@@ -852,14 +852,35 @@ body.memory-view-open #evaMemoryBtn { background: rgba(74,222,199,0.12); color: 
 body.memory-view-open .memory-inspector-panel { display: flex; position: fixed; inset: 0; width: 100vw; max-width: none; height: 100vh; transform: none !important; transition: none !important; border: 0; border-radius: 0; flex-direction: column; background: #081211; z-index: 9001; }
 body.eva-standalone.memory-view-open .memory-inspector-panel { top: 32px; height: calc(100vh - 32px); }
 body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 16px 22px 11px; border-bottom-color: rgba(74,222,199,0.18); }
-.memory-inspector-toolbar { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
+.memory-inspector-toolbar { display: grid; grid-template-columns: auto auto minmax(150px, 1fr) repeat(4, minmax(100px, 126px)) auto minmax(110px, 0.8fr); align-items: center; gap: 8px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
 .memory-inspector-toolbar .auth-note { margin: 0; }
+.memory-inspector-toolbar input,
+.memory-inspector-toolbar select { min-width: 0; height: 32px; border: 1px solid rgba(74,222,199,0.18); border-radius: 3px; background: #0c1b19; color: #e5faf7; padding: 0 9px; font: 10px monospace; }
+.memory-inspector-toolbar input:focus,
+.memory-inspector-toolbar select:focus { outline: none; border-color: #4adec7; }
+#memoryAtomCount { color: #83bbb4; font: 10px monospace; white-space: nowrap; }
 .memory-inspector-body { display: grid; grid-template-columns: minmax(220px, 0.72fr) minmax(360px, 1.5fr) minmax(220px, 0.72fr); min-height: 0; flex: 1; overflow: hidden; }
 .memory-inspector-section { min-width: 0; min-height: 0; overflow: auto; border-right: 1px solid rgba(74,222,199,0.14); background: rgba(9,24,22,0.76); }
 .memory-inspector-section:last-child { border-right: 0; }
 .memory-inspector-atoms { background: rgba(5,17,16,0.65); }
 .memory-inspector-list { display: grid; gap: 8px; padding: 10px; }
-.memory-inspector-card { display: grid; gap: 7px; min-width: 0; padding: 10px; border: 1px solid rgba(74,222,199,0.15); border-radius: 4px; background: rgba(12,27,25,0.82); }
+.memory-atom-group { min-width: 0; border: 1px solid rgba(74,222,199,0.16); border-radius: 4px; background: rgba(9,24,22,0.62); }
+.memory-atom-group > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 48px; padding: 9px 10px; cursor: pointer; list-style: none; }
+.memory-atom-group > summary::-webkit-details-marker { display: none; }
+.memory-atom-group > summary::before { content: '+'; flex: none; width: 15px; color: #4adec7; font: 16px/1 monospace; text-align: center; }
+.memory-atom-group[open] > summary::before { content: '-'; }
+.memory-atom-group > summary:hover,
+.memory-atom-group > summary:focus { background: rgba(74,222,199,0.07); outline: none; }
+.memory-atom-group-title { display: grid; min-width: 0; gap: 2px; margin-right: auto; }
+.memory-atom-group-title strong { color: #e8fffb; font-size: 12px; font-weight: 600; }
+.memory-atom-group-title small { color: #779b95; font: 9px/1.35 monospace; overflow-wrap: anywhere; }
+.memory-atom-group-count { flex: none; padding: 3px 5px; border: 1px solid rgba(74,222,199,0.22); border-radius: 3px; color: #8ce4d7; font: 9px monospace; white-space: nowrap; }
+.memory-atom-group-list { display: grid; gap: 8px; padding: 0 8px 8px; border-top: 1px solid rgba(74,222,199,0.1); }
+.memory-atom-group-list .memory-inspector-card { margin-top: 8px; }
+.memory-atoms-empty { margin: 0; padding: 24px 10px; color: #759c97; text-align: center; font: 10px/1.4 monospace; }
+.memory-inspector-card { display: grid; gap: 7px; min-width: 0; padding: 10px; border: 1px solid rgba(74,222,199,0.15); border-radius: 4px; background: rgba(12,27,25,0.82); cursor: pointer; }
+.memory-inspector-card:hover,
+.memory-inspector-card:focus { border-color: rgba(74,222,199,0.58); outline: none; }
 .memory-inspector-card strong { color: #e8fffb; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .memory-inspector-value { color: #abc6c1; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }
 .memory-inspector-meta,
@@ -881,6 +902,44 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 }
 .memory-inspector-actions .background-inline-button { min-width: 72px; }
 .memory-inspector-actions button:first-child { flex: 0 1 auto; }
+.memory-atom-detail-dialog { display: none; position: fixed; z-index: 9010; inset: 0; align-items: center; justify-content: center; padding: 20px; background: rgba(2, 10, 9, 0.78); }
+.memory-atom-detail-dialog[aria-hidden="false"] { display: flex; }
+.memory-atom-detail-panel { display: flex; flex-direction: column; width: min(980px, 100%); max-height: min(820px, calc(100vh - 40px)); overflow: hidden; border: 1px solid rgba(74,222,199,0.36); border-radius: 6px; background: #081211; box-shadow: 0 18px 60px rgba(0,0,0,0.55); }
+.memory-atom-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 17px 20px 14px; border-bottom: 1px solid rgba(74,222,199,0.18); }
+.memory-atom-detail-kicker { display: block; color: #4adec7; font: 700 9px monospace; letter-spacing: 0.12em; }
+.memory-atom-detail-header h2 { margin: 4px 0 0; color: #e8fffb; font-size: 18px; font-weight: 600; }
+.memory-atom-detail-header button { flex: none; width: 30px; height: 30px; border: 0; border-radius: 3px; background: transparent; color: #9fc4bf; font-size: 24px; line-height: 1; cursor: pointer; }
+.memory-atom-detail-header button:hover,
+.memory-atom-detail-header button:focus { background: rgba(74,222,199,0.12); color: #e8fffb; outline: none; }
+.memory-atom-detail-state { min-height: 0; padding: 0 20px; color: #ffcf85; font: 10px/1.4 monospace; }
+.memory-atom-detail-content { display: grid; grid-template-columns: minmax(260px, 0.9fr) minmax(390px, 1.1fr); min-height: 0; overflow: auto; }
+.memory-atom-detail-content > section,
+.memory-atom-detail-form { min-width: 0; padding: 18px 20px 22px; }
+.memory-atom-detail-content > section { border-right: 1px solid rgba(74,222,199,0.14); background: rgba(9,24,22,0.76); }
+.memory-atom-detail-content h3 { margin: 0 0 11px; color: #e8fffb; font-size: 13px; font-weight: 600; }
+.memory-atom-detail-metadata { display: grid; grid-template-columns: minmax(100px, 0.42fr) minmax(0, 1fr); gap: 6px 12px; margin: 0; font: 10px/1.4 monospace; }
+.memory-atom-detail-metadata dt { color: #6f9791; }
+.memory-atom-detail-metadata dd { min-width: 0; margin: 0; color: #c6dfdb; overflow-wrap: anywhere; white-space: pre-wrap; }
+.memory-atom-detail-purpose { margin-top: 18px; padding: 10px; border-left: 2px solid #4adec7; background: rgba(74,222,199,0.07); }
+.memory-atom-detail-purpose h4 { margin: 0 0 5px; color: #8ce4d7; font: 700 10px monospace; }
+.memory-atom-detail-purpose p { margin: 0; color: #c6dfdb; font: 10px/1.5 monospace; overflow-wrap: anywhere; }
+.memory-atom-detail-associations { display: grid; gap: 12px; margin-top: 20px; }
+.memory-atom-detail-associations h4 { margin: 0 0 5px; color: #82a9a2; font: 700 10px monospace; }
+.memory-atom-detail-associations p { margin: 0; color: #c6dfdb; font: 10px/1.45 monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
+.memory-atom-detail-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
+.memory-atom-detail-fields label { display: grid; gap: 5px; min-width: 0; color: #82a9a2; font: 700 9px monospace; letter-spacing: 0.04em; }
+.memory-atom-detail-fields input,
+.memory-atom-detail-fields select,
+.memory-atom-detail-fields textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid rgba(74,222,199,0.18); border-radius: 3px; background: #0c1b19; color: #e5faf7; padding: 7px 8px; font: 11px/1.4 monospace; }
+.memory-atom-detail-fields textarea { resize: vertical; }
+.memory-atom-detail-fields input:focus,
+.memory-atom-detail-fields select:focus,
+.memory-atom-detail-fields textarea:focus { outline: none; border-color: #4adec7; }
+.memory-atom-detail-fields input:disabled,
+.memory-atom-detail-fields select:disabled,
+.memory-atom-detail-fields textarea:disabled { opacity: 0.55; }
+.memory-atom-detail-wide { grid-column: 1 / -1; }
+.memory-atom-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .skills-view-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(132px, 150px) minmax(132px, 150px) minmax(158px, 176px) auto; align-items: center; gap: 7px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
 .skills-view-toolbar input,
 .skills-view-toolbar select { min-width: 0; height: 32px; border: 1px solid rgba(74,222,199,0.18); border-radius: 3px; background: #0c1b19; color: #e5faf7; padding: 0 9px; font: 11px inherit; }
@@ -2606,9 +2665,19 @@ body.theme-eva .workspace-panel .session-panel-header { border-color: var(--eva-
 .workspace-discard-confirm .workspace-detail-action:last-child { border-color: rgba(255,138,138,0.55); color: #ffb4b4; }
 
 @media (max-width: 560px) {
+  .memory-inspector-toolbar { grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); }
+  .memory-inspector-toolbar input { grid-column: 1 / -1; }
+  .memory-inspector-toolbar select { min-width: 0; }
+  #memoryAtomCount { justify-self: end; }
   .workspace-run-options { grid-template-columns: auto minmax(0, 1fr); }
   .workspace-run-options button { grid-column: 1 / -1; }
 }
+  .memory-atom-detail-dialog { align-items: flex-start; padding: 8px; overflow: auto; }
+  .memory-atom-detail-panel { max-height: none; }
+  .memory-atom-detail-content { grid-template-columns: 1fr; overflow: visible; }
+  .memory-atom-detail-content > section { border-right: 0; border-bottom: 1px solid rgba(74,222,199,0.14); }
+  .memory-atom-detail-fields { grid-template-columns: 1fr; }
+  .memory-atom-detail-wide { grid-column: auto; }
 
 /* ── Terminal Panel ────────────────────────────────────────── */
 .terminal-panel {

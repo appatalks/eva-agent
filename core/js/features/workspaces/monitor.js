@@ -47,6 +47,7 @@ var EvaWorkspaces = (function() {
     monitorSignature: '',
     permissionSignature: '',
     monitorRunStates: {},
+    monitorRunStatesInitialized: false,
     monitorActivity: [],
     clearedActivityProjectIds: savedDisplayState.clearedActivityProjectIds,
     clearedCodingRunProjectIds: savedDisplayState.clearedCodingRunProjectIds,
@@ -560,6 +561,16 @@ var EvaWorkspaces = (function() {
         changes: Number(run.checkout && run.checkout.dirtyFileCount || 0)
       };
       nextStates[run.id] = current;
+    });
+    // Existing runs are a snapshot on launch, not fresh chat events.
+    if (!state.monitorRunStatesInitialized) {
+      state.monitorRunStates = nextStates;
+      state.monitorRunStatesInitialized = true;
+      return;
+    }
+    runs.forEach(function(run) {
+      var agent = run.agent || {};
+      var current = nextStates[run.id];
       var prior = state.monitorRunStates[run.id];
       var name = run.project ? run.project.name : run.objective;
       if (!prior && current.status) {

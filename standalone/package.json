@@ -1,6 +1,6 @@
 {
   "name": "eva-standalone",
-  "version": "5.6.0",
+  "version": "5.6.1",
   "author": "@apptalks",
   "desktopName": "Eva",
   "description": "Localhost Electron shell for Eva AI Assistant.",

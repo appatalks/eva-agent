@@ -1226,6 +1226,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._memory_context()
         elif parsed_path == "/v1/memory/inspector":
             self._memory_inspector()
+        elif re.fullmatch(r"/v1/memory/atoms/[^/]+", parsed_path):
+            self._memory_atom_detail(urllib.parse.unquote(parsed_path.rsplit("/", 1)[1]))
         elif parsed_path == "/v1/protected-memory/status":
             self._protected_memory_status()
         elif re.fullmatch(r"/v1/protected-memory/(records|artifacts)/[^/]+", parsed_path):
@@ -1279,6 +1281,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._mcp_configure()
         elif parsed_path == "/v1/memory/reflect":
             self._memory_reflect()
+        elif parsed_path == "/v1/memory/start-fresh":
+            self._memory_start_fresh()
         elif parsed_path == "/v1/memory/atoms":
             self._memory_atom_create()
         elif parsed_path == "/v1/memory/traits":
@@ -5357,6 +5361,33 @@ class BridgeHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         session_id = str((urllib.parse.parse_qs(parsed.query).get("session_id") or [""])[0])[:120]
         self._json_response(200, model.inspector(session_id))
+
+    def _memory_start_fresh(self):
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "fresh memory start is restricted to loopback"}})
+            return
+        if _resolve_memory_backend() != "sqlite":
+            self._json_response(409, {"error": {"message": "fresh memory start is currently available for local SQLite memory only"}})
+            return
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        if (data or {}).get("confirmation") != "START_FRESH_MEMORY":
+            self._json_response(400, {"error": {"message": "type START_FRESH_MEMORY to confirm the reset"}})
+            return
+        result = MemoryModel(_get_sqlite_mem()).start_fresh()
+        self._json_response(200, result)
+
+    def _memory_atom_detail(self, memory_id):
+        model = self._structured_memory_model()
+        if model is None:
+            return
+        detail = model.atom_detail(memory_id)
+        if detail is None:
+            self._json_response(404, {"error": {"message": "memory atom not found"}})
+            return
+        self._json_response(200, detail)
 
     def _memory_atom_create(self):
         model = self._structured_memory_model()
