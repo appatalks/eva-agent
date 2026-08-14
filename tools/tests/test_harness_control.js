@@ -233,6 +233,13 @@ async function main() {
   assert.strictEqual(removeWorkspaceResult.ok, true);
   assert.strictEqual(removedWorkspace, 'LLM Assist Private');
   assert.match(removeWorkspaceResult.message, /source repository was preserved/i);
+  const conversationalRemovalRequest = 'Hi Eva. Please remove the appatalks/cs-proxy Workspaces, it is no longer needed at this time.';
+  const conversationalRemovalRoute = harness.resolveNavigationRequest(conversationalRemovalRequest, { directUser: true });
+  assert.strictEqual(conversationalRemovalRoute.action, 'remove_workspace');
+  assert.strictEqual(conversationalRemovalRoute.projectName, 'appatalks/cs-proxy');
+  const conversationalRemovalResult = await harness.execute(conversationalRemovalRoute, { source: 'voice', userRequest: conversationalRemovalRequest });
+  assert.strictEqual(conversationalRemovalResult.ok, true);
+  assert.strictEqual(removedWorkspace, 'appatalks/cs-proxy');
   const verifyMcpRoute = harness.resolveNavigationRequest('Verify MCP server project-docs for example/repository is working.', { directUser: true });
   assert.strictEqual(verifyMcpRoute.action, 'verify_workspace_mcp_server');
   const verifyMcpResult = await harness.execute(verifyMcpRoute, { source: 'voice', userRequest: 'Verify MCP server project-docs for example/repository is working.' });

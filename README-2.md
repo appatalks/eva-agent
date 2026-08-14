@@ -1410,6 +1410,13 @@ runs or terminals. The drawer opens by default on first use, remembers its
 toggle state, fills the screen on narrow viewports, and restores the chat nodes
 to the primary conversation when Workspaces closes.
 
+Application-specific Workspace commands use the native harness rather than
+browser or desktop automation. Conversational removal requests may place the
+workspace name before or after "Workspace" and may include a greeting or reason.
+They resolve to the native removal API, which always shows the final confirmation,
+preserves the source repository, and requires a second confirmation for dirty
+managed worktrees.
+
 Settings > Auth launches GitHub CLI device authorization, opens GitHub's device
 page, copies the one-time code when possible, and keeps the code visible with a
 Copy code button until authorization completes. When a GitHub MCP action is

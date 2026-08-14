@@ -186,6 +186,20 @@ async function main() {
     assert.deepStrictEqual(githubAuthSurface, { start: 'function', status: 'function', authorize: 'function' }, 'GitHub device authorization APIs are unavailable');
     const projectWorkspace = page.locator('#workspaceWorkbenchProjects .workspace-monitor-run').filter({ hasText: 'project' });
     await projectWorkspace.waitFor();
+    const conversationalRemovalRoute = await page.evaluate(function() {
+      return window.EvaHarness.resolveNavigationRequest('Hi Eva. Please remove the project Workspaces, it is no longer needed at this time.', { directUser: true });
+    });
+    assert.strictEqual(conversationalRemovalRoute.action, 'remove_workspace', 'Conversational removal did not use the native Workspace action');
+    assert.strictEqual(conversationalRemovalRoute.projectName, 'project', 'Conversational removal selected the wrong Workspace');
+    let removalConfirmationSeen = false;
+    page.once('dialog', async function(dialog) {
+      removalConfirmationSeen = /Remove project from Eva/i.test(dialog.message());
+      await dialog.dismiss();
+    });
+    const cancelledRemoval = await page.evaluate(function(route) { return window.EvaHarness.execute(route); }, conversationalRemovalRoute);
+    assert.strictEqual(removalConfirmationSeen, true, 'Native Workspace removal confirmation did not open');
+    assert.strictEqual(cancelledRemoval.data.outcome, 'cancelled', 'Dismissed Workspace removal did not remain cancelled');
+    await projectWorkspace.waitFor();
     await projectWorkspace.click();
     await page.locator('#workspaceProjectFiles .workspace-project-file').filter({ hasText: 'README.md' }).waitFor();
     let sourceFolder = page.locator('#workspaceProjectFiles > details.workspace-tree-folder').filter({ hasText: 'src' });
