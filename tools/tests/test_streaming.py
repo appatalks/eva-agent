@@ -1026,7 +1026,7 @@ class StreamingContractTests(unittest.TestCase):
                 "kind": "mcp",
                 "status": "failed",
                 "title": "GitHub pull request review",
-                "error": "GitHub App does not have write access to this repository",
+                "content": [{"result": {"error": "GitHub App does not have write access to this repository"}}],
             },
         }
         with patch("bridge.alerts._notify_enqueue") as notify:

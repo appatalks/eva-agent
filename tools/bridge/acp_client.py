@@ -63,18 +63,27 @@ _GITHUB_AUTH_FAILURE_RE = re.compile(
 _GITHUB_TOOL_CONTEXT_RE = re.compile(r"(?:github|\bgh\b|repository|pull request|\bissue\b)", re.IGNORECASE)
 
 
+def _github_tool_update_text(value, details=None):
+    """Collect bounded strings from an ACP tool result without recording them."""
+    details = details if details is not None else []
+    if len(details) >= 32:
+        return details
+    if isinstance(value, str):
+        details.append(value[:2000])
+    elif isinstance(value, dict):
+        for item in value.values():
+            _github_tool_update_text(item, details)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _github_tool_update_text(item, details)
+    return details
+
+
 def _github_authorization_needed(update):
     """Return true only for an explicit GitHub tool authorization failure."""
     if not isinstance(update, dict):
         return False
-    details = []
-    for key in ("title", "message", "error", "content", "output", "status"):
-        value = update.get(key)
-        if isinstance(value, str):
-            details.append(value[:2000])
-        elif isinstance(value, dict):
-            details.extend(str(item)[:2000] for item in value.values() if isinstance(item, str))
-    text = "\n".join(details)
+    text = "\n".join(_github_tool_update_text(update))
     return bool(_GITHUB_TOOL_CONTEXT_RE.search(text) and _GITHUB_AUTH_FAILURE_RE.search(text))
 
 
