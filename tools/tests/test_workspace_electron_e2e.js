@@ -141,10 +141,23 @@ async function main() {
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
     assert.strictEqual(await page.locator('#workspaceWorkbench h1').innerText(), 'Workspaces', 'Workspace tab did not open the coding workspace dashboard');
     assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'Workspace dashboard is not active');
+    assert.strictEqual(await page.locator('#workspaceChatDrawer').getAttribute('aria-hidden'), 'false', 'Workspace chat drawer did not open by default');
+    assert.deepStrictEqual(await page.evaluate(function() {
+      return {
+        outputParent: document.getElementById('txtOutput').parentElement.id,
+        inputParent: document.querySelector('.chat-input-container').parentElement.id,
+      };
+    }), { outputParent: 'workspaceChatOutputHost', inputParent: 'workspaceChatInputHost' }, 'Workspace chat drawer did not reuse the live chat nodes');
     await page.evaluate(function() { window.EvaWorkspaces.closeWorkbench(); });
+    assert.strictEqual(await page.evaluate(function() { return document.getElementById('workspaceChatDrawer').contains(document.getElementById('txtOutput')); }), false, 'Closing Workspaces did not restore the live chat output');
     await page.evaluate(function() { document.getElementById('lcarsWorkspacesBtn').click(); });
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
     assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'LCARS Workspaces click was closed by sidebar bubbling');
+    await page.locator('#workspaceChatCloseBtn').click();
+    assert.strictEqual(await page.locator('#workspaceChatDrawer').getAttribute('aria-hidden'), 'true', 'Workspace chat drawer close button did not close it');
+    await page.locator('#workspaceChatToggleBtn').click();
+    assert.strictEqual(await page.locator('#workspaceChatDrawer').getAttribute('aria-hidden'), 'false', 'Workspace chat drawer toggle did not reopen it');
+    await page.locator('#workspaceChatCloseBtn').click();
     await page.waitForFunction(function() {
       const workbenchHeader = document.querySelector('#workspaceWorkbench .workspace-workbench-header').getBoundingClientRect();
       const titleBar = document.querySelector('#evaTitleBar').getBoundingClientRect();

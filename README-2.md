@@ -1403,6 +1403,13 @@ session inherits that session's last explicit capability policy, preventing a
 completed autonomous turn from silently falling back to an interactive card;
 requests from unknown sessions remain interactive and fail closed.
 
+The full Workspace monitor includes a **Chat** drawer that reuses Eva's live
+conversation output and composer. Streaming responses, speech, voice input,
+send controls, and session history continue normally while the user inspects
+runs or terminals. The drawer opens by default on first use, remembers its
+toggle state, fills the screen on narrow viewports, and restores the chat nodes
+to the primary conversation when Workspaces closes.
+
 Settings > Auth launches GitHub CLI device authorization, opens GitHub's device
 page, copies the one-time code when possible, and keeps the code visible with a
 Copy code button until authorization completes. When a GitHub MCP action is

@@ -1,5 +1,6 @@
 var EvaWorkspaces = (function() {
   var WORKSPACE_DISPLAY_STATE_STORAGE_KEY = 'eva.workspaceMonitorDisplay.v1';
+  var WORKSPACE_CHAT_DRAWER_STORAGE_KEY = 'eva.workspaceChatDrawer.open';
 
   function workspaceDisplayState() {
     function booleanMap(value) {
@@ -56,7 +57,9 @@ var EvaWorkspaces = (function() {
     githubRepositories: [],
     githubRepositoriesCollapsed: false,
     githubAuthTimer: null,
-    githubAuthRetry: null
+    githubAuthRetry: null,
+    chatDrawerOpen: false,
+    chatNodeOrigins: null
   };
 
   function api() {
@@ -75,6 +78,58 @@ var EvaWorkspaces = (function() {
     } catch (_) {
       return true;
     }
+  }
+
+  function chatDrawerPreference(value) {
+    try {
+      if (typeof value === 'boolean') localStorage.setItem(WORKSPACE_CHAT_DRAWER_STORAGE_KEY, value ? 'true' : 'false');
+      var saved = localStorage.getItem(WORKSPACE_CHAT_DRAWER_STORAGE_KEY);
+      return saved === null ? true : saved === 'true';
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function captureChatNodeOrigins() {
+    if (state.chatNodeOrigins) return state.chatNodeOrigins;
+    var output = document.getElementById('txtOutput');
+    var input = document.querySelector('.chat-input-container');
+    if (!output || !input) return null;
+    state.chatNodeOrigins = {
+      output: output,
+      outputParent: output.parentNode,
+      outputNext: output.nextSibling,
+      input: input,
+      inputParent: input.parentNode,
+      inputNext: input.nextSibling
+    };
+    return state.chatNodeOrigins;
+  }
+
+  function restoreChatNodes() {
+    var origins = state.chatNodeOrigins;
+    if (!origins) return;
+    if (origins.outputParent) origins.outputParent.insertBefore(origins.output, origins.outputNext && origins.outputNext.parentNode === origins.outputParent ? origins.outputNext : null);
+    if (origins.inputParent) origins.inputParent.insertBefore(origins.input, origins.inputNext && origins.inputNext.parentNode === origins.inputParent ? origins.inputNext : null);
+  }
+
+  function setChatDrawerOpen(open, remember) {
+    var drawer = document.getElementById('workspaceChatDrawer');
+    var outputHost = document.getElementById('workspaceChatOutputHost');
+    var inputHost = document.getElementById('workspaceChatInputHost');
+    var toggle = document.getElementById('workspaceChatToggleBtn');
+    var origins = captureChatNodeOrigins();
+    open = !!(open && drawer && outputHost && inputHost && origins);
+    if (open) {
+      outputHost.appendChild(origins.output);
+      inputHost.appendChild(origins.input);
+      requestAnimationFrame(function() { origins.output.scrollTop = origins.output.scrollHeight; });
+    }
+    state.chatDrawerOpen = open;
+    if (drawer) drawer.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    document.body.classList.toggle('workspace-chat-drawer-open', open);
+    if (remember !== false) chatDrawerPreference(open);
   }
 
   function currentProjectId() {
@@ -1332,6 +1387,7 @@ var EvaWorkspaces = (function() {
     document.body.classList.add('workspace-workbench-open');
     var view = document.getElementById('workspaceWorkbench');
     if (view) view.setAttribute('aria-hidden', 'false');
+    setChatDrawerOpen(chatDrawerPreference(), false);
     if (!supported()) {
       status('Coding workspaces are unavailable in this Eva launch.', 'error');
       renderWorkbench();
@@ -1343,6 +1399,8 @@ var EvaWorkspaces = (function() {
 
   function closeWorkbench() {
     dismissWorkspaceContextMenu();
+    setChatDrawerOpen(false, false);
+    restoreChatNodes();
     state.workbenchOpen = false;
     document.body.classList.remove('workspace-workbench-open');
     var view = document.getElementById('workspaceWorkbench');
@@ -1981,6 +2039,8 @@ var EvaWorkspaces = (function() {
     var monitorRefresh = document.getElementById('workspaceMonitorRefreshBtn');
     var monitorClose = document.getElementById('workspaceMonitorCloseBtn');
     var monitorNew = document.getElementById('workspaceMonitorNewBtn');
+    var chatToggle = document.getElementById('workspaceChatToggleBtn');
+    var chatClose = document.getElementById('workspaceChatCloseBtn');
     bindWorkbenchContextMenus();
     if (close) close.addEventListener('click', toggle);
     if (add) add.addEventListener('click', addProject);
@@ -2006,6 +2066,8 @@ var EvaWorkspaces = (function() {
     });
     if (monitorRefresh) monitorRefresh.addEventListener('click', monitor);
     if (monitorClose) monitorClose.addEventListener('click', closeWorkbench);
+    if (chatToggle) chatToggle.addEventListener('click', function() { setChatDrawerOpen(!state.chatDrawerOpen); });
+    if (chatClose) chatClose.addEventListener('click', function() { setChatDrawerOpen(false); });
     if (monitorNew) monitorNew.addEventListener('click', async function() {
       closeWorkbench();
       var currentPanel = panel();
