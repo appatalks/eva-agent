@@ -210,6 +210,8 @@ async function main() {
   assert.match(pullViewResult.message, /static-checks: SUCCESS/);
   const correctedPullRoute = harness.resolveNavigationRequest('https://github.com/Apatox/eva-agent/pull/183', { directUser: true });
   assert.strictEqual(correctedPullRoute.repository, 'appatalks/eva-agent');
+  const correctedImportRoute = harness.resolveNavigationRequest('Import repo Apatox/eva-agent.', { directUser: true });
+  assert.strictEqual(correctedImportRoute.repositoryName, 'appatalks/eva-agent');
   const mergeRoute = harness.resolveNavigationRequest('Merge PR #183 into main.', { directUser: true });
   assert.strictEqual(mergeRoute.action, 'merge_github_pull_request');
   assert.strictEqual(mergeRoute.number, 183);

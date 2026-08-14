@@ -123,6 +123,25 @@ function githubPullRequestArgs(number, repository, fields) {
   return args;
 }
 
+async function resolveGitHubPullRequestRepository(number, repository) {
+  if (repository) return repository;
+  const viewer = JSON.parse(await runGitHubCli(['api', 'user'], 30000));
+  const login = String(viewer && viewer.login || '');
+  if (!/^[A-Za-z0-9-]{1,39}$/.test(login)) throw new Error('GitHub CLI could not determine the authenticated account.');
+  const search = JSON.parse(await runGitHubCli([
+    'api', '--method', 'GET', 'search/issues', '-f', 'q=' + String(number) + ' in:number is:pr user:' + login, '-f', 'per_page=100'
+  ], 30000));
+  const matches = (search && Array.isArray(search.items) ? search.items : []).filter(function(item) {
+    return item && Number(item.number) === number && item.pull_request && typeof item.repository_url === 'string';
+  }).map(function(item) {
+    const match = item.repository_url.match(/\/repos\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)$/);
+    return match ? match[1] : '';
+  }).filter(Boolean).filter(function(value, index, values) { return values.indexOf(value) === index; });
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) throw new Error('PR #' + number + ' exists in multiple repositories. Provide the full GitHub pull request URL.');
+  throw new Error('Could not find PR #' + number + ' in repositories owned by ' + login + '. Provide the full GitHub pull request URL.');
+}
+
 function githubChecksPassed(checks) {
   return (checks || []).every(function(check) {
     const conclusion = String((check && check.conclusion) || '').toUpperCase();
@@ -134,10 +153,11 @@ async function githubViewPullRequest(event, request) {
   requireWorkspaceFeature(event);
   const input = request && typeof request === 'object' ? request : {};
   const number = Number(input.number);
-  const repository = String(input.repository || '').trim();
+  let repository = String(input.repository || '').trim();
   if (!validGitHubPullRequestNumber(number) || !validGitHubRepository(repository)) {
     throw new Error('Invalid GitHub pull request reference.');
   }
+  repository = await resolveGitHubPullRequestRepository(number, repository);
   let pull;
   try {
     pull = JSON.parse(await runGitHubCli(githubPullRequestArgs(
@@ -171,10 +191,11 @@ async function githubMergePullRequest(event, request) {
   requireWorkspaceFeature(event);
   const input = request && typeof request === 'object' ? request : {};
   const number = Number(input.number);
-  const repository = String(input.repository || '').trim();
+  let repository = String(input.repository || '').trim();
   if (!validGitHubPullRequestNumber(number) || !validGitHubRepository(repository)) {
     throw new Error('Invalid GitHub pull request reference.');
   }
+  repository = await resolveGitHubPullRequestRepository(number, repository);
   if (input.confirmation !== 'MERGE') throw new Error('Type MERGE to confirm the pull request merge.');
   const fields = 'number,state,isDraft,mergeStateStatus,headRefOid,statusCheckRollup,url';
   let pull;

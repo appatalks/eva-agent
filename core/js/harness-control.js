@@ -237,6 +237,9 @@ var EvaHarness = (function() {
   function resolveNavigationRequest(value, options) {
     var rawPhrase = String(value || '').trim();
     rawPhrase = rawPhrase.replace(/^(?:(?:hi|hello|hey)\s+)?eva\s*[,!.:-]*\s*/i, '');
+    if (/\b(?:github|repo|repository|pull\s+request|pr|issue|branch|workflow|release)\b/i.test(rawPhrase)) {
+      rawPhrase = rawPhrase.replace(/\bapatox\b/gi, 'appatalks');
+    }
     var phrase = rawPhrase.toLowerCase();
     var directUser = !!(options && options.directUser);
     var lastRemediation = null;
