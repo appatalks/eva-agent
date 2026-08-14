@@ -32,6 +32,7 @@ let skillsOpenCalls = 0;
 let agentsOpenCalls = 0;
 let sessionsOpenCalls = 0;
 let mergeRequest = null;
+let pullRequestViewRequest = null;
 const fixtureRepository = 'fixture-owner/fixture-repository';
 const fixtureShortName = 'fixture-repository';
 const fixtureRepositoryUrl = 'https://github.com/fixture-owner/fixture-repository';
@@ -47,6 +48,14 @@ const window = {
     githubMergePullRequest(request) {
       mergeRequest = request;
       return Promise.resolve({ url: 'https://github.com/example/repository/pull/' + request.number, mergeCommit: 'a'.repeat(40) });
+    },
+    githubViewPullRequest(request) {
+      pullRequestViewRequest = request;
+      return Promise.resolve({
+        number: request.number, title: 'Native routing', state: 'OPEN', draft: false, mergeState: 'CLEAN',
+        url: 'https://github.com/example/repository/pull/' + request.number,
+        checks: [{ name: 'static-checks', conclusion: 'SUCCESS' }]
+      });
     }
   },
   EvaWorkspaces: {
@@ -189,6 +198,16 @@ async function main() {
   ['describe_workspaces', 'describe_assets', 'describe_skills', 'describe_sessions', 'describe_agents'].forEach(function(action) {
     assert.ok(manifestActions.includes(action), action + ' must be exposed in the native action manifest');
   });
+  const pullUrl = 'https://github.com/example/repository/pull/183';
+  const pullViewRoute = harness.resolveNavigationRequest(pullUrl, { directUser: true });
+  assert.strictEqual(pullViewRoute.action, 'describe_github_pull_request');
+  assert.strictEqual(pullViewRoute.number, 183);
+  const pullViewResult = await harness.execute(pullViewRoute, { source: 'voice', userRequest: pullUrl });
+  assert.strictEqual(pullViewResult.ok, true);
+  assert.strictEqual(pullRequestViewRequest.number, 183);
+  assert.strictEqual(pullRequestViewRequest.repository, 'example/repository');
+  assert.match(pullViewResult.message, /PR #183/);
+  assert.match(pullViewResult.message, /static-checks: SUCCESS/);
   const mergeRoute = harness.resolveNavigationRequest('Merge PR #183 into main.', { directUser: true });
   assert.strictEqual(mergeRoute.action, 'merge_github_pull_request');
   assert.strictEqual(mergeRoute.number, 183);

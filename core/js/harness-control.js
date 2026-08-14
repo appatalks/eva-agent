@@ -89,6 +89,7 @@ var EvaHarness = (function() {
     { id: 'run_repository_remediation', description: 'Start an explicitly requested repository remediation run.' },
     { id: 'import_github', description: 'Import an exact GitHub HTTPS URL only after a direct user request.' },
     { id: 'import_github_selection', description: 'Import a named repository selected from a native GitHub listing.' },
+    { id: 'describe_github_pull_request', description: 'Inspect a GitHub pull request through authenticated gh. args: {number, repository?}. Read-only.' },
     { id: 'merge_github_pull_request', description: 'Verify and merge a pull request through authenticated gh only after a direct user request and typed MERGE confirmation.' },
     { id: 'remove_workspace', description: 'Remove a named workspace only after a direct user request.' },
     { id: 'run_terminal_command', description: 'Submit an exact terminal command only after a direct user request.' },
@@ -221,6 +222,13 @@ var EvaHarness = (function() {
       }
     } catch (_) {}
     if (!lastRemediation) lastRemediation = nativeRemediationContext();
+    var directPullRequest = pullRequestReference(rawPhrase);
+    if (directPullRequest && !/\bmerge\b/i.test(rawPhrase)) {
+      return {
+        action: 'describe_github_pull_request', target: 'workspaces', label: 'GitHub Pull Request',
+        number: directPullRequest.number, repository: directPullRequest.repository
+      };
+    }
     var workspaceDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:current\s+)?workspaces?\b|\bworkspaces?\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
     if (workspaceDescription) return { action: 'describe_workspaces', target: 'workspaces', label: 'Workspaces' };
     var assetsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:assets?|artifacts?|generated files?|workspace files?)\b|\b(?:assets?|artifacts?|generated files?|workspace files?)\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
@@ -497,7 +505,7 @@ var EvaHarness = (function() {
     request = request && typeof request === 'object' ? request : {};
     context = context && typeof context === 'object' ? context : {};
     var action = normalize(request.action);
-    var modelAllowed = { navigate: true, refresh: true, describe_workspaces: true, describe_assets: true, describe_skills: true, describe_sessions: true, describe_agents: true, inspect_form: true };
+    var modelAllowed = { navigate: true, refresh: true, describe_workspaces: true, describe_assets: true, describe_skills: true, describe_sessions: true, describe_agents: true, describe_github_pull_request: true, inspect_form: true };
     var userRepositoryUrl = githubRepositoryUrl(context.userRequest);
     var requestedRepositoryUrl = String(request.repositoryUrl || request.repository_url || '').trim();
     var userNativeRoute = resolveNavigationRequest(context.userRequest || '', { directUser: true });
@@ -584,6 +592,29 @@ var EvaHarness = (function() {
         return result(true, 'describe_workspace_tools', message, { outcome: 'completed' });
       }).catch(function(error) {
         return result(false, 'describe_workspace_tools', error && error.message ? error.message : 'Workspace tools could not be described.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'describe_github_pull_request') {
+      if (!window.evaStandalone || typeof window.evaStandalone.githubViewPullRequest !== 'function') return Promise.resolve(result(false, 'describe_github_pull_request', 'Native GitHub CLI pull-request inspection is unavailable in this Eva build.'));
+      var pullNumber = Number(request.number);
+      if (!Number.isInteger(pullNumber) || pullNumber <= 0) return Promise.resolve(result(false, 'describe_github_pull_request', 'A pull request number is required for native inspection.'));
+      return window.evaStandalone.githubViewPullRequest({
+        number: pullNumber, repository: String(request.repository || '').trim()
+      }).then(function(pull) {
+        var checks = (pull && pull.checks || []).map(function(check) {
+          return String(check.name || 'check') + ': ' + String(check.conclusion || 'PENDING');
+        }).filter(Boolean);
+        var summary = 'PR #' + pullNumber + (pull && pull.title ? ' "' + String(pull.title) + '"' : '') +
+          ' is ' + String(pull && pull.state || 'UNKNOWN') +
+          ' with merge state ' + String(pull && pull.mergeState || 'UNKNOWN') +
+          (pull && pull.draft ? ' and is a draft' : '') + '.';
+        if (checks.length) summary += ' Checks: ' + checks.join(', ') + '.';
+        if (pull && pull.url) summary += ' ' + String(pull.url);
+        return result(true, 'describe_github_pull_request', summary, {
+          outcome: 'completed', url: String(pull && pull.url || ''), state: String(pull && pull.state || ''), mergeState: String(pull && pull.mergeState || '')
+        });
+      }).catch(function(error) {
+        return result(false, 'describe_github_pull_request', error && error.message ? error.message : 'Pull request inspection failed.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
     if (action === 'merge_github_pull_request') {

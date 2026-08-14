@@ -130,6 +130,43 @@ function githubChecksPassed(checks) {
   });
 }
 
+async function githubViewPullRequest(event, request) {
+  requireWorkspaceFeature(event);
+  const input = request && typeof request === 'object' ? request : {};
+  const number = Number(input.number);
+  const repository = String(input.repository || '').trim();
+  if (!validGitHubPullRequestNumber(number) || !validGitHubRepository(repository)) {
+    throw new Error('Invalid GitHub pull request reference.');
+  }
+  let pull;
+  try {
+    pull = JSON.parse(await runGitHubCli(githubPullRequestArgs(
+      number, repository, 'number,title,state,isDraft,mergeStateStatus,headRefName,baseRefName,statusCheckRollup,url'
+    ), 30000));
+  } catch (error) {
+    throw new Error(repository ? error.message : error.message + ' Include an owner/repository reference if GitHub CLI cannot infer the repository.');
+  }
+  if (!pull || !validGitHubPullRequestNumber(Number(pull.number))) {
+    throw new Error('GitHub did not return a valid pull request.');
+  }
+  return {
+    number: Number(pull.number),
+    title: String(pull.title || '').slice(0, 300),
+    state: String(pull.state || ''),
+    draft: pull.isDraft === true,
+    mergeState: String(pull.mergeStateStatus || ''),
+    head: String(pull.headRefName || ''),
+    base: String(pull.baseRefName || ''),
+    url: String(pull.url || ''),
+    checks: (pull.statusCheckRollup || []).slice(0, 32).map(function(check) {
+      return {
+        name: String((check && check.name) || '').slice(0, 160),
+        conclusion: String((check && check.conclusion) || '').slice(0, 40)
+      };
+    })
+  };
+}
+
 async function githubMergePullRequest(event, request) {
   requireWorkspaceFeature(event);
   const input = request && typeof request === 'object' ? request : {};
@@ -1727,6 +1764,7 @@ ipcMain.handle('workspace-import-github', workspaceImportGitHub);
 ipcMain.handle('workspace-list-github-repositories', workspaceListGitHubRepositories);
 ipcMain.handle('workspace-github-auth-start', workspaceGitHubAuthStart);
 ipcMain.handle('workspace-github-auth-status', workspaceGitHubAuthStatus);
+ipcMain.handle('github-view-pull-request', githubViewPullRequest);
 ipcMain.handle('github-merge-pull-request', githubMergePullRequest);
 ipcMain.handle('workspace-set-mcp-server', workspaceSetMcpServer);
 ipcMain.handle('workspace-delete-project', workspaceDeleteProject);
