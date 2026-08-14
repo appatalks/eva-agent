@@ -25,6 +25,9 @@ let retriedRunId = '';
 let remediationRequest = null;
 let nativeRemediationContext = null;
 let visibleUserMessages = [];
+const fixtureRepository = 'fixture-owner/fixture-repository';
+const fixtureShortName = 'fixture-repository';
+const fixtureRepositoryUrl = 'https://github.com/fixture-owner/fixture-repository';
 const localStorage = {
   values: {},
   getItem(key) { return this.values[key] || null; },
@@ -162,61 +165,71 @@ async function main() {
   assert.deepStrictEqual(mcpModuleRequest, { serverName: 'project-docs', enabled: true, projectName: 'example/repository' });
   const modelMcpResult = await harness.execute(enableMcpRoute, { source: 'model', userRequest: 'Enable MCP server project-docs for example/repository.' });
   assert.strictEqual(modelMcpResult.ok, true);
+  const mismatchedModelMcp = await harness.execute(
+    Object.assign({}, enableMcpRoute, { projectName: 'example/other-repository' }),
+    { source: 'model', userRequest: 'Enable MCP server project-docs for example/repository.' }
+  );
+  assert.strictEqual(mismatchedModelMcp.ok, false);
   assert.strictEqual(harness.resolveNavigationRequest('Disable MCP server project-docs.', { directUser: true }).enabled, false);
   const retryWorkspaceRoute = harness.resolveNavigationRequest('Retry the workspace run run-123.', { directUser: true });
   assert.strictEqual(retryWorkspaceRoute.action, 'retry_workspace_run');
   const retryWorkspaceResult = await harness.execute(retryWorkspaceRoute, { source: 'model', userRequest: 'Retry the workspace run run-123.' });
   assert.strictEqual(retryWorkspaceResult.ok, true);
   assert.strictEqual(retriedRunId, 'run-123');
-  const remediationRoute = harness.resolveNavigationRequest('Resolve Dependabot alerts in appatalks/cs-proxy.', { directUser: true });
+  const mismatchedRetry = await harness.execute(
+    { action: 'retry_workspace_run' },
+    { source: 'model', userRequest: 'Retry the workspace run run-123.' }
+  );
+  assert.strictEqual(mismatchedRetry.ok, false);
+  const remediationRoute = harness.resolveNavigationRequest('Resolve Dependabot alerts in ' + fixtureRepository + '.', { directUser: true });
   assert.strictEqual(remediationRoute.action, 'run_repository_remediation');
-  const remediationResult = await harness.execute(remediationRoute, { source: 'model', userRequest: 'Resolve Dependabot alerts in appatalks/cs-proxy.' });
+  const remediationResult = await harness.execute(remediationRoute, { source: 'model', userRequest: 'Resolve Dependabot alerts in ' + fixtureRepository + '.' });
   assert.strictEqual(remediationResult.ok, true);
   assert.strictEqual(remediationResult.data.runId, 'run-remediation');
-  assert.deepStrictEqual(remediationRequest, { repositoryName: 'appatalks/cs-proxy', objective: 'Resolve Dependabot alerts in appatalks/cs-proxy' });
-  const dependabotUrlRequest = 'Eva please review the Dependabot alerts at: https://github.com/appatalks/cs-proxy/security/dependabot and then please address them in a Pull request';
+  assert.deepStrictEqual(remediationRequest, { repositoryName: fixtureRepository, objective: 'Resolve Dependabot alerts in ' + fixtureRepository });
+  const dependabotUrlRequest = 'Eva please review the Dependabot alerts at: ' + fixtureRepositoryUrl + '/security/dependabot and then please address them in a Pull request';
   const normalizedDependabotUrlRequest = dependabotUrlRequest.replace(/^Eva\s+/i, '');
   const dependabotUrlRoute = harness.resolveNavigationRequest(dependabotUrlRequest, { directUser: true });
   assert.strictEqual(dependabotUrlRoute.action, 'run_repository_remediation');
-  assert.strictEqual(dependabotUrlRoute.repositoryName, 'appatalks/cs-proxy');
+  assert.strictEqual(dependabotUrlRoute.repositoryName, fixtureRepository);
   const dependabotUrlResult = await harness.execute(dependabotUrlRoute, { source: 'model', userRequest: dependabotUrlRequest });
   assert.strictEqual(dependabotUrlResult.ok, true);
-  assert.deepStrictEqual(remediationRequest, { repositoryName: 'appatalks/cs-proxy', objective: normalizedDependabotUrlRequest });
-  assert.deepStrictEqual(nativeRemediationContext, { repositoryName: 'appatalks/cs-proxy', objective: normalizedDependabotUrlRequest });
+  assert.deepStrictEqual(remediationRequest, { repositoryName: fixtureRepository, objective: normalizedDependabotUrlRequest });
+  assert.deepStrictEqual(nativeRemediationContext, { repositoryName: fixtureRepository, objective: normalizedDependabotUrlRequest });
   delete localStorage.values.eva_last_repository_remediation;
   delete localStorage.values.aigMessages;
   const pullRequestFollowUp = harness.resolveNavigationRequest('Please create the PR now.', { directUser: true });
   assert.strictEqual(pullRequestFollowUp.action, 'run_repository_remediation');
-  assert.strictEqual(pullRequestFollowUp.repositoryName, 'appatalks/cs-proxy');
+  assert.strictEqual(pullRequestFollowUp.repositoryName, fixtureRepository);
   assert.match(pullRequestFollowUp.objective, /Follow-up: Please create the PR now/);
   nativeRemediationContext = null;
   delete localStorage.values.eva_last_repository_remediation;
   visibleUserMessages = [dependabotUrlRequest];
   const visiblePullRequestFollowUp = harness.resolveNavigationRequest('Go ahead and create a PR too please.', { directUser: true });
   assert.strictEqual(visiblePullRequestFollowUp.action, 'run_repository_remediation');
-  assert.strictEqual(visiblePullRequestFollowUp.repositoryName, 'appatalks/cs-proxy');
+  assert.strictEqual(visiblePullRequestFollowUp.repositoryName, fixtureRepository);
   assert.match(visiblePullRequestFollowUp.objective, /Follow-up: Go ahead and create a PR too please/);
   const visibleWorkspaceContinuation = harness.resolveNavigationRequest('Eva please continue and ensure we have a workspace created for tracking the progress.', { directUser: true });
   assert.strictEqual(visibleWorkspaceContinuation.action, 'run_repository_remediation');
-  assert.strictEqual(visibleWorkspaceContinuation.repositoryName, 'appatalks/cs-proxy');
+  assert.strictEqual(visibleWorkspaceContinuation.repositoryName, fixtureRepository);
   assert.match(visibleWorkspaceContinuation.objective, /Follow-up: please continue and ensure we have a workspace created/);
   visibleUserMessages = [];
-  const shortRemediationRoute = harness.resolveNavigationRequest('Fix dependency alerts with cs-proxy repo.', { directUser: true });
+  const shortRemediationRoute = harness.resolveNavigationRequest('Fix dependency alerts with ' + fixtureShortName + ' repo.', { directUser: true });
   assert.strictEqual(shortRemediationRoute.action, 'run_repository_remediation');
-  assert.strictEqual(shortRemediationRoute.repositoryName, 'cs-proxy');
-  assert.strictEqual(harness.resolveNavigationRequest('Try to resolve some alerts with cs-proxy repo.', { directUser: true }).action, 'run_repository_remediation');
+  assert.strictEqual(shortRemediationRoute.repositoryName, fixtureShortName);
+  assert.strictEqual(harness.resolveNavigationRequest('Try to resolve some alerts with ' + fixtureShortName + ' repo.', { directUser: true }).action, 'run_repository_remediation');
   const retryRemediationRoute = harness.resolveNavigationRequest('Try again please.', { directUser: true });
   assert.strictEqual(retryRemediationRoute.action, 'run_repository_remediation');
-  assert.strictEqual(retryRemediationRoute.repositoryName, 'cs-proxy');
+  assert.strictEqual(retryRemediationRoute.repositoryName, fixtureShortName);
   delete localStorage.values.eva_last_repository_remediation;
   nativeRemediationContext = null;
   localStorage.setItem('aigMessages', JSON.stringify([
-    { role: 'user', content: 'Try to resolve some alerts with cs-proxy repo.' },
+    { role: 'user', content: 'Try to resolve some alerts with ' + fixtureShortName + ' repo.' },
     { role: 'assistant', content: 'I will locate it.' }
   ]));
   const recoveredRetryRoute = harness.resolveNavigationRequest('Eva can you try again please. I updated your permissions.', { directUser: true });
   assert.strictEqual(recoveredRetryRoute.action, 'run_repository_remediation');
-  assert.strictEqual(recoveredRetryRoute.repositoryName, 'cs-proxy');
+  assert.strictEqual(recoveredRetryRoute.repositoryName, fixtureShortName);
   const workspaceToolsRoute = harness.resolveNavigationRequest("for the LLM Assist Private, what's the enabled tool?", { directUser: true });
   assert.strictEqual(workspaceToolsRoute.action, 'describe_workspace_tools');
   assert.strictEqual(workspaceToolsRoute.projectName, 'LLM Assist Private');
@@ -234,20 +247,20 @@ async function main() {
   assert.strictEqual(removeWorkspaceResult.ok, true);
   assert.strictEqual(removedWorkspace, 'LLM Assist Private');
   assert.match(removeWorkspaceResult.message, /source repository was preserved/i);
-  const conversationalRemovalRequest = 'Hi Eva. Please remove the appatalks/cs-proxy Workspaces, it is no longer needed at this time.';
+  const conversationalRemovalRequest = 'Hi Eva. Please remove the ' + fixtureRepository + ' Workspaces, it is no longer needed at this time.';
   const conversationalRemovalRoute = harness.resolveNavigationRequest(conversationalRemovalRequest, { directUser: true });
   assert.strictEqual(conversationalRemovalRoute.action, 'remove_workspace');
-  assert.strictEqual(conversationalRemovalRoute.projectName, 'appatalks/cs-proxy');
+  assert.strictEqual(conversationalRemovalRoute.projectName, fixtureRepository);
   const conversationalRemovalResult = await harness.execute(conversationalRemovalRoute, { source: 'voice', userRequest: conversationalRemovalRequest });
   assert.strictEqual(conversationalRemovalResult.ok, true);
-  assert.strictEqual(removedWorkspace, 'appatalks/cs-proxy');
-  const cleanupRemovalRequest = 'Eva please cleanup and remove the appatalks/cs-proxy workspaces, as its no longer needed.';
+  assert.strictEqual(removedWorkspace, fixtureRepository);
+  const cleanupRemovalRequest = 'Eva please cleanup and remove the ' + fixtureRepository + ' workspaces, as its no longer needed.';
   const cleanupRemovalRoute = harness.resolveNavigationRequest(cleanupRemovalRequest, { directUser: true });
   assert.strictEqual(cleanupRemovalRoute.action, 'remove_workspace');
-  assert.strictEqual(cleanupRemovalRoute.projectName, 'appatalks/cs-proxy');
-  const modelCleanupRemoval = await harness.execute({ action: 'remove_workspace', projectName: 'appatalks/cs-proxy' }, { source: 'model', userRequest: cleanupRemovalRequest });
+  assert.strictEqual(cleanupRemovalRoute.projectName, fixtureRepository);
+  const modelCleanupRemoval = await harness.execute({ action: 'remove_workspace', projectName: fixtureRepository }, { source: 'model', userRequest: cleanupRemovalRequest });
   assert.strictEqual(modelCleanupRemoval.ok, true);
-  assert.strictEqual(removedWorkspace, 'appatalks/cs-proxy');
+  assert.strictEqual(removedWorkspace, fixtureRepository);
   const mismatchedModelRemoval = await harness.execute({ action: 'remove_workspace', projectName: 'example/other' }, { source: 'model', userRequest: cleanupRemovalRequest });
   assert.strictEqual(mismatchedModelRemoval.ok, false);
   assert.match(mismatchedModelRemoval.message, /direct user interaction/);

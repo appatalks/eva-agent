@@ -289,6 +289,8 @@ def _workspace_autonomy_block_reason(tool_call, cwd=None):
         return "protected_path"
     if _WORKSPACE_AUTONOMY_DESTRUCTIVE_PATTERN.search(command):
         return "destructive_execution"
+    if category in {"outside_workspace", "inline_script", "shell_interpreter", "shell_composition"}:
+        return category
     try:
         parts = shlex.split(command, posix=True)
     except ValueError:
@@ -767,11 +769,10 @@ class ACPClient:
                 state for state in self._active_prompts.values()
                 if state.get("session_id") == session_id
             ]
-            has_active_prompt = bool(self._active_prompts)
             remembered_mode = self._session_permission_modes.get(session_id, "interactive")
-        permission_mode = prompt_states[0].get("permission_mode", "workspace_auto") \
-            if len(prompt_states) == 1 else ("workspace_auto" if has_active_prompt else remembered_mode)
-        workspace_mode = permission_mode in {"workspace_write", "workspace_auto"}
+        permission_mode = prompt_states[0].get("permission_mode", "interactive") \
+            if len(prompt_states) == 1 else remembered_mode
+        workspace_mode = permission_mode == "workspace_auto"
         execute_category = _workspace_execute_category(tool_call, self.cwd) \
             if workspace_mode and tool_kind == "execute" else ""
         _verbose_debug_emit(
@@ -1027,14 +1028,14 @@ class ACPClient:
     # --- Public API ---
 
     def prompt(self, text, timeout=120, conversation_id=None, on_chunk=None,
-               permission_mode="workspace_auto", on_event=None):
+               permission_mode="interactive", on_event=None):
         with _pin_acp_client(self) as acquired:
             if not acquired:
                 return {"error": "ACP client is unavailable"}
             with self.prompt_lock:
                 return self._prompt(text, timeout, conversation_id, on_chunk, permission_mode, on_event)
 
-    def _begin_prompt(self, prompt_id, session_id, on_chunk, permission_mode="workspace_auto", on_event=None):
+    def _begin_prompt(self, prompt_id, session_id, on_chunk, permission_mode="interactive", on_event=None):
         with self._prompt_state_lock:
             self.response_chunks[prompt_id] = ""
             self._session_permission_modes[session_id] = permission_mode
@@ -1073,7 +1074,7 @@ class ACPClient:
         }
 
     def _prompt(self, text, timeout=120, conversation_id=None, on_chunk=None,
-                permission_mode="workspace_auto", on_event=None):
+                permission_mode="interactive", on_event=None):
         """Send a text prompt and return the accumulated response text."""
         session_id = self._session_for_conversation(conversation_id)
         if not session_id:
@@ -1124,14 +1125,16 @@ class ACPClient:
             "permission_cancelled": prompt_metrics["permission_cancelled"],
             "permission_reason": prompt_metrics["permission_reason"]}
 
-    def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None):
+    def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None,
+                          permission_mode="interactive"):
         with _pin_acp_client(self) as acquired:
             if not acquired:
                 return {"error": "ACP client is unavailable"}
             with self.prompt_lock:
-                return self._prompt_with_image(text, image_b64, mime, timeout, conversation_id, on_chunk)
+                return self._prompt_with_image(text, image_b64, mime, timeout, conversation_id, on_chunk, permission_mode)
 
-    def _prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None):
+    def _prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None,
+                           permission_mode="interactive"):
         """Send a text + image prompt and return the accumulated response text.
 
         Uses the ACP content-block image type (the agent advertised
@@ -1142,7 +1145,7 @@ class ACPClient:
             return {"error": "No active ACP session"}
 
         pid = self._next_id()
-        self._begin_prompt(pid, session_id, on_chunk)
+        self._begin_prompt(pid, session_id, on_chunk, permission_mode)
 
         _t0 = time.perf_counter()
         try:

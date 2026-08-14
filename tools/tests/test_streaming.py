@@ -289,6 +289,8 @@ class StreamingContractTests(unittest.TestCase):
             url = "https://github.com/example/project/pull/42"
             self.assertTrue(_verify_workspace_github_delivery(url, "", "pull_request"))
             self.assertEqual(run.call_args.args[0], ["gh", "api", "repos/example/project/pulls/42", "--silent"])
+            self.assertFalse(_verify_workspace_github_delivery(url, "", "pull_request", "example/other-project"))
+            self.assertTrue(_verify_workspace_github_delivery(url, "", "pull_request", "EXAMPLE/PROJECT"))
             self.assertFalse(_verify_workspace_github_delivery(url, "", "issue"))
             self.assertFalse(_verify_workspace_github_delivery(
                 "https://github.com/example/project/issues/42", "", "pull_request"
@@ -351,7 +353,7 @@ class StreamingContractTests(unittest.TestCase):
         client = CallbackACPClient()
         responses = []
         client._send_response = lambda request_id, result: responses.append((request_id, result))
-        client._begin_prompt(202, "workspace-session", None, "workspace_write")
+        client._begin_prompt(202, "workspace-session", None, "workspace_auto")
         with patch("bridge.acp_client._telemetry_emit") as emit:
             client._handle_message({
                 "id": 62,
@@ -376,7 +378,7 @@ class StreamingContractTests(unittest.TestCase):
         client = CallbackACPClient()
         responses = []
         client._send_response = lambda request_id, result: responses.append((request_id, result))
-        client._begin_prompt(204, "workspace-session", None, "workspace_write")
+        client._begin_prompt(204, "workspace-session", None, "workspace_auto")
         with patch("bridge.acp_client._telemetry_emit") as emit:
             client._handle_message({
                 "id": 64,
@@ -430,8 +432,8 @@ class StreamingContractTests(unittest.TestCase):
     def test_workspace_modes_auto_approve_remote_and_package_actions(self):
         cases = (
             ("workspace_auto", {"command": "gh", "args": ["issue", "comment", "1", "--body", "Summary"]}),
-            ("workspace_write", {"command": "npm", "args": ["install"]}),
-            ("workspace_write", {"command": "git", "args": ["push", "origin", "HEAD"]}),
+            ("workspace_auto", {"command": "npm", "args": ["install"]}),
+            ("workspace_auto", {"command": "git", "args": ["push", "origin", "HEAD"]}),
         )
         for index, (permission_mode, raw_input) in enumerate(cases):
             with self.subTest(permission_mode=permission_mode, command=raw_input["command"]):
@@ -466,12 +468,18 @@ class StreamingContractTests(unittest.TestCase):
             "rawInput": {"command": "npm test && rm -rf build"}
         }), "destructive_execution")
         self.assertEqual(_workspace_autonomy_block_reason({
-            "rawInput": {"command": "bash", "args": ["-c", "gh pr list --repo appatalks/example"]}
-        }), "")
+            "rawInput": {"command": "bash", "args": ["-c", "gh pr list --repo example/example"]}
+        }), "shell_interpreter")
+        self.assertEqual(_workspace_autonomy_block_reason({
+            "rawInput": {"command": "python3", "args": ["-c", "print('x')"]}
+        }), "inline_script")
+        self.assertEqual(_workspace_autonomy_block_reason({
+            "rawInput": {"command": "cp", "args": ["README.md", "/tmp/copy"]}
+        }), "outside_workspace")
         client = CallbackACPClient()
         responses = []
         client._send_response = lambda request_id, result: responses.append((request_id, result))
-        client._begin_prompt(285, "workspace-autonomy-session", None, "workspace_write")
+        client._begin_prompt(285, "workspace-autonomy-session", None, "workspace_auto")
         with patch("bridge.acp_client._telemetry_emit") as emit:
             client._handle_message({
                 "id": 85,
@@ -638,7 +646,7 @@ class StreamingContractTests(unittest.TestCase):
     def test_workspace_autonomy_reject_does_not_leave_a_pending_permission(self):
         client = CallbackACPClient()
         client.workspace_run_id = "workspace-run"
-        client._begin_prompt(207, "workspace-session", None, "workspace_write")
+        client._begin_prompt(207, "workspace-session", None, "workspace_auto")
         wire = []
         client._send_notification = lambda method, params: wire.append(("notification", method, params))
         client._send_response = lambda request_id, result: wire.append(("response", request_id, result))
@@ -774,7 +782,7 @@ class StreamingContractTests(unittest.TestCase):
         client = CallbackACPClient()
         responses = []
         client._send_response = lambda request_id, result: responses.append((request_id, result))
-        client._begin_prompt(205, "workspace-session", None, "workspace_write")
+        client._begin_prompt(205, "workspace-session", None, "workspace_auto")
         with patch("bridge.acp_client._telemetry_emit"):
             client._handle_message({
                 "id": 65,
@@ -790,7 +798,7 @@ class StreamingContractTests(unittest.TestCase):
                 },
             })
         client._finish_prompt(205)
-        self.assertEqual(responses, [(65, {"outcome": {"outcome": "selected", "optionId": "allow-once"}})])
+        self.assertEqual(responses, [(65, {"outcome": {"outcome": "cancelled"}})])
         self.assertEqual(client.list_pending_permissions(), [])
 
     def test_workspace_agent_auto_allows_local_edit_and_rejects_delete_or_unknown_tools(self):
@@ -799,7 +807,7 @@ class StreamingContractTests(unittest.TestCase):
                 client = CallbackACPClient()
                 responses = []
                 client._send_response = lambda request_id, result: responses.append((request_id, result))
-                client._begin_prompt(203 + index, "workspace-session", None, "workspace_write")
+                client._begin_prompt(203 + index, "workspace-session", None, "workspace_auto")
                 with patch("bridge.acp_client._get_learning_consent", return_value={"routine_tools": False}), \
                     patch("bridge.acp_client._telemetry_emit"):
                     client._handle_message({
@@ -832,7 +840,7 @@ class StreamingContractTests(unittest.TestCase):
                 client = CallbackACPClient()
                 responses = []
                 client._send_response = lambda request_id, result: responses.append((request_id, result))
-                client._begin_prompt(240 + index, "workspace-session", None, "workspace_write")
+                client._begin_prompt(240 + index, "workspace-session", None, "workspace_auto")
                 with patch("bridge.acp_client._telemetry_emit") as emit:
                     client._handle_message({
                         "id": 90 + index,
@@ -858,7 +866,7 @@ class StreamingContractTests(unittest.TestCase):
                 client = CallbackACPClient()
                 responses = []
                 client._send_response = lambda request_id, result: responses.append((request_id, result))
-                client._begin_prompt(260 + index, "workspace-session", None, "workspace_write")
+                client._begin_prompt(260 + index, "workspace-session", None, "workspace_auto")
                 with patch("bridge.acp_client._telemetry_emit"):
                     client._handle_message({
                         "id": 100 + index,
@@ -1064,12 +1072,12 @@ class StreamingContractTests(unittest.TestCase):
         self.assertEqual(result["stop_reason"], "end_turn")
         self.assertEqual(client.created_sessions, ["session-1"])
 
-    def test_acp_prompt_defaults_to_workspace_autonomy(self):
+    def test_acp_prompt_defaults_to_interactive(self):
         client = CallbackACPClient()
         client._begin_prompt(300, "workspace-default-session", None)
         with client._prompt_state_lock:
             state = client._active_prompts[300]
-        self.assertEqual(state["permission_mode"], "workspace_auto")
+        self.assertEqual(state["permission_mode"], "interactive")
         client._finish_prompt(300)
 
     def test_late_permission_inherits_known_session_autonomy(self):
@@ -1124,7 +1132,7 @@ class StreamingContractTests(unittest.TestCase):
         self.assertEqual(responses, [])
         self.assertEqual(len(client.list_pending_permissions()), 1)
 
-    def test_ambiguous_active_prompt_defaults_to_workspace_autonomy(self):
+    def test_ambiguous_active_prompt_defaults_to_interactive(self):
         client = CallbackACPClient()
         client._begin_prompt(301, "session-a", None, "interactive")
         client._begin_prompt(302, "session-b", None, "interactive")
@@ -1140,8 +1148,8 @@ class StreamingContractTests(unittest.TestCase):
                     "options": [{"optionId": "allow", "kind": "allow_once"}],
                 },
             })
-        self.assertEqual(responses, [(301, {"outcome": {"outcome": "selected", "optionId": "allow"}})])
-        self.assertEqual(emit.call_args.kwargs["decision"], "workspace-autonomy-approve")
+        self.assertEqual(responses, [])
+        self.assertEqual(len(client.list_pending_permissions()), 1)
         client._finish_prompt(301)
         client._finish_prompt(302)
 

@@ -99,7 +99,8 @@ def _run_gh_api(endpoint, jq_filter=""):
     return completed.stdout.strip() if jq_filter else ""
 
 
-def _verify_workspace_github_delivery(url, required_issue_state="", required_kind=""):
+def _verify_workspace_github_delivery(url, required_issue_state="", required_kind="", expected_repository=""):
+    expected_repository = str(expected_repository or "").strip().lower()
     pull_match = re.fullmatch(
         r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)",
         str(url or ""),
@@ -108,6 +109,8 @@ def _verify_workspace_github_delivery(url, required_issue_state="", required_kin
         if required_kind and required_kind != "pull_request":
             return False
         owner, repository, pull_number = pull_match.groups()
+        if expected_repository and f"{owner}/{repository}".lower() != expected_repository:
+            return False
         return _run_gh_api(f"repos/{owner}/{repository}/pulls/{pull_number}") is not None
     if required_kind == "pull_request":
         return False
@@ -120,6 +123,8 @@ def _verify_workspace_github_delivery(url, required_issue_state="", required_kin
     if required_kind and required_kind != "issue":
         return False
     owner, repository, issue_number, comment_id = match.groups()
+    if expected_repository and f"{owner}/{repository}".lower() != expected_repository:
+        return False
     delivery_endpoint = (
         f"repos/{owner}/{repository}/issues/comments/{comment_id}"
         if comment_id else f"repos/{owner}/{repository}/issues/{issue_number}"
@@ -476,8 +481,9 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 delivery_url = _workspace_github_delivery_url(result_text)
                 required_issue_state = task.get("required_github_issue_state") or ""
                 required_delivery_kind = task.get("required_github_delivery_kind") or ""
+                required_repository = task.get("required_github_repository") or ""
                 if not delivery_url or not _verify_workspace_github_delivery(
-                    delivery_url, required_issue_state, required_delivery_kind
+                    delivery_url, required_issue_state, required_delivery_kind, required_repository
                 ):
                     state_requirement = (
                         " and leave the issue " + required_issue_state

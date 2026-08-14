@@ -128,7 +128,10 @@ var EvaWorkspaces = (function() {
       requestAnimationFrame(function() { origins.output.scrollTop = origins.output.scrollHeight; });
     }
     state.chatDrawerOpen = open;
-    if (drawer) drawer.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (drawer) {
+      drawer.setAttribute('aria-hidden', open ? 'false' : 'true');
+      drawer.inert = !open;
+    }
     if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
     document.body.classList.toggle('workspace-chat-drawer-open', open);
     if (remember !== false) chatDrawerPreference(open);
@@ -431,7 +434,8 @@ var EvaWorkspaces = (function() {
     if (run.status !== 'active' || (run.agent && ['starting', 'running', 'steering'].indexOf(run.agent.status) >= 0)) {
       throw new Error('This workspace run is already active or cannot be retried.');
     }
-    await retryWorkspaceRun(run);
+    var retried = await retryWorkspaceRun(run);
+    if (!retried || !retried.id) throw new Error('Workspace agent retry could not be dispatched.');
     return 'Workspace agent retry started for ' + (run.project ? run.project.name : 'the selected workspace') + '.';
   }
 

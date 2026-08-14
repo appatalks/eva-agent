@@ -116,7 +116,7 @@ var EvaHarness = (function() {
     try {
       if (!window.evaStandalone || typeof window.evaStandalone.workspaceRemediationContextLoad !== 'function') return null;
       var context = window.evaStandalone.workspaceRemediationContextLoad();
-      if (context && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(context.repositoryName || '')) && String(context.objective || '').trim()) {
+      if (context && /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?$/.test(String(context.repositoryName || '')) && String(context.objective || '').trim()) {
         return { repositoryName: String(context.repositoryName), objective: String(context.objective).slice(0, 4000) };
       }
     } catch (_) {}
@@ -225,7 +225,7 @@ var EvaHarness = (function() {
       }
       var workspaceRemovalVerb = '(?:(?:clean\\s*up)\\s+(?:and\\s+)?)?(?:remove|delete|forget)';
       var suffixedWorkspaceRemoval = rawPhrase.match(new RegExp('^(?:please\\s+)?' + workspaceRemovalVerb + '\\s+(?:the\\s+)?(.+?)\\s+(?:workspace|workspaces|project|projects|repository|repositories|repo|repos)(?:\\s*,[\\s\\S]*)?[.!?]*$', 'i'));
-      var workspaceRemoval = suffixedWorkspaceRemoval || rawPhrase.match(new RegExp('^(?:please\\s+)?' + workspaceRemovalVerb + '\\s+(?:the\\s+)?(?:workspace|workspaces|project|projects|repository|repositories|repo|repos)\\s+(.+?)[.!?]*$', 'i'));
+      var workspaceRemoval = suffixedWorkspaceRemoval || rawPhrase.match(new RegExp('^(?:please\\s+)?' + workspaceRemovalVerb + '\\s+(?:the\\s+)?(?:workspace|workspaces|project|projects|repository|repositories|repo|repos)\\s+(.+?)(?:\\s*,[\\s\\S]*)?[.!?]*$', 'i'));
       if (workspaceRemoval) {
         return {
           action: 'remove_workspace', target: 'workspaces', label: 'Workspace Removal',
@@ -434,10 +434,11 @@ var EvaHarness = (function() {
     var modelWorkspaceMcp = action === 'set_workspace_mcp_server' && userNativeRoute &&
       userNativeRoute.action === 'set_workspace_mcp_server' &&
       String(request.serverName || '').toLowerCase() === String(userNativeRoute.serverName || '').toLowerCase() &&
-      request.enabled === userNativeRoute.enabled;
+      request.enabled === userNativeRoute.enabled &&
+      String(request.projectName || '').trim().toLowerCase() === String(userNativeRoute.projectName || '').trim().toLowerCase();
     var modelWorkspaceRetry = action === 'retry_workspace_run' && userNativeRoute &&
       userNativeRoute.action === 'retry_workspace_run' &&
-      (!request.runId || request.runId === userNativeRoute.runId);
+      String(request.runId || '').trim() === String(userNativeRoute.runId || '').trim();
     var modelWorkspaceRemoval = action === 'remove_workspace' && userNativeRoute &&
       userNativeRoute.action === 'remove_workspace' &&
       String(request.projectName || '').trim().toLowerCase() === String(userNativeRoute.projectName || '').trim().toLowerCase();

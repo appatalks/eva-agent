@@ -660,6 +660,7 @@ def _dispatch_workspace_run(run):
         "requires_github_delivery": github_delivery_required,
         "required_github_delivery_kind": github_delivery_kind,
         "required_github_issue_state": github_issue_state,
+        "required_github_repository": str((run.get("project") or {}).get("name") or "").strip(),
         "_cwd": checkout_path,
         "_workspace_mcp_config": workspace_mcp_config,
     }

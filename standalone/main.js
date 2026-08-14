@@ -685,7 +685,7 @@ function normalizedRemediationContext(value) {
   if (!value || typeof value !== 'object') return {};
   const repositoryName = String(value.repositoryName || '').trim();
   const objective = String(value.objective || '').trim();
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repositoryName) || !objective || objective.length > 4000) return {};
+  if (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?$/.test(repositoryName) || !objective || objective.length > 4000) return {};
   return { repositoryName: repositoryName, objective: objective };
 }
 

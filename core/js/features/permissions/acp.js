@@ -81,6 +81,7 @@ function _renderACPPermission(permission) {
 }
 
 function pollACPPermissions() {
+  if (typeof hasBridgeCapability === 'function' && !hasBridgeCapability()) return Promise.resolve();
   if (_acpPermissionState.polling) return Promise.resolve();
   _acpPermissionState.polling = true;
   return backgroundBridgeRequest('/v1/acp/permissions', { headers: getBridgeCapabilityHeaders() })
@@ -100,6 +101,7 @@ function pollACPPermissions() {
 }
 
 function initACPPermissions() {
+  if (typeof hasBridgeCapability === 'function' && !hasBridgeCapability()) return;
   if (_acpPermissionState.timer) return;
   _scheduleACPPermissionPoll(1500);
 }

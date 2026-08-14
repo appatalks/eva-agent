@@ -377,6 +377,10 @@ function getBridgeCapabilityHeaders() {
   };
 }
 
+function hasBridgeCapability() {
+  return !!(window.evaStandalone && window.evaStandalone.bridgeToken);
+}
+
 function installBridgeCapabilityFetch() {
   if (typeof window === 'undefined' || typeof window.fetch !== 'function' || window._evaBridgeFetchInstalled) return;
   var nativeFetch = window.fetch.bind(window);
