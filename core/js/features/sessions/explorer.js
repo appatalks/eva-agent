@@ -328,8 +328,18 @@ function newSession() {
 }
 
 function startFreshSessionOnLaunch() {
-  // Startup intentionally begins a new chat. Do not snapshot provider-local
-  // state left by a prior renderer before it has been associated with a session.
+  // A relaunch must land in the regular chat, not in a retained workflow view.
+  if (typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
+  if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
+  if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();
+  if (window.EvaSkills && typeof window.EvaSkills.close === 'function') window.EvaSkills.close();
+  if (window.EvaMemoryInspector && typeof window.EvaMemoryInspector.close === 'function') window.EvaMemoryInspector.close();
+  if (typeof closeVoiceView === 'function') closeVoiceView();
+  if (typeof closeSidePanels === 'function') closeSidePanels();
+  localStorage.setItem(SESSION_PANEL_TAB_KEY, 'chats');
+
+  // Do not snapshot provider-local state left by a prior renderer before it
+  // has been associated with a session.
   localStorage.removeItem(SESSION_ACTIVE_KEY);
   SESSION_MSG_KEYS.forEach(function(key) { localStorage.removeItem(key); });
   localStorage.removeItem('masterOutput');
@@ -342,6 +352,8 @@ function startFreshSessionOnLaunch() {
     else if (typeof showWelcome === 'function') showWelcome();
     else txtOutput.innerHTML = '';
   }
+  var input = document.getElementById('txtMsg');
+  if (input) input.textContent = '';
   renderSessionList();
 }
 

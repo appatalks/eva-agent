@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current release:** Eva 5.6.0. This document describes the matching browser UI,
+> **Current release:** Eva 5.6.1. This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -19,7 +19,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.6.0.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.6.1.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
@@ -82,6 +82,7 @@ files and are normalized before Eva uses them.
 - Dual-mode data retrieval: cloud (Copilot CLI + MCP) or local (LM Studio + direct MCP)
 - MCP tool access (Kusto, GitHub, Azure, web search) hot-reloadable at runtime
 - Persistent memory via Azure Data Explorer (Kusto) or local SQLite
+- Memory Inspector with searchable traceable records, provenance, associations, and append-only corrections
 - Signal text messaging (send-only via signal-cli, keyword-triggered fallback for local models)
 - Autonomous browser control (Playwright + CDP) and desktop control (pyautogui)
 - Webcam presence detection (OpenCV face + motion)
@@ -369,7 +370,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.6.0)
+  package.json             Electron + electron-builder config (v5.6.1)
 ```
 
 ## Dependencies
@@ -535,6 +536,9 @@ Options:
 | `/v1/memory/context` | GET | Build and return memory context for injection |
 | `/v1/memory/reflect` | POST | Trigger post-response reflection (entities, emotion) |
 | `/v1/memory/backend` | GET/POST | Get or switch memory backend (kusto/sqlite) |
+| `/v1/memory/start-fresh` | POST | Confirmed SQLite-only reset of ordinary memory with a local database backup; retains approved identity, policy, skills, settings, and workspace data |
+| `/v1/memory/inspector` | GET | Bounded record list, traits, scenarios, and growth proposals for the Memory Inspector |
+| `/v1/memory/atoms/{id}` | GET/PATCH/DELETE | Inspect an atom's provenance and associations, append a correction, or remove it from future recall |
 | `/v1/kusto/seed` | POST | Loopback-only Kusto schema seed |
 
 **Data Retrieval:**
@@ -797,6 +801,22 @@ Eva supports two memory backends, switchable at runtime via Settings or the
 | `MemoryTurns` | Turn ID, session, provider, status | Exactly-once reflection lifecycle for direct providers |
 | `AutonomyPolicy` / `GrowthProposals` | Approved autonomy limits and reviewable proposals | Bounded self-directed improvement with maintainers in control |
 | `SkillVersions` / `SkillEvaluations` | Risk, validation, lifecycle, outcome | Draft-first skills and evidence-gated provisional use |
+
+### Memory Inspector
+
+The Memory view organizes the bounded atom list into collapsible type groups, with text
+search plus type, lifecycle status, scope, recency, and confidence filters. Selecting a
+record opens its audit view with the full atom fields, source evidence, scenario
+memberships, derived persona traits, correction ancestry, and a plain-language note
+explaining whether and how Eva can use it for recall. Saving changes creates a successor
+atom and supersedes the prior record; removal only excludes the active record from future
+recall, so the audit trail remains available for inspection.
+
+**Fresh start:** The Memory Inspector's **Start fresh** command requires an explicit
+typed confirmation. It first creates a timestamped local database backup, then clears
+ordinary user/conversation memory and its derived recall state. Eva's approved Core
+Identity, autonomy policy, skills, settings, and workspace records are retained. No
+legacy claim is promoted automatically during the reset.
 
 ### Memory Context Injection
 
@@ -1788,7 +1808,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.6.0.AppImage'
+./dist/'Eva Standalone-5.6.1.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace

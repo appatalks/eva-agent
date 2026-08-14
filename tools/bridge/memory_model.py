@@ -3,7 +3,9 @@
 import datetime
 import hashlib
 import json
+import os
 import re
+import sqlite3
 import threading
 import uuid
 
@@ -17,6 +19,17 @@ SKILL_RISKS = {"low", "review", "restricted"}
 LOW_RISK_TOOLS = {"", "data-retrieval", "web-search"}
 RESTRICTED_TOOL_TERMS = {"browser", "desktop", "signal", "email", "message", "payment", "purchase", "credential", "protected", "delete", "write"}
 _KUSTO_TURN_LOCK = threading.RLock()
+_FRESH_START_TABLES = (
+    "MemoryEvidence", "ScenarioMembers", "UserPersonaTraits", "MemoryTurnStages",
+    "MemoryAtoms", "MemoryScenarios", "MemoryTurns", "MemoryOutbox",
+    "MemorySemanticClaims", "MemoryClaimEvidence", "MemoryClaimProposals",
+    "MemoryClaimProposalConflicts", "MemoryClaimProposalDecisions", "MemoryClaimResolutions",
+    "MemoryConsolidationCheckpoints", "MemoryConsolidationReceipts", "MemoryEmbeddingCache",
+    "Knowledge", "Conversations", "EmotionState", "MemorySummaries", "Reflections",
+    "HeuristicsIndex", "Goals", "BackgroundProposals", "BackgroundActivity", "GrowthProposals",
+    "IdentityClaims", "LearningCandidateEvidence", "LearningCandidates", "LearningEvaluationPlans",
+    "LearningEvaluationResults", "LearningExecutionReports", "MemoryMigrations",
+)
 
 
 def _now():
@@ -111,6 +124,54 @@ class MemoryModel:
             return inserted
 
         return self.memory.transaction(write)
+
+    def start_fresh(self):
+        """Backup then clear ordinary memory while retaining Eva's approved operating foundation."""
+        db_path = self.memory.db_path
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_dir = os.path.join(os.path.dirname(db_path), "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        backup_path = os.path.join(backup_dir, "memory-before-fresh-start-" + stamp + ".db")
+
+        def write(conn):
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            cleared = {}
+            target = sqlite3.connect(backup_path)
+            try:
+                conn.backup(target)
+            finally:
+                target.close()
+            for table in _FRESH_START_TABLES:
+                if table not in tables:
+                    continue
+                cleared[table] = conn.execute("SELECT COUNT(*) FROM " + table).fetchone()[0]
+                if table == "Knowledge":
+                    triggers = list(conn.execute(
+                        "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'Knowledge'"
+                    ))
+                    for name, _ in triggers:
+                        conn.execute("DROP TRIGGER IF EXISTS \"" + name + "\"")
+                    conn.execute("DELETE FROM Knowledge")
+                    if "Knowledge_fts" in tables:
+                        conn.execute("INSERT INTO Knowledge_fts(Knowledge_fts) VALUES('rebuild')")
+                    for _, statement in triggers:
+                        conn.execute(statement)
+                    continue
+                conn.execute("DELETE FROM " + table)
+            if "MemoryMigrations" in tables:
+                now = _now()
+                conn.execute(
+                    "INSERT INTO MemoryMigrations (MigrationId, AppliedAt, Details) VALUES (?, ?, ?)",
+                    ("legacy-knowledge-atoms-v1", now, "Fresh start: legacy Knowledge was intentionally cleared"),
+                )
+                conn.execute(
+                    "INSERT INTO MemoryMigrations (MigrationId, AppliedAt, Details) VALUES (?, ?, ?)",
+                    ("memory-fresh-start-v1", now, "Ordinary user memory reset; CoreIdentity, policy, skills, and workspace data retained"),
+                )
+            return cleared
+
+        cleared = self.memory.transaction(write)
+        return {"backup_path": backup_path, "cleared": cleared}
 
     def active_charter(self, fallback):
         rows = self.memory.query(
@@ -308,6 +369,38 @@ class MemoryModel:
             "SELECT ProposalId, Kind, RiskLevel, Status, EvidenceRefs, CreatedAt, ReviewedAt, ReviewedBy FROM GrowthProposals ORDER BY CreatedAt DESC LIMIT 50"
         ) or []
         return {"scenario": scenario, "atoms": atoms, "traits": traits, "identity_claims": claims, "growth_proposals": proposals}
+
+    def atom_detail(self, memory_id):
+        """Return one atom with its provenance, usages, and revision lineage."""
+        atom_rows = self.memory.query(
+            "SELECT MemoryId, Entity, Relation, Value, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt, ExpiresAt, SupersedesId "
+            "FROM MemoryAtoms WHERE MemoryId = ? LIMIT 1", (str(memory_id),)
+        ) or []
+        if not atom_rows:
+            return None
+        atom = atom_rows[0]
+        evidence = self.memory.query(
+            "SELECT EvidenceId, SourceType, SourceRef, CreatedAt FROM MemoryEvidence WHERE MemoryId = ? ORDER BY CreatedAt DESC", (str(memory_id),)
+        ) or []
+        scenarios = self.memory.query(
+            "SELECT s.ScenarioId, s.Scope, s.ScopeId, s.Title, s.Status, m.Role, m.CreatedAt AS MemberCreatedAt "
+            "FROM ScenarioMembers m JOIN MemoryScenarios s ON s.ScenarioId = m.ScenarioId WHERE m.MemoryId = ? ORDER BY s.UpdatedAt DESC", (str(memory_id),)
+        ) or []
+        traits = self.memory.query(
+            "SELECT TraitId, Trait, Value, Confidence, SourceMemoryIds, Status, Scope, ScopeId, CreatedAt, UpdatedAt, ExpiresAt "
+            "FROM UserPersonaTraits WHERE SourceMemoryIds LIKE ? ORDER BY UpdatedAt DESC", ("%" + str(memory_id) + "%",)
+        ) or []
+        traits = [item for item in traits if str(memory_id) in json.loads(item.get("SourceMemoryIds") or "[]")]
+        predecessor = None
+        if atom.get("SupersedesId"):
+            rows = self.memory.query(
+                "SELECT MemoryId, Entity, Relation, Value, Status, UpdatedAt FROM MemoryAtoms WHERE MemoryId = ? LIMIT 1", (atom["SupersedesId"],)
+            ) or []
+            predecessor = rows[0] if rows else None
+        successors = self.memory.query(
+            "SELECT MemoryId, Entity, Relation, Value, Status, UpdatedAt FROM MemoryAtoms WHERE SupersedesId = ? ORDER BY UpdatedAt DESC", (str(memory_id),)
+        ) or []
+        return {"atom": atom, "evidence": evidence, "scenarios": scenarios, "traits": traits, "superseded_atom": predecessor, "corrections": successors}
 
     def register_turn(self, turn_id, session_id, provider=""):
         turn_id = _clip(turn_id, 120)
@@ -648,6 +741,37 @@ class KustoMemoryModel:
         claims = self._read("IdentityClaims | summarize arg_max(CreatedAt, *) by ClaimId | order by CreatedAt desc | take 50")
         proposals = self._read("GrowthProposals | summarize arg_max(CreatedAt, *) by ProposalId | order by CreatedAt desc | take 50")
         return {"scenario": scenario, "atoms": latest_atoms, "traits": latest_traits, "identity_claims": claims, "growth_proposals": proposals}
+
+    def atom_detail(self, memory_id):
+        """Return the current Kusto atom and its provenance, usages, and revisions."""
+        atom = self._latest("MemoryAtoms", "MemoryId", memory_id)
+        if not atom:
+            return None
+        evidence = self._read(
+            "MemoryEvidence | where MemoryId == " + self._quote(memory_id)
+            + " | project EvidenceId, SourceType, SourceRef, CreatedAt | order by CreatedAt desc"
+        )
+        memberships = self._read(
+            "ScenarioMembers | where MemoryId == " + self._quote(memory_id)
+            + " | project ScenarioId, Role, MemberCreatedAt=CreatedAt"
+        )
+        scenarios = []
+        for membership in memberships:
+            scenario = self._latest("MemoryScenarios", "ScenarioId", membership.get("ScenarioId"))
+            if scenario:
+                scenario.update({"Role": membership.get("Role", ""), "MemberCreatedAt": membership.get("MemberCreatedAt", "")})
+                scenarios.append(scenario)
+        traits = self._read(
+            "UserPersonaTraits | where SourceMemoryIds has " + self._quote(memory_id)
+            + " | summarize arg_max(UpdatedAt, *) by TraitId | order by UpdatedAt desc"
+        )
+        traits = [item for item in traits if str(memory_id) in json.loads(item.get("SourceMemoryIds") or "[]")]
+        predecessor = self._latest("MemoryAtoms", "MemoryId", atom.get("SupersedesId")) if atom.get("SupersedesId") else None
+        corrections = self._read(
+            "MemoryAtoms | where SupersedesId == " + self._quote(memory_id)
+            + " | summarize arg_max(UpdatedAt, *) by MemoryId | project MemoryId, Entity, Relation, Value, Status, UpdatedAt | order by UpdatedAt desc"
+        )
+        return {"atom": atom, "evidence": evidence, "scenarios": scenarios, "traits": traits, "superseded_atom": predecessor, "corrections": corrections}
 
     def register_turn(self, turn_id, session_id, provider=""):
         turn_id = _clip(turn_id, 120)

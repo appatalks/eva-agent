@@ -47,5 +47,7 @@ assert.ok(source.includes('function pruneWorkspaceDisplayState()') && source.inc
   'Deleted workspace and run IDs must be pruned from saved display state');
 assert.ok(source.includes("selected.status === 'active' && (!selected.agent || selected.agent.status === 'error')"),
   'Workspace runs delayed before agent creation must expose the retry control');
+assert.ok(source.includes('monitorRunStatesInitialized: false') && source.includes('if (!state.monitorRunStatesInitialized)'),
+  'The initial workspace monitor snapshot must not narrate retained runs into a fresh chat');
 
 console.log('workspaces API tests: PASS');
