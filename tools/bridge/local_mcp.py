@@ -422,7 +422,13 @@ class MCPServer:
                 line = process.stderr.readline()
                 if not line:
                     break
-                print(f"[MCP:{self.name}] {line.decode(errors='replace').rstrip()}")
+                message = line.decode(errors="replace").rstrip()
+                expected_discover_rejection = "server/discover" in message and (
+                    "expect initialized request" in message
+                    or "method invalid during initialization" in message
+                )
+                if not expected_discover_rejection:
+                    print(f"[MCP:{self.name}] {message}")
         except Exception:
             pass
 
