@@ -208,13 +208,15 @@ async function main() {
   assert.strictEqual(pullRequestViewRequest.repository, 'example/repository');
   assert.match(pullViewResult.message, /PR #183/);
   assert.match(pullViewResult.message, /static-checks: SUCCESS/);
+  const correctedPullRoute = harness.resolveNavigationRequest('https://github.com/Apatox/eva-agent/pull/183', { directUser: true });
+  assert.strictEqual(correctedPullRoute.repository, 'appatalks/eva-agent');
   const mergeRoute = harness.resolveNavigationRequest('Merge PR #183 into main.', { directUser: true });
   assert.strictEqual(mergeRoute.action, 'merge_github_pull_request');
   assert.strictEqual(mergeRoute.number, 183);
   const mergeResult = await harness.execute(mergeRoute, { source: 'voice', userRequest: 'Merge PR #183 into main.' });
   assert.strictEqual(mergeResult.ok, true);
   assert.strictEqual(mergeRequest.number, 183);
-  assert.strictEqual(mergeRequest.repository, '');
+  assert.strictEqual(mergeRequest.repository, 'example/repository');
   assert.strictEqual(mergeRequest.confirmation, 'MERGE');
   assert.match(mergeResult.message, /Merged pull request #183/);
   const modelMerge = await harness.execute(mergeRoute, { source: 'model', userRequest: 'Merge PR #183 into main.' });

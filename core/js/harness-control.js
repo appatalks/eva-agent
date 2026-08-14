@@ -1,6 +1,7 @@
 // Native control facade for Eva's own renderer surfaces. This is deliberately
 // allowlisted: it controls Eva without simulating pointer or keyboard input.
 var EvaHarness = (function() {
+  var GITHUB_PULL_REQUEST_CONTEXT_KEY = 'eva_last_github_pull_request';
   var aliases = {
     workspace: 'workspaces', coding_workspace: 'workspaces', coding_workspaces: 'workspaces',
     skill: 'skills',
@@ -181,13 +182,42 @@ var EvaHarness = (function() {
   function pullRequestReference(value) {
     var text = String(value || '');
     var url = text.match(/https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/(\d+)/i);
-    if (url) return { repository: url[1], number: Number(url[2]) };
+    if (url) return { repository: normalizeGitHubRepository(url[1]), number: Number(url[2]) };
     var number = text.match(/\b(?:pull\s+request|pr)\s*#?\s*(\d+)\b/i);
     return number ? { repository: '', number: Number(number[1]) } : null;
   }
 
+  function normalizeGitHubRepository(value) {
+    var parts = String(value || '').trim().split('/');
+    if (parts.length !== 2) return '';
+    var owner = parts[0].toLowerCase() === 'apatox' ? 'appatalks' : parts[0];
+    return /^[A-Za-z0-9_.-]+$/.test(owner) && /^[A-Za-z0-9_.-]+$/.test(parts[1]) ? owner + '/' + parts[1] : '';
+  }
+
+  function savedPullRequestContext() {
+    try {
+      var saved = JSON.parse(localStorage.getItem(GITHUB_PULL_REQUEST_CONTEXT_KEY) || 'null');
+      if (saved && Number.isInteger(Number(saved.number)) && Number(saved.number) > 0 && normalizeGitHubRepository(saved.repository)) {
+        return { number: Number(saved.number), repository: normalizeGitHubRepository(saved.repository) };
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function persistPullRequestContext(context) {
+    if (!context || !Number.isInteger(Number(context.number)) || !normalizeGitHubRepository(context.repository)) return;
+    try {
+      localStorage.setItem(GITHUB_PULL_REQUEST_CONTEXT_KEY, JSON.stringify({
+        number: Number(context.number), repository: normalizeGitHubRepository(context.repository)
+      }));
+    } catch (_) {}
+  }
+
   function recentPullRequestContext(rawPhrase) {
     var direct = pullRequestReference(rawPhrase);
+    if (direct && direct.repository) return direct;
+    var saved = savedPullRequestContext();
+    if (saved && (!direct || saved.number === direct.number)) return saved;
     if (direct) return direct;
     var candidates = [];
     try {
@@ -610,6 +640,8 @@ var EvaHarness = (function() {
           (pull && pull.draft ? ' and is a draft' : '') + '.';
         if (checks.length) summary += ' Checks: ' + checks.join(', ') + '.';
         if (pull && pull.url) summary += ' ' + String(pull.url);
+        var inferredRepository = String(pull && pull.url || '').replace(/^https:\/\/github\.com\//, '').replace(/\/pull\/\d+.*$/, '');
+        persistPullRequestContext({ number: pullNumber, repository: String(request.repository || '') || inferredRepository });
         return result(true, 'describe_github_pull_request', summary, {
           outcome: 'completed', url: String(pull && pull.url || ''), state: String(pull && pull.state || ''), mergeState: String(pull && pull.mergeState || '')
         });

@@ -109,6 +109,7 @@ function _normalizeEvaPromptVoiceValue(value) {
   text = text.replace(/github\s+(?:dot|\.)\s+com/i, 'github.com');
   text = text.replace(/\s+(?:forward\s+)?slash\s+/gi, '/');
   text = text.replace(/\s+(?:dot|\.)\s+git\b/i, '.git');
+  text = text.replace(/\bapatox\b/gi, 'appatalks');
   var direct = text.match(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?/i);
   if (direct) return direct[0];
   var githubPath = text.match(/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?/i);
@@ -118,7 +119,8 @@ function _normalizeEvaPromptVoiceValue(value) {
 function _evaGithubPromptUrl(value) {
   var match = String(value || '').trim().match(/^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/i);
   if (!match) return '';
-  return 'https://github.com/' + match[1] + '/' + match[2].replace(/\.git$/i, '');
+  var owner = match[1].toLowerCase() === 'apatox' ? 'appatalks' : match[1];
+  return 'https://github.com/' + owner + '/' + match[2].replace(/\.git$/i, '');
 }
 
 function _evaGithubSlug(value) {
