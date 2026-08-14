@@ -1367,7 +1367,7 @@ Both `workspace_write` and `workspace_auto` make autonomous one-time decisions
 for structured reads, edits within the assigned worktree, builds, package
 operations, GitHub, Git, and remote-tool actions. Eva rejects rather than
 waits on protected credential/config paths, edits outside the assigned
-worktree, opaque shell or inline-script execution, privilege escalation,
+worktree, unparseable commands, Git configuration overrides, privilege escalation,
 destructive filesystem commands, service control, and destructive Git actions.
 The rejection is returned to ACP immediately so Eva can select a safer direct
 alternative instead of leaving a stale approval card.

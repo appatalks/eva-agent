@@ -440,13 +440,16 @@ class StreamingContractTests(unittest.TestCase):
                 })])
                 self.assertEqual(emit.call_args.kwargs["decision"], "workspace-autonomy-approve")
 
-    def test_workspace_modes_reject_destructive_or_opaque_execution(self):
+    def test_workspace_modes_reject_destructive_execution_but_allow_safe_shell_wrappers(self):
         self.assertEqual(_workspace_autonomy_block_reason({
             "rawInput": {"command": "rm", "args": ["-rf", "build"]}
         }), "destructive_execution")
         self.assertEqual(_workspace_autonomy_block_reason({
             "rawInput": {"command": "npm test && rm -rf build"}
-        }), "opaque_execution")
+        }), "destructive_execution")
+        self.assertEqual(_workspace_autonomy_block_reason({
+            "rawInput": {"command": "bash", "args": ["-c", "gh pr list --repo appatalks/example"]}
+        }), "")
         client = CallbackACPClient()
         responses = []
         client._send_response = lambda request_id, result: responses.append((request_id, result))
@@ -627,7 +630,7 @@ class StreamingContractTests(unittest.TestCase):
                 "method": "session/request_permission",
                 "params": {
                     "sessionId": "workspace-session",
-                    "toolCall": {"toolCallId": "call-workspace-reject", "kind": "execute", "rawInput": {"command": "node", "args": ["-e", "console.log('x')"]}},
+                    "toolCall": {"toolCallId": "call-workspace-reject", "kind": "execute", "rawInput": {"command": "node", "args": ["-e", "require('child_process').execSync('rm -rf build')"]}},
                     "options": [{"optionId": "allow", "kind": "allow_once"}, {"optionId": "reject", "kind": "reject_once"}],
                 },
             })
@@ -749,7 +752,7 @@ class StreamingContractTests(unittest.TestCase):
                 self.assertEqual(responses, [])
                 self.assertEqual(len(client.list_pending_permissions()), 1)
 
-    def test_workspace_agent_rejects_shell_chained_execute_without_waiting(self):
+    def test_workspace_agent_allows_non_destructive_shell_chained_execute(self):
         client = CallbackACPClient()
         responses = []
         client._send_response = lambda request_id, result: responses.append((request_id, result))
@@ -769,7 +772,7 @@ class StreamingContractTests(unittest.TestCase):
                 },
             })
         client._finish_prompt(205)
-        self.assertEqual(responses, [(65, {"outcome": {"outcome": "cancelled"}})])
+        self.assertEqual(responses, [(65, {"outcome": {"outcome": "selected", "optionId": "allow-once"}})])
         self.assertEqual(client.list_pending_permissions(), [])
 
     def test_workspace_agent_auto_allows_local_edit_and_rejects_delete_or_unknown_tools(self):

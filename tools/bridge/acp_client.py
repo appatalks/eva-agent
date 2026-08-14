@@ -40,6 +40,11 @@ _WORKSPACE_AUTONOMY_BLOCKED_EXECUTABLES = {
     "sudo", "su", "doas", "pkexec", "rm", "shred", "mkfs", "fdisk", "parted", "dd", "mount", "umount",
     "systemctl", "service", "launchctl",
 }
+_WORKSPACE_AUTONOMY_DESTRUCTIVE_PATTERN = re.compile(
+    r"\b(?:rm|shred|mkfs|fdisk|parted|dd|mount|umount|sudo|su|doas|pkexec|"
+    r"systemctl|service|launchctl|os\.remove|os\.unlink|shutil\.rmtree|remove-item)\b",
+    re.IGNORECASE,
+)
 _WORKSPACE_SAFE_GIT_SUBCOMMANDS = {"add", "commit", "status", "diff", "log", "show", "rev-parse"}
 _WORKSPACE_SAFE_PACKAGE_SUBCOMMANDS = {"test", "run", "lint", "check", "build"}
 _GH_FILE_OPTIONS = {"--body-file", "--template", "--input"}
@@ -246,12 +251,13 @@ def _workspace_autonomy_block_reason(tool_call, cwd=None):
     category = _workspace_execute_category(tool_call, cwd)
     if category == "secret_or_sensitive_path":
         return "protected_path"
-    if category in {
-        "missing_command", "parse_error", "shell_composition", "inline_script", "shell_interpreter",
-        "git_configuration_override",
-    }:
-        return "opaque_execution"
     command = _tool_call_command(tool_call)
+    if not command or category in {"missing_command", "parse_error", "git_configuration_override"}:
+        return "opaque_execution"
+    if _workspace_argument_mentions_secret(command) or _workspace_argument_is_protected(command):
+        return "protected_path"
+    if _WORKSPACE_AUTONOMY_DESTRUCTIVE_PATTERN.search(command):
+        return "destructive_execution"
     try:
         parts = shlex.split(command, posix=True)
     except ValueError:
