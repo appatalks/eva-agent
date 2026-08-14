@@ -995,10 +995,14 @@ body.workspace-chat-drawer-open #workspaceChatToggleBtn { border-color: #78dce8;
 .workspace-workbench-body { display: grid; grid-template-columns: minmax(180px, 0.56fr) minmax(210px, 0.7fr) minmax(280px, 0.95fr) minmax(300px, 1.1fr) minmax(280px, 0.9fr); min-height: 0; overflow: hidden; }
 .workspace-chat-drawer { position: absolute; z-index: 30; top: 0; right: 0; bottom: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: clamp(360px, 36vw, 520px); max-width: 100%; border-left: 1px solid rgba(120,220,232,0.3); background: #09171b; box-shadow: -18px 0 42px rgba(0,0,0,0.48); transform: translateX(100%); transition: transform 180ms ease; pointer-events: none; }
 .workspace-chat-drawer[aria-hidden="false"] { transform: translateX(0); pointer-events: auto; }
-.workspace-chat-header { display: flex; align-items: center; justify-content: space-between; min-height: 58px; padding: 0 14px 0 18px; border-bottom: 1px solid rgba(120,220,232,0.18); }
+.workspace-chat-header { display: grid; grid-template-columns: minmax(110px, auto) minmax(140px, 1fr) auto; align-items: center; gap: 12px; min-height: 58px; padding: 0 14px 0 18px; border-bottom: 1px solid rgba(120,220,232,0.18); }
 .workspace-chat-header div { display: grid; gap: 3px; }
 .workspace-chat-header span { color: #78dce8; font: 700 9px monospace; letter-spacing: 0.12em; }
 .workspace-chat-header strong { color: #f2fdff; font-size: 16px; }
+.workspace-chat-session-label { display: grid; gap: 3px; min-width: 0; color: #73979c; font: 700 8px monospace; letter-spacing: 0.08em; text-transform: uppercase; }
+.workspace-chat-session-label select { box-sizing: border-box; width: 100%; min-width: 0; height: 30px; padding: 0 26px 0 8px; border: 1px solid rgba(120,220,232,0.26); border-radius: 3px; background: #0a2025; color: #e7fbff; font: 11px monospace; }
+.workspace-chat-session-label select:focus-visible { outline: 1px solid #78dce8; outline-offset: 1px; }
+.workspace-chat-session-label select:disabled { opacity: 0.55; }
 .workspace-chat-output-host { min-height: 0; overflow: hidden; }
 .workspace-chat-input-host { padding: 10px; border-top: 1px solid rgba(120,220,232,0.18); background: rgba(3,12,15,0.82); }
 body.workspace-workbench-open .workspace-chat-drawer #txtOutput { width: 100%; max-width: none; height: 100%; min-height: 0; margin: 0; padding: 14px; border: 0; border-radius: 0; background: transparent; color: #e7f6f8; font-size: 14px; }

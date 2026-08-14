@@ -1407,15 +1407,20 @@ The full Workspace monitor includes a **Chat** drawer that reuses Eva's live
 conversation output and composer. Streaming responses, speech, voice input,
 send controls, and session history continue normally while the user inspects
 runs or terminals. The drawer opens by default on first use, remembers its
-toggle state, fills the screen on narrow viewports, and restores the chat nodes
-to the primary conversation when Workspaces closes.
+toggle state, fills the screen on narrow viewports, and includes a session
+selector that switches conversations without leaving Workspaces. Clicking
+outside hides the drawer without unmounting the live chat, so generation and
+speech continue; the Chat button restores it. Closing Workspaces returns the
+chat nodes to the primary conversation.
 
 Application-specific Workspace commands use the native harness rather than
 browser or desktop automation. Conversational removal requests may place the
 workspace name before or after "Workspace" and may include a greeting or reason.
 They resolve to the native removal API, which always shows the final confirmation,
 preserves the source repository, and requires a second confirmation for dirty
-managed worktrees.
+managed worktrees. Exact full names take priority; a short repository name such
+as `cs-proxy` is accepted only when its final path segment uniquely identifies
+one imported Workspace. Ambiguous short names require `owner/repository`.
 
 Settings > Auth launches GitHub CLI device authorization, opens GitHub's device
 page, copies the one-time code when possible, and keeps the code visible with a

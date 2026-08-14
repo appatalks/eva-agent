@@ -160,6 +160,29 @@ async function main() {
         ordered: output.bottom <= input.top + 1,
       };
     }), { inside: true, usableOutput: true, usableInput: true, ordered: true }, 'Workspace chat drawer layout is clipped or overlapping');
+    const sessionFixture = await page.evaluate(async function() {
+      const firstId = ensureActiveSessionId();
+      localStorage.setItem('aigMessages', JSON.stringify([{ role: 'user', content: 'Workspace drawer first session' }]));
+      document.getElementById('txtOutput').innerHTML = '<div class="chat-bubble user-bubble"><span class="user">You:</span> Workspace drawer first session</div>';
+      await saveCurrentSession();
+      newSession();
+      const secondId = ensureActiveSessionId();
+      localStorage.setItem('aigMessages', JSON.stringify([{ role: 'user', content: 'Workspace drawer second session' }]));
+      document.getElementById('txtOutput').innerHTML = '<div class="chat-bubble user-bubble"><span class="user">You:</span> Workspace drawer second session</div>';
+      await saveCurrentSession();
+      return { firstId: firstId, secondId: secondId };
+    });
+    await page.locator('#workspaceChatCloseBtn').click();
+    await page.locator('#workspaceChatToggleBtn').click();
+    await page.waitForFunction(function() { return document.getElementById('workspaceChatSessionSelect').options.length >= 2; });
+    await page.locator('#workspaceChatSessionSelect').selectOption(sessionFixture.firstId);
+    await page.waitForFunction(function(firstId) { return localStorage.getItem('eva_active_session') === firstId; }, sessionFixture.firstId);
+    assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'Switching drawer sessions closed Workspaces');
+    assert.match(await page.locator('#txtOutput').innerText(), /Workspace drawer first session/, 'Drawer session selector did not restore the selected conversation');
+    await page.locator('#workspaceMonitorProjectCount').click();
+    assert.strictEqual(await page.locator('#workspaceChatDrawer').getAttribute('aria-hidden'), 'true', 'Clicking outside did not hide the Workspace chat drawer');
+    assert.strictEqual(await page.evaluate(function() { return document.getElementById('workspaceChatOutputHost').contains(document.getElementById('txtOutput')); }), true, 'Click-away unmounted the live chat instead of allowing it to continue');
+    await page.locator('#workspaceChatToggleBtn').click();
     await page.evaluate(function() { window.EvaWorkspaces.closeWorkbench(); });
     assert.strictEqual(await page.evaluate(function() { return document.getElementById('workspaceChatDrawer').contains(document.getElementById('txtOutput')); }), false, 'Closing Workspaces did not restore the live chat output');
     await page.evaluate(function() { document.getElementById('lcarsWorkspacesBtn').click(); });
@@ -187,10 +210,10 @@ async function main() {
     const projectWorkspace = page.locator('#workspaceWorkbenchProjects .workspace-monitor-run').filter({ hasText: 'project' });
     await projectWorkspace.waitFor();
     const conversationalRemovalRoute = await page.evaluate(function() {
-      return window.EvaHarness.resolveNavigationRequest('Hi Eva. Please remove the project Workspaces, it is no longer needed at this time.', { directUser: true });
+      return window.EvaHarness.resolveNavigationRequest('Hi Eva. Please remove the example/project Workspaces, it is no longer needed at this time.', { directUser: true });
     });
     assert.strictEqual(conversationalRemovalRoute.action, 'remove_workspace', 'Conversational removal did not use the native Workspace action');
-    assert.strictEqual(conversationalRemovalRoute.projectName, 'project', 'Conversational removal selected the wrong Workspace');
+    assert.strictEqual(conversationalRemovalRoute.projectName, 'example/project', 'Conversational removal selected the wrong Workspace');
     let removalConfirmationSeen = false;
     page.once('dialog', async function(dialog) {
       removalConfirmationSeen = /Remove project from Eva/i.test(dialog.message());

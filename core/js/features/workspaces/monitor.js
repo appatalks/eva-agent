@@ -59,7 +59,8 @@ var EvaWorkspaces = (function() {
     githubAuthTimer: null,
     githubAuthRetry: null,
     chatDrawerOpen: false,
-    chatNodeOrigins: null
+    chatNodeOrigins: null,
+    sessionSwitching: false
   };
 
   function api() {
@@ -123,6 +124,7 @@ var EvaWorkspaces = (function() {
     if (open) {
       outputHost.appendChild(origins.output);
       inputHost.appendChild(origins.input);
+      refreshChatSessionSelect();
       requestAnimationFrame(function() { origins.output.scrollTop = origins.output.scrollHeight; });
     }
     state.chatDrawerOpen = open;
@@ -130,6 +132,61 @@ var EvaWorkspaces = (function() {
     if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
     document.body.classList.toggle('workspace-chat-drawer-open', open);
     if (remember !== false) chatDrawerPreference(open);
+  }
+
+  function refreshChatSessionSelect() {
+    var select = document.getElementById('workspaceChatSessionSelect');
+    if (!select || typeof getAllSessions !== 'function') return Promise.resolve();
+    var activeId = '';
+    try { activeId = localStorage.getItem('eva_active_session') || ''; } catch (_) {}
+    return Promise.resolve(getAllSessions()).then(function(sessions) {
+      sessions = Array.isArray(sessions) ? sessions.slice() : [];
+      sessions.sort(function(left, right) {
+        if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+        return Number(right.updatedAt || 0) - Number(left.updatedAt || 0);
+      });
+      select.replaceChildren();
+      sessions.forEach(function(session) {
+        var option = document.createElement('option');
+        option.value = session.id;
+        option.textContent = (session.pinned ? '\u2022 ' : '') + (session.title || 'Untitled');
+        option.selected = session.id === activeId;
+        select.appendChild(option);
+      });
+      if (!sessions.length) {
+        var empty = document.createElement('option');
+        empty.value = activeId;
+        empty.textContent = 'Current session';
+        select.appendChild(empty);
+      }
+      select.disabled = sessions.length < 2;
+    }).catch(function() {
+      select.disabled = true;
+    });
+  }
+
+  function switchChatSession(sessionId) {
+    if (!sessionId || state.sessionSwitching || typeof loadSession !== 'function') return;
+    state.sessionSwitching = true;
+    var select = document.getElementById('workspaceChatSessionSelect');
+    if (select) select.disabled = true;
+    Promise.resolve(loadSession(sessionId, { preserveWorkspace: true })).then(function(loaded) {
+      if (loaded) {
+        setChatDrawerOpen(true, false);
+        status('Chat session loaded.', 'success');
+      }
+    }).catch(function(error) {
+      status(error && error.message ? error.message : 'Chat session could not be loaded.', 'error');
+    }).finally(function() {
+      state.sessionSwitching = false;
+      refreshChatSessionSelect();
+    });
+  }
+
+  function hideChatDrawerOnOutsidePointer(event) {
+    if (!state.workbenchOpen || !state.chatDrawerOpen) return;
+    if (event.target.closest('#workspaceChatDrawer') || event.target.closest('#workspaceChatToggleBtn')) return;
+    setChatDrawerOpen(false);
   }
 
   function currentProjectId() {
@@ -1791,9 +1848,20 @@ var EvaWorkspaces = (function() {
   async function removeProjectByName(projectName) {
     if (!state.projects.length) await refresh();
     var query = String(projectName || '').trim().toLowerCase();
-    var project = query
-      ? state.projects.filter(function(item) { return String(item.name || '').trim().toLowerCase() === query; })[0]
-      : projectById(state.selectedProjectId);
+    var project = null;
+    if (query) {
+      project = state.projects.filter(function(item) { return String(item.name || '').trim().toLowerCase() === query; })[0] || null;
+      if (!project) {
+        var basename = query.split('/').filter(Boolean).pop();
+        var basenameMatches = state.projects.filter(function(item) {
+          return String(item.name || '').trim().toLowerCase().split('/').filter(Boolean).pop() === basename;
+        });
+        if (basenameMatches.length > 1) throw new Error('More than one imported workspace matched "' + projectName + '". Use the full owner/repository name.');
+        project = basenameMatches[0] || null;
+      }
+    } else {
+      project = projectById(state.selectedProjectId);
+    }
     if (!project) throw new Error(query ? 'No imported workspace matched "' + projectName + '".' : 'Select an imported workspace before removing it.');
     var removed = await removeProject(project);
     return removed ? 'Removed ' + project.name + ' from Eva. The source repository was preserved.' : 'Workspace removal was cancelled.';
@@ -2041,6 +2109,7 @@ var EvaWorkspaces = (function() {
     var monitorNew = document.getElementById('workspaceMonitorNewBtn');
     var chatToggle = document.getElementById('workspaceChatToggleBtn');
     var chatClose = document.getElementById('workspaceChatCloseBtn');
+    var chatSessionSelect = document.getElementById('workspaceChatSessionSelect');
     bindWorkbenchContextMenus();
     if (close) close.addEventListener('click', toggle);
     if (add) add.addEventListener('click', addProject);
@@ -2068,6 +2137,8 @@ var EvaWorkspaces = (function() {
     if (monitorClose) monitorClose.addEventListener('click', closeWorkbench);
     if (chatToggle) chatToggle.addEventListener('click', function() { setChatDrawerOpen(!state.chatDrawerOpen); });
     if (chatClose) chatClose.addEventListener('click', function() { setChatDrawerOpen(false); });
+    if (chatSessionSelect) chatSessionSelect.addEventListener('change', function() { switchChatSession(chatSessionSelect.value); });
+    document.addEventListener('pointerdown', hideChatDrawerOnOutsidePointer);
     if (monitorNew) monitorNew.addEventListener('click', async function() {
       closeWorkbench();
       var currentPanel = panel();
