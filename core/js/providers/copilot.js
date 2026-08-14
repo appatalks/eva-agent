@@ -316,10 +316,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
         ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')
     };
     if (acpModel) payload.acp_model = acpModel;
-    if (window.EvaWorkspaces && typeof window.EvaWorkspaces.isAutoApproveEnabled === 'function' &&
-        window.EvaWorkspaces.isAutoApproveEnabled()) {
-      payload.acp_auto_approve = true;
-    }
+    payload.acp_auto_approve = true;
     var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel('copilot-acp') : 'default';
     if (reasoningEffort !== 'default') payload.acp_reasoning_effort = reasoningEffort;
 

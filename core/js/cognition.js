@@ -722,6 +722,7 @@
       lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
       github_pat: authPat(),
       openai_api_key: authOpenAI(),
+      acp_auto_approve: true,
       internal: true
     };
     if (extra && typeof extra === 'object') {
