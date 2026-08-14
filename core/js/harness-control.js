@@ -146,7 +146,7 @@ var EvaHarness = (function() {
 
   function resolveNavigationRequest(value, options) {
     var rawPhrase = String(value || '').trim();
-    rawPhrase = rawPhrase.replace(/^(?:hi|hello|hey)\s+eva\s*[,!.:-]*\s*/i, '');
+    rawPhrase = rawPhrase.replace(/^(?:(?:hi|hello|hey)\s+)?eva\s*[,!.:-]*\s*/i, '');
     var phrase = rawPhrase.toLowerCase();
     var directUser = !!(options && options.directUser);
     var lastRemediation = null;
@@ -223,8 +223,9 @@ var EvaHarness = (function() {
           };
         }
       }
-      var suffixedWorkspaceRemoval = rawPhrase.match(/^(?:please\s+)?(?:remove|delete|forget)\s+(?:the\s+)?(.+?)\s+(?:workspace|workspaces|project|projects|repository|repositories|repo|repos)(?:\s*,[\s\S]*)?[.!?]*$/i);
-      var workspaceRemoval = suffixedWorkspaceRemoval || rawPhrase.match(/^(?:please\s+)?(?:remove|delete|forget)\s+(?:the\s+)?(?:workspace|workspaces|project|projects|repository|repositories|repo|repos)\s+(.+?)[.!?]*$/i);
+      var workspaceRemovalVerb = '(?:(?:clean\\s*up)\\s+(?:and\\s+)?)?(?:remove|delete|forget)';
+      var suffixedWorkspaceRemoval = rawPhrase.match(new RegExp('^(?:please\\s+)?' + workspaceRemovalVerb + '\\s+(?:the\\s+)?(.+?)\\s+(?:workspace|workspaces|project|projects|repository|repositories|repo|repos)(?:\\s*,[\\s\\S]*)?[.!?]*$', 'i'));
+      var workspaceRemoval = suffixedWorkspaceRemoval || rawPhrase.match(new RegExp('^(?:please\\s+)?' + workspaceRemovalVerb + '\\s+(?:the\\s+)?(?:workspace|workspaces|project|projects|repository|repositories|repo|repos)\\s+(.+?)[.!?]*$', 'i'));
       if (workspaceRemoval) {
         return {
           action: 'remove_workspace', target: 'workspaces', label: 'Workspace Removal',
@@ -437,11 +438,14 @@ var EvaHarness = (function() {
     var modelWorkspaceRetry = action === 'retry_workspace_run' && userNativeRoute &&
       userNativeRoute.action === 'retry_workspace_run' &&
       (!request.runId || request.runId === userNativeRoute.runId);
+    var modelWorkspaceRemoval = action === 'remove_workspace' && userNativeRoute &&
+      userNativeRoute.action === 'remove_workspace' &&
+      String(request.projectName || '').trim().toLowerCase() === String(userNativeRoute.projectName || '').trim().toLowerCase();
     var modelRepositoryRemediation = action === 'run_repository_remediation' && userNativeRoute &&
       userNativeRoute.action === 'run_repository_remediation' &&
       String(request.repositoryName || '').toLowerCase() === String(userNativeRoute.repositoryName || '').toLowerCase() &&
       String(request.objective || '') === String(userNativeRoute.objective || '');
-    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelRepositoryRemediation) {
+    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation) {
       return result(false, action, 'This native action requires direct user interaction.');
     }
     if (action === 'navigate') return navigate(request.target);

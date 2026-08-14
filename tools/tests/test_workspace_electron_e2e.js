@@ -209,9 +209,10 @@ async function main() {
     assert.deepStrictEqual(githubAuthSurface, { start: 'function', status: 'function', authorize: 'function' }, 'GitHub device authorization APIs are unavailable');
     const projectWorkspace = page.locator('#workspaceWorkbenchProjects .workspace-monitor-run').filter({ hasText: 'project' });
     await projectWorkspace.waitFor();
-    const conversationalRemovalRoute = await page.evaluate(function() {
-      return window.EvaHarness.resolveNavigationRequest('Hi Eva. Please remove the example/project Workspaces, it is no longer needed at this time.', { directUser: true });
-    });
+    const cleanupRemovalRequest = 'Eva please cleanup and remove the example/project workspaces, as its no longer needed.';
+    const conversationalRemovalRoute = await page.evaluate(function(userRequest) {
+      return window.EvaHarness.resolveNavigationRequest(userRequest, { directUser: true });
+    }, cleanupRemovalRequest);
     assert.strictEqual(conversationalRemovalRoute.action, 'remove_workspace', 'Conversational removal did not use the native Workspace action');
     assert.strictEqual(conversationalRemovalRoute.projectName, 'example/project', 'Conversational removal selected the wrong Workspace');
     let removalConfirmationSeen = false;
@@ -219,7 +220,12 @@ async function main() {
       removalConfirmationSeen = /Remove project from Eva/i.test(dialog.message());
       await dialog.dismiss();
     });
-    const cancelledRemoval = await page.evaluate(function(route) { return window.EvaHarness.execute(route); }, conversationalRemovalRoute);
+    const cancelledRemoval = await page.evaluate(function(userRequest) {
+      return window.EvaHarness.execute(
+        { action: 'remove_workspace', projectName: 'example/project' },
+        { source: 'model', userRequest: userRequest }
+      );
+    }, cleanupRemovalRequest);
     assert.strictEqual(removalConfirmationSeen, true, 'Native Workspace removal confirmation did not open');
     assert.strictEqual(cancelledRemoval.data.outcome, 'cancelled', 'Dismissed Workspace removal did not remain cancelled');
     await projectWorkspace.waitFor();

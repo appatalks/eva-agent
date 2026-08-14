@@ -1421,6 +1421,10 @@ preserves the source repository, and requires a second confirmation for dirty
 managed worktrees. Exact full names take priority; a short repository name such
 as `cs-proxy` is accepted only when its final path segment uniquely identifies
 one imported Workspace. Ambiguous short names require `owner/repository`.
+If Eva emits the native removal action after narrating or resolving the target,
+the harness accepts it only when the action and Workspace name exactly match the
+user's directly parsed removal request. The native confirmation still decides
+whether deletion proceeds; mismatched or unsolicited model actions are denied.
 
 Settings > Auth launches GitHub CLI device authorization, opens GitHub's device
 page, copies the one-time code when possible, and keeps the code visible with a
