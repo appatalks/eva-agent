@@ -69,7 +69,7 @@ def _subagent_result_text(result):
 
 def _workspace_github_delivery_url(text):
     match = re.search(
-        r"(?im)^Submitted:\s*(https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/\d+(?:#issuecomment-\d+)?)\s*$",
+        r"(?im)^Submitted:\s*(https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues/\d+(?:#issuecomment-\d+)?|pull/\d+))\s*$",
         str(text or ""),
     )
     return match.group(1) if match else ""
@@ -99,12 +99,25 @@ def _run_gh_api(endpoint, jq_filter=""):
     return completed.stdout.strip() if jq_filter else ""
 
 
-def _verify_workspace_github_delivery(url, required_issue_state=""):
+def _verify_workspace_github_delivery(url, required_issue_state="", required_kind=""):
+    pull_match = re.fullmatch(
+        r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\d+)",
+        str(url or ""),
+    )
+    if pull_match:
+        if required_kind and required_kind != "pull_request":
+            return False
+        owner, repository, pull_number = pull_match.groups()
+        return _run_gh_api(f"repos/{owner}/{repository}/pulls/{pull_number}") is not None
+    if required_kind == "pull_request":
+        return False
     match = re.fullmatch(
         r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/issues/(\d+)(?:#issuecomment-(\d+))?",
         str(url or ""),
     )
     if not match:
+        return False
+    if required_kind and required_kind != "issue":
         return False
     owner, repository, issue_number, comment_id = match.groups()
     delivery_endpoint = (
@@ -462,14 +475,18 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
             if task.get("requires_github_delivery"):
                 delivery_url = _workspace_github_delivery_url(result_text)
                 required_issue_state = task.get("required_github_issue_state") or ""
-                if not delivery_url or not _verify_workspace_github_delivery(delivery_url, required_issue_state):
+                required_delivery_kind = task.get("required_github_delivery_kind") or ""
+                if not delivery_url or not _verify_workspace_github_delivery(
+                    delivery_url, required_issue_state, required_delivery_kind
+                ):
                     state_requirement = (
                         " and leave the issue " + required_issue_state
                         if required_issue_state else ""
                     )
+                    delivery_label = "pull request" if required_delivery_kind == "pull_request" else "issue action"
                     raise RuntimeError(
-                        "GitHub Issues submission was required but not verified. The agent must create or comment on the issue "
-                        + state_requirement +
+                        "GitHub " + delivery_label + " submission was required but not verified. The agent must perform the "
+                        "requested delivery" + state_requirement +
                         " and return a final 'Submitted: <github-url>' line that resolves through GitHub."
                     )
             while True:

@@ -1380,6 +1380,12 @@ open issue exists, Eva creates a new issue containing the requested report. The
 run completes only after its final `Submitted:` issue/comment URL resolves
 through GitHub. Explicit close and reopen objectives additionally verify the
 issue endpoint reports the requested `closed` or `open` state before completion.
+An objective that requests a pull request similarly cannot complete after only
+creating a branch or commit. The Workspace agent must push the branch, create or
+update the PR, verify it with GitHub, and finish with a `Submitted:` pull-request
+URL that resolves through the authenticated API. A later instruction such as
+"create the PR" recovers the most recent repository-remediation context and
+starts a Workspace delivery run when the original work was not durable.
 Failed workspace agents are not automatically replayed on application startup,
 which prevents remote side effects from being duplicated after an ambiguous
 failure. Their retained run exposes an explicit **Retry** action immediately,

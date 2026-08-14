@@ -575,20 +575,36 @@ def _dispatch_workspace_run(run):
     }
     task_id = "sub-" + uuid.uuid4().hex[:8]
     objective = str(run.get("objective") or "").strip()
-    github_delivery_required = bool(
+    github_issue_delivery_required = bool(
         run.get("auto_approve")
         and re.search(r"\b(?:issue|issues)\b", objective, re.IGNORECASE)
         and re.search(r"\b(?:close|comment|create|leave|post|publish|reopen|submit|write)\b", objective, re.IGNORECASE)
     )
+    github_pr_delivery_required = bool(
+        run.get("auto_approve")
+        and re.search(r"\b(?:pull\s+request|pr)\b", objective, re.IGNORECASE)
+        and re.search(r"\b(?:create|open|raise|submit|publish|address|fix|resolve|remediate|update)\b", objective, re.IGNORECASE)
+    )
+    github_delivery_required = github_issue_delivery_required or github_pr_delivery_required
+    github_delivery_kind = "pull_request" if github_pr_delivery_required else ("issue" if github_issue_delivery_required else "")
     github_issue_state = ""
-    if github_delivery_required:
+    if github_issue_delivery_required:
         if re.search(r"\breopen\b", objective, re.IGNORECASE):
             github_issue_state = "open"
         elif re.search(r"\bclose\b", objective, re.IGNORECASE):
             github_issue_state = "closed"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     github_delivery_prompt = ""
-    if github_delivery_required:
+    if github_pr_delivery_required:
+        github_delivery_prompt = (
+            "This objective requires a real GitHub pull request, not only a local branch, commit, or draft report. "
+            "You are authorized to use authenticated `git` and `gh` operations in this auto-approved workspace run. "
+            "Inspect and complete the requested repository changes, run focused validation, commit them on the assigned "
+            "branch, push that branch, and create or update a pull request against the repository's default branch. "
+            "Do not stop after creating the branch. Verify the pull request with `gh pr view`, then end the final report "
+            "with `Submitted: <github-pull-request-url>`.\n\n"
+        )
+    elif github_issue_delivery_required:
         close_only_instruction = (
             "This is a close-only request: do not implement, commit, or otherwise resolve the issue body first. "
             "Inspect enough context to identify the requested issue, close it directly, and verify its state. "
@@ -642,6 +658,7 @@ def _dispatch_workspace_run(run):
         "checkout_id": checkout["id"],
         "capability_policy": "workspace_auto" if run.get("auto_approve") else "workspace_write",
         "requires_github_delivery": github_delivery_required,
+        "required_github_delivery_kind": github_delivery_kind,
         "required_github_issue_state": github_issue_state,
         "_cwd": checkout_path,
         "_workspace_mcp_config": workspace_mcp_config,

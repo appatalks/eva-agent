@@ -155,6 +155,17 @@ var EvaHarness = (function() {
     if (directUser) {
       var explicitRemediation = repositoryRemediationRoute(rawPhrase);
       if (explicitRemediation) return explicitRemediation;
+      var pullRequestFollowUp = /\b(?:create|open|raise|submit|publish)\b[\s\S]{0,32}\b(?:pull\s+request|pr)\b|\b(?:create|open|raise|submit|publish)\s+(?:it|that|the)\b[\s\S]{0,16}\bpr\b/i.test(rawPhrase);
+      if (pullRequestFollowUp) {
+        var pullRequestRemediation = lastRemediation || recentRemediationContext();
+        if (pullRequestRemediation) {
+          return {
+            action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Pull Request',
+            repositoryName: pullRequestRemediation.repositoryName,
+            objective: pullRequestRemediation.objective + '\n\nFollow-up: ' + rawPhrase.replace(/[.!?]+$/g, '').trim()
+          };
+        }
+      }
       if (/\b(?:try|retry|rerun|resume|continue)\s+(?:again|it|that|the\s+(?:task|work|remediation))\b/i.test(rawPhrase)) {
         var retryRemediation = lastRemediation || recentRemediationContext();
         if (retryRemediation) {

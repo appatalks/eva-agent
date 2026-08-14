@@ -200,6 +200,12 @@ class StreamingContractTests(unittest.TestCase):
         )
         self.assertEqual(_workspace_github_delivery_url("Prepared a report but did not submit it."), "")
         self.assertEqual(_workspace_github_delivery_url("See https://github.com/example/project/issues/12"), "")
+        self.assertEqual(
+            _workspace_github_delivery_url(
+                "Changes pushed.\nSubmitted: https://github.com/example/project/pull/42"
+            ),
+            "https://github.com/example/project/pull/42",
+        )
 
     def test_generic_subagent_receives_durable_workspace_scope(self):
         class WorkspaceStoreDouble:
@@ -275,6 +281,18 @@ class StreamingContractTests(unittest.TestCase):
                 run.call_args.args[0],
                 ["gh", "api", "repos/example/project/issues/12", "--jq", ".state"],
             )
+
+    def test_workspace_github_delivery_verifies_pull_request_url(self):
+        with patch("bridge.utils.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = ""
+            url = "https://github.com/example/project/pull/42"
+            self.assertTrue(_verify_workspace_github_delivery(url, "", "pull_request"))
+            self.assertEqual(run.call_args.args[0], ["gh", "api", "repos/example/project/pulls/42", "--silent"])
+            self.assertFalse(_verify_workspace_github_delivery(url, "", "issue"))
+            self.assertFalse(_verify_workspace_github_delivery(
+                "https://github.com/example/project/issues/42", "", "pull_request"
+            ))
 
     def test_private_routes_reject_unauthenticated_file_origins(self):
         handler = BridgeHandler.__new__(BridgeHandler)
