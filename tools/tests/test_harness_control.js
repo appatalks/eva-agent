@@ -31,6 +31,7 @@ let assetsOpenCalls = 0;
 let skillsOpenCalls = 0;
 let agentsOpenCalls = 0;
 let sessionsOpenCalls = 0;
+let mergeRequest = null;
 const fixtureRepository = 'fixture-owner/fixture-repository';
 const fixtureShortName = 'fixture-repository';
 const fixtureRepositoryUrl = 'https://github.com/fixture-owner/fixture-repository';
@@ -42,7 +43,11 @@ const localStorage = {
 const window = {
   evaStandalone: {
     workspaceRemediationContextLoad() { return nativeRemediationContext || {}; },
-    workspaceRemediationContextSave(value) { nativeRemediationContext = Object.assign({}, value); return Promise.resolve(true); }
+    workspaceRemediationContextSave(value) { nativeRemediationContext = Object.assign({}, value); return Promise.resolve(true); },
+    githubMergePullRequest(request) {
+      mergeRequest = request;
+      return Promise.resolve({ url: 'https://github.com/example/repository/pull/' + request.number, mergeCommit: 'a'.repeat(40) });
+    }
   },
   EvaWorkspaces: {
     openWorkbench() { workspaceOpenCalls += 1; },
@@ -141,6 +146,7 @@ const sandbox = {
   localStorage,
   describeSavedSessions() { return Promise.resolve('There are 2 saved chat sessions: Today and Planning.'); },
   toggleSessionPanel() { sessionsOpenCalls += 1; },
+  evaTextPrompt() { return Promise.resolve('MERGE'); },
 };
 vm.runInNewContext(source, sandbox, { filename: 'core/js/harness-control.js' });
 const harness = sandbox.EvaHarness;
@@ -183,6 +189,18 @@ async function main() {
   ['describe_workspaces', 'describe_assets', 'describe_skills', 'describe_sessions', 'describe_agents'].forEach(function(action) {
     assert.ok(manifestActions.includes(action), action + ' must be exposed in the native action manifest');
   });
+  const mergeRoute = harness.resolveNavigationRequest('Merge PR #183 into main.', { directUser: true });
+  assert.strictEqual(mergeRoute.action, 'merge_github_pull_request');
+  assert.strictEqual(mergeRoute.number, 183);
+  const mergeResult = await harness.execute(mergeRoute, { source: 'voice', userRequest: 'Merge PR #183 into main.' });
+  assert.strictEqual(mergeResult.ok, true);
+  assert.strictEqual(mergeRequest.number, 183);
+  assert.strictEqual(mergeRequest.repository, '');
+  assert.strictEqual(mergeRequest.confirmation, 'MERGE');
+  assert.match(mergeResult.message, /Merged pull request #183/);
+  const modelMerge = await harness.execute(mergeRoute, { source: 'model', userRequest: 'Merge PR #183 into main.' });
+  assert.strictEqual(modelMerge.ok, false);
+  assert.match(modelMerge.message, /direct user interaction/);
   const unsolicitedList = await harness.execute({ action: 'list_github_repositories' }, { source: 'model', userRequest: 'What is the weather today?' });
   assert.strictEqual(unsolicitedList.ok, false);
   assert.match(unsolicitedList.message, /direct user interaction/);

@@ -89,6 +89,7 @@ var EvaHarness = (function() {
     { id: 'run_repository_remediation', description: 'Start an explicitly requested repository remediation run.' },
     { id: 'import_github', description: 'Import an exact GitHub HTTPS URL only after a direct user request.' },
     { id: 'import_github_selection', description: 'Import a named repository selected from a native GitHub listing.' },
+    { id: 'merge_github_pull_request', description: 'Verify and merge a pull request through authenticated gh only after a direct user request and typed MERGE confirmation.' },
     { id: 'remove_workspace', description: 'Remove a named workspace only after a direct user request.' },
     { id: 'run_terminal_command', description: 'Submit an exact terminal command only after a direct user request.' },
     { id: 'type_terminal_command', description: 'Type an exact terminal command for review only after a direct user request.' },
@@ -176,6 +177,32 @@ var EvaHarness = (function() {
     return null;
   }
 
+  function pullRequestReference(value) {
+    var text = String(value || '');
+    var url = text.match(/https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/(\d+)/i);
+    if (url) return { repository: url[1], number: Number(url[2]) };
+    var number = text.match(/\b(?:pull\s+request|pr)\s*#?\s*(\d+)\b/i);
+    return number ? { repository: '', number: Number(number[1]) } : null;
+  }
+
+  function recentPullRequestContext(rawPhrase) {
+    var direct = pullRequestReference(rawPhrase);
+    if (direct) return direct;
+    var candidates = [];
+    try {
+      var messages = JSON.parse(localStorage.getItem('aigMessages') || '[]');
+      if (Array.isArray(messages)) candidates = candidates.concat(messages.map(function(message) { return message && message.content; }));
+    } catch (_) {}
+    try {
+      candidates = candidates.concat(Array.prototype.map.call(document.querySelectorAll('.chat-bubble'), function(bubble) { return bubble.textContent; }));
+    } catch (_) {}
+    for (var index = candidates.length - 1; index >= 0; index--) {
+      var context = pullRequestReference(candidates[index]);
+      if (context) return context;
+    }
+    return null;
+  }
+
   function resolveNavigationRequest(value, options) {
     var rawPhrase = String(value || '').trim();
     rawPhrase = rawPhrase.replace(/^(?:(?:hi|hello|hey)\s+)?eva\s*[,!.:-]*\s*/i, '');
@@ -251,6 +278,16 @@ var EvaHarness = (function() {
             action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Remediation',
             repositoryName: continuedRemediation.repositoryName,
             objective: continuedRemediation.objective + '\n\nFollow-up: ' + rawPhrase.replace(/[.!?]+$/g, '').trim()
+          };
+        }
+      }
+      var pullRequestMerge = /\bmerge\b/i.test(rawPhrase) && /\b(?:pull\s+request|pr|it|into\s+main)\b/i.test(rawPhrase);
+      if (pullRequestMerge) {
+        var pullRequest = recentPullRequestContext(rawPhrase);
+        if (pullRequest) {
+          return {
+            action: 'merge_github_pull_request', target: 'workspaces', label: 'GitHub Pull Request Merge',
+            number: pullRequest.number, repository: pullRequest.repository
           };
         }
       }
@@ -547,6 +584,29 @@ var EvaHarness = (function() {
         return result(true, 'describe_workspace_tools', message, { outcome: 'completed' });
       }).catch(function(error) {
         return result(false, 'describe_workspace_tools', error && error.message ? error.message : 'Workspace tools could not be described.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'merge_github_pull_request') {
+      if (!window.evaStandalone || typeof window.evaStandalone.githubMergePullRequest !== 'function') return Promise.resolve(result(false, 'merge_github_pull_request', 'Native GitHub CLI merge is unavailable in this Eva build.'));
+      var number = Number(request.number);
+      if (!Number.isInteger(number) || number <= 0) return Promise.resolve(result(false, 'merge_github_pull_request', 'A pull request number is required to merge natively.'));
+      if (typeof evaTextPrompt !== 'function') return Promise.resolve(result(false, 'merge_github_pull_request', 'Native merge confirmation is unavailable.'));
+      return Promise.resolve(evaTextPrompt('Confirm merge PR #' + number, '', {
+        maxLength: 5, placeholder: 'Type MERGE', kind: 'github_pr_merge'
+      })).then(function(confirmation) {
+        if (String(confirmation || '').trim().toUpperCase() !== 'MERGE') {
+          return result(false, 'merge_github_pull_request', 'Pull request merge cancelled.', { outcome: 'cancelled' });
+        }
+        return window.evaStandalone.githubMergePullRequest({
+          number: number, repository: String(request.repository || '').trim(), confirmation: 'MERGE'
+        }).then(function(merged) {
+          var url = String(merged && merged.url || '');
+          return result(true, 'merge_github_pull_request', 'Merged pull request #' + number + (url ? ': ' + url : '.'), {
+            outcome: 'completed', url: url, mergeCommit: String(merged && merged.mergeCommit || '')
+          });
+        });
+      }).catch(function(error) {
+        return result(false, 'merge_github_pull_request', error && error.message ? error.message : 'Pull request merge failed.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
     if (action === 'remove_workspace') {
