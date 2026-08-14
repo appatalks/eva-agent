@@ -195,6 +195,10 @@ async function main() {
   assert.strictEqual(visiblePullRequestFollowUp.action, 'run_repository_remediation');
   assert.strictEqual(visiblePullRequestFollowUp.repositoryName, 'appatalks/cs-proxy');
   assert.match(visiblePullRequestFollowUp.objective, /Follow-up: Go ahead and create a PR too please/);
+  const visibleWorkspaceContinuation = harness.resolveNavigationRequest('Eva please continue and ensure we have a workspace created for tracking the progress.', { directUser: true });
+  assert.strictEqual(visibleWorkspaceContinuation.action, 'run_repository_remediation');
+  assert.strictEqual(visibleWorkspaceContinuation.repositoryName, 'appatalks/cs-proxy');
+  assert.match(visibleWorkspaceContinuation.objective, /Follow-up: Eva please continue and ensure we have a workspace created/);
   visibleUserMessages = [];
   const shortRemediationRoute = harness.resolveNavigationRequest('Fix dependency alerts with cs-proxy repo.', { directUser: true });
   assert.strictEqual(shortRemediationRoute.action, 'run_repository_remediation');

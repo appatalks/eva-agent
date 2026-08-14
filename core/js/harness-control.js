@@ -202,6 +202,17 @@ var EvaHarness = (function() {
           };
         }
       }
+      var workspaceContinuation = /\b(?:continue|resume|proceed)\b[\s\S]{0,96}\b(?:workspace|work|task|pull\s+request|pr)\b/i.test(rawPhrase);
+      if (workspaceContinuation) {
+        var continuedRemediation = lastRemediation || recentRemediationContext();
+        if (continuedRemediation) {
+          return {
+            action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Remediation',
+            repositoryName: continuedRemediation.repositoryName,
+            objective: continuedRemediation.objective + '\n\nFollow-up: ' + rawPhrase.replace(/[.!?]+$/g, '').trim()
+          };
+        }
+      }
       if (/\b(?:try|retry|rerun|resume|continue)\s+(?:again|it|that|the\s+(?:task|work|remediation))\b/i.test(rawPhrase)) {
         var retryRemediation = lastRemediation || recentRemediationContext();
         if (retryRemediation) {
