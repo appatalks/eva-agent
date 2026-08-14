@@ -271,7 +271,7 @@ async function githubDeletePullRequestBranch(event, request) {
   if (!validGitHubRepository(headRepositoryName) || !validGitHubBranch(branch)) throw new Error('GitHub returned an invalid pull request branch.');
   if (branch === base || /^(?:main|master)$/i.test(branch)) throw new Error('Eva will not delete a default or base branch.');
   const encodedBranch = branch.split('/').map(encodeURIComponent).join('/');
-  const referencePath = 'repos/' + headRepositoryName + '/git/ref/heads/' + encodedBranch;
+  const referencePath = 'repos/' + headRepositoryName + '/git/refs/heads/' + encodedBranch;
   const matchingPath = 'repos/' + headRepositoryName + '/git/matching-refs/heads/' + encodedBranch;
   await runGitHubCli(['api', '--method', 'DELETE', referencePath], 30000);
   const remaining = JSON.parse(await runGitHubCli(['api', matchingPath], 30000));
