@@ -75,6 +75,8 @@ for (const model of legacyDirectOpenAI) {
 }
 assert.match(sendData, /route === 'openai'[\s\S]*?trboSend\(\)/,
   'direct OpenAI selector values must route to trboSend');
+assert.match(sendData, /EvaRequestRouting\.isGitHubOperation[\s\S]*?aigSend\(\)/,
+  'GitHub operations must route through AIG/ACP MCP before direct model selection');
 for (const [model, sender] of specialRoutes) {
   assert.ok(values.includes(model), `${model} must remain selectable`);
   assert.strictEqual(routing.routeFor(model), model === 'lm-studio' ? 'lmstudio' : model === 'dall-e-3' ? 'image' : model,

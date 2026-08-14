@@ -1,6 +1,7 @@
 // Native control facade for Eva's own renderer surfaces. This is deliberately
 // allowlisted: it controls Eva without simulating pointer or keyboard input.
 var EvaHarness = (function() {
+  var GITHUB_PULL_REQUEST_CONTEXT_KEY = 'eva_last_github_pull_request';
   var aliases = {
     workspace: 'workspaces', coding_workspace: 'workspaces', coding_workspaces: 'workspaces',
     skill: 'skills',
@@ -69,6 +70,40 @@ var EvaHarness = (function() {
     voice: function() { return requireAction(typeof _vv !== 'undefined' && typeof openVoiceView === 'function', 'Voice API is unavailable.', function() { if (!_vv.open) openVoiceView(); }); },
     agent_operations: function() { return requireAction(window.EvaAgents && typeof EvaAgents.open === 'function', 'Agent Operations API is unavailable.', function() { return EvaAgents.open('agents'); }); }
   };
+
+  var actionManifest = [
+    { id: 'navigate', description: 'Open a native Eva surface. args: {target}. Read-only navigation.' },
+    { id: 'refresh', description: 'Refresh a native surface. args: {target}. Read-only.' },
+    { id: 'describe_workspaces', description: 'Open Workspaces and return the real workspace and active-run count. Read-only.' },
+    { id: 'describe_assets', description: 'Open Assets and summarize generated and workspace files. Read-only.' },
+    { id: 'describe_skills', description: 'Open Skills and summarize saved and active skills. Read-only.' },
+    { id: 'describe_sessions', description: 'Open Sessions and summarize saved chat sessions. Read-only.' },
+    { id: 'describe_agents', description: 'Open Agent Operations and summarize active and recent agents. Read-only.' },
+    { id: 'describe_workspace_tools', description: 'Summarize enabled MCP tools for a workspace. args: {projectName?}. Read-only.' },
+    { id: 'list_github_repositories', description: 'List the user-owned GitHub repositories after a direct user request. Read-only.' },
+    { id: 'continue_github_repositories', description: 'Continue an explicit native GitHub repository listing. Read-only.' },
+    { id: 'authorize_github', description: 'Open GitHub device authorization only for an explicit user request.' },
+    { id: 'set_workspace_mcp_server', description: 'Enable or disable a named workspace MCP server only when the user explicitly asks.' },
+    { id: 'verify_workspace_mcp_server', description: 'Start an isolated workspace check for a named MCP server after a direct request.' },
+    { id: 'retry_workspace_run', description: 'Retry the named workspace run after a direct user request.' },
+    { id: 'run_workspace_check', description: 'Start a requested workspace check or build.' },
+    { id: 'run_repository_remediation', description: 'Start an explicitly requested repository remediation run.' },
+    { id: 'import_github', description: 'Import an exact GitHub HTTPS URL only after a direct user request.' },
+    { id: 'import_github_selection', description: 'Import a named repository selected from a native GitHub listing.' },
+    { id: 'describe_github_pull_request', description: 'Inspect a GitHub pull request through authenticated gh. args: {number, repository?}. Read-only.' },
+    { id: 'merge_github_pull_request', description: 'Verify and merge a pull request through authenticated gh only after a direct user request and typed MERGE confirmation.' },
+    { id: 'remove_workspace', description: 'Remove a named workspace only after a direct user request.' },
+    { id: 'run_terminal_command', description: 'Submit an exact terminal command only after a direct user request.' },
+    { id: 'type_terminal_command', description: 'Type an exact terminal command for review only after a direct user request.' },
+    { id: 'plan_terminal_task', description: 'Plan and submit a direct user-requested terminal task.' },
+    { id: 'consider_terminal_task', description: 'Consider a direct user request for terminal applicability.' },
+    { id: 'inspect_form', description: 'Inspect the active native confirmation form. Read-only.' },
+    { id: 'set_field', description: 'Set a field in the active native form.' },
+    { id: 'submit_form', description: 'Submit the active native form.' },
+    { id: 'cancel_form', description: 'Cancel the active native form.' },
+    { id: 'new_chat', description: 'Start a new chat.' },
+    { id: 'voice_control', description: 'Enable or disable Eva voice control.' }
+  ];
 
   function normalize(value) {
     return String(value || '').trim().toLowerCase().replace(/[ -]+/g, '_');
@@ -144,9 +179,67 @@ var EvaHarness = (function() {
     return null;
   }
 
+  function pullRequestReference(value) {
+    var text = String(value || '');
+    var url = text.match(/https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/(\d+)/i);
+    if (url) return { repository: normalizeGitHubRepository(url[1]), number: Number(url[2]) };
+    var number = text.match(/\b(?:pull\s+request|pr)\s*#?\s*(\d+)\b/i);
+    return number ? { repository: '', number: Number(number[1]) } : null;
+  }
+
+  function normalizeGitHubRepository(value) {
+    var parts = String(value || '').trim().split('/');
+    if (parts.length !== 2) return '';
+    var owner = parts[0].toLowerCase() === 'apatox' ? 'appatalks' : parts[0];
+    return /^[A-Za-z0-9_.-]+$/.test(owner) && /^[A-Za-z0-9_.-]+$/.test(parts[1]) ? owner + '/' + parts[1] : '';
+  }
+
+  function savedPullRequestContext() {
+    try {
+      var saved = JSON.parse(localStorage.getItem(GITHUB_PULL_REQUEST_CONTEXT_KEY) || 'null');
+      if (saved && Number.isInteger(Number(saved.number)) && Number(saved.number) > 0 && normalizeGitHubRepository(saved.repository)) {
+        return { number: Number(saved.number), repository: normalizeGitHubRepository(saved.repository) };
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function persistPullRequestContext(context) {
+    if (!context || !Number.isInteger(Number(context.number)) || !normalizeGitHubRepository(context.repository)) return;
+    try {
+      localStorage.setItem(GITHUB_PULL_REQUEST_CONTEXT_KEY, JSON.stringify({
+        number: Number(context.number), repository: normalizeGitHubRepository(context.repository)
+      }));
+    } catch (_) {}
+  }
+
+  function recentPullRequestContext(rawPhrase) {
+    var direct = pullRequestReference(rawPhrase);
+    if (direct && direct.repository) return direct;
+    var saved = savedPullRequestContext();
+    if (saved && (!direct || saved.number === direct.number)) return saved;
+    if (direct) return direct;
+    var candidates = [];
+    try {
+      var messages = JSON.parse(localStorage.getItem('aigMessages') || '[]');
+      if (Array.isArray(messages)) candidates = candidates.concat(messages.map(function(message) { return message && message.content; }));
+    } catch (_) {}
+    try {
+      candidates = candidates.concat(Array.prototype.map.call(document.querySelectorAll('.chat-bubble'), function(bubble) { return bubble.textContent; }));
+    } catch (_) {}
+    for (var index = candidates.length - 1; index >= 0; index--) {
+      var context = pullRequestReference(candidates[index]);
+      if (context) return context;
+    }
+    return null;
+  }
+
   function resolveNavigationRequest(value, options) {
     var rawPhrase = String(value || '').trim();
     rawPhrase = rawPhrase.replace(/^(?:(?:hi|hello|hey)\s+)?eva\s*[,!.:-]*\s*/i, '');
+    if (/\b(?:github|repo|repository|pull\s+request|pr|issue|branch|workflow|release)\b/i.test(rawPhrase)) {
+      rawPhrase = rawPhrase.replace(/\bapatox\b/gi, 'appatalks');
+    }
     var phrase = rawPhrase.toLowerCase();
     var directUser = !!(options && options.directUser);
     var lastRemediation = null;
@@ -162,8 +255,23 @@ var EvaHarness = (function() {
       }
     } catch (_) {}
     if (!lastRemediation) lastRemediation = nativeRemediationContext();
-    var workspaceDescription = /\b(?:tell me|describe|list|summarize|summary|what|which)\b[\s\S]{0,48}\b(?:current\s+)?workspaces?\b|\bworkspaces?\b[\s\S]{0,32}\b(?:do i have|are available|can you access|current)\b/.test(phrase);
+    var directPullRequest = pullRequestReference(rawPhrase);
+    if (directPullRequest && !/\bmerge\b/i.test(rawPhrase)) {
+      return {
+        action: 'describe_github_pull_request', target: 'workspaces', label: 'GitHub Pull Request',
+        number: directPullRequest.number, repository: directPullRequest.repository
+      };
+    }
+    var workspaceDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:current\s+)?workspaces?\b|\bworkspaces?\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
     if (workspaceDescription) return { action: 'describe_workspaces', target: 'workspaces', label: 'Workspaces' };
+    var assetsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:assets?|artifacts?|generated files?|workspace files?)\b|\b(?:assets?|artifacts?|generated files?|workspace files?)\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
+    if (assetsDescription) return { action: 'describe_assets', target: 'assets', label: 'Assets' };
+    var skillsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\bskills?\b|\bskills?\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
+    if (skillsDescription) return { action: 'describe_skills', target: 'skills', label: 'Skills' };
+    var sessionsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:sessions?|chat history|saved chats?)\b|\b(?:sessions?|chat history|saved chats?)\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
+    if (sessionsDescription) return { action: 'describe_sessions', target: 'sessions', label: 'Sessions' };
+    var agentsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:agents?|agent operations|agent sessions?)\b|\b(?:agents?|agent operations|agent sessions?)\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
+    if (agentsDescription) return { action: 'describe_agents', target: 'agent_operations', label: 'Agent Operations' };
     var ownedRepositoryPhrase = '(?:my\\s+(?:github\\s+)?(?:repositories|repos)|owned\\s+(?:github\\s+)?(?:repositories|repos)|(?:github\\s+)?(?:repositories|repos)\\s+(?:that\\s+)?i\\s+own)';
     var githubListRequest = new RegExp(
       '^(?:(?:please\\s+)?(?:list|show|display|enumerate)|(?:can|could|would|will)\\s+you\\s+(?:please\\s+)?(?:list|show|display|enumerate)|(?:i\\s+want\\s+you\\s+to|i(?:\'d|\\s+would)\\s+like\\s+you\\s+to)\\s+(?:list|show|display|enumerate))\\s+' + ownedRepositoryPhrase + '(?:\\s+please)?[.!?]*$'
@@ -211,6 +319,16 @@ var EvaHarness = (function() {
             action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Remediation',
             repositoryName: continuedRemediation.repositoryName,
             objective: continuedRemediation.objective + '\n\nFollow-up: ' + rawPhrase.replace(/[.!?]+$/g, '').trim()
+          };
+        }
+      }
+      var pullRequestMerge = /\bmerge\b/i.test(rawPhrase) && /\b(?:pull\s+request|pr|it|into\s+main)\b/i.test(rawPhrase);
+      if (pullRequestMerge) {
+        var pullRequest = recentPullRequestContext(rawPhrase);
+        if (pullRequest) {
+          return {
+            action: 'merge_github_pull_request', target: 'workspaces', label: 'GitHub Pull Request Merge',
+            number: pullRequest.number, repository: pullRequest.repository
           };
         }
       }
@@ -420,7 +538,7 @@ var EvaHarness = (function() {
     request = request && typeof request === 'object' ? request : {};
     context = context && typeof context === 'object' ? context : {};
     var action = normalize(request.action);
-    var modelAllowed = { navigate: true, refresh: true, describe_workspaces: true, inspect_form: true };
+    var modelAllowed = { navigate: true, refresh: true, describe_workspaces: true, describe_assets: true, describe_skills: true, describe_sessions: true, describe_agents: true, describe_github_pull_request: true, inspect_form: true };
     var userRepositoryUrl = githubRepositoryUrl(context.userRequest);
     var requestedRepositoryUrl = String(request.repositoryUrl || request.repository_url || '').trim();
     var userNativeRoute = resolveNavigationRequest(context.userRequest || '', { directUser: true });
@@ -453,10 +571,52 @@ var EvaHarness = (function() {
     if (action === 'refresh') return refresh(request.target);
     if (action === 'describe_workspaces') {
       if (!window.EvaWorkspaces || typeof EvaWorkspaces.describe !== 'function') return Promise.resolve(result(false, 'describe_workspaces', 'Workspaces description API is unavailable.'));
+      var openedWorkspaces = navigate('workspaces');
+      if (!openedWorkspaces.ok) return Promise.resolve(openedWorkspaces);
       return Promise.resolve(EvaWorkspaces.describe()).then(function(message) {
         return result(true, 'describe_workspaces', message);
       }).catch(function(error) {
         return result(false, 'describe_workspaces', error && error.message ? error.message : 'Workspaces could not be described.');
+      });
+    }
+    if (action === 'describe_assets') {
+      if (!window.EvaAssets || typeof EvaAssets.describe !== 'function') return Promise.resolve(result(false, 'describe_assets', 'Assets description API is unavailable.'));
+      return Promise.resolve(EvaAssets.describe()).then(function(message) {
+        var openedAssets = navigate('assets');
+        if (!openedAssets.ok) return openedAssets;
+        return result(true, 'describe_assets', message);
+      }).catch(function(error) {
+        return result(false, 'describe_assets', error && error.message ? error.message : 'Assets could not be described.');
+      });
+    }
+    if (action === 'describe_skills') {
+      if (!window.EvaSkills || typeof EvaSkills.describe !== 'function') return Promise.resolve(result(false, 'describe_skills', 'Skills description API is unavailable.'));
+      return Promise.resolve(EvaSkills.describe()).then(function(message) {
+        var openedSkills = navigate('skills');
+        if (!openedSkills.ok) return openedSkills;
+        return result(true, 'describe_skills', message);
+      }).catch(function(error) {
+        return result(false, 'describe_skills', error && error.message ? error.message : 'Skills could not be described.');
+      });
+    }
+    if (action === 'describe_sessions') {
+      var openedSessions = navigate('sessions');
+      if (!openedSessions.ok) return Promise.resolve(openedSessions);
+      if (typeof describeSavedSessions !== 'function') return Promise.resolve(result(false, 'describe_sessions', 'Sessions description API is unavailable.'));
+      return Promise.resolve(describeSavedSessions()).then(function(message) {
+        return result(true, 'describe_sessions', message);
+      }).catch(function(error) {
+        return result(false, 'describe_sessions', error && error.message ? error.message : 'Sessions could not be described.');
+      });
+    }
+    if (action === 'describe_agents') {
+      if (!window.EvaAgents || typeof EvaAgents.describe !== 'function') return Promise.resolve(result(false, 'describe_agents', 'Agent Operations description API is unavailable.'));
+      return Promise.resolve(EvaAgents.describe()).then(function(message) {
+        var openedAgents = navigate('agent_operations');
+        if (!openedAgents.ok) return openedAgents;
+        return result(true, 'describe_agents', message);
+      }).catch(function(error) {
+        return result(false, 'describe_agents', error && error.message ? error.message : 'Agent Operations could not be described.');
       });
     }
     if (action === 'describe_workspace_tools') {
@@ -465,6 +625,54 @@ var EvaHarness = (function() {
         return result(true, 'describe_workspace_tools', message, { outcome: 'completed' });
       }).catch(function(error) {
         return result(false, 'describe_workspace_tools', error && error.message ? error.message : 'Workspace tools could not be described.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'describe_github_pull_request') {
+      if (!window.evaStandalone || typeof window.evaStandalone.githubViewPullRequest !== 'function') return Promise.resolve(result(false, 'describe_github_pull_request', 'Native GitHub CLI pull-request inspection is unavailable in this Eva build.'));
+      var pullNumber = Number(request.number);
+      if (!Number.isInteger(pullNumber) || pullNumber <= 0) return Promise.resolve(result(false, 'describe_github_pull_request', 'A pull request number is required for native inspection.'));
+      return window.evaStandalone.githubViewPullRequest({
+        number: pullNumber, repository: String(request.repository || '').trim()
+      }).then(function(pull) {
+        var checks = (pull && pull.checks || []).map(function(check) {
+          return String(check.name || 'check') + ': ' + String(check.conclusion || 'PENDING');
+        }).filter(Boolean);
+        var summary = 'PR #' + pullNumber + (pull && pull.title ? ' "' + String(pull.title) + '"' : '') +
+          ' is ' + String(pull && pull.state || 'UNKNOWN') +
+          ' with merge state ' + String(pull && pull.mergeState || 'UNKNOWN') +
+          (pull && pull.draft ? ' and is a draft' : '') + '.';
+        if (checks.length) summary += ' Checks: ' + checks.join(', ') + '.';
+        if (pull && pull.url) summary += ' ' + String(pull.url);
+        var inferredRepository = String(pull && pull.url || '').replace(/^https:\/\/github\.com\//, '').replace(/\/pull\/\d+.*$/, '');
+        persistPullRequestContext({ number: pullNumber, repository: String(request.repository || '') || inferredRepository });
+        return result(true, 'describe_github_pull_request', summary, {
+          outcome: 'completed', url: String(pull && pull.url || ''), state: String(pull && pull.state || ''), mergeState: String(pull && pull.mergeState || '')
+        });
+      }).catch(function(error) {
+        return result(false, 'describe_github_pull_request', error && error.message ? error.message : 'Pull request inspection failed.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'merge_github_pull_request') {
+      if (!window.evaStandalone || typeof window.evaStandalone.githubMergePullRequest !== 'function') return Promise.resolve(result(false, 'merge_github_pull_request', 'Native GitHub CLI merge is unavailable in this Eva build.'));
+      var number = Number(request.number);
+      if (!Number.isInteger(number) || number <= 0) return Promise.resolve(result(false, 'merge_github_pull_request', 'A pull request number is required to merge natively.'));
+      if (typeof evaTextPrompt !== 'function') return Promise.resolve(result(false, 'merge_github_pull_request', 'Native merge confirmation is unavailable.'));
+      return Promise.resolve(evaTextPrompt('Confirm merge PR #' + number, '', {
+        maxLength: 5, placeholder: 'Type MERGE', kind: 'github_pr_merge'
+      })).then(function(confirmation) {
+        if (String(confirmation || '').trim().toUpperCase() !== 'MERGE') {
+          return result(false, 'merge_github_pull_request', 'Pull request merge cancelled.', { outcome: 'cancelled' });
+        }
+        return window.evaStandalone.githubMergePullRequest({
+          number: number, repository: String(request.repository || '').trim(), confirmation: 'MERGE'
+        }).then(function(merged) {
+          var url = String(merged && merged.url || '');
+          return result(true, 'merge_github_pull_request', 'Merged pull request #' + number + (url ? ': ' + url : '.'), {
+            outcome: 'completed', url: url, mergeCommit: String(merged && merged.mergeCommit || '')
+          });
+        });
+      }).catch(function(error) {
+        return result(false, 'merge_github_pull_request', error && error.message ? error.message : 'Pull request merge failed.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
     if (action === 'remove_workspace') {
@@ -663,7 +871,8 @@ var EvaHarness = (function() {
 
   function capabilities() {
     return {
-      actions: ['navigate', 'refresh', 'describe_workspaces', 'describe_workspace_tools', 'remove_workspace', 'list_github_repositories', 'continue_github_repositories', 'authorize_github', 'set_workspace_mcp_server', 'verify_workspace_mcp_server', 'retry_workspace_run', 'run_repository_remediation', 'import_github', 'run_terminal_command', 'type_terminal_command', 'plan_terminal_task', 'consider_terminal_task', 'inspect_form', 'set_field', 'submit_form', 'cancel_form', 'new_chat', 'voice_control'],
+      actions: actionManifest.map(function(action) { return action.id; }),
+      manifest: actionManifest.slice(),
       surfaces: Object.keys(navigation),
       aliases: Object.keys(aliases),
       nativeOnly: true
@@ -672,6 +881,8 @@ var EvaHarness = (function() {
 
   function promptContract() {
     var contract = '\n\nNATIVE EVA HARNESS:\nFor Eva application controls, use [[EVA_HARNESS]]{"action":"navigate","target":"workspaces"}[[/EVA_HARNESS]] instead of browser or desktop automation. Navigate targets: workspaces, skills, memory, assets, sessions, terminal, settings, models, personality, goals, background_jobs, schedules, accounts, tools_memory, learning, profile, voice, and agent_operations. To list or summarize current coding workspaces, use [[EVA_HARNESS]]{"action":"describe_workspaces"}[[/EVA_HARNESS]]. To list the user\'s owned GitHub repositories, use [[EVA_HARNESS]]{"action":"list_github_repositories"}[[/EVA_HARNESS]] and present its returned URLs for user selection. To import a GitHub repository only after the user explicitly requests that import and its exact HTTPS URL is known, use [[EVA_HARNESS]]{"action":"import_github","repository_url":"https://github.com/owner/repository"}[[/EVA_HARNESS]]. When an explicit GitHub listing or import request needs repository authorization, use [[EVA_HARNESS]]{"action":"authorize_github"}[[/EVA_HARNESS]]; this opens a native device-code flow and never exposes a token. Workspace-local MCP servers come from each imported project\'s mcp.json and are isolated from global MCP configuration. When the user explicitly requests a named module, enable it with [[EVA_HARNESS]]{"action":"set_workspace_mcp_server","serverName":"<name>","enabled":true,"projectName":"<optional project>"}[[/EVA_HARNESS]]. When an explicit user request asks to retry a delayed coding run, use [[EVA_HARNESS]]{"action":"retry_workspace_run","runId":"<optional run id>"}[[/EVA_HARNESS]]. Do not use browser or desktop automation for these native workspace operations. Do not open an empty import form or use browser, terminal, or desktop control for GitHub repository listing/import. Terminal commands execute only from a direct user request and cannot be initiated by a model marker. Native forms support inspect_form, set_field, submit_form, and cancel_form for direct user interaction. Other actions: new_chat and voice_control with optional enabled:false. These actions control Eva directly; never use browser, screenshots, or desktop automation for those same Eva surfaces.';
+    contract += '\nFor requests to open, count, inspect, list, or summarize Workspaces, use describe_workspaces. It opens the native Workspaces view and returns the real count. Never use browser or desktop automation for this.';
+    contract += '\nAVAILABLE NATIVE ACTIONS:\n' + actionManifest.map(function(action) { return '- ' + action.id + ': ' + action.description; }).join('\n');
     if (typeof evaTextPromptDescribe === 'function') {
       var schema = evaTextPromptDescribe();
       if (schema.open) contract += '\nCURRENT NATIVE FORM: ' + JSON.stringify(schema);

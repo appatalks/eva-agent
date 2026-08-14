@@ -1799,6 +1799,16 @@ async function sendData() {
         }
       }
     }
+    if (window.EvaRequestRouting && typeof EvaRequestRouting.isGitHubOperation === 'function' &&
+        EvaRequestRouting.isGitHubOperation(protectedRawText)) {
+      evaAuditEvent('github_mcp_route', 'started', {
+        correlation_id: auditTurnId,
+        action: 'github_mcp',
+        label: 'aig_acp'
+      });
+      if (typeof setStatus === 'function') setStatus('info', 'Routing GitHub operation through native GitHub MCP...');
+      return aigSend();
+    }
     // Hide Eva welcome MOTD on first send
     hideEvaWelcome();
   applyStandaloneSimplifications();
@@ -3283,12 +3293,17 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   // Detect Eva browser-agent launch marker:
   // [[EVA_BROWSER]]{"goal":"...","start_url":"..."}[[/EVA_BROWSER]]
   var browserLaunch = null;
+  var nativeRequest = String(renderOptions.nativeRequest || '');
+  var nativeGitHubOperation = (window.EvaRequestRouting && typeof EvaRequestRouting.isGitHubOperation === 'function' &&
+    EvaRequestRouting.isGitHubOperation(nativeRequest)) || /https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+/i.test(nativeRequest);
   text = text.replace(/\[\[EVA_BROWSER\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_BROWSER\]\])?/g, function (full, json) {
+    var parsed = null;
+    try { parsed = JSON.parse(json); } catch (e) { /* ignore malformed block */ }
+    if (nativeGitHubOperation || (parsed && /github\.com/i.test(String(parsed.start_url || parsed.goal || '')))) {
+      return '\n_GitHub operations use Eva\'s native GitHub MCP or gh tools instead of browser automation._\n';
+    }
     if (!browserLaunch) {
-      try {
-        var parsed = JSON.parse(json);
-        if (parsed && parsed.goal) browserLaunch = parsed;
-      } catch (e) { /* ignore malformed block */ }
+      if (parsed && parsed.goal) browserLaunch = parsed;
     }
     return browserLaunch ? '\n_Opening the browser agent…_\n' : '';
   });
@@ -3300,6 +3315,9 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   // [[EVA_DESKTOP]]{"goal":"..."}[[/EVA_DESKTOP]]
   var desktopLaunch = null;
   text = text.replace(/\[\[EVA_DESKTOP\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_DESKTOP\]\])?/g, function (full, json) {
+    if (nativeGitHubOperation) {
+      return '\n_GitHub operations use Eva\'s native GitHub MCP or gh tools instead of desktop automation._\n';
+    }
     if (!desktopLaunch) {
       try {
         var parsed = JSON.parse(json);

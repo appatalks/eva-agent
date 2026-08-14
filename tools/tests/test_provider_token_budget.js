@@ -130,6 +130,7 @@ async function testOpenAITurnSessionRetention() {
   const selModel = { value: 'gpt-4o' };
   let contextUrl = '';
   let reflectionPayload = null;
+  let openAiPayload = null;
   let sessionCalls = 0;
   let resolveReflection;
   const reflectionCaptured = new Promise((resolve) => { resolveReflection = resolve; });
@@ -137,7 +138,8 @@ async function testOpenAITurnSessionRetention() {
   class MockXMLHttpRequest {
     open() {}
     setRequestHeader() {}
-    send() {
+    send(body) {
+      openAiPayload = JSON.parse(body);
       this.readyState = 4;
       this.status = 200;
       this.responseText = JSON.stringify({
@@ -182,6 +184,7 @@ async function testOpenAITurnSessionRetention() {
       createElement() { return { appendChild() {} }; },
     },
     EvaPromptBudget: { compactMessages(messages) { return { messages }; } },
+    EvaHarness: { promptContract() { return '\nNATIVE EVA HARNESS: use describe_workspaces for native workspace counts.'; } },
     getSystemPrompt() { return 'Eva OpenAI prompt'; },
     getACPBridgeUrl() { return 'http://localhost:8888'; },
     getModelMaxTokens() { return 1024; },
@@ -217,6 +220,7 @@ async function testOpenAITurnSessionRetention() {
   assert.ok(contextUrl.includes('session_id=openai-session'));
   assert.strictEqual(reflectionPayload.session_id, 'openai-session');
   assert.strictEqual(sessionCalls, 1);
+  assert.match(openAiPayload.messages[0].content, /NATIVE EVA HARNESS/);
 }
 
 async function testGitHubModelsTurnSessionRetention() {

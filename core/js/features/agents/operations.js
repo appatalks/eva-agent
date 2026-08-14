@@ -860,12 +860,27 @@ var EvaAgents = (function() {
     if (state.open) refresh(true);
   }
 
+  async function describe() {
+    await refresh();
+    var data = state.data || {};
+    var agents = Array.isArray(data.agents) ? data.agents : [];
+    var active = agents.filter(function(agent) { return isActive(agent.status); });
+    if (!agents.length) return 'There are no active or recent agent sessions right now.';
+    var labels = active.slice(0, 6).map(function(agent) {
+      return (agent.label || 'Agent session') + ' (' + statusLabel(agent.status) + ')';
+    });
+    return 'There ' + (active.length === 1 ? 'is 1 active agent' : 'are ' + active.length + ' active agents') +
+      ' out of ' + agents.length + ' recent session' + (agents.length === 1 ? '' : 's') +
+      (labels.length ? ': ' + labels.join(', ') + '.' : '.');
+  }
+
   return {
     open: open,
     openWorkspace: openWorkspace,
     close: close,
     toggle: toggle,
     refresh: refresh,
+    describe: describe,
     openAgent: openAgent,
     invalidateGraph: invalidateGraph,
     _selectGraphNodes: selectGraphNodes

@@ -420,6 +420,21 @@ async function loadSkills() {
   }
 }
 
+async function describeSkills() {
+  await loadSkills();
+  var skills = _skillsState.skills || [];
+  var active = skills.filter(function(skill) {
+    return String(_skillField(skill, 'Status', 'status') || 'active').toLowerCase() === 'active';
+  });
+  if (!skills.length) return 'There are no saved skills right now.';
+  var names = skills.slice(0, 8).map(function(skill) {
+    return String(_skillField(skill, 'Name', 'name') || 'Untitled skill');
+  });
+  var remaining = skills.length - names.length;
+  return 'There are ' + skills.length + ' saved skill' + (skills.length === 1 ? '' : 's') + ', ' + active.length +
+    ' active. Available examples: ' + names.join(', ') + (remaining > 0 ? ', and ' + remaining + ' more' : '') + '.';
+}
+
 async function toggleSkill(id, status) {
   if (!id) return;
   try {
@@ -490,5 +505,6 @@ function toggleSkillsPanel(force, event) {
 window.EvaSkills = {
   open: function() { toggleSkillsPanel(true); },
   close: function() { toggleSkillsPanel(false); },
-  refresh: loadSkills
+  refresh: loadSkills,
+  describe: describeSkills
 };

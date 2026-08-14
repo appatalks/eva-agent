@@ -215,6 +215,18 @@ var EvaAssets = (function() {
     if (view) view.setAttribute('aria-hidden', 'true');
   }
 
+  async function describe() {
+    await refresh();
+    var generated = state.assets.filter(function(asset) { return asset.source === 'generated'; });
+    var workspace = state.assets.filter(function(asset) { return asset.source === 'workspace'; });
+    if (!state.assets.length) return 'There are no generated or workspace assets available right now.';
+    var names = state.assets.slice(0, 8).map(function(asset) { return asset.relativePath || asset.name; }).filter(Boolean);
+    var remaining = state.assets.length - names.length;
+    return 'I can access ' + state.assets.length + ' asset' + (state.assets.length === 1 ? '' : 's') + ': ' +
+      generated.length + ' generated and ' + workspace.length + ' from workspaces. ' +
+      'Most recent: ' + names.join(', ') + (remaining > 0 ? ', and ' + remaining + ' more' : '') + '.';
+  }
+
   function init() {
     var closeButton = document.getElementById('assetsViewClose');
     var refreshButton = document.getElementById('assetsViewRefresh');
@@ -232,5 +244,5 @@ var EvaAssets = (function() {
   }
 
   document.addEventListener('DOMContentLoaded', init);
-  return { open: open, close: close, refresh: refresh };
+  return { open: open, close: close, refresh: refresh, describe: describe };
 })();

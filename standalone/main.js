@@ -83,6 +83,166 @@ function validWorkspaceId(value) {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
+function validGitHubRepository(value) {
+  return value === '' || (typeof value === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value));
+}
+
+function validGitHubPullRequestNumber(value) {
+  return Number.isInteger(value) && value > 0 && value <= 1000000000;
+}
+
+function runGitHubCli(args, timeoutMs, maxOutputBytes) {
+  return new Promise(function(resolve, reject) {
+    const outputLimit = Number(maxOutputBytes) > 0 ? Number(maxOutputBytes) : 65536;
+    const child = spawn('gh', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0' })
+    });
+    let output = '';
+    let errors = '';
+    let outputBytes = 0;
+    let outputTooLarge = false;
+    const timeout = setTimeout(function() {
+      child.kill('SIGTERM');
+      reject(new Error('GitHub CLI timed out.'));
+    }, timeoutMs || 30000);
+    child.stdout.on('data', function(chunk) {
+      outputBytes += chunk.length;
+      if (outputBytes > outputLimit) {
+        outputTooLarge = true;
+        child.kill('SIGTERM');
+        return;
+      }
+      output += String(chunk);
+    });
+    child.stderr.on('data', function(chunk) { errors = (errors + String(chunk)).slice(0, 65536); });
+    child.once('error', function() {
+      clearTimeout(timeout);
+      reject(new Error('GitHub CLI is unavailable.'));
+    });
+    child.once('exit', function(code) {
+      clearTimeout(timeout);
+      if (outputTooLarge) return reject(new Error('GitHub CLI response exceeded the safe output limit.'));
+      if (code === 0) return resolve(output);
+      reject(new Error((errors || output || 'GitHub CLI command failed.').trim().slice(0, 1000)));
+    });
+  });
+}
+
+function githubPullRequestArgs(number, repository, fields) {
+  const args = ['pr', 'view', String(number), '--json', fields];
+  if (repository) args.push('--repo', repository);
+  return args;
+}
+
+async function resolveGitHubPullRequestRepository(number, repository) {
+  if (repository) return repository;
+  const viewer = JSON.parse(await runGitHubCli(['api', 'user'], 30000));
+  const login = String(viewer && viewer.login || '');
+  if (!/^[A-Za-z0-9-]{1,39}$/.test(login)) throw new Error('GitHub CLI could not determine the authenticated account.');
+  const graphQuery = 'query($searchQuery:String!){search(type:ISSUE,query:$searchQuery,first:100){nodes{... on PullRequest{number repository{nameWithOwner}}}}}';
+  const search = JSON.parse(await runGitHubCli([
+    'api', 'graphql', '-f', 'query=' + graphQuery,
+    '-F', 'searchQuery=' + String(number) + ' in:number is:pr user:' + login
+  ], 30000));
+  const nodes = search && search.data && search.data.search && Array.isArray(search.data.search.nodes)
+    ? search.data.search.nodes : [];
+  const matches = nodes.filter(function(item) {
+    return item && Number(item.number) === number && item.repository && typeof item.repository.nameWithOwner === 'string';
+  }).map(function(item) {
+    return item.repository.nameWithOwner;
+  }).filter(Boolean).filter(function(value, index, values) { return values.indexOf(value) === index; });
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) throw new Error('PR #' + number + ' exists in multiple repositories. Provide the full GitHub pull request URL.');
+  throw new Error('Could not find PR #' + number + ' in repositories owned by ' + login + '. Provide the full GitHub pull request URL.');
+}
+
+function githubChecksPassed(checks) {
+  return (checks || []).every(function(check) {
+    const conclusion = String((check && check.conclusion) || '').toUpperCase();
+    return ['SUCCESS', 'SKIPPED', 'NEUTRAL'].includes(conclusion);
+  });
+}
+
+async function githubViewPullRequest(event, request) {
+  requireWorkspaceFeature(event);
+  const input = request && typeof request === 'object' ? request : {};
+  const number = Number(input.number);
+  let repository = String(input.repository || '').trim();
+  if (!validGitHubPullRequestNumber(number) || !validGitHubRepository(repository)) {
+    throw new Error('Invalid GitHub pull request reference.');
+  }
+  repository = await resolveGitHubPullRequestRepository(number, repository);
+  let pull;
+  try {
+    pull = JSON.parse(await runGitHubCli(githubPullRequestArgs(
+      number, repository, 'number,title,state,isDraft,mergeStateStatus,headRefName,baseRefName,statusCheckRollup,url'
+    ), 30000));
+  } catch (error) {
+    throw new Error(repository ? error.message : error.message + ' Include an owner/repository reference if GitHub CLI cannot infer the repository.');
+  }
+  if (!pull || !validGitHubPullRequestNumber(Number(pull.number))) {
+    throw new Error('GitHub did not return a valid pull request.');
+  }
+  return {
+    number: Number(pull.number),
+    title: String(pull.title || '').slice(0, 300),
+    state: String(pull.state || ''),
+    draft: pull.isDraft === true,
+    mergeState: String(pull.mergeStateStatus || ''),
+    head: String(pull.headRefName || ''),
+    base: String(pull.baseRefName || ''),
+    url: String(pull.url || ''),
+    checks: (pull.statusCheckRollup || []).slice(0, 32).map(function(check) {
+      return {
+        name: String((check && check.name) || '').slice(0, 160),
+        conclusion: String((check && check.conclusion) || '').slice(0, 40)
+      };
+    })
+  };
+}
+
+async function githubMergePullRequest(event, request) {
+  requireWorkspaceFeature(event);
+  const input = request && typeof request === 'object' ? request : {};
+  const number = Number(input.number);
+  let repository = String(input.repository || '').trim();
+  if (!validGitHubPullRequestNumber(number) || !validGitHubRepository(repository)) {
+    throw new Error('Invalid GitHub pull request reference.');
+  }
+  repository = await resolveGitHubPullRequestRepository(number, repository);
+  if (input.confirmation !== 'MERGE') throw new Error('Type MERGE to confirm the pull request merge.');
+  const fields = 'number,state,isDraft,mergeStateStatus,headRefOid,statusCheckRollup,url';
+  let pull;
+  try {
+    pull = JSON.parse(await runGitHubCli(githubPullRequestArgs(number, repository, fields), 30000));
+  } catch (error) {
+    throw new Error(repository ? error.message : error.message + ' Include an owner/repository reference if GitHub CLI cannot infer the repository.');
+  }
+  if (!pull || pull.state !== 'OPEN' || pull.isDraft || pull.mergeStateStatus !== 'CLEAN') {
+    throw new Error('Pull request #' + number + ' is not ready to merge (state: ' + String(pull && pull.state || 'unknown') + ', merge state: ' + String(pull && pull.mergeStateStatus || 'unknown') + ').');
+  }
+  if (!githubChecksPassed(pull.statusCheckRollup)) {
+    throw new Error('Pull request #' + number + ' has pending or failing checks.');
+  }
+  if (!/^[0-9a-f]{40}$/i.test(String(pull.headRefOid || ''))) {
+    throw new Error('Pull request #' + number + ' did not provide a verifiable head commit.');
+  }
+  const mergeArgs = ['pr', 'merge', String(number), '--merge', '--match-head-commit', pull.headRefOid];
+  if (repository) mergeArgs.push('--repo', repository);
+  await runGitHubCli(mergeArgs, 60000);
+  const verified = JSON.parse(await runGitHubCli(githubPullRequestArgs(number, repository, 'state,mergedAt,mergeCommit,url'), 30000));
+  if (!verified || verified.state !== 'MERGED' || !verified.mergedAt) {
+    throw new Error('GitHub did not confirm that pull request #' + number + ' merged.');
+  }
+  return {
+    number: number,
+    url: String(verified.url || pull.url || ''),
+    mergedAt: String(verified.mergedAt),
+    mergeCommit: String((verified.mergeCommit || {}).oid || '')
+  };
+}
+
 function githubAuthSnapshot() {
   return {
     state: githubAuthState.state,
@@ -1640,6 +1800,8 @@ ipcMain.handle('workspace-import-github', workspaceImportGitHub);
 ipcMain.handle('workspace-list-github-repositories', workspaceListGitHubRepositories);
 ipcMain.handle('workspace-github-auth-start', workspaceGitHubAuthStart);
 ipcMain.handle('workspace-github-auth-status', workspaceGitHubAuthStatus);
+ipcMain.handle('github-view-pull-request', githubViewPullRequest);
+ipcMain.handle('github-merge-pull-request', githubMergePullRequest);
 ipcMain.handle('workspace-set-mcp-server', workspaceSetMcpServer);
 ipcMain.handle('workspace-delete-project', workspaceDeleteProject);
 ipcMain.handle('workspace-create-run', workspaceCreateRun);

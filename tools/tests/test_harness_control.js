@@ -25,6 +25,14 @@ let retriedRunId = '';
 let remediationRequest = null;
 let nativeRemediationContext = null;
 let visibleUserMessages = [];
+let workspaceOpenCalls = 0;
+let workspaceDescriptionCalls = 0;
+let assetsOpenCalls = 0;
+let skillsOpenCalls = 0;
+let agentsOpenCalls = 0;
+let sessionsOpenCalls = 0;
+let mergeRequest = null;
+let pullRequestViewRequest = null;
 const fixtureRepository = 'fixture-owner/fixture-repository';
 const fixtureShortName = 'fixture-repository';
 const fixtureRepositoryUrl = 'https://github.com/fixture-owner/fixture-repository';
@@ -36,10 +44,26 @@ const localStorage = {
 const window = {
   evaStandalone: {
     workspaceRemediationContextLoad() { return nativeRemediationContext || {}; },
-    workspaceRemediationContextSave(value) { nativeRemediationContext = Object.assign({}, value); return Promise.resolve(true); }
+    workspaceRemediationContextSave(value) { nativeRemediationContext = Object.assign({}, value); return Promise.resolve(true); },
+    githubMergePullRequest(request) {
+      mergeRequest = request;
+      return Promise.resolve({ url: 'https://github.com/example/repository/pull/' + request.number, mergeCommit: 'a'.repeat(40) });
+    },
+    githubViewPullRequest(request) {
+      pullRequestViewRequest = request;
+      return Promise.resolve({
+        number: request.number, title: 'Native routing', state: 'OPEN', draft: false, mergeState: 'CLEAN',
+        url: 'https://github.com/example/repository/pull/' + request.number,
+        checks: [{ name: 'static-checks', conclusion: 'SUCCESS' }]
+      });
+    }
   },
   EvaWorkspaces: {
-    openWorkbench() {},
+    openWorkbench() { workspaceOpenCalls += 1; },
+    describe() {
+      workspaceDescriptionCalls += 1;
+      return Promise.resolve('I can access 2 coding workspaces: Alpha and Beta. There are 0 active coding runs.');
+    },
     listGitHubRepositories() {
       repositoryListCalls += 1;
       return Promise.resolve('Available GitHub repositories:\nexample/repository - https://github.com/example/repository');
@@ -89,10 +113,26 @@ const window = {
       return Promise.resolve({ id: 'selected-project' });
     },
   },
+  EvaAssets: {
+    open() { assetsOpenCalls += 1; },
+    describe() { return Promise.resolve('I can access 3 assets: report.md, notes.txt, and build.log.'); },
+  },
+  EvaSkills: {
+    open() { skillsOpenCalls += 1; },
+    describe() { return Promise.resolve('There are 2 saved skills, 1 active. Available examples: Research and Review.'); },
+  },
+  EvaAgents: {
+    open() { agentsOpenCalls += 1; },
+    describe() { return Promise.resolve('There is 1 active agent out of 2 recent sessions: Review (RUNNING).'); },
+  },
 };
+const sessionPanel = { getAttribute() { return 'true'; } };
 const sandbox = {
   window,
   EvaWorkspaces: window.EvaWorkspaces,
+  EvaAssets: window.EvaAssets,
+  EvaSkills: window.EvaSkills,
+  EvaAgents: window.EvaAgents,
   runEvaTerminalCommand(command, submit) {
     submittedCommand = command;
     commandSubmitMode = submit;
@@ -105,7 +145,7 @@ const sandbox = {
   },
   document: {
     body: { classList: { contains() { return false; } } },
-    getElementById() { return null; },
+    getElementById(id) { return id === 'sessionPanel' ? sessionPanel : null; },
     querySelectorAll(selector) {
       return selector === '.chat-bubble.user-bubble'
         ? visibleUserMessages.map(function(text) { return { textContent: 'You: ' + text }; })
@@ -113,12 +153,77 @@ const sandbox = {
     }
   },
   localStorage,
+  describeSavedSessions() { return Promise.resolve('There are 2 saved chat sessions: Today and Planning.'); },
+  toggleSessionPanel() { sessionsOpenCalls += 1; },
+  evaTextPrompt() { return Promise.resolve('MERGE'); },
 };
 vm.runInNewContext(source, sandbox, { filename: 'core/js/harness-control.js' });
 const harness = sandbox.EvaHarness;
 
 async function main() {
   const url = 'https://github.com/example/repository';
+  const workspaceCountRequest = 'Open Eva\'s Workspaces window and count the listed workspaces without making changes.';
+  const workspaceCountRoute = harness.resolveNavigationRequest(workspaceCountRequest, { directUser: true });
+  assert.strictEqual(workspaceCountRoute.action, 'describe_workspaces');
+  const workspaceCountResult = await harness.execute(workspaceCountRoute, { source: 'voice', userRequest: workspaceCountRequest });
+  assert.strictEqual(workspaceCountResult.ok, true);
+  assert.strictEqual(workspaceOpenCalls, 1);
+  assert.strictEqual(workspaceDescriptionCalls, 1);
+  assert.match(workspaceCountResult.message, /2 coding workspaces/);
+  const assetsRoute = harness.resolveNavigationRequest('List my generated assets.', { directUser: true });
+  assert.strictEqual(assetsRoute.action, 'describe_assets');
+  const assetsResult = await harness.execute(assetsRoute, { source: 'voice', userRequest: 'List my generated assets.' });
+  assert.strictEqual(assetsResult.ok, true);
+  assert.strictEqual(assetsOpenCalls, 1);
+  assert.match(assetsResult.message, /3 assets/);
+  const skillsRoute = harness.resolveNavigationRequest('Count my saved skills.', { directUser: true });
+  assert.strictEqual(skillsRoute.action, 'describe_skills');
+  const skillsResult = await harness.execute(skillsRoute, { source: 'voice', userRequest: 'Count my saved skills.' });
+  assert.strictEqual(skillsResult.ok, true);
+  assert.strictEqual(skillsOpenCalls, 1);
+  assert.match(skillsResult.message, /2 saved skills/);
+  const sessionsRoute = harness.resolveNavigationRequest('Which saved sessions are available?', { directUser: true });
+  assert.strictEqual(sessionsRoute.action, 'describe_sessions');
+  const sessionsResult = await harness.execute(sessionsRoute, { source: 'voice', userRequest: 'Which saved sessions are available?' });
+  assert.strictEqual(sessionsResult.ok, true);
+  assert.strictEqual(sessionsOpenCalls, 1);
+  assert.match(sessionsResult.message, /2 saved chat sessions/);
+  const agentsRoute = harness.resolveNavigationRequest('Show active agents.', { directUser: true });
+  assert.strictEqual(agentsRoute.action, 'describe_agents');
+  const agentsResult = await harness.execute(agentsRoute, { source: 'voice', userRequest: 'Show active agents.' });
+  assert.strictEqual(agentsResult.ok, true);
+  assert.strictEqual(agentsOpenCalls, 1);
+  assert.match(agentsResult.message, /1 active agent/);
+  const manifestActions = harness.capabilities().actions;
+  ['describe_workspaces', 'describe_assets', 'describe_skills', 'describe_sessions', 'describe_agents'].forEach(function(action) {
+    assert.ok(manifestActions.includes(action), action + ' must be exposed in the native action manifest');
+  });
+  const pullUrl = 'https://github.com/example/repository/pull/183';
+  const pullViewRoute = harness.resolveNavigationRequest(pullUrl, { directUser: true });
+  assert.strictEqual(pullViewRoute.action, 'describe_github_pull_request');
+  assert.strictEqual(pullViewRoute.number, 183);
+  const pullViewResult = await harness.execute(pullViewRoute, { source: 'voice', userRequest: pullUrl });
+  assert.strictEqual(pullViewResult.ok, true);
+  assert.strictEqual(pullRequestViewRequest.number, 183);
+  assert.strictEqual(pullRequestViewRequest.repository, 'example/repository');
+  assert.match(pullViewResult.message, /PR #183/);
+  assert.match(pullViewResult.message, /static-checks: SUCCESS/);
+  const correctedPullRoute = harness.resolveNavigationRequest('https://github.com/Apatox/eva-agent/pull/183', { directUser: true });
+  assert.strictEqual(correctedPullRoute.repository, 'appatalks/eva-agent');
+  const correctedImportRoute = harness.resolveNavigationRequest('Import repo Apatox/eva-agent.', { directUser: true });
+  assert.strictEqual(correctedImportRoute.repositoryName, 'appatalks/eva-agent');
+  const mergeRoute = harness.resolveNavigationRequest('Merge PR #183 into main.', { directUser: true });
+  assert.strictEqual(mergeRoute.action, 'merge_github_pull_request');
+  assert.strictEqual(mergeRoute.number, 183);
+  const mergeResult = await harness.execute(mergeRoute, { source: 'voice', userRequest: 'Merge PR #183 into main.' });
+  assert.strictEqual(mergeResult.ok, true);
+  assert.strictEqual(mergeRequest.number, 183);
+  assert.strictEqual(mergeRequest.repository, 'example/repository');
+  assert.strictEqual(mergeRequest.confirmation, 'MERGE');
+  assert.match(mergeResult.message, /Merged pull request #183/);
+  const modelMerge = await harness.execute(mergeRoute, { source: 'model', userRequest: 'Merge PR #183 into main.' });
+  assert.strictEqual(modelMerge.ok, false);
+  assert.match(modelMerge.message, /direct user interaction/);
   const unsolicitedList = await harness.execute({ action: 'list_github_repositories' }, { source: 'model', userRequest: 'What is the weather today?' });
   assert.strictEqual(unsolicitedList.ok, false);
   assert.match(unsolicitedList.message, /direct user interaction/);
