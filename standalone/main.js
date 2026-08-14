@@ -162,7 +162,16 @@ function workspaceGitHubAuthStart(event) {
       githubAuthState = code === 0
         ? { state: 'complete', message: 'GitHub authorization complete. Private repository imports can now use the GitHub CLI credential.' }
         : { state: 'failed', message: 'GitHub device authorization did not complete.' };
-      if (code === 0) githubCliAuthPreferred = true;
+      if (code === 0) {
+        githubCliAuthPreferred = true;
+        githubCliToken().then(function(token) {
+          if (!token) return;
+          const auth = loadEncryptedAuth();
+          auth.GITHUB_PAT = token;
+          saveEncryptedAuth(auth);
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('github-auth-complete');
+        }).catch(function() {});
+      }
     });
     return child;
   }
@@ -419,7 +428,7 @@ async function workspaceListGitHubRepositories(event) {
     timeout: 15000
   };
   const payload = await new Promise(function(resolve, reject) {
-    const request = https.request('https://api.github.com/user/repos?affiliation=owner&sort=updated&per_page=20', requestOptions, function(response) {
+    const request = https.request('https://api.github.com/user/repos?affiliation=owner&sort=updated&per_page=100', requestOptions, function(response) {
       const chunks = [];
       let size = 0;
       response.on('data', function(chunk) { size += chunk.length; if (size <= 1024 * 1024) chunks.push(chunk); });
@@ -669,6 +678,36 @@ function saveEncryptedAuth(values) {
   const temporaryPath = authPath + '.tmp';
   fs.writeFileSync(temporaryPath, JSON.stringify(encrypted), { mode: 0o600 });
   fs.renameSync(temporaryPath, authPath);
+  return true;
+}
+
+function normalizedRemediationContext(value) {
+  if (!value || typeof value !== 'object') return {};
+  const repositoryName = String(value.repositoryName || '').trim();
+  const objective = String(value.objective || '').trim();
+  if (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?$/.test(repositoryName) || !objective || objective.length > 4000) return {};
+  return { repositoryName: repositoryName, objective: objective };
+}
+
+function remediationContextPath() {
+  return path.join(app.getPath('userData'), 'remediation-context.json');
+}
+
+function loadRemediationContext() {
+  try {
+    return normalizedRemediationContext(JSON.parse(fs.readFileSync(remediationContextPath(), 'utf8')));
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveRemediationContext(value) {
+  const context = normalizedRemediationContext(value);
+  if (!context.repositoryName) return false;
+  const target = remediationContextPath();
+  const temporary = target + '.tmp';
+  fs.writeFileSync(temporary, JSON.stringify(context), { mode: 0o600 });
+  fs.renameSync(temporary, target);
   return true;
 }
 
@@ -1560,6 +1599,12 @@ ipcMain.handle('auth-load', function(event) {
 });
 ipcMain.handle('auth-save', function(event, values) {
   return isTrustedEvaRenderer(event) && saveEncryptedAuth(values);
+});
+ipcMain.on('workspace-remediation-context-load', function(event) {
+  event.returnValue = isTrustedEvaRenderer(event) ? loadRemediationContext() : {};
+});
+ipcMain.handle('workspace-remediation-context-save', function(event, value) {
+  return isTrustedEvaRenderer(event) && saveRemediationContext(value);
 });
 ipcMain.on('bridge-capability-token', function(event) {
   event.returnValue = isTrustedEvaRenderer(event) ? bridgeCapabilityToken : '';

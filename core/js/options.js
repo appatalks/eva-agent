@@ -377,6 +377,10 @@ function getBridgeCapabilityHeaders() {
   };
 }
 
+function hasBridgeCapability() {
+  return !!(window.evaStandalone && window.evaStandalone.bridgeToken);
+}
+
 function installBridgeCapabilityFetch() {
   if (typeof window === 'undefined' || typeof window.fetch !== 'function' || window._evaBridgeFetchInstalled) return;
   var nativeFetch = window.fetch.bind(window);
@@ -1781,7 +1785,7 @@ async function sendData() {
           if (typeof setStatus === 'function') {
             setStatus(nativeResult.ok ? 'info' : 'error', nativeResult.message);
           }
-          if (nativeRoute.action === 'run_workspace_check' || nativeRoute.action === 'describe_workspace_tools') {
+          if (nativeRoute.action === 'run_workspace_check' || nativeRoute.action === 'run_repository_remediation' || nativeRoute.action === 'describe_workspace_tools') {
             injectWorkspaceStatusBubble(nativeResult.message, nativeResult.ok ? 'working' : 'error');
           }
           if (typeof recordConversationTurn === 'function') recordConversationTurn(protectedRawText, nativeResult.message);

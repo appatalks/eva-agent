@@ -34,6 +34,9 @@ def normalize_aig_request(
     raw_reasoning_effort = data.get("acp_reasoning_effort", "")
     if not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort not in allowed_reasoning_efforts | {""}:
         raise ValueError("Unsupported acp_reasoning_effort")
+    acp_auto_approve = data.get("acp_auto_approve", False)
+    if not isinstance(acp_auto_approve, bool):
+        raise ValueError("acp_auto_approve must be a boolean")
 
     if not user_message and messages:
         for message in reversed(messages):
@@ -59,5 +62,6 @@ def normalize_aig_request(
         "model_for_response": model_for_response,
         "max_completion_tokens": max_completion_tokens,
         "reasoning_effort": raw_reasoning_effort,
+        "acp_auto_approve": acp_auto_approve,
         "stream_requested": data.get("stream") is True,
     }

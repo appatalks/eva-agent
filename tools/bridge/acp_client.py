@@ -36,6 +36,15 @@ _WORKSPACE_SENSITIVE_COMMANDS = {
     "nc", "ncat", "telnet", "ftp", "rsync", "docker", "kubectl", "gh", "aws", "az",
     "gcloud", "npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "poetry", "gem", "cargo",
 }
+_WORKSPACE_AUTONOMY_BLOCKED_EXECUTABLES = {
+    "sudo", "su", "doas", "pkexec", "rm", "shred", "mkfs", "fdisk", "parted", "dd", "mount", "umount",
+    "systemctl", "service", "launchctl",
+}
+_WORKSPACE_AUTONOMY_DESTRUCTIVE_PATTERN = re.compile(
+    r"\b(?:rm|shred|mkfs|fdisk|parted|dd|mount|umount|sudo|su|doas|pkexec|"
+    r"systemctl|service|launchctl|os\.remove|os\.unlink|shutil\.rmtree|remove-item)\b",
+    re.IGNORECASE,
+)
 _WORKSPACE_SAFE_GIT_SUBCOMMANDS = {"add", "commit", "status", "diff", "log", "show", "rev-parse"}
 _WORKSPACE_SAFE_PACKAGE_SUBCOMMANDS = {"test", "run", "lint", "check", "build"}
 _GH_FILE_OPTIONS = {"--body-file", "--template", "--input"}
@@ -45,6 +54,37 @@ _WORKSPACE_SENSITIVE_PATH_RE = re.compile(
     r"config\.json|config\.local\.(?:js|json))(?:[/\s]|$)",
     re.IGNORECASE,
 )
+_GITHUB_AUTH_FAILURE_RE = re.compile(
+    r"(?:does not have write access|write access (?:is )?denied|resource not accessible|bad credentials|"
+    r"(?:authentication|authorization) (?:is )?(?:required|failed|rejected)|permission denied|"
+    r"must authenticate|http (?:401|403))",
+    re.IGNORECASE,
+)
+_GITHUB_TOOL_CONTEXT_RE = re.compile(r"(?:github|\bgh\b|repository|pull request|\bissue\b)", re.IGNORECASE)
+
+
+def _github_tool_update_text(value, details=None):
+    """Collect bounded strings from an ACP tool result without recording them."""
+    details = details if details is not None else []
+    if len(details) >= 32:
+        return details
+    if isinstance(value, str):
+        details.append(value[:2000])
+    elif isinstance(value, dict):
+        for item in value.values():
+            _github_tool_update_text(item, details)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _github_tool_update_text(item, details)
+    return details
+
+
+def _github_authorization_needed(update):
+    """Return true only for an explicit GitHub tool authorization failure."""
+    if not isinstance(update, dict):
+        return False
+    text = "\n".join(_github_tool_update_text(update))
+    return bool(_GITHUB_TOOL_CONTEXT_RE.search(text) and _GITHUB_AUTH_FAILURE_RE.search(text))
 
 
 def _tool_call_command(tool_call):
@@ -237,6 +277,39 @@ def _workspace_sensitive_execute(tool_call, cwd=None):
     return _workspace_execute_category(tool_call, cwd) != "trusted_local"
 
 
+def _workspace_autonomy_block_reason(tool_call, cwd=None):
+    """Return the hard safety reason that prevents autonomous execution."""
+    category = _workspace_execute_category(tool_call, cwd)
+    if category == "secret_or_sensitive_path":
+        return "protected_path"
+    command = _tool_call_command(tool_call)
+    if not command or category in {"missing_command", "parse_error", "git_configuration_override"}:
+        return "opaque_execution"
+    if _workspace_argument_mentions_secret(command) or _workspace_argument_is_protected(command):
+        return "protected_path"
+    if _WORKSPACE_AUTONOMY_DESTRUCTIVE_PATTERN.search(command):
+        return "destructive_execution"
+    if category in {"outside_workspace", "inline_script", "shell_interpreter", "shell_composition"}:
+        return category
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        return "opaque_execution"
+    if not parts:
+        return "opaque_execution"
+    executable = os.path.basename(parts[0]).lower()
+    arguments = parts[1:]
+    if executable in _WORKSPACE_AUTONOMY_BLOCKED_EXECUTABLES:
+        return "destructive_execution"
+    if executable == "git":
+        subcommand = next((argument for argument in arguments if not argument.startswith("-")), "")
+        if subcommand in {"clean", "reset"} or any(
+            argument == "--hard" or argument.startswith("--force") for argument in arguments
+        ):
+            return "destructive_execution"
+    return ""
+
+
 def _hidden_subprocess_options():
     if os.name != "nt":
         return {}
@@ -310,6 +383,8 @@ class ACPClient:
         self.session_usage = {}     # session_id -> latest context usage metadata
         self._prompt_state_lock = threading.RLock()
         self._active_prompts = {}   # prompt_id -> session/callback/timing state
+        self._session_permission_modes = {}  # session_id -> last explicit prompt policy
+        self._session_permission_mode_order = []
         self.reader_thread = None
         self.agent_info = {}
         self.alive = False
@@ -317,6 +392,7 @@ class ACPClient:
         self.terminals = {}  # terminal_id -> {"process": Popen, "output": str}
         self.permission_lock = threading.RLock()
         self.pending_permissions = {}
+        self._github_auth_notified = False
 
     # --- Lifecycle ---
 
@@ -625,6 +701,14 @@ class ACPClient:
             kind = str(update.get("kind") or "other")[:32]
             if status:
                 print(f"[ACP] Tool update: kind={kind} status={str(status)[:24]}")
+            if not self._github_auth_notified and _github_authorization_needed(update):
+                self._github_auth_notified = True
+                from bridge.alerts import _notify_enqueue
+                _notify_enqueue(
+                    "GitHub authorization needed",
+                    "Eva needs GitHub write access to continue the requested work. Starting device authorization now; complete the GitHub prompt when it appears.",
+                    "github-auth-needed", 0.95, ["chat", "voice"],
+                )
                 self._dispatch_prompt_event(params, {
                     "kind": "tool",
                     "label": "Using " + kind.replace("_", " ") + " (" + str(status)[:24] + ")",
@@ -685,9 +769,10 @@ class ACPClient:
                 state for state in self._active_prompts.values()
                 if state.get("session_id") == session_id
             ]
+            remembered_mode = self._session_permission_modes.get(session_id, "interactive")
         permission_mode = prompt_states[0].get("permission_mode", "interactive") \
-            if len(prompt_states) == 1 else "interactive"
-        workspace_mode = permission_mode in {"workspace_write", "workspace_auto"}
+            if len(prompt_states) == 1 else remembered_mode
+        workspace_mode = permission_mode == "workspace_auto"
         execute_category = _workspace_execute_category(tool_call, self.cwd) \
             if workspace_mode and tool_kind == "execute" else ""
         _verbose_debug_emit(
@@ -709,55 +794,37 @@ class ACPClient:
                 _telemetry_emit("acp_permission", decision="policy-deny",
                                 tool_kind=tool_kind, option_count=len(options))
             return
-        if permission_mode == "workspace_auto":
+        if workspace_mode:
             allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
-            confined = tool_kind != "edit" or (
-                _workspace_edit_target_is_local(tool_call, self.cwd)
-                and not _workspace_edit_target_is_protected(tool_call)
+            reject_once = next((option for option in options if option["kind"] == "reject_once"), None)
+            reject_option = reject_once or next(
+                (option for option in options if option["kind"] == "reject_always"), None
             )
-            safe_execute = tool_kind != "execute" or execute_category not in {"outside_workspace", "secret_or_sensitive_path"}
-            if allow_once and confined and safe_execute:
-                self._send_response(rpc_id, {
-                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
-                })
-                _telemetry_emit("acp_permission", decision="workspace-auto-approve",
-                                tool_kind=tool_kind, option_count=len(options))
-                return
-            if not confined or not safe_execute:
-                reject_once = next((option for option in options if option["kind"] == "reject_once"), None)
-                reject_option = reject_once or next(
-                    (option for option in options if option["kind"] == "reject_always"), None
-                )
+            block_reason = ""
+            if tool_kind in {"delete", "other"}:
+                block_reason = "unsupported_tool"
+            elif tool_kind == "edit":
+                if _workspace_edit_target_is_protected(tool_call):
+                    block_reason = "protected_path"
+                elif not _workspace_edit_target_is_local(tool_call, self.cwd):
+                    block_reason = "outside_workspace_edit"
+            elif tool_kind == "execute":
+                block_reason = _workspace_autonomy_block_reason(tool_call, self.cwd)
+            if block_reason:
                 if reject_option:
                     self._send_response(rpc_id, {
                         "outcome": {"outcome": "selected", "optionId": reject_option["option_id"]}
                     })
                 else:
-                    self._send_rpc_error(rpc_id, -32602, "Workspace auto approval cannot leave the assigned root or access protected paths")
-                _telemetry_emit("acp_permission", decision="workspace-auto-reject-boundary",
+                    self._send_response(rpc_id, {"outcome": {"outcome": "cancelled"}})
+                _telemetry_emit("acp_permission", decision="workspace-autonomy-reject-" + block_reason,
                                 tool_kind=tool_kind, option_count=len(options))
                 return
-        if workspace_mode:
-            allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
-            if tool_kind in {"read", "search", "fetch", "think"} and allow_once:
+            if allow_once:
                 self._send_response(rpc_id, {
                     "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
                 })
-                _telemetry_emit("acp_permission", decision="workspace-auto-allow-tool",
-                                tool_kind=tool_kind, option_count=len(options))
-                return
-            if tool_kind == "edit" and allow_once and _workspace_edit_target_is_local(tool_call, self.cwd):
-                self._send_response(rpc_id, {
-                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
-                })
-                _telemetry_emit("acp_permission", decision="workspace-auto-allow-edit",
-                                tool_kind=tool_kind, option_count=len(options))
-                return
-            if tool_kind == "execute" and allow_once and not _workspace_sensitive_execute(tool_call, self.cwd):
-                self._send_response(rpc_id, {
-                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
-                })
-                _telemetry_emit("acp_permission", decision="workspace-auto-allow-execute",
+                _telemetry_emit("acp_permission", decision="workspace-autonomy-approve",
                                 tool_kind=tool_kind, option_count=len(options))
                 return
         allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
@@ -971,6 +1038,15 @@ class ACPClient:
     def _begin_prompt(self, prompt_id, session_id, on_chunk, permission_mode="interactive", on_event=None):
         with self._prompt_state_lock:
             self.response_chunks[prompt_id] = ""
+            self._session_permission_modes[session_id] = permission_mode
+            try:
+                self._session_permission_mode_order.remove(session_id)
+            except ValueError:
+                pass
+            self._session_permission_mode_order.append(session_id)
+            while len(self._session_permission_mode_order) > _ACP_SESSION_MAX:
+                evicted_session_id = self._session_permission_mode_order.pop(0)
+                self._session_permission_modes.pop(evicted_session_id, None)
             self._active_prompts[prompt_id] = {
                 "session_id": session_id,
                 "on_chunk": on_chunk,
@@ -1049,14 +1125,16 @@ class ACPClient:
             "permission_cancelled": prompt_metrics["permission_cancelled"],
             "permission_reason": prompt_metrics["permission_reason"]}
 
-    def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None):
+    def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None,
+                          permission_mode="interactive"):
         with _pin_acp_client(self) as acquired:
             if not acquired:
                 return {"error": "ACP client is unavailable"}
             with self.prompt_lock:
-                return self._prompt_with_image(text, image_b64, mime, timeout, conversation_id, on_chunk)
+                return self._prompt_with_image(text, image_b64, mime, timeout, conversation_id, on_chunk, permission_mode)
 
-    def _prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None):
+    def _prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None,
+                           permission_mode="interactive"):
         """Send a text + image prompt and return the accumulated response text.
 
         Uses the ACP content-block image type (the agent advertised
@@ -1067,7 +1145,7 @@ class ACPClient:
             return {"error": "No active ACP session"}
 
         pid = self._next_id()
-        self._begin_prompt(pid, session_id, on_chunk)
+        self._begin_prompt(pid, session_id, on_chunk, permission_mode)
 
         _t0 = time.perf_counter()
         try:

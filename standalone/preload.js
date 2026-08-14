@@ -44,6 +44,14 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   workspaceListGitHubRepositories: function() { return ipcRenderer.invoke('workspace-list-github-repositories'); },
   workspaceGitHubAuthStart: function() { return ipcRenderer.invoke('workspace-github-auth-start'); },
   workspaceGitHubAuthStatus: function() { return ipcRenderer.invoke('workspace-github-auth-status'); },
+  workspaceRemediationContextLoad: function() { return ipcRenderer.sendSync('workspace-remediation-context-load'); },
+  workspaceRemediationContextSave: function(value) { return ipcRenderer.invoke('workspace-remediation-context-save', value); },
+  onGitHubAuthComplete: function(listener) {
+    if (typeof listener !== 'function') return function() {};
+    const wrapped = function() { listener(); };
+    ipcRenderer.on('github-auth-complete', wrapped);
+    return function() { ipcRenderer.removeListener('github-auth-complete', wrapped); };
+  },
   workspaceSetMcpServer: function(projectId, serverName, enabled, approvedDigest) { return ipcRenderer.invoke('workspace-set-mcp-server', projectId, serverName, enabled, approvedDigest); },
   workspaceDeleteProject: function(projectId, confirmDirty) { return ipcRenderer.invoke('workspace-delete-project', projectId, confirmDirty === true); },
   workspaceCreateRun: function(request) { return ipcRenderer.invoke('workspace-create-run', request); },

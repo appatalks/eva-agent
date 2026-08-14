@@ -1,4 +1,33 @@
 var EvaWorkspaces = (function() {
+  var WORKSPACE_DISPLAY_STATE_STORAGE_KEY = 'eva.workspaceMonitorDisplay.v1';
+  var WORKSPACE_CHAT_DRAWER_STORAGE_KEY = 'eva.workspaceChatDrawer.open';
+
+  function workspaceDisplayState() {
+    function booleanMap(value) {
+      var output = {};
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return output;
+      Object.keys(value).forEach(function(id) {
+        if (value[id] === true) output[String(id).slice(0, 120)] = true;
+      });
+      return output;
+    }
+    try {
+      var saved = JSON.parse(localStorage.getItem(WORKSPACE_DISPLAY_STATE_STORAGE_KEY) || '{}');
+      return {
+        clearedActivityProjectIds: booleanMap(saved.clearedActivityProjectIds),
+        clearedCodingRunProjectIds: booleanMap(saved.clearedCodingRunProjectIds),
+        clearedResultRunIds: booleanMap(saved.clearedResultRunIds)
+      };
+    } catch (_) {
+      return {
+        clearedActivityProjectIds: {},
+        clearedCodingRunProjectIds: {},
+        clearedResultRunIds: {}
+      };
+    }
+  }
+
+  var savedDisplayState = workspaceDisplayState();
   var state = {
     projects: [],
     runs: [],
@@ -19,15 +48,19 @@ var EvaWorkspaces = (function() {
     permissionSignature: '',
     monitorRunStates: {},
     monitorActivity: [],
-    clearedCodingRunProjectIds: {},
-    clearedResultRunIds: {},
+    clearedActivityProjectIds: savedDisplayState.clearedActivityProjectIds,
+    clearedCodingRunProjectIds: savedDisplayState.clearedCodingRunProjectIds,
+    clearedResultRunIds: savedDisplayState.clearedResultRunIds,
     lastMonitorVoiceAt: 0,
     lastPeriodicNoteAt: 0,
     lastCheckedAt: 0,
     githubRepositories: [],
     githubRepositoriesCollapsed: false,
     githubAuthTimer: null,
-    githubAuthRetry: null
+    githubAuthRetry: null,
+    chatDrawerOpen: false,
+    chatNodeOrigins: null,
+    sessionSwitching: false
   };
 
   function api() {
@@ -42,10 +75,151 @@ var EvaWorkspaces = (function() {
   function autoApprovePreference(value) {
     try {
       if (typeof value === 'boolean') localStorage.setItem('workspaceAutoApprove', value ? 'true' : 'false');
-      return localStorage.getItem('workspaceAutoApprove') === 'true';
+      return localStorage.getItem('workspaceAutoApprove') !== 'false';
     } catch (_) {
-      return false;
+      return true;
     }
+  }
+
+  function chatDrawerPreference(value) {
+    try {
+      if (typeof value === 'boolean') localStorage.setItem(WORKSPACE_CHAT_DRAWER_STORAGE_KEY, value ? 'true' : 'false');
+      var saved = localStorage.getItem(WORKSPACE_CHAT_DRAWER_STORAGE_KEY);
+      return saved === null ? true : saved === 'true';
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function captureChatNodeOrigins() {
+    if (state.chatNodeOrigins) return state.chatNodeOrigins;
+    var output = document.getElementById('txtOutput');
+    var input = document.querySelector('.chat-input-container');
+    if (!output || !input) return null;
+    state.chatNodeOrigins = {
+      output: output,
+      outputParent: output.parentNode,
+      outputNext: output.nextSibling,
+      input: input,
+      inputParent: input.parentNode,
+      inputNext: input.nextSibling
+    };
+    return state.chatNodeOrigins;
+  }
+
+  function restoreChatNodes() {
+    var origins = state.chatNodeOrigins;
+    if (!origins) return;
+    if (origins.outputParent) origins.outputParent.insertBefore(origins.output, origins.outputNext && origins.outputNext.parentNode === origins.outputParent ? origins.outputNext : null);
+    if (origins.inputParent) origins.inputParent.insertBefore(origins.input, origins.inputNext && origins.inputNext.parentNode === origins.inputParent ? origins.inputNext : null);
+  }
+
+  function setChatDrawerOpen(open, remember) {
+    var drawer = document.getElementById('workspaceChatDrawer');
+    var outputHost = document.getElementById('workspaceChatOutputHost');
+    var inputHost = document.getElementById('workspaceChatInputHost');
+    var toggle = document.getElementById('workspaceChatToggleBtn');
+    var origins = captureChatNodeOrigins();
+    open = !!(open && drawer && outputHost && inputHost && origins);
+    if (open) {
+      outputHost.appendChild(origins.output);
+      inputHost.appendChild(origins.input);
+      refreshChatSessionSelect();
+      requestAnimationFrame(function() { origins.output.scrollTop = origins.output.scrollHeight; });
+    }
+    state.chatDrawerOpen = open;
+    if (drawer) {
+      drawer.setAttribute('aria-hidden', open ? 'false' : 'true');
+      drawer.inert = !open;
+    }
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    document.body.classList.toggle('workspace-chat-drawer-open', open);
+    if (remember !== false) chatDrawerPreference(open);
+  }
+
+  function refreshChatSessionSelect() {
+    var select = document.getElementById('workspaceChatSessionSelect');
+    if (!select || typeof getAllSessions !== 'function') return Promise.resolve();
+    var activeId = '';
+    try { activeId = localStorage.getItem('eva_active_session') || ''; } catch (_) {}
+    return Promise.resolve(getAllSessions()).then(function(sessions) {
+      sessions = Array.isArray(sessions) ? sessions.slice() : [];
+      sessions.sort(function(left, right) {
+        if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+        return Number(right.updatedAt || 0) - Number(left.updatedAt || 0);
+      });
+      select.replaceChildren();
+      sessions.forEach(function(session) {
+        var option = document.createElement('option');
+        option.value = session.id;
+        option.textContent = (session.pinned ? '\u2022 ' : '') + (session.title || 'Untitled');
+        option.selected = session.id === activeId;
+        select.appendChild(option);
+      });
+      if (!sessions.length) {
+        var empty = document.createElement('option');
+        empty.value = activeId;
+        empty.textContent = 'Current session';
+        select.appendChild(empty);
+      }
+      select.disabled = sessions.length < 2;
+    }).catch(function() {
+      select.disabled = true;
+    });
+  }
+
+  function switchChatSession(sessionId) {
+    if (!sessionId || state.sessionSwitching || typeof loadSession !== 'function') return;
+    state.sessionSwitching = true;
+    var select = document.getElementById('workspaceChatSessionSelect');
+    if (select) select.disabled = true;
+    Promise.resolve(loadSession(sessionId, { preserveWorkspace: true })).then(function(loaded) {
+      if (loaded) {
+        setChatDrawerOpen(true, false);
+        status('Chat session loaded.', 'success');
+      }
+    }).catch(function(error) {
+      status(error && error.message ? error.message : 'Chat session could not be loaded.', 'error');
+    }).finally(function() {
+      state.sessionSwitching = false;
+      refreshChatSessionSelect();
+    });
+  }
+
+  function hideChatDrawerOnOutsidePointer(event) {
+    if (!state.workbenchOpen || !state.chatDrawerOpen) return;
+    if (event.target.closest('#workspaceChatDrawer') || event.target.closest('#workspaceChatToggleBtn')) return;
+    setChatDrawerOpen(false);
+  }
+
+  function currentProjectId() {
+    return state.selectedProjectId;
+  }
+
+  function persistWorkspaceDisplayState() {
+    try {
+      localStorage.setItem(WORKSPACE_DISPLAY_STATE_STORAGE_KEY, JSON.stringify({
+        clearedActivityProjectIds: state.clearedActivityProjectIds,
+        clearedCodingRunProjectIds: state.clearedCodingRunProjectIds,
+        clearedResultRunIds: state.clearedResultRunIds
+      }));
+    } catch (_) {}
+  }
+
+  function pruneWorkspaceDisplayState() {
+    var projectIds = {};
+    var runIds = {};
+    state.projects.forEach(function(project) { projectIds[project.id] = true; });
+    state.runs.forEach(function(run) { runIds[run.id] = true; });
+    [state.clearedActivityProjectIds, state.clearedCodingRunProjectIds].forEach(function(entries) {
+      Object.keys(entries).forEach(function(id) {
+        if (!projectIds[id]) delete entries[id];
+      });
+    });
+    Object.keys(state.clearedResultRunIds).forEach(function(id) {
+      if (!runIds[id]) delete state.clearedResultRunIds[id];
+    });
+    persistWorkspaceDisplayState();
   }
 
   function panel() {
@@ -109,6 +283,7 @@ var EvaWorkspaces = (function() {
     if (run) {
       state.selectedProjectId = run.projectId;
       delete state.clearedResultRunIds[run.id];
+      persistWorkspaceDisplayState();
     }
     renderProjects();
     renderRuns();
@@ -243,10 +418,25 @@ var EvaWorkspaces = (function() {
       state.selectedRunId = updated.id;
       await refresh();
       status('Workspace agent retry started.', 'success');
+      return updated;
     } catch (error) {
       status(error.message || 'Workspace agent retry failed.', 'error');
       setBusy(false);
     }
+  }
+
+  async function retryRunById(runId) {
+    if (!state.runs.length) await refresh();
+    var requestedRunId = String(runId || '').trim();
+    var run = state.runs.find(function(item) { return item.id === requestedRunId; }) ||
+      state.runs.find(function(item) { return item.id === state.selectedRunId; });
+    if (!run) throw new Error('Select an active workspace run before retrying it.');
+    if (run.status !== 'active' || (run.agent && ['starting', 'running', 'steering'].indexOf(run.agent.status) >= 0)) {
+      throw new Error('This workspace run is already active or cannot be retried.');
+    }
+    var retried = await retryWorkspaceRun(run);
+    if (!retried || !retried.id) throw new Error('Workspace agent retry could not be dispatched.');
+    return 'Workspace agent retry started for ' + (run.project ? run.project.name : 'the selected workspace') + '.';
   }
 
   function appendWorkspacePermissions(detail, run) {
@@ -537,17 +727,26 @@ var EvaWorkspaces = (function() {
   function clearSelectedProjectActivity() {
     var project = projectById(state.selectedProjectId);
     if (!project) return;
-    state.monitorActivity = state.monitorActivity.filter(function(entry) {
-      return entry.projectId !== project.id;
-    });
+    state.clearedActivityProjectIds[project.id] = true;
+    persistWorkspaceDisplayState();
     renderWorkbench();
     status('Cleared Eva activity for ' + project.name + '.', 'success');
+  }
+
+  function showSelectedProjectActivity() {
+    var project = projectById(state.selectedProjectId);
+    if (!project) return;
+    delete state.clearedActivityProjectIds[project.id];
+    persistWorkspaceDisplayState();
+    renderWorkbench();
+    status('Restored Eva activity for ' + project.name + '.', 'success');
   }
 
   function clearSelectedRunResult() {
     var run = state.runs.find(function(item) { return item.id === state.selectedRunId; });
     if (!run) return;
     state.clearedResultRunIds[run.id] = true;
+    persistWorkspaceDisplayState();
     renderWorkbench();
     status('Cleared the displayed result for this coding run.', 'success');
   }
@@ -556,6 +755,7 @@ var EvaWorkspaces = (function() {
     var project = projectById(state.selectedProjectId);
     if (!project) return;
     state.clearedCodingRunProjectIds[project.id] = true;
+    persistWorkspaceDisplayState();
     renderWorkbench();
     status('Cleared the coding runs display for ' + project.name + '.', 'success');
   }
@@ -564,6 +764,7 @@ var EvaWorkspaces = (function() {
     var project = projectById(state.selectedProjectId);
     if (!project) return;
     delete state.clearedCodingRunProjectIds[project.id];
+    persistWorkspaceDisplayState();
     renderWorkbench();
     status('Restored the coding runs display for ' + project.name + '.', 'success');
   }
@@ -572,6 +773,7 @@ var EvaWorkspaces = (function() {
     var run = state.runs.find(function(item) { return item.id === state.selectedRunId; });
     if (!run) return;
     delete state.clearedResultRunIds[run.id];
+    persistWorkspaceDisplayState();
     renderWorkbench();
     status('Restored the displayed result for this coding run.', 'success');
   }
@@ -604,9 +806,10 @@ var EvaWorkspaces = (function() {
       }
       if (event.target.closest('#workspaceMonitorFeed')) {
         if (state.selectedProjectId) {
+          var activityCleared = state.clearedActivityProjectIds[state.selectedProjectId] === true;
           showWorkspaceContextMenu(event, [{
-            label: 'Clear activity display',
-            action: clearSelectedProjectActivity
+            label: activityCleared ? 'Show activity display' : 'Clear activity display',
+            action: activityCleared ? showSelectedProjectActivity : clearSelectedProjectActivity
           }]);
         }
         return;
@@ -1031,13 +1234,16 @@ var EvaWorkspaces = (function() {
     var selectedProject = projectById(state.selectedProjectId);
     var activityTitle = document.getElementById('workspaceMonitorActivityTitle');
     if (activityTitle) activityTitle.textContent = selectedProject ? 'EVA ACTIVITY: ' + selectedProject.name : 'EVA ACTIVITY';
-    var projectActivity = state.monitorActivity.filter(function(entry) {
+    var activityCleared = state.clearedActivityProjectIds[state.selectedProjectId] === true;
+    var projectActivity = activityCleared ? [] : state.monitorActivity.filter(function(entry) {
       return entry.projectId === state.selectedProjectId;
     });
     if (!projectActivity.length) {
       var emptyActivity = document.createElement('li');
       emptyActivity.className = 'workspace-monitor-empty';
-      emptyActivity.textContent = selectedProject ? 'No Eva activity recorded for this workspace.' : 'Select a workspace to view Eva activity.';
+      emptyActivity.textContent = activityCleared
+        ? 'Activity display cleared. Click Show to restore it.'
+        : selectedProject ? 'No Eva activity recorded for this workspace.' : 'Select a workspace to view Eva activity.';
       feed.appendChild(emptyActivity);
     }
     projectActivity.forEach(function(entry) {
@@ -1054,10 +1260,10 @@ var EvaWorkspaces = (function() {
     });
     configureWorkbenchDisplayControl(
       'workspaceActivityDisplayBtn',
-      'CLEAR',
-      'Clear activity display',
-      clearSelectedProjectActivity,
-      !projectActivity.length
+      activityCleared ? 'SHOW' : 'CLEAR',
+      activityCleared ? 'Show activity display' : 'Clear activity display',
+      activityCleared ? showSelectedProjectActivity : clearSelectedProjectActivity,
+      !selectedProject || (!activityCleared && !projectActivity.length)
     );
 
     detail.replaceChildren();
@@ -1113,7 +1319,7 @@ var EvaWorkspaces = (function() {
         openWorkspaceTerminal(selected.checkout.id, (selected.project ? selected.project.name + ' | ' : '') + (selected.checkout.branch || 'worktree'));
       });
       actions.appendChild(terminalButton);
-      if (selected.status === 'active' && selected.agent && selected.agent.status === 'error') {
+      if (selected.status === 'active' && (!selected.agent || selected.agent.status === 'error')) {
         var retryButton = document.createElement('button');
         retryButton.type = 'button';
         retryButton.textContent = 'Retry run';
@@ -1207,6 +1413,7 @@ var EvaWorkspaces = (function() {
       var changed = signature !== state.monitorSignature;
       var shouldRender = changed || permissionsChanged;
       state.runs = runs;
+      pruneWorkspaceDisplayState();
       state.lastTerminals = terminals;
       state.lastCheckedAt = Date.now();
       narrateRunChanges(state.runs);
@@ -1241,6 +1448,7 @@ var EvaWorkspaces = (function() {
     document.body.classList.add('workspace-workbench-open');
     var view = document.getElementById('workspaceWorkbench');
     if (view) view.setAttribute('aria-hidden', 'false');
+    setChatDrawerOpen(chatDrawerPreference(), false);
     if (!supported()) {
       status('Coding workspaces are unavailable in this Eva launch.', 'error');
       renderWorkbench();
@@ -1252,6 +1460,8 @@ var EvaWorkspaces = (function() {
 
   function closeWorkbench() {
     dismissWorkspaceContextMenu();
+    setChatDrawerOpen(false, false);
+    restoreChatNodes();
     state.workbenchOpen = false;
     document.body.classList.remove('workspace-workbench-open');
     var view = document.getElementById('workspaceWorkbench');
@@ -1269,6 +1479,7 @@ var EvaWorkspaces = (function() {
       state.projects = await api().workspaceListProjects();
       if (!state.selectedProjectId && state.projects.length) state.selectedProjectId = state.projects[0].id;
       state.runs = await api().workspaceListRuns();
+      pruneWorkspaceDisplayState();
       if (state.selectedRunId && !state.runs.some(function(run) { return run.id === state.selectedRunId; })) state.selectedRunId = '';
       renderProjects();
       renderRuns();
@@ -1455,7 +1666,7 @@ var EvaWorkspaces = (function() {
     status('Loading GitHub repositories...', 'loading');
     try {
       var repositories = await api().workspaceListGitHubRepositories();
-      repositories = Array.isArray(repositories) ? repositories.slice(0, 20) : [];
+      repositories = Array.isArray(repositories) ? repositories : [];
       state.githubRepositories = repositories;
       state.githubRepositoriesCollapsed = false;
       renderGitHubRepositories();
@@ -1568,6 +1779,48 @@ var EvaWorkspaces = (function() {
     return importGitHubProject(matches[0].url);
   }
 
+  async function startRepositoryRemediation(repositoryName, objectiveValue) {
+    if (!supported()) throw new Error('Workspace agent execution is unavailable in this Eva launch.');
+    var repositoryQuery = String(repositoryName || '').trim().replace(/^https:\/\/github\.com\//i, '').replace(/\.git$/i, '').toLowerCase();
+    if (!/^[a-z0-9_.-]+(?:\/[a-z0-9_.-]+)?$/i.test(repositoryQuery)) {
+      throw new Error('Use an exact GitHub repository name such as repository or owner/repository for remediation.');
+    }
+    var objective = String(objectiveValue || '').trim();
+    if (!objective) throw new Error('Describe the remediation objective first.');
+    if (!state.projects.length) await refresh();
+    var project = state.projects.filter(function(item) {
+      return String(item.name || '').trim().toLowerCase() === repositoryQuery;
+    })[0];
+    if (!project) {
+      if (!state.githubRepositories.length) await listGitHubRepositories();
+      var repositories = state.githubRepositories.filter(function(repository) {
+        return String(repository.fullName || '').trim().toLowerCase() === repositoryQuery ||
+          String(repository.name || '').trim().toLowerCase() === repositoryQuery;
+      });
+      if (repositories.length !== 1) {
+        throw new Error('GitHub repository "' + repositoryName + '" was not available from the authenticated repository list.');
+      }
+      project = await importGitHubProject(repositories[0].url);
+    }
+    if (!project || !project.id) throw new Error('GitHub workspace import did not return a project.');
+    state.selectedProjectId = project.id;
+    var run = await createWorkspaceRun(project.id, objective, 'HEAD', { autoApprove: true, throwOnError: true });
+    try {
+      localStorage.setItem('eva_last_repository_remediation', JSON.stringify({
+        repositoryName: project.name,
+        objective: objective
+      }));
+    } catch (_) {}
+    return {
+      runId: run.id,
+      projectName: project.name,
+      dispatchError: run.dispatchError || '',
+      message: run.dispatchError
+        ? 'Created Workspace run ' + run.id + ' for ' + project.name + ', but dispatch is delayed: ' + run.dispatchError
+        : 'Started Workspace run ' + run.id + ' for ' + project.name + '.'
+    };
+  }
+
   async function removeProject(project) {
     if (!project || !api() || typeof api().workspaceDeleteProject !== 'function') throw new Error('Workspace removal is unavailable in this Eva build.');
     var approved = confirm('Remove ' + project.name + ' from Eva?\n\nEva will remove managed coding-run worktrees and history. The source repository will remain on disk.');
@@ -1599,9 +1852,20 @@ var EvaWorkspaces = (function() {
   async function removeProjectByName(projectName) {
     if (!state.projects.length) await refresh();
     var query = String(projectName || '').trim().toLowerCase();
-    var project = query
-      ? state.projects.filter(function(item) { return String(item.name || '').trim().toLowerCase() === query; })[0]
-      : projectById(state.selectedProjectId);
+    var project = null;
+    if (query) {
+      project = state.projects.filter(function(item) { return String(item.name || '').trim().toLowerCase() === query; })[0] || null;
+      if (!project) {
+        var basename = query.split('/').filter(Boolean).pop();
+        var basenameMatches = state.projects.filter(function(item) {
+          return String(item.name || '').trim().toLowerCase().split('/').filter(Boolean).pop() === basename;
+        });
+        if (basenameMatches.length > 1) throw new Error('More than one imported workspace matched "' + projectName + '". Use the full owner/repository name.');
+        project = basenameMatches[0] || null;
+      }
+    } else {
+      project = projectById(state.selectedProjectId);
+    }
     if (!project) throw new Error(query ? 'No imported workspace matched "' + projectName + '".' : 'Select an imported workspace before removing it.');
     var removed = await removeProject(project);
     return removed ? 'Removed ' + project.name + ' from Eva. The source repository was preserved.' : 'Workspace removal was cancelled.';
@@ -1847,6 +2111,9 @@ var EvaWorkspaces = (function() {
     var monitorRefresh = document.getElementById('workspaceMonitorRefreshBtn');
     var monitorClose = document.getElementById('workspaceMonitorCloseBtn');
     var monitorNew = document.getElementById('workspaceMonitorNewBtn');
+    var chatToggle = document.getElementById('workspaceChatToggleBtn');
+    var chatClose = document.getElementById('workspaceChatCloseBtn');
+    var chatSessionSelect = document.getElementById('workspaceChatSessionSelect');
     bindWorkbenchContextMenus();
     if (close) close.addEventListener('click', toggle);
     if (add) add.addEventListener('click', addProject);
@@ -1872,6 +2139,10 @@ var EvaWorkspaces = (function() {
     });
     if (monitorRefresh) monitorRefresh.addEventListener('click', monitor);
     if (monitorClose) monitorClose.addEventListener('click', closeWorkbench);
+    if (chatToggle) chatToggle.addEventListener('click', function() { setChatDrawerOpen(!state.chatDrawerOpen); });
+    if (chatClose) chatClose.addEventListener('click', function() { setChatDrawerOpen(false); });
+    if (chatSessionSelect) chatSessionSelect.addEventListener('change', function() { switchChatSession(chatSessionSelect.value); });
+    document.addEventListener('pointerdown', hideChatDrawerOnOutsidePointer);
     if (monitorNew) monitorNew.addEventListener('click', async function() {
       closeWorkbench();
       var currentPanel = panel();
@@ -1906,11 +2177,15 @@ var EvaWorkspaces = (function() {
     listGitHubRepositories: listGitHubRepositories,
     continueGitHubRepositories: continueGitHubRepositories,
     authorizeGitHub: authorizeGitHub,
+    isAutoApproveEnabled: autoApprovePreference,
+    currentProjectId: currentProjectId,
     removeProjectByName: removeProjectByName,
     setProjectMcpServerByName: setProjectMcpServerByName,
     verifyProjectMcpServerByName: verifyProjectMcpServerByName,
+    retryRun: retryRunById,
     runSelectedCheck: runSelectedCheck,
     importGitHubSelection: importGitHubSelection,
+    startRepositoryRemediation: startRepositoryRemediation,
     promptGitHubImport: function(repositoryUrl) { return importGitHubProject(repositoryUrl, true); }
   };
 })();

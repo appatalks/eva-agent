@@ -141,10 +141,58 @@ async function main() {
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
     assert.strictEqual(await page.locator('#workspaceWorkbench h1').innerText(), 'Workspaces', 'Workspace tab did not open the coding workspace dashboard');
     assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'Workspace dashboard is not active');
+    assert.strictEqual(await page.locator('#workspaceChatDrawer').getAttribute('aria-hidden'), 'false', 'Workspace chat drawer did not open by default');
+    assert.deepStrictEqual(await page.evaluate(function() {
+      return {
+        outputParent: document.getElementById('txtOutput').parentElement.id,
+        inputParent: document.querySelector('.chat-input-container').parentElement.id,
+      };
+    }), { outputParent: 'workspaceChatOutputHost', inputParent: 'workspaceChatInputHost' }, 'Workspace chat drawer did not reuse the live chat nodes');
+    assert.deepStrictEqual(await page.evaluate(function() {
+      const workbench = document.getElementById('workspaceWorkbench').getBoundingClientRect();
+      const drawer = document.getElementById('workspaceChatDrawer').getBoundingClientRect();
+      const output = document.getElementById('workspaceChatOutputHost').getBoundingClientRect();
+      const input = document.getElementById('workspaceChatInputHost').getBoundingClientRect();
+      return {
+        inside: drawer.top >= workbench.top && drawer.right <= workbench.right + 1 && drawer.bottom <= workbench.bottom + 1,
+        usableOutput: output.width > 280 && output.height > 160,
+        usableInput: input.width > 280 && input.height > 70,
+        ordered: output.bottom <= input.top + 1,
+      };
+    }), { inside: true, usableOutput: true, usableInput: true, ordered: true }, 'Workspace chat drawer layout is clipped or overlapping');
+    const sessionFixture = await page.evaluate(async function() {
+      const firstId = ensureActiveSessionId();
+      localStorage.setItem('aigMessages', JSON.stringify([{ role: 'user', content: 'Workspace drawer first session' }]));
+      document.getElementById('txtOutput').innerHTML = '<div class="chat-bubble user-bubble"><span class="user">You:</span> Workspace drawer first session</div>';
+      await saveCurrentSession();
+      newSession();
+      const secondId = ensureActiveSessionId();
+      localStorage.setItem('aigMessages', JSON.stringify([{ role: 'user', content: 'Workspace drawer second session' }]));
+      document.getElementById('txtOutput').innerHTML = '<div class="chat-bubble user-bubble"><span class="user">You:</span> Workspace drawer second session</div>';
+      await saveCurrentSession();
+      return { firstId: firstId, secondId: secondId };
+    });
+    await page.locator('#workspaceChatCloseBtn').click();
+    await page.locator('#workspaceChatToggleBtn').click();
+    await page.waitForFunction(function() { return document.getElementById('workspaceChatSessionSelect').options.length >= 2; });
+    await page.locator('#workspaceChatSessionSelect').selectOption(sessionFixture.firstId);
+    await page.waitForFunction(function(firstId) { return localStorage.getItem('eva_active_session') === firstId; }, sessionFixture.firstId);
+    assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'Switching drawer sessions closed Workspaces');
+    assert.match(await page.locator('#txtOutput').innerText(), /Workspace drawer first session/, 'Drawer session selector did not restore the selected conversation');
+    await page.locator('#workspaceMonitorProjectCount').click();
+    assert.strictEqual(await page.locator('#workspaceChatDrawer').getAttribute('aria-hidden'), 'true', 'Clicking outside did not hide the Workspace chat drawer');
+    assert.strictEqual(await page.evaluate(function() { return document.getElementById('workspaceChatOutputHost').contains(document.getElementById('txtOutput')); }), true, 'Click-away unmounted the live chat instead of allowing it to continue');
+    await page.locator('#workspaceChatToggleBtn').click();
     await page.evaluate(function() { window.EvaWorkspaces.closeWorkbench(); });
+    assert.strictEqual(await page.evaluate(function() { return document.getElementById('workspaceChatDrawer').contains(document.getElementById('txtOutput')); }), false, 'Closing Workspaces did not restore the live chat output');
     await page.evaluate(function() { document.getElementById('lcarsWorkspacesBtn').click(); });
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
     assert.strictEqual(await page.evaluate(function() { return document.body.classList.contains('workspace-workbench-open'); }), true, 'LCARS Workspaces click was closed by sidebar bubbling');
+    await page.locator('#workspaceChatCloseBtn').click();
+    assert.strictEqual(await page.locator('#workspaceChatDrawer').getAttribute('aria-hidden'), 'true', 'Workspace chat drawer close button did not close it');
+    await page.locator('#workspaceChatToggleBtn').click();
+    assert.strictEqual(await page.locator('#workspaceChatDrawer').getAttribute('aria-hidden'), 'false', 'Workspace chat drawer toggle did not reopen it');
+    await page.locator('#workspaceChatCloseBtn').click();
     await page.waitForFunction(function() {
       const workbenchHeader = document.querySelector('#workspaceWorkbench .workspace-workbench-header').getBoundingClientRect();
       const titleBar = document.querySelector('#evaTitleBar').getBoundingClientRect();
@@ -160,6 +208,26 @@ async function main() {
     });
     assert.deepStrictEqual(githubAuthSurface, { start: 'function', status: 'function', authorize: 'function' }, 'GitHub device authorization APIs are unavailable');
     const projectWorkspace = page.locator('#workspaceWorkbenchProjects .workspace-monitor-run').filter({ hasText: 'project' });
+    await projectWorkspace.waitFor();
+    const cleanupRemovalRequest = 'Eva please cleanup and remove the example/project workspaces, as its no longer needed.';
+    const conversationalRemovalRoute = await page.evaluate(function(userRequest) {
+      return window.EvaHarness.resolveNavigationRequest(userRequest, { directUser: true });
+    }, cleanupRemovalRequest);
+    assert.strictEqual(conversationalRemovalRoute.action, 'remove_workspace', 'Conversational removal did not use the native Workspace action');
+    assert.strictEqual(conversationalRemovalRoute.projectName, 'example/project', 'Conversational removal selected the wrong Workspace');
+    let removalConfirmationSeen = false;
+    page.once('dialog', async function(dialog) {
+      removalConfirmationSeen = /Remove project from Eva/i.test(dialog.message());
+      await dialog.dismiss();
+    });
+    const cancelledRemoval = await page.evaluate(function(userRequest) {
+      return window.EvaHarness.execute(
+        { action: 'remove_workspace', projectName: 'example/project' },
+        { source: 'model', userRequest: userRequest }
+      );
+    }, cleanupRemovalRequest);
+    assert.strictEqual(removalConfirmationSeen, true, 'Native Workspace removal confirmation did not open');
+    assert.strictEqual(cancelledRemoval.data.outcome, 'cancelled', 'Dismissed Workspace removal did not remain cancelled');
     await projectWorkspace.waitFor();
     await projectWorkspace.click();
     await page.locator('#workspaceProjectFiles .workspace-project-file').filter({ hasText: 'README.md' }).waitFor();
@@ -320,7 +388,7 @@ async function main() {
     await page.locator('#workspaceRunsDisplayBtn').click();
     await monitoredRun.waitFor();
     await page.locator('#workspaceActivityDisplayBtn').click();
-    await page.locator('#workspaceMonitorFeed').filter({ hasText: 'No Eva activity recorded for this workspace.' }).waitFor();
+    await page.locator('#workspaceMonitorFeed').filter({ hasText: 'Activity display cleared. Click Show to restore it.' }).waitFor();
     await page.locator('#workspaceResultsDisplayBtn').click();
     await page.locator('#workspaceWorkbenchResults').filter({ hasText: 'Run result display cleared.' }).waitFor();
     await page.locator('#workspaceResultsDisplayBtn').click();

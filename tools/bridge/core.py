@@ -501,6 +501,59 @@ def _public_subagent_task(task):
     }
 
 
+def _scope_subagent_task_to_workspace(task):
+    """Attach a generic agent task to an isolated Eva Ready worktree."""
+    if task.get("coding_run_id"):
+        return
+    store = _workspace_store()
+    requested_project_id = str(task.get("workspace_project_id") or "").strip()[:120]
+    try:
+        project = store.get_project(requested_project_id) if requested_project_id else store.ensure_eva_ready_project()
+    except WorkspaceError:
+        project = store.ensure_eva_ready_project()
+    objective = "Autonomous agent task: " + str(task.get("label") or "Subagent") + "\n\n" + str(task.get("prompt") or "")
+    run = store.create_run(
+        project["id"], objective, primary_session_id=task.get("session_id", ""),
+        model_policy=task.get("model", ""), auto_approve=True,
+    )
+    try:
+        checkout = run["checkout"]
+        workspace_mcp_config = store.mcp_config_for_run(run["id"])
+        workspace_mcp_prefix = "workspace-" + str(run.get("project_id") or "workspace").replace("-", "")[:12] + "-"
+        task.update({
+            "coding_run_id": run["id"],
+            "checkout_id": checkout["id"],
+            "capability_policy": "workspace_auto",
+            "workspace_scoped": True,
+            "_cwd": store.validated_checkout_path(checkout["id"]),
+            "_workspace_mcp_config": {
+                workspace_mcp_prefix + name: config for name, config in workspace_mcp_config.items()
+            },
+            "_created_workspace_scope": True,
+        })
+        store.create_agent_run(
+            task["id"], run["id"], checkout["id"], "agent:" + task["id"], task["capability_policy"]
+        )
+    except Exception:
+        try:
+            store.discard_run(run["id"], confirm_dirty=True)
+        except WorkspaceError:
+            pass
+        raise
+
+
+def _discard_subagent_workspace_scope(task, reason):
+    """Remove a never-started generic agent worktree after a startup failure."""
+    if not task.get("_created_workspace_scope"):
+        return
+    try:
+        store = _workspace_store()
+        store.update_agent_run(task["id"], "cancelled", reason)
+        store.discard_run(task["coding_run_id"], confirm_dirty=True)
+    except WorkspaceError:
+        pass
+
+
 def _dispatch_workspace_run(run):
     """Start one implementation agent in the run's bridge-resolved worktree."""
     existing_agent = run.get("agent") or {}
@@ -522,20 +575,36 @@ def _dispatch_workspace_run(run):
     }
     task_id = "sub-" + uuid.uuid4().hex[:8]
     objective = str(run.get("objective") or "").strip()
-    github_delivery_required = bool(
+    github_issue_delivery_required = bool(
         run.get("auto_approve")
         and re.search(r"\b(?:issue|issues)\b", objective, re.IGNORECASE)
         and re.search(r"\b(?:close|comment|create|leave|post|publish|reopen|submit|write)\b", objective, re.IGNORECASE)
     )
+    github_pr_delivery_required = bool(
+        run.get("auto_approve")
+        and re.search(r"\b(?:pull\s+request|pr)\b", objective, re.IGNORECASE)
+        and re.search(r"\b(?:create|open|raise|submit|publish|address|fix|resolve|remediate|update)\b", objective, re.IGNORECASE)
+    )
+    github_delivery_required = github_issue_delivery_required or github_pr_delivery_required
+    github_delivery_kind = "pull_request" if github_pr_delivery_required else ("issue" if github_issue_delivery_required else "")
     github_issue_state = ""
-    if github_delivery_required:
+    if github_issue_delivery_required:
         if re.search(r"\breopen\b", objective, re.IGNORECASE):
             github_issue_state = "open"
         elif re.search(r"\bclose\b", objective, re.IGNORECASE):
             github_issue_state = "closed"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     github_delivery_prompt = ""
-    if github_delivery_required:
+    if github_pr_delivery_required:
+        github_delivery_prompt = (
+            "This objective requires a real GitHub pull request, not only a local branch, commit, or draft report. "
+            "You are authorized to use authenticated `git` and `gh` operations in this auto-approved workspace run. "
+            "Inspect and complete the requested repository changes, run focused validation, commit them on the assigned "
+            "branch, push that branch, and create or update a pull request against the repository's default branch. "
+            "Do not stop after creating the branch. Verify the pull request with `gh pr view`, then end the final report "
+            "with `Submitted: <github-pull-request-url>`.\n\n"
+        )
+    elif github_issue_delivery_required:
         close_only_instruction = (
             "This is a close-only request: do not implement, commit, or otherwise resolve the issue body first. "
             "Inspect enough context to identify the requested issue, close it directly, and verify its state. "
@@ -589,7 +658,9 @@ def _dispatch_workspace_run(run):
         "checkout_id": checkout["id"],
         "capability_policy": "workspace_auto" if run.get("auto_approve") else "workspace_write",
         "requires_github_delivery": github_delivery_required,
+        "required_github_delivery_kind": github_delivery_kind,
         "required_github_issue_state": github_issue_state,
+        "required_github_repository": str((run.get("project") or {}).get("name") or "").strip(),
         "_cwd": checkout_path,
         "_workspace_mcp_config": workspace_mcp_config,
     }
@@ -3534,6 +3605,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         label = str((data or {}).get("label", "subagent task")).strip()[:120]
         model = str((data or {}).get("model", "")).strip()[:120]
         session_id = str((data or {}).get("session_id", "")).strip()[:120]
+        workspace_project_id = str((data or {}).get("workspace_project_id", "")).strip()[:120]
         group_id = str((data or {}).get("group_id", "")).strip()[:120]
         raw_dependencies = (data or {}).get("depends_on", [])
         depends_on = [str(value).strip()[:120] for value in raw_dependencies if str(value).strip()][:3] if isinstance(raw_dependencies, list) else []
@@ -3552,6 +3624,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "started_at": now_iso,
             "ended_at": None,
             "session_id": session_id,
+            "workspace_project_id": workspace_project_id,
             "group_id": group_id,
             "depends_on": depends_on,
             "signal_on_complete": False,
@@ -3562,8 +3635,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not _reserve_subagent_task(task):
             self._json_response(429, {"error": {"message": f"max {_SUBAGENT_MAX} concurrent subagents"}})
             return
-        thread = threading.Thread(target=_subagent_worker, args=(task_id, prompt, label, model), name=f"subagent-{task_id}", daemon=True)
-        thread.start()
+        try:
+            _scope_subagent_task_to_workspace(task)
+            thread = threading.Thread(target=_subagent_worker, args=(task_id, prompt, label, model), name=f"subagent-{task_id}", daemon=True)
+            thread.start()
+        except (WorkspaceError, RuntimeError) as error:
+            _discard_subagent_workspace_scope(task, "Generic agent startup failed: " + str(error))
+            with _st.subagent_lock:
+                _st.subagent_tasks.pop(task_id, None)
+            self._json_response(503, {"error": {"message": "Workspace-scoped agent could not start: " + str(error)}})
+            return
         self._json_response(202, {"task": _public_subagent_task(task)})
 
     def _subagent_spawn_batch(self):
@@ -3584,6 +3665,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if signal_on_complete and not self._require_bridge_capability():
             return
         session_id = str((data or {}).get("session_id", "")).strip()[:120]
+        workspace_project_id = str((data or {}).get("workspace_project_id", "")).strip()[:120]
         group_id = str((data or {}).get("group_id", "")).strip()[:120] or "group-" + uuid.uuid4().hex[:10]
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         tasks = []
@@ -3604,6 +3686,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "started_at": now_iso,
                 "ended_at": None,
                 "session_id": session_id,
+                "workspace_project_id": workspace_project_id,
                 "group_id": group_id,
                 "depends_on": [],
                 "signal_on_complete": False,
@@ -3622,7 +3705,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 available = max(0, _SUBAGENT_MAX - _subagent_active_count())
             self._json_response(429, {"error": {"message": f"batch needs {len(tasks)} slots; {available} available"}})
             return
+        try:
+            for task in tasks:
+                _scope_subagent_task_to_workspace(task)
+        except (WorkspaceError, RuntimeError) as error:
+            for task in tasks:
+                _discard_subagent_workspace_scope(task, "Generic agent batch startup failed: " + str(error))
+            with _st.subagent_lock:
+                for task in tasks:
+                    _st.subagent_tasks.pop(task["id"], None)
+            self._json_response(503, {"error": {"message": "Workspace-scoped agent batch could not start: " + str(error)}})
+            return
         if not _start_reserved_subagent_batch(tasks):
+            for task in tasks:
+                _discard_subagent_workspace_scope(task, "Generic agent batch worker startup failed")
             self._json_response(500, {"error": {"message": "batch worker startup failed; no tasks were launched"}})
             return
         self._json_response(202, {
@@ -4082,6 +4178,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         model_for_response = request["model_for_response"]
         max_completion_tokens = request["max_completion_tokens"]
         reasoning_effort = request["reasoning_effort"]
+        acp_auto_approve = request["acp_auto_approve"]
         stream_requested = request["stream_requested"]
         _set_openai_key_from(data)  # cache key for semantic recall (incl. background threads)
         _mark_user_activity()
@@ -4094,6 +4191,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _request_type = _classify_request_type(msg_lower)
         _fast_route = _classify_fast_route(_routing_message)
         _passive_recall = _is_passive_memory_recall(_routing_message)
+        _acp_permission_mode = "passive_recall" if _passive_recall else (
+            "workspace_auto" if acp_auto_approve else "interactive"
+        )
         _prompt_fields = _prompt_budget_fields(data.get("prompt_budget"))
         stream_state = self._new_stream_state("aig", requested_backend) if stream_requested else None
 
@@ -4288,7 +4388,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             with _acquire_acp_client(_st.acp_client.model or "", reasoning_effort or None,
                                      tool_profile=_tool_profile) as (preflight_client, acquire_detail):
                 acp_result = preflight_client.prompt(
-                    acp_prompt, timeout=90, conversation_id=conversation_id
+                    acp_prompt, timeout=90, conversation_id=conversation_id,
+                    permission_mode=_acp_permission_mode,
                 ) if preflight_client else {"error": acquire_detail}
             if acp_result and "text" in acp_result and acp_result["text"]:
                 acp_data = acp_result["text"]
@@ -4936,7 +5037,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             conversation_id=_passive_recall_session_key(conversation_id)
                             if _passive_recall else conversation_id,
                             on_chunk=on_chunk,
-                            permission_mode="passive_recall" if _passive_recall else "interactive",
+                            permission_mode=_acp_permission_mode,
                         )
                         if acp_result.get("error"):
                             _audit_turn_failed("acp", "prompt", 502)
@@ -5652,6 +5753,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         reasoning_effort = raw_reasoning_effort
         stream_requested = data.get("stream") is True
+        acp_auto_approve = data.get("acp_auto_approve", False)
+        if not isinstance(acp_auto_approve, bool):
+            self._json_response(400, {"error": {"message": "acp_auto_approve must be a boolean"}})
+            return
 
         # Build prompt text from messages (combine for context)
         # ACP doesn't have native message roles, so we format them
@@ -5687,6 +5792,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         direct_request_type = _classify_request_type(last_user_msg.lower()) if last_user_msg else "general"
         direct_profile = _select_acp_tool_profile(last_user_msg, direct_request_type)
         direct_passive_recall = _is_passive_memory_recall(last_user_msg)
+        acp_permission_mode = "passive_recall" if direct_passive_recall else (
+            "workspace_auto" if acp_auto_approve else "interactive"
+        )
 
         memory_context = _build_memory_context(last_user_msg, conversation_id)
         if memory_context:
@@ -5716,7 +5824,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 conversation_id=_passive_recall_session_key(conversation_id)
                 if direct_passive_recall else conversation_id,
                 on_chunk=on_chunk,
-                permission_mode="passive_recall" if direct_passive_recall else "interactive",
+                permission_mode=acp_permission_mode,
             )
 
         if "error" in result:

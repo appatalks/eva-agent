@@ -316,6 +316,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
         ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')
     };
     if (acpModel) payload.acp_model = acpModel;
+    payload.acp_auto_approve = true;
     var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel('copilot-acp') : 'default';
     if (reasoningEffort !== 'default') payload.acp_reasoning_effort = reasoningEffort;
 
@@ -557,6 +558,12 @@ async function _applySavedMCPConfig(githubPat) {
     }
     await new Promise(function (r) { setTimeout(r, 1500); });
   }
+}
+
+if (isEvaStandalone() && window.evaStandalone && typeof window.evaStandalone.onGitHubAuthComplete === 'function') {
+  window.evaStandalone.onGitHubAuthComplete(function() {
+    autoApplySavedMCPConfig().catch(function() {});
+  });
 }
 
 async function applyMCPConfig() {

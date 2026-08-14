@@ -435,6 +435,7 @@
           <button id="workspaceAddProjectWorkbenchBtn" class="workspace-monitor-btn" type="button" title="Import a local Git project">Import workspace</button>
           <button id="workspaceImportGitHubBtn" class="workspace-monitor-btn" type="button" title="Import a public GitHub repository">Import GitHub</button>
           <button id="workspaceCollapseGitHubBtn" class="workspace-monitor-icon" type="button" title="Hide listed GitHub repositories" aria-label="Hide listed GitHub repositories" hidden>&times;</button>
+          <button id="workspaceChatToggleBtn" class="workspace-monitor-btn" type="button" title="Show Eva chat beside Workspaces" aria-controls="workspaceChatDrawer" aria-expanded="false">Chat</button>
           <button id="workspaceMonitorRefreshBtn" class="workspace-monitor-icon" type="button" title="Refresh workspace activity" aria-label="Refresh workspace activity">&#x21BB;</button>
           <button id="workspaceMonitorCloseBtn" class="workspace-monitor-icon" type="button" title="Return to chat" aria-label="Return to chat">&times;</button>
         </div>
@@ -471,6 +472,17 @@
           <div id="workspaceWorkbenchDetail" class="workspace-monitor-detail-content"></div>
         </aside>
       </div>
+      <aside id="workspaceChatDrawer" class="workspace-chat-drawer" aria-hidden="true" inert aria-label="Eva chat">
+        <header class="workspace-chat-header">
+          <div><span>LIVE CONVERSATION</span><strong>Eva Chat</strong></div>
+          <label class="workspace-chat-session-label" for="workspaceChatSessionSelect">Session
+            <select id="workspaceChatSessionSelect" aria-label="Select chat session"></select>
+          </label>
+          <button id="workspaceChatCloseBtn" class="workspace-monitor-icon" type="button" title="Close Eva chat" aria-label="Close Eva chat">&times;</button>
+        </header>
+        <div id="workspaceChatOutputHost" class="workspace-chat-output-host"></div>
+        <div id="workspaceChatInputHost" class="workspace-chat-input-host"></div>
+      </aside>
     </section>
     <div id="workspaceContextMenu" class="workspace-context-menu" role="menu" hidden></div>
     <section id="agentsView" class="agents-view" aria-hidden="true" aria-label="Agentic sessions workspace">

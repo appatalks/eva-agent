@@ -88,8 +88,9 @@ async function main() {
 
   standalone = false;
   const requestCount = requests.length;
+  responses.push({ permissions: [] });
   await context.pollACPPermissions();
-  assert.strictEqual(requests.length, requestCount, 'browser-only mode must not poll permissions');
+  assert.strictEqual(requests.length, requestCount + 1, 'authorized hosted mode must poll permissions');
 }
 
 main().then(function() {

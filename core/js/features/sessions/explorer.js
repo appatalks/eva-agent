@@ -346,7 +346,8 @@ function startFreshSessionOnLaunch() {
 }
 
 /** Load a session by id */
-function loadSession(id) {
+function loadSession(id, options) {
+  options = options && typeof options === 'object' ? options : {};
   // Finish saving the current session before reading another record. This
   // avoids a read/restore race when users switch sessions quickly.
   return Promise.resolve(saveCurrentSession()).then(function() {
@@ -378,7 +379,7 @@ function loadSession(id) {
     var panel = document.getElementById('sessionPanel');
     if (panel) panel.setAttribute('aria-hidden', 'true');
     if (typeof EvaAgents !== 'undefined' && EvaAgents.close) EvaAgents.close();
-    if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
+    if (!options.preserveWorkspace && window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
     if (typeof setStatus === 'function') setStatus('info', 'Session loaded.');
     return true;
   }).catch(function(e) {
