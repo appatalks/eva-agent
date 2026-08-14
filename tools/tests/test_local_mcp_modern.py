@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Dual-era stdio MCP regression tests using deterministic local fixtures."""
 import json
+import io
 import sys
 import tempfile
 import textwrap
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -192,6 +194,15 @@ def main():
         transient_manager.start_servers({"computer-use-linux": {}})
     assert transient_manager.start_failures == {"computer-use-linux": "start_failed"}
     assert "private detail" not in str(transient_manager.start_failures)
+    stderr_server = MCPServer("stderr-fixture", sys.executable)
+    stderr_process = SimpleNamespace(stderr=io.BytesIO(
+        b'Error: expect initialized request, but received method: "server/discover"\n'
+        b'level=ERROR msg="method invalid during initialization" method=server/discover\n'
+        b'level=ERROR msg="real startup failure"\n'
+    ))
+    with patch("builtins.print") as stderr_output:
+        stderr_server._stderr_loop(stderr_process)
+    stderr_output.assert_called_once_with('[MCP:stderr-fixture] level=ERROR msg="real startup failure"')
     print("local MCP modern compatibility tests: PASS")
 
 
