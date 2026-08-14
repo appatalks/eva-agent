@@ -98,6 +98,31 @@ var EvaHarness = (function() {
     };
   }
 
+  function persistRemediationContext(context) {
+    if (!context || !context.repositoryName || !context.objective) return;
+    var value = {
+      repositoryName: String(context.repositoryName).slice(0, 240),
+      objective: String(context.objective).slice(0, 4000)
+    };
+    try { localStorage.setItem('eva_last_repository_remediation', JSON.stringify(value)); } catch (_) {}
+    try {
+      if (window.evaStandalone && typeof window.evaStandalone.workspaceRemediationContextSave === 'function') {
+        Promise.resolve(window.evaStandalone.workspaceRemediationContextSave(value)).catch(function() {});
+      }
+    } catch (_) {}
+  }
+
+  function nativeRemediationContext() {
+    try {
+      if (!window.evaStandalone || typeof window.evaStandalone.workspaceRemediationContextLoad !== 'function') return null;
+      var context = window.evaStandalone.workspaceRemediationContextLoad();
+      if (context && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(context.repositoryName || '')) && String(context.objective || '').trim()) {
+        return { repositoryName: String(context.repositoryName), objective: String(context.objective).slice(0, 4000) };
+      }
+    } catch (_) {}
+    return null;
+  }
+
   function recentRemediationContext() {
     try {
       var messages = JSON.parse(localStorage.getItem('aigMessages') || '[]');
@@ -107,6 +132,13 @@ var EvaHarness = (function() {
         if (message.role !== 'user' || typeof message.content !== 'string') continue;
         var route = repositoryRemediationRoute(message.content);
         if (route) return { repositoryName: route.repositoryName, objective: route.objective };
+      }
+    } catch (_) {}
+    try {
+      var bubbles = document.querySelectorAll('.chat-bubble.user-bubble');
+      for (var bubbleIndex = bubbles.length - 1; bubbleIndex >= 0; bubbleIndex--) {
+        var visibleRoute = repositoryRemediationRoute(String(bubbles[bubbleIndex].textContent || '').replace(/^\s*You:\s*/i, ''));
+        if (visibleRoute) return { repositoryName: visibleRoute.repositoryName, objective: visibleRoute.objective };
       }
     } catch (_) {}
     return null;
@@ -128,6 +160,7 @@ var EvaHarness = (function() {
         };
       }
     } catch (_) {}
+    if (!lastRemediation) lastRemediation = nativeRemediationContext();
     var workspaceDescription = /\b(?:tell me|describe|list|summarize|summary|what|which)\b[\s\S]{0,48}\b(?:current\s+)?workspaces?\b|\bworkspaces?\b[\s\S]{0,32}\b(?:do i have|are available|can you access|current)\b/.test(phrase);
     if (workspaceDescription) return { action: 'describe_workspaces', target: 'workspaces', label: 'Workspaces' };
     var ownedRepositoryPhrase = '(?:my\\s+(?:github\\s+)?(?:repositories|repos)|owned\\s+(?:github\\s+)?(?:repositories|repos)|(?:github\\s+)?(?:repositories|repos)\\s+(?:that\\s+)?i\\s+own)';
@@ -154,7 +187,10 @@ var EvaHarness = (function() {
     }
     if (directUser) {
       var explicitRemediation = repositoryRemediationRoute(rawPhrase);
-      if (explicitRemediation) return explicitRemediation;
+      if (explicitRemediation) {
+        persistRemediationContext(explicitRemediation);
+        return explicitRemediation;
+      }
       var pullRequestFollowUp = /\b(?:create|open|raise|submit|publish)\b[\s\S]{0,32}\b(?:pull\s+request|pr)\b|\b(?:create|open|raise|submit|publish)\s+(?:it|that|the)\b[\s\S]{0,16}\bpr\b/i.test(rawPhrase);
       if (pullRequestFollowUp) {
         var pullRequestRemediation = lastRemediation || recentRemediationContext();
@@ -500,12 +536,10 @@ var EvaHarness = (function() {
       var openedRemediationWorkspaces = navigate('workspaces');
       if (!openedRemediationWorkspaces.ok) return Promise.resolve(openedRemediationWorkspaces);
       return Promise.resolve(EvaWorkspaces.startRepositoryRemediation(request.repositoryName, request.objective)).then(function(started) {
-        try {
-          localStorage.setItem('eva_last_repository_remediation', JSON.stringify({
-            repositoryName: started.projectName || request.repositoryName,
-            objective: request.objective
-          }));
-        } catch (_) {}
+        persistRemediationContext({
+          repositoryName: started.projectName || request.repositoryName,
+          objective: request.objective
+        });
         return result(true, 'run_repository_remediation', started.message, {
           outcome: started.dispatchError ? 'delayed' : 'started', runId: started.runId || '', projectName: started.projectName || ''
         });

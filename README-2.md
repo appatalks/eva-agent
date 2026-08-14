@@ -1385,7 +1385,12 @@ creating a branch or commit. The Workspace agent must push the branch, create or
 update the PR, verify it with GitHub, and finish with a `Submitted:` pull-request
 URL that resolves through the authenticated API. A later instruction such as
 "create the PR" recovers the most recent repository-remediation context and
-starts a Workspace delivery run when the original work was not durable.
+starts a Workspace delivery run when the original work was not durable. Eva
+captures the non-secret repository name and objective when the initial request
+is submitted, before import or authentication can fail, and persists that
+context through the Electron main process. Follow-ups therefore survive normal
+system relaunches and renderer-storage changes. A visible pre-upgrade chat
+transcript is also scanned as a migration fallback.
 Failed workspace agents are not automatically replayed on application startup,
 which prevents remote side effects from being duplicated after an ambiguous
 failure. Their retained run exposes an explicit **Retry** action immediately,

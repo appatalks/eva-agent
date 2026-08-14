@@ -44,6 +44,8 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   workspaceListGitHubRepositories: function() { return ipcRenderer.invoke('workspace-list-github-repositories'); },
   workspaceGitHubAuthStart: function() { return ipcRenderer.invoke('workspace-github-auth-start'); },
   workspaceGitHubAuthStatus: function() { return ipcRenderer.invoke('workspace-github-auth-status'); },
+  workspaceRemediationContextLoad: function() { return ipcRenderer.sendSync('workspace-remediation-context-load'); },
+  workspaceRemediationContextSave: function(value) { return ipcRenderer.invoke('workspace-remediation-context-save', value); },
   onGitHubAuthComplete: function(listener) {
     if (typeof listener !== 'function') return function() {};
     const wrapped = function() { listener(); };

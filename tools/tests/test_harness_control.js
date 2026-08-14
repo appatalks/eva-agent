@@ -23,12 +23,18 @@ let workspaceToolsProject = '';
 let removedWorkspace = '';
 let retriedRunId = '';
 let remediationRequest = null;
+let nativeRemediationContext = null;
+let visibleUserMessages = [];
 const localStorage = {
   values: {},
   getItem(key) { return this.values[key] || null; },
   setItem(key, value) { this.values[key] = String(value); }
 };
 const window = {
+  evaStandalone: {
+    workspaceRemediationContextLoad() { return nativeRemediationContext || {}; },
+    workspaceRemediationContextSave(value) { nativeRemediationContext = Object.assign({}, value); return Promise.resolve(true); }
+  },
   EvaWorkspaces: {
     openWorkbench() {},
     listGitHubRepositories() {
@@ -94,7 +100,15 @@ const sandbox = {
     if (allowDecline !== undefined) plannedTask.allowDecline = allowDecline;
     return Promise.resolve(plannedResult || { submitted: submit !== false });
   },
-  document: { body: { classList: { contains() { return false; } } }, getElementById() { return null; } },
+  document: {
+    body: { classList: { contains() { return false; } } },
+    getElementById() { return null; },
+    querySelectorAll(selector) {
+      return selector === '.chat-bubble.user-bubble'
+        ? visibleUserMessages.map(function(text) { return { textContent: 'You: ' + text }; })
+        : [];
+    }
+  },
   localStorage,
 };
 vm.runInNewContext(source, sandbox, { filename: 'core/js/harness-control.js' });
@@ -167,18 +181,30 @@ async function main() {
   const dependabotUrlResult = await harness.execute(dependabotUrlRoute, { source: 'model', userRequest: dependabotUrlRequest });
   assert.strictEqual(dependabotUrlResult.ok, true);
   assert.deepStrictEqual(remediationRequest, { repositoryName: 'appatalks/cs-proxy', objective: dependabotUrlRequest });
+  assert.deepStrictEqual(nativeRemediationContext, { repositoryName: 'appatalks/cs-proxy', objective: dependabotUrlRequest });
+  delete localStorage.values.eva_last_repository_remediation;
+  delete localStorage.values.aigMessages;
   const pullRequestFollowUp = harness.resolveNavigationRequest('Please create the PR now.', { directUser: true });
   assert.strictEqual(pullRequestFollowUp.action, 'run_repository_remediation');
   assert.strictEqual(pullRequestFollowUp.repositoryName, 'appatalks/cs-proxy');
   assert.match(pullRequestFollowUp.objective, /Follow-up: Please create the PR now/);
+  nativeRemediationContext = null;
+  delete localStorage.values.eva_last_repository_remediation;
+  visibleUserMessages = [dependabotUrlRequest];
+  const visiblePullRequestFollowUp = harness.resolveNavigationRequest('Go ahead and create a PR too please.', { directUser: true });
+  assert.strictEqual(visiblePullRequestFollowUp.action, 'run_repository_remediation');
+  assert.strictEqual(visiblePullRequestFollowUp.repositoryName, 'appatalks/cs-proxy');
+  assert.match(visiblePullRequestFollowUp.objective, /Follow-up: Go ahead and create a PR too please/);
+  visibleUserMessages = [];
   const shortRemediationRoute = harness.resolveNavigationRequest('Fix dependency alerts with cs-proxy repo.', { directUser: true });
   assert.strictEqual(shortRemediationRoute.action, 'run_repository_remediation');
   assert.strictEqual(shortRemediationRoute.repositoryName, 'cs-proxy');
   assert.strictEqual(harness.resolveNavigationRequest('Try to resolve some alerts with cs-proxy repo.', { directUser: true }).action, 'run_repository_remediation');
   const retryRemediationRoute = harness.resolveNavigationRequest('Try again please.', { directUser: true });
   assert.strictEqual(retryRemediationRoute.action, 'run_repository_remediation');
-  assert.strictEqual(retryRemediationRoute.repositoryName, 'appatalks/cs-proxy');
+  assert.strictEqual(retryRemediationRoute.repositoryName, 'cs-proxy');
   delete localStorage.values.eva_last_repository_remediation;
+  nativeRemediationContext = null;
   localStorage.setItem('aigMessages', JSON.stringify([
     { role: 'user', content: 'Try to resolve some alerts with cs-proxy repo.' },
     { role: 'assistant', content: 'I will locate it.' }

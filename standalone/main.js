@@ -681,6 +681,36 @@ function saveEncryptedAuth(values) {
   return true;
 }
 
+function normalizedRemediationContext(value) {
+  if (!value || typeof value !== 'object') return {};
+  const repositoryName = String(value.repositoryName || '').trim();
+  const objective = String(value.objective || '').trim();
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repositoryName) || !objective || objective.length > 4000) return {};
+  return { repositoryName: repositoryName, objective: objective };
+}
+
+function remediationContextPath() {
+  return path.join(app.getPath('userData'), 'remediation-context.json');
+}
+
+function loadRemediationContext() {
+  try {
+    return normalizedRemediationContext(JSON.parse(fs.readFileSync(remediationContextPath(), 'utf8')));
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveRemediationContext(value) {
+  const context = normalizedRemediationContext(value);
+  if (!context.repositoryName) return false;
+  const target = remediationContextPath();
+  const temporary = target + '.tmp';
+  fs.writeFileSync(temporary, JSON.stringify(context), { mode: 0o600 });
+  fs.renameSync(temporary, target);
+  return true;
+}
+
 function isTrustedEvaRenderer(event) {
   try {
     const rendererPath = fileURLToPath(event.senderFrame.url);
@@ -1569,6 +1599,12 @@ ipcMain.handle('auth-load', function(event) {
 });
 ipcMain.handle('auth-save', function(event, values) {
   return isTrustedEvaRenderer(event) && saveEncryptedAuth(values);
+});
+ipcMain.on('workspace-remediation-context-load', function(event) {
+  event.returnValue = isTrustedEvaRenderer(event) ? loadRemediationContext() : {};
+});
+ipcMain.handle('workspace-remediation-context-save', function(event, value) {
+  return isTrustedEvaRenderer(event) && saveRemediationContext(value);
 });
 ipcMain.on('bridge-capability-token', function(event) {
   event.returnValue = isTrustedEvaRenderer(event) ? bridgeCapabilityToken : '';
