@@ -91,19 +91,30 @@ function validGitHubPullRequestNumber(value) {
   return Number.isInteger(value) && value > 0 && value <= 1000000000;
 }
 
-function runGitHubCli(args, timeoutMs) {
+function runGitHubCli(args, timeoutMs, maxOutputBytes) {
   return new Promise(function(resolve, reject) {
+    const outputLimit = Number(maxOutputBytes) > 0 ? Number(maxOutputBytes) : 65536;
     const child = spawn('gh', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: Object.assign({}, process.env, { GIT_TERMINAL_PROMPT: '0' })
     });
     let output = '';
     let errors = '';
+    let outputBytes = 0;
+    let outputTooLarge = false;
     const timeout = setTimeout(function() {
       child.kill('SIGTERM');
       reject(new Error('GitHub CLI timed out.'));
     }, timeoutMs || 30000);
-    child.stdout.on('data', function(chunk) { output = (output + String(chunk)).slice(0, 65536); });
+    child.stdout.on('data', function(chunk) {
+      outputBytes += chunk.length;
+      if (outputBytes > outputLimit) {
+        outputTooLarge = true;
+        child.kill('SIGTERM');
+        return;
+      }
+      output += String(chunk);
+    });
     child.stderr.on('data', function(chunk) { errors = (errors + String(chunk)).slice(0, 65536); });
     child.once('error', function() {
       clearTimeout(timeout);
@@ -111,6 +122,7 @@ function runGitHubCli(args, timeoutMs) {
     });
     child.once('exit', function(code) {
       clearTimeout(timeout);
+      if (outputTooLarge) return reject(new Error('GitHub CLI response exceeded the safe output limit.'));
       if (code === 0) return resolve(output);
       reject(new Error((errors || output || 'GitHub CLI command failed.').trim().slice(0, 1000)));
     });
@@ -128,14 +140,17 @@ async function resolveGitHubPullRequestRepository(number, repository) {
   const viewer = JSON.parse(await runGitHubCli(['api', 'user'], 30000));
   const login = String(viewer && viewer.login || '');
   if (!/^[A-Za-z0-9-]{1,39}$/.test(login)) throw new Error('GitHub CLI could not determine the authenticated account.');
+  const graphQuery = 'query($searchQuery:String!){search(type:ISSUE,query:$searchQuery,first:100){nodes{... on PullRequest{number repository{nameWithOwner}}}}}';
   const search = JSON.parse(await runGitHubCli([
-    'api', '--method', 'GET', 'search/issues', '-f', 'q=' + String(number) + ' in:number is:pr user:' + login, '-f', 'per_page=100'
+    'api', 'graphql', '-f', 'query=' + graphQuery,
+    '-F', 'searchQuery=' + String(number) + ' in:number is:pr user:' + login
   ], 30000));
-  const matches = (search && Array.isArray(search.items) ? search.items : []).filter(function(item) {
-    return item && Number(item.number) === number && item.pull_request && typeof item.repository_url === 'string';
+  const nodes = search && search.data && search.data.search && Array.isArray(search.data.search.nodes)
+    ? search.data.search.nodes : [];
+  const matches = nodes.filter(function(item) {
+    return item && Number(item.number) === number && item.repository && typeof item.repository.nameWithOwner === 'string';
   }).map(function(item) {
-    const match = item.repository_url.match(/\/repos\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)$/);
-    return match ? match[1] : '';
+    return item.repository.nameWithOwner;
   }).filter(Boolean).filter(function(value, index, values) { return values.indexOf(value) === index; });
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) throw new Error('PR #' + number + ' exists in multiple repositories. Provide the full GitHub pull request URL.');
