@@ -35,6 +35,18 @@ function getAllSessions() {
   }));
 }
 
+function describeSavedSessions() {
+  return getAllSessions().then(function(sessions) {
+    sessions = Array.isArray(sessions) ? sessions.slice() : [];
+    if (!sessions.length) return 'There are no saved chat sessions right now.';
+    sessions.sort(function(left, right) { return Number(right.updatedAt || 0) - Number(left.updatedAt || 0); });
+    var titles = sessions.slice(0, 8).map(function(session) { return session.title || 'Untitled'; });
+    var remaining = sessions.length - titles.length;
+    return 'There are ' + sessions.length + ' saved chat session' + (sessions.length === 1 ? '' : 's') +
+      ': ' + titles.join(', ') + (remaining > 0 ? ', and ' + remaining + ' more' : '') + '.';
+  });
+}
+
 function _activeSessionId() {
   return localStorage.getItem(SESSION_ACTIVE_KEY) || null;
 }
