@@ -1355,18 +1355,22 @@ defaults to automatic dispatch.
 
 ### Workspace agent execution
 
-Workspace agents reuse the observable subagent registry, so the same task is
-visible in Agent Operations with `coding_run_id`, `checkout_id`, and
-`capability_policy`. Unlike generic subagents, the worker creates its
-`ACPClient` with the assigned worktree and uses prompt permission mode
-`workspace_write`, or `workspace_auto` when **Auto approve actions** is enabled
-for the run. The composer remembers that choice locally for later runs.
+Workspace and generic subagents reuse the observable subagent registry, so the
+same task is visible in Agent Operations with `coding_run_id`, `checkout_id`,
+and `capability_policy`. Every subagent receives an isolated worktree: it uses
+the selected imported workspace when available, otherwise Eva's managed
+**Eva Ready Workspace**. The worker creates its ACP client with that worktree
+as its real `cwd` and uses `workspace_auto`; the composer defaults **Auto
+approve actions** to enabled unless the user explicitly turns it off.
 
-ACP `session/request_permission` requests are automatically allowed once only
-for routine workspace reads, local edits, and trusted local build/test commands.
-With `workspace_auto`, Eva also selects one-time approval for remote tools such
-as GitHub CLI issue comments. Auto approval still rejects edits outside the
-assigned worktree and commands referencing protected credential/config paths.
+Both `workspace_write` and `workspace_auto` make autonomous one-time decisions
+for structured reads, edits within the assigned worktree, builds, package
+operations, GitHub, Git, and remote-tool actions. Eva rejects rather than
+waits on protected credential/config paths, edits outside the assigned
+worktree, opaque shell or inline-script execution, privilege escalation,
+destructive filesystem commands, service control, and destructive Git actions.
+The rejection is returned to ACP immediately so Eva can select a safer direct
+alternative instead of leaving a stale approval card.
 For an explicit GitHub Issues objective, Eva may use the authenticated `gh`
 CLI. A named issue receives a comment; when no target is named and no matching
 open issue exists, Eva creates a new issue containing the requested report. The
@@ -1375,9 +1379,11 @@ through GitHub. Explicit close and reopen objectives additionally verify the
 issue endpoint reports the requested `closed` or `open` state before completion.
 Failed workspace agents are not automatically replayed on application startup,
 which prevents remote side effects from being duplicated after an ambiguous
-failure. Their retained run exposes an explicit **Retry** action instead.
-Ordinary chats and generic subagents retain interactive permission handling;
-passive recall continues to reject tools. Neither workspace mode accepts
+failure. Their retained run exposes an explicit **Retry** action immediately,
+including dispatch-delayed runs that have no `AgentRun` record yet. ACP
+permission polling works in authorized hosted renderers as well as Standalone;
+file-origin and unauthenticated clients remain blocked by bridge authorization.
+Passive recall continues to reject tools. Neither workspace mode accepts
 persistent `allow_always` authority.
 
 Settings > Auth launches GitHub CLI device authorization, opens GitHub's device

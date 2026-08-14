@@ -21,6 +21,13 @@ let mcpVerificationRequest = null;
 let workspaceCheckObjective = '';
 let workspaceToolsProject = '';
 let removedWorkspace = '';
+let retriedRunId = '';
+let remediationRequest = null;
+const localStorage = {
+  values: {},
+  getItem(key) { return this.values[key] || null; },
+  setItem(key, value) { this.values[key] = String(value); }
+};
 const window = {
   EvaWorkspaces: {
     openWorkbench() {},
@@ -56,6 +63,14 @@ const window = {
       workspaceCheckObjective = objective;
       return Promise.resolve({ outcome: 'started', runId: 'run-check', message: 'Started a workspace-scoped agent run for example/repository. Progress and results will appear in Workspaces.' });
     },
+    retryRun(runId) {
+      retriedRunId = runId;
+      return Promise.resolve('Workspace agent retry started for example/repository.');
+    },
+    startRepositoryRemediation(repositoryName, objective) {
+      remediationRequest = { repositoryName, objective };
+      return Promise.resolve({ runId: 'run-remediation', projectName: repositoryName, message: 'Started Workspace run run-remediation for ' + repositoryName + '.' });
+    },
     importGitHub(url) {
       importedUrl = url;
       return Promise.resolve(importResult);
@@ -80,6 +95,7 @@ const sandbox = {
     return Promise.resolve(plannedResult || { submitted: submit !== false });
   },
   document: { body: { classList: { contains() { return false; } } }, getElementById() { return null; } },
+  localStorage,
 };
 vm.runInNewContext(source, sandbox, { filename: 'core/js/harness-control.js' });
 const harness = sandbox.EvaHarness;
@@ -130,7 +146,35 @@ async function main() {
   const enableMcpResult = await harness.execute(enableMcpRoute, { source: 'voice', userRequest: 'Enable MCP server project-docs for example/repository.' });
   assert.strictEqual(enableMcpResult.ok, true);
   assert.deepStrictEqual(mcpModuleRequest, { serverName: 'project-docs', enabled: true, projectName: 'example/repository' });
+  const modelMcpResult = await harness.execute(enableMcpRoute, { source: 'model', userRequest: 'Enable MCP server project-docs for example/repository.' });
+  assert.strictEqual(modelMcpResult.ok, true);
   assert.strictEqual(harness.resolveNavigationRequest('Disable MCP server project-docs.', { directUser: true }).enabled, false);
+  const retryWorkspaceRoute = harness.resolveNavigationRequest('Retry the workspace run run-123.', { directUser: true });
+  assert.strictEqual(retryWorkspaceRoute.action, 'retry_workspace_run');
+  const retryWorkspaceResult = await harness.execute(retryWorkspaceRoute, { source: 'model', userRequest: 'Retry the workspace run run-123.' });
+  assert.strictEqual(retryWorkspaceResult.ok, true);
+  assert.strictEqual(retriedRunId, 'run-123');
+  const remediationRoute = harness.resolveNavigationRequest('Resolve Dependabot alerts in appatalks/cs-proxy.', { directUser: true });
+  assert.strictEqual(remediationRoute.action, 'run_repository_remediation');
+  const remediationResult = await harness.execute(remediationRoute, { source: 'model', userRequest: 'Resolve Dependabot alerts in appatalks/cs-proxy.' });
+  assert.strictEqual(remediationResult.ok, true);
+  assert.strictEqual(remediationResult.data.runId, 'run-remediation');
+  assert.deepStrictEqual(remediationRequest, { repositoryName: 'appatalks/cs-proxy', objective: 'Resolve Dependabot alerts in appatalks/cs-proxy' });
+  const shortRemediationRoute = harness.resolveNavigationRequest('Fix dependency alerts with cs-proxy repo.', { directUser: true });
+  assert.strictEqual(shortRemediationRoute.action, 'run_repository_remediation');
+  assert.strictEqual(shortRemediationRoute.repositoryName, 'cs-proxy');
+  assert.strictEqual(harness.resolveNavigationRequest('Try to resolve some alerts with cs-proxy repo.', { directUser: true }).action, 'run_repository_remediation');
+  const retryRemediationRoute = harness.resolveNavigationRequest('Try again please.', { directUser: true });
+  assert.strictEqual(retryRemediationRoute.action, 'run_repository_remediation');
+  assert.strictEqual(retryRemediationRoute.repositoryName, 'appatalks/cs-proxy');
+  delete localStorage.values.eva_last_repository_remediation;
+  localStorage.setItem('aigMessages', JSON.stringify([
+    { role: 'user', content: 'Try to resolve some alerts with cs-proxy repo.' },
+    { role: 'assistant', content: 'I will locate it.' }
+  ]));
+  const recoveredRetryRoute = harness.resolveNavigationRequest('Eva can you try again please. I updated your permissions.', { directUser: true });
+  assert.strictEqual(recoveredRetryRoute.action, 'run_repository_remediation');
+  assert.strictEqual(recoveredRetryRoute.repositoryName, 'cs-proxy');
   const workspaceToolsRoute = harness.resolveNavigationRequest("for the LLM Assist Private, what's the enabled tool?", { directUser: true });
   assert.strictEqual(workspaceToolsRoute.action, 'describe_workspace_tools');
   assert.strictEqual(workspaceToolsRoute.projectName, 'LLM Assist Private');

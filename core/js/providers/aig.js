@@ -263,6 +263,9 @@ async function aigSend() {
         lmstudio_available: aigLmStudioAvailable(),
         github_pat: (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : '',
         openai_api_key: (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : '',
+        acp_auto_approve: !!(window.EvaWorkspaces &&
+          typeof window.EvaWorkspaces.isAutoApproveEnabled === 'function' &&
+          window.EvaWorkspaces.isAutoApproveEnabled()),
         stream: true
       })
     });

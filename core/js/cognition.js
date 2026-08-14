@@ -573,6 +573,8 @@
       var signalOnComplete = collaborative && _agentSignalIntent(sourceRequest);
       var groupId = 'group-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
       var sessionId = (typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '';
+      var workspaceProjectId = (window.EvaWorkspaces && typeof window.EvaWorkspaces.currentProjectId === 'function')
+        ? window.EvaWorkspaces.currentProjectId() : '';
       var baseUrl = bridgeUrl().replace(/\/+$/, '');
       var preparedTasks = [];
       for (var i = 0; i < tasks.length; i++) {
@@ -598,6 +600,7 @@
         body: JSON.stringify({
           tasks: preparedTasks,
           session_id: sessionId,
+          workspace_project_id: workspaceProjectId,
           group_id: groupId,
           collaborative: collaborative,
           signal_on_complete: signalOnComplete

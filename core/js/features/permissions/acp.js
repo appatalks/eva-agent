@@ -17,7 +17,6 @@ function _acpPermissionPollDelay() {
 }
 
 function _scheduleACPPermissionPoll(delay) {
-  if (!isEvaStandalone()) return;
   if (_acpPermissionState.timer) clearTimeout(_acpPermissionState.timer);
   _acpPermissionState.timer = setTimeout(function() {
     _acpPermissionState.timer = null;
@@ -26,7 +25,6 @@ function _scheduleACPPermissionPoll(delay) {
 }
 
 function watchACPPermissions(durationMs) {
-  if (!isEvaStandalone()) return;
   var duration = Math.max(0, Number(durationMs) || 0);
   _acpPermissionState.activeUntil = Math.max(_acpPermissionState.activeUntil, Date.now() + duration);
   _scheduleACPPermissionPoll(0);
@@ -83,7 +81,7 @@ function _renderACPPermission(permission) {
 }
 
 function pollACPPermissions() {
-  if (_acpPermissionState.polling || !isEvaStandalone()) return Promise.resolve();
+  if (_acpPermissionState.polling) return Promise.resolve();
   _acpPermissionState.polling = true;
   return backgroundBridgeRequest('/v1/acp/permissions', { headers: getBridgeCapabilityHeaders() })
     .then(function(data) {

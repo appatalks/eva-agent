@@ -36,6 +36,10 @@ _WORKSPACE_SENSITIVE_COMMANDS = {
     "nc", "ncat", "telnet", "ftp", "rsync", "docker", "kubectl", "gh", "aws", "az",
     "gcloud", "npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "poetry", "gem", "cargo",
 }
+_WORKSPACE_AUTONOMY_BLOCKED_EXECUTABLES = {
+    "sudo", "su", "doas", "pkexec", "rm", "shred", "mkfs", "fdisk", "parted", "dd", "mount", "umount",
+    "systemctl", "service", "launchctl",
+}
 _WORKSPACE_SAFE_GIT_SUBCOMMANDS = {"add", "commit", "status", "diff", "log", "show", "rev-parse"}
 _WORKSPACE_SAFE_PACKAGE_SUBCOMMANDS = {"test", "run", "lint", "check", "build"}
 _GH_FILE_OPTIONS = {"--body-file", "--template", "--input"}
@@ -235,6 +239,36 @@ def _workspace_execute_category(tool_call, cwd=None):
 def _workspace_sensitive_execute(tool_call, cwd=None):
     """Return true when a workspace command needs an explicit user decision."""
     return _workspace_execute_category(tool_call, cwd) != "trusted_local"
+
+
+def _workspace_autonomy_block_reason(tool_call, cwd=None):
+    """Return the hard safety reason that prevents autonomous execution."""
+    category = _workspace_execute_category(tool_call, cwd)
+    if category == "secret_or_sensitive_path":
+        return "protected_path"
+    if category in {
+        "missing_command", "parse_error", "shell_composition", "inline_script", "shell_interpreter",
+        "git_configuration_override",
+    }:
+        return "opaque_execution"
+    command = _tool_call_command(tool_call)
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        return "opaque_execution"
+    if not parts:
+        return "opaque_execution"
+    executable = os.path.basename(parts[0]).lower()
+    arguments = parts[1:]
+    if executable in _WORKSPACE_AUTONOMY_BLOCKED_EXECUTABLES:
+        return "destructive_execution"
+    if executable == "git":
+        subcommand = next((argument for argument in arguments if not argument.startswith("-")), "")
+        if subcommand in {"clean", "reset"} or any(
+            argument == "--hard" or argument.startswith("--force") for argument in arguments
+        ):
+            return "destructive_execution"
+    return ""
 
 
 def _hidden_subprocess_options():
@@ -709,55 +743,37 @@ class ACPClient:
                 _telemetry_emit("acp_permission", decision="policy-deny",
                                 tool_kind=tool_kind, option_count=len(options))
             return
-        if permission_mode == "workspace_auto":
+        if workspace_mode:
             allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
-            confined = tool_kind != "edit" or (
-                _workspace_edit_target_is_local(tool_call, self.cwd)
-                and not _workspace_edit_target_is_protected(tool_call)
+            reject_once = next((option for option in options if option["kind"] == "reject_once"), None)
+            reject_option = reject_once or next(
+                (option for option in options if option["kind"] == "reject_always"), None
             )
-            safe_execute = tool_kind != "execute" or execute_category not in {"outside_workspace", "secret_or_sensitive_path"}
-            if allow_once and confined and safe_execute:
-                self._send_response(rpc_id, {
-                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
-                })
-                _telemetry_emit("acp_permission", decision="workspace-auto-approve",
-                                tool_kind=tool_kind, option_count=len(options))
-                return
-            if not confined or not safe_execute:
-                reject_once = next((option for option in options if option["kind"] == "reject_once"), None)
-                reject_option = reject_once or next(
-                    (option for option in options if option["kind"] == "reject_always"), None
-                )
+            block_reason = ""
+            if tool_kind in {"delete", "other"}:
+                block_reason = "unsupported_tool"
+            elif tool_kind == "edit":
+                if _workspace_edit_target_is_protected(tool_call):
+                    block_reason = "protected_path"
+                elif not _workspace_edit_target_is_local(tool_call, self.cwd):
+                    block_reason = "outside_workspace_edit"
+            elif tool_kind == "execute":
+                block_reason = _workspace_autonomy_block_reason(tool_call, self.cwd)
+            if block_reason:
                 if reject_option:
                     self._send_response(rpc_id, {
                         "outcome": {"outcome": "selected", "optionId": reject_option["option_id"]}
                     })
                 else:
-                    self._send_rpc_error(rpc_id, -32602, "Workspace auto approval cannot leave the assigned root or access protected paths")
-                _telemetry_emit("acp_permission", decision="workspace-auto-reject-boundary",
+                    self._send_response(rpc_id, {"outcome": {"outcome": "cancelled"}})
+                _telemetry_emit("acp_permission", decision="workspace-autonomy-reject-" + block_reason,
                                 tool_kind=tool_kind, option_count=len(options))
                 return
-        if workspace_mode:
-            allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
-            if tool_kind in {"read", "search", "fetch", "think"} and allow_once:
+            if allow_once:
                 self._send_response(rpc_id, {
                     "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
                 })
-                _telemetry_emit("acp_permission", decision="workspace-auto-allow-tool",
-                                tool_kind=tool_kind, option_count=len(options))
-                return
-            if tool_kind == "edit" and allow_once and _workspace_edit_target_is_local(tool_call, self.cwd):
-                self._send_response(rpc_id, {
-                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
-                })
-                _telemetry_emit("acp_permission", decision="workspace-auto-allow-edit",
-                                tool_kind=tool_kind, option_count=len(options))
-                return
-            if tool_kind == "execute" and allow_once and not _workspace_sensitive_execute(tool_call, self.cwd):
-                self._send_response(rpc_id, {
-                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
-                })
-                _telemetry_emit("acp_permission", decision="workspace-auto-allow-execute",
+                _telemetry_emit("acp_permission", decision="workspace-autonomy-approve",
                                 tool_kind=tool_kind, option_count=len(options))
                 return
         allow_once = next((option for option in options if option["kind"] == "allow_once"), None)

@@ -1,4 +1,32 @@
 var EvaWorkspaces = (function() {
+  var WORKSPACE_DISPLAY_STATE_STORAGE_KEY = 'eva.workspaceMonitorDisplay.v1';
+
+  function workspaceDisplayState() {
+    function booleanMap(value) {
+      var output = {};
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return output;
+      Object.keys(value).forEach(function(id) {
+        if (value[id] === true) output[String(id).slice(0, 120)] = true;
+      });
+      return output;
+    }
+    try {
+      var saved = JSON.parse(localStorage.getItem(WORKSPACE_DISPLAY_STATE_STORAGE_KEY) || '{}');
+      return {
+        clearedActivityProjectIds: booleanMap(saved.clearedActivityProjectIds),
+        clearedCodingRunProjectIds: booleanMap(saved.clearedCodingRunProjectIds),
+        clearedResultRunIds: booleanMap(saved.clearedResultRunIds)
+      };
+    } catch (_) {
+      return {
+        clearedActivityProjectIds: {},
+        clearedCodingRunProjectIds: {},
+        clearedResultRunIds: {}
+      };
+    }
+  }
+
+  var savedDisplayState = workspaceDisplayState();
   var state = {
     projects: [],
     runs: [],
@@ -19,8 +47,9 @@ var EvaWorkspaces = (function() {
     permissionSignature: '',
     monitorRunStates: {},
     monitorActivity: [],
-    clearedCodingRunProjectIds: {},
-    clearedResultRunIds: {},
+    clearedActivityProjectIds: savedDisplayState.clearedActivityProjectIds,
+    clearedCodingRunProjectIds: savedDisplayState.clearedCodingRunProjectIds,
+    clearedResultRunIds: savedDisplayState.clearedResultRunIds,
     lastMonitorVoiceAt: 0,
     lastPeriodicNoteAt: 0,
     lastCheckedAt: 0,
@@ -42,10 +71,40 @@ var EvaWorkspaces = (function() {
   function autoApprovePreference(value) {
     try {
       if (typeof value === 'boolean') localStorage.setItem('workspaceAutoApprove', value ? 'true' : 'false');
-      return localStorage.getItem('workspaceAutoApprove') === 'true';
+      return localStorage.getItem('workspaceAutoApprove') !== 'false';
     } catch (_) {
-      return false;
+      return true;
     }
+  }
+
+  function currentProjectId() {
+    return state.selectedProjectId;
+  }
+
+  function persistWorkspaceDisplayState() {
+    try {
+      localStorage.setItem(WORKSPACE_DISPLAY_STATE_STORAGE_KEY, JSON.stringify({
+        clearedActivityProjectIds: state.clearedActivityProjectIds,
+        clearedCodingRunProjectIds: state.clearedCodingRunProjectIds,
+        clearedResultRunIds: state.clearedResultRunIds
+      }));
+    } catch (_) {}
+  }
+
+  function pruneWorkspaceDisplayState() {
+    var projectIds = {};
+    var runIds = {};
+    state.projects.forEach(function(project) { projectIds[project.id] = true; });
+    state.runs.forEach(function(run) { runIds[run.id] = true; });
+    [state.clearedActivityProjectIds, state.clearedCodingRunProjectIds].forEach(function(entries) {
+      Object.keys(entries).forEach(function(id) {
+        if (!projectIds[id]) delete entries[id];
+      });
+    });
+    Object.keys(state.clearedResultRunIds).forEach(function(id) {
+      if (!runIds[id]) delete state.clearedResultRunIds[id];
+    });
+    persistWorkspaceDisplayState();
   }
 
   function panel() {
@@ -109,6 +168,7 @@ var EvaWorkspaces = (function() {
     if (run) {
       state.selectedProjectId = run.projectId;
       delete state.clearedResultRunIds[run.id];
+      persistWorkspaceDisplayState();
     }
     renderProjects();
     renderRuns();
@@ -243,10 +303,24 @@ var EvaWorkspaces = (function() {
       state.selectedRunId = updated.id;
       await refresh();
       status('Workspace agent retry started.', 'success');
+      return updated;
     } catch (error) {
       status(error.message || 'Workspace agent retry failed.', 'error');
       setBusy(false);
     }
+  }
+
+  async function retryRunById(runId) {
+    if (!state.runs.length) await refresh();
+    var requestedRunId = String(runId || '').trim();
+    var run = state.runs.find(function(item) { return item.id === requestedRunId; }) ||
+      state.runs.find(function(item) { return item.id === state.selectedRunId; });
+    if (!run) throw new Error('Select an active workspace run before retrying it.');
+    if (run.status !== 'active' || (run.agent && ['starting', 'running', 'steering'].indexOf(run.agent.status) >= 0)) {
+      throw new Error('This workspace run is already active or cannot be retried.');
+    }
+    await retryWorkspaceRun(run);
+    return 'Workspace agent retry started for ' + (run.project ? run.project.name : 'the selected workspace') + '.';
   }
 
   function appendWorkspacePermissions(detail, run) {
@@ -537,17 +611,26 @@ var EvaWorkspaces = (function() {
   function clearSelectedProjectActivity() {
     var project = projectById(state.selectedProjectId);
     if (!project) return;
-    state.monitorActivity = state.monitorActivity.filter(function(entry) {
-      return entry.projectId !== project.id;
-    });
+    state.clearedActivityProjectIds[project.id] = true;
+    persistWorkspaceDisplayState();
     renderWorkbench();
     status('Cleared Eva activity for ' + project.name + '.', 'success');
+  }
+
+  function showSelectedProjectActivity() {
+    var project = projectById(state.selectedProjectId);
+    if (!project) return;
+    delete state.clearedActivityProjectIds[project.id];
+    persistWorkspaceDisplayState();
+    renderWorkbench();
+    status('Restored Eva activity for ' + project.name + '.', 'success');
   }
 
   function clearSelectedRunResult() {
     var run = state.runs.find(function(item) { return item.id === state.selectedRunId; });
     if (!run) return;
     state.clearedResultRunIds[run.id] = true;
+    persistWorkspaceDisplayState();
     renderWorkbench();
     status('Cleared the displayed result for this coding run.', 'success');
   }
@@ -556,6 +639,7 @@ var EvaWorkspaces = (function() {
     var project = projectById(state.selectedProjectId);
     if (!project) return;
     state.clearedCodingRunProjectIds[project.id] = true;
+    persistWorkspaceDisplayState();
     renderWorkbench();
     status('Cleared the coding runs display for ' + project.name + '.', 'success');
   }
@@ -564,6 +648,7 @@ var EvaWorkspaces = (function() {
     var project = projectById(state.selectedProjectId);
     if (!project) return;
     delete state.clearedCodingRunProjectIds[project.id];
+    persistWorkspaceDisplayState();
     renderWorkbench();
     status('Restored the coding runs display for ' + project.name + '.', 'success');
   }
@@ -572,6 +657,7 @@ var EvaWorkspaces = (function() {
     var run = state.runs.find(function(item) { return item.id === state.selectedRunId; });
     if (!run) return;
     delete state.clearedResultRunIds[run.id];
+    persistWorkspaceDisplayState();
     renderWorkbench();
     status('Restored the displayed result for this coding run.', 'success');
   }
@@ -604,9 +690,10 @@ var EvaWorkspaces = (function() {
       }
       if (event.target.closest('#workspaceMonitorFeed')) {
         if (state.selectedProjectId) {
+          var activityCleared = state.clearedActivityProjectIds[state.selectedProjectId] === true;
           showWorkspaceContextMenu(event, [{
-            label: 'Clear activity display',
-            action: clearSelectedProjectActivity
+            label: activityCleared ? 'Show activity display' : 'Clear activity display',
+            action: activityCleared ? showSelectedProjectActivity : clearSelectedProjectActivity
           }]);
         }
         return;
@@ -1031,13 +1118,16 @@ var EvaWorkspaces = (function() {
     var selectedProject = projectById(state.selectedProjectId);
     var activityTitle = document.getElementById('workspaceMonitorActivityTitle');
     if (activityTitle) activityTitle.textContent = selectedProject ? 'EVA ACTIVITY: ' + selectedProject.name : 'EVA ACTIVITY';
-    var projectActivity = state.monitorActivity.filter(function(entry) {
+    var activityCleared = state.clearedActivityProjectIds[state.selectedProjectId] === true;
+    var projectActivity = activityCleared ? [] : state.monitorActivity.filter(function(entry) {
       return entry.projectId === state.selectedProjectId;
     });
     if (!projectActivity.length) {
       var emptyActivity = document.createElement('li');
       emptyActivity.className = 'workspace-monitor-empty';
-      emptyActivity.textContent = selectedProject ? 'No Eva activity recorded for this workspace.' : 'Select a workspace to view Eva activity.';
+      emptyActivity.textContent = activityCleared
+        ? 'Activity display cleared. Click Show to restore it.'
+        : selectedProject ? 'No Eva activity recorded for this workspace.' : 'Select a workspace to view Eva activity.';
       feed.appendChild(emptyActivity);
     }
     projectActivity.forEach(function(entry) {
@@ -1054,10 +1144,10 @@ var EvaWorkspaces = (function() {
     });
     configureWorkbenchDisplayControl(
       'workspaceActivityDisplayBtn',
-      'CLEAR',
-      'Clear activity display',
-      clearSelectedProjectActivity,
-      !projectActivity.length
+      activityCleared ? 'SHOW' : 'CLEAR',
+      activityCleared ? 'Show activity display' : 'Clear activity display',
+      activityCleared ? showSelectedProjectActivity : clearSelectedProjectActivity,
+      !selectedProject || (!activityCleared && !projectActivity.length)
     );
 
     detail.replaceChildren();
@@ -1113,7 +1203,7 @@ var EvaWorkspaces = (function() {
         openWorkspaceTerminal(selected.checkout.id, (selected.project ? selected.project.name + ' | ' : '') + (selected.checkout.branch || 'worktree'));
       });
       actions.appendChild(terminalButton);
-      if (selected.status === 'active' && selected.agent && selected.agent.status === 'error') {
+      if (selected.status === 'active' && (!selected.agent || selected.agent.status === 'error')) {
         var retryButton = document.createElement('button');
         retryButton.type = 'button';
         retryButton.textContent = 'Retry run';
@@ -1207,6 +1297,7 @@ var EvaWorkspaces = (function() {
       var changed = signature !== state.monitorSignature;
       var shouldRender = changed || permissionsChanged;
       state.runs = runs;
+      pruneWorkspaceDisplayState();
       state.lastTerminals = terminals;
       state.lastCheckedAt = Date.now();
       narrateRunChanges(state.runs);
@@ -1269,6 +1360,7 @@ var EvaWorkspaces = (function() {
       state.projects = await api().workspaceListProjects();
       if (!state.selectedProjectId && state.projects.length) state.selectedProjectId = state.projects[0].id;
       state.runs = await api().workspaceListRuns();
+      pruneWorkspaceDisplayState();
       if (state.selectedRunId && !state.runs.some(function(run) { return run.id === state.selectedRunId; })) state.selectedRunId = '';
       renderProjects();
       renderRuns();
@@ -1455,7 +1547,7 @@ var EvaWorkspaces = (function() {
     status('Loading GitHub repositories...', 'loading');
     try {
       var repositories = await api().workspaceListGitHubRepositories();
-      repositories = Array.isArray(repositories) ? repositories.slice(0, 20) : [];
+      repositories = Array.isArray(repositories) ? repositories : [];
       state.githubRepositories = repositories;
       state.githubRepositoriesCollapsed = false;
       renderGitHubRepositories();
@@ -1566,6 +1658,48 @@ var EvaWorkspaces = (function() {
     if (!matches.length) throw new Error('No listed GitHub repository matched "' + repositoryName + '". List your repositories and use the displayed name.');
     if (matches.length > 1) throw new Error('More than one repository matched. Use the full owner/repository name.');
     return importGitHubProject(matches[0].url);
+  }
+
+  async function startRepositoryRemediation(repositoryName, objectiveValue) {
+    if (!supported()) throw new Error('Workspace agent execution is unavailable in this Eva launch.');
+    var repositoryQuery = String(repositoryName || '').trim().replace(/^https:\/\/github\.com\//i, '').replace(/\.git$/i, '').toLowerCase();
+    if (!/^[a-z0-9_.-]+(?:\/[a-z0-9_.-]+)?$/i.test(repositoryQuery)) {
+      throw new Error('Use an exact GitHub repository name such as repository or owner/repository for remediation.');
+    }
+    var objective = String(objectiveValue || '').trim();
+    if (!objective) throw new Error('Describe the remediation objective first.');
+    if (!state.projects.length) await refresh();
+    var project = state.projects.filter(function(item) {
+      return String(item.name || '').trim().toLowerCase() === repositoryQuery;
+    })[0];
+    if (!project) {
+      if (!state.githubRepositories.length) await listGitHubRepositories();
+      var repositories = state.githubRepositories.filter(function(repository) {
+        return String(repository.fullName || '').trim().toLowerCase() === repositoryQuery ||
+          String(repository.name || '').trim().toLowerCase() === repositoryQuery;
+      });
+      if (repositories.length !== 1) {
+        throw new Error('GitHub repository "' + repositoryName + '" was not available from the authenticated repository list.');
+      }
+      project = await importGitHubProject(repositories[0].url);
+    }
+    if (!project || !project.id) throw new Error('GitHub workspace import did not return a project.');
+    state.selectedProjectId = project.id;
+    var run = await createWorkspaceRun(project.id, objective, 'HEAD', { autoApprove: true, throwOnError: true });
+    try {
+      localStorage.setItem('eva_last_repository_remediation', JSON.stringify({
+        repositoryName: project.name,
+        objective: objective
+      }));
+    } catch (_) {}
+    return {
+      runId: run.id,
+      projectName: project.name,
+      dispatchError: run.dispatchError || '',
+      message: run.dispatchError
+        ? 'Created Workspace run ' + run.id + ' for ' + project.name + ', but dispatch is delayed: ' + run.dispatchError
+        : 'Started Workspace run ' + run.id + ' for ' + project.name + '.'
+    };
   }
 
   async function removeProject(project) {
@@ -1906,11 +2040,15 @@ var EvaWorkspaces = (function() {
     listGitHubRepositories: listGitHubRepositories,
     continueGitHubRepositories: continueGitHubRepositories,
     authorizeGitHub: authorizeGitHub,
+    isAutoApproveEnabled: autoApprovePreference,
+    currentProjectId: currentProjectId,
     removeProjectByName: removeProjectByName,
     setProjectMcpServerByName: setProjectMcpServerByName,
     verifyProjectMcpServerByName: verifyProjectMcpServerByName,
+    retryRun: retryRunById,
     runSelectedCheck: runSelectedCheck,
     importGitHubSelection: importGitHubSelection,
+    startRepositoryRemediation: startRepositoryRemediation,
     promptGitHubImport: function(repositoryUrl) { return importGitHubProject(repositoryUrl, true); }
   };
 })();

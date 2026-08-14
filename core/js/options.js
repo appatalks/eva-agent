@@ -1781,7 +1781,7 @@ async function sendData() {
           if (typeof setStatus === 'function') {
             setStatus(nativeResult.ok ? 'info' : 'error', nativeResult.message);
           }
-          if (nativeRoute.action === 'run_workspace_check' || nativeRoute.action === 'describe_workspace_tools') {
+          if (nativeRoute.action === 'run_workspace_check' || nativeRoute.action === 'run_repository_remediation' || nativeRoute.action === 'describe_workspace_tools') {
             injectWorkspaceStatusBubble(nativeResult.message, nativeResult.ok ? 'working' : 'error');
           }
           if (typeof recordConversationTurn === 'function') recordConversationTurn(protectedRawText, nativeResult.message);

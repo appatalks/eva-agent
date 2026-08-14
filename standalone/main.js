@@ -419,7 +419,7 @@ async function workspaceListGitHubRepositories(event) {
     timeout: 15000
   };
   const payload = await new Promise(function(resolve, reject) {
-    const request = https.request('https://api.github.com/user/repos?affiliation=owner&sort=updated&per_page=20', requestOptions, function(response) {
+    const request = https.request('https://api.github.com/user/repos?affiliation=owner&sort=updated&per_page=100', requestOptions, function(response) {
       const chunks = [];
       let size = 0;
       response.on('data', function(chunk) { size += chunk.length; if (size <= 1024 * 1024) chunks.push(chunk); });

@@ -75,6 +75,12 @@ class AigRequestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "No user message"):
             self.normalize({"messages": [{"role": "assistant", "content": "only"}]})
 
+    def test_normalizes_explicit_acp_auto_approval(self):
+        self.assertTrue(self.normalize({"user_message": "fix the alerts", "acp_auto_approve": True})["acp_auto_approve"])
+        self.assertFalse(self.normalize({"user_message": "fix the alerts"})["acp_auto_approve"])
+        with self.assertRaisesRegex(ValueError, "acp_auto_approve"):
+            self.normalize({"user_message": "fix the alerts", "acp_auto_approve": "true"})
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

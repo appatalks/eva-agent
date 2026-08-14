@@ -79,10 +79,45 @@ var EvaHarness = (function() {
     return aliases[target] || target;
   }
 
+  function repositoryRemediationRoute(rawPhrase) {
+    var match = String(rawPhrase || '').trim().match(/^(?:please\s+)?(?:try\s+to\s+)?(?:resolve|fix|remediate|address|update)\b[\s\S]{0,180}\b(?:dependabot|dependency|dependencies|codeql|security|alerts?)\b[\s\S]{0,100}\b(?:in|for|on|with)\s+(?:the\s+)?([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?)(?:\s+(?:repo|repository))?[.!?]*$/i);
+    if (!match) return null;
+    return {
+      action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Remediation',
+      repositoryName: String(match[1] || '').replace(/[.!?]+$/g, ''), objective: String(rawPhrase || '').replace(/[.!?]+$/g, '').trim()
+    };
+  }
+
+  function recentRemediationContext() {
+    try {
+      var messages = JSON.parse(localStorage.getItem('aigMessages') || '[]');
+      if (!Array.isArray(messages)) return null;
+      for (var index = messages.length - 1; index >= 0; index--) {
+        var message = messages[index] || {};
+        if (message.role !== 'user' || typeof message.content !== 'string') continue;
+        var route = repositoryRemediationRoute(message.content);
+        if (route) return { repositoryName: route.repositoryName, objective: route.objective };
+      }
+    } catch (_) {}
+    return null;
+  }
+
   function resolveNavigationRequest(value, options) {
     var rawPhrase = String(value || '').trim();
     var phrase = rawPhrase.toLowerCase();
     var directUser = !!(options && options.directUser);
+    var lastRemediation = null;
+    try {
+      var savedRemediation = JSON.parse(localStorage.getItem('eva_last_repository_remediation') || 'null');
+      if (savedRemediation && typeof savedRemediation === 'object' &&
+          /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?$/.test(String(savedRemediation.repositoryName || '')) &&
+          String(savedRemediation.objective || '').trim()) {
+        lastRemediation = {
+          repositoryName: String(savedRemediation.repositoryName),
+          objective: String(savedRemediation.objective).slice(0, 4000)
+        };
+      }
+    } catch (_) {}
     var workspaceDescription = /\b(?:tell me|describe|list|summarize|summary|what|which)\b[\s\S]{0,48}\b(?:current\s+)?workspaces?\b|\bworkspaces?\b[\s\S]{0,32}\b(?:do i have|are available|can you access|current)\b/.test(phrase);
     if (workspaceDescription) return { action: 'describe_workspaces', target: 'workspaces', label: 'Workspaces' };
     var ownedRepositoryPhrase = '(?:my\\s+(?:github\\s+)?(?:repositories|repos)|owned\\s+(?:github\\s+)?(?:repositories|repos)|(?:github\\s+)?(?:repositories|repos)\\s+(?:that\\s+)?i\\s+own)';
@@ -108,6 +143,17 @@ var EvaHarness = (function() {
       return { action: 'list_github_repositories', target: 'workspaces', label: 'GitHub Repositories' };
     }
     if (directUser) {
+      var explicitRemediation = repositoryRemediationRoute(rawPhrase);
+      if (explicitRemediation) return explicitRemediation;
+      if (/\b(?:try|retry|rerun|resume|continue)\s+(?:again|it|that|the\s+(?:task|work|remediation))\b/i.test(rawPhrase)) {
+        var retryRemediation = lastRemediation || recentRemediationContext();
+        if (retryRemediation) {
+          return {
+            action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Remediation',
+            repositoryName: retryRemediation.repositoryName, objective: retryRemediation.objective
+          };
+        }
+      }
       var workspaceRemoval = rawPhrase.match(/^(?:please\s+)?(?:remove|delete|forget)\s+(?:the\s+)?(?:workspace|project|repository|repo)\s+(.+?)[.!?]*$/i);
       if (workspaceRemoval) {
         return {
@@ -129,6 +175,13 @@ var EvaHarness = (function() {
         return {
           action: 'run_workspace_check', target: 'workspaces', label: 'Workspace Check',
           objective: rawPhrase.replace(/[.!?]+$/g, '').trim()
+        };
+      }
+      var workspaceRetry = rawPhrase.match(/^(?:please\s+)?(?:retry|resume|redispatch)\s+(?:the\s+)?(?:workspace|coding)\s+run(?:\s+([A-Za-z0-9-]+))?[.!?]*$/i);
+      if (workspaceRetry) {
+        return {
+          action: 'retry_workspace_run', target: 'workspaces', label: 'Workspace Retry',
+          runId: String(workspaceRetry[1] || '').replace(/[.!?]+$/g, '').trim()
         };
       }
       var githubContinuation = /^(?:please\s+)?(?:continue|proceed|go ahead)\b/i.test(rawPhrase) &&
@@ -307,7 +360,18 @@ var EvaHarness = (function() {
       'list_github_repositories', 'continue_github_repositories', 'import_github',
       'import_github_selection', 'authorize_github'
     ].indexOf(userNativeRoute.action) >= 0;
-    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization) {
+    var modelWorkspaceMcp = action === 'set_workspace_mcp_server' && userNativeRoute &&
+      userNativeRoute.action === 'set_workspace_mcp_server' &&
+      String(request.serverName || '').toLowerCase() === String(userNativeRoute.serverName || '').toLowerCase() &&
+      request.enabled === userNativeRoute.enabled;
+    var modelWorkspaceRetry = action === 'retry_workspace_run' && userNativeRoute &&
+      userNativeRoute.action === 'retry_workspace_run' &&
+      (!request.runId || request.runId === userNativeRoute.runId);
+    var modelRepositoryRemediation = action === 'run_repository_remediation' && userNativeRoute &&
+      userNativeRoute.action === 'run_repository_remediation' &&
+      String(request.repositoryName || '').toLowerCase() === String(userNativeRoute.repositoryName || '').toLowerCase() &&
+      String(request.objective || '') === String(userNativeRoute.objective || '');
+    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelRepositoryRemediation) {
       return result(false, action, 'This native action requires direct user interaction.');
     }
     if (action === 'navigate') return navigate(request.target);
@@ -376,6 +440,16 @@ var EvaHarness = (function() {
         return result(false, 'set_workspace_mcp_server', error && error.message ? error.message : 'Workspace MCP server update failed.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
+    if (action === 'retry_workspace_run') {
+      if (!window.EvaWorkspaces || typeof EvaWorkspaces.retryRun !== 'function') return Promise.resolve(result(false, 'retry_workspace_run', 'Workspace retry is unavailable in this Eva build.'));
+      var openedRetryWorkspaces = navigate('workspaces');
+      if (!openedRetryWorkspaces.ok) return Promise.resolve(openedRetryWorkspaces);
+      return Promise.resolve(EvaWorkspaces.retryRun(request.runId)).then(function(message) {
+        return result(true, 'retry_workspace_run', message, { outcome: 'started' });
+      }).catch(function(error) {
+        return result(false, 'retry_workspace_run', error && error.message ? error.message : 'Workspace retry failed.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
     if (action === 'verify_workspace_mcp_server') {
       if (!window.EvaWorkspaces || typeof EvaWorkspaces.verifyProjectMcpServerByName !== 'function') return Promise.resolve(result(false, 'verify_workspace_mcp_server', 'Workspace MCP verification is unavailable in this Eva build.'));
       var openedVerificationWorkspaces = navigate('workspaces');
@@ -398,6 +472,24 @@ var EvaHarness = (function() {
         });
       }).catch(function(error) {
         return result(false, 'run_workspace_check', error && error.message ? error.message : 'Workspace check could not start.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'run_repository_remediation') {
+      if (!window.EvaWorkspaces || typeof EvaWorkspaces.startRepositoryRemediation !== 'function') return Promise.resolve(result(false, 'run_repository_remediation', 'Repository remediation is unavailable in this Eva build.'));
+      var openedRemediationWorkspaces = navigate('workspaces');
+      if (!openedRemediationWorkspaces.ok) return Promise.resolve(openedRemediationWorkspaces);
+      return Promise.resolve(EvaWorkspaces.startRepositoryRemediation(request.repositoryName, request.objective)).then(function(started) {
+        try {
+          localStorage.setItem('eva_last_repository_remediation', JSON.stringify({
+            repositoryName: started.projectName || request.repositoryName,
+            objective: request.objective
+          }));
+        } catch (_) {}
+        return result(true, 'run_repository_remediation', started.message, {
+          outcome: started.dispatchError ? 'delayed' : 'started', runId: started.runId || '', projectName: started.projectName || ''
+        });
+      }).catch(function(error) {
+        return result(false, 'run_repository_remediation', error && error.message ? error.message : 'Repository remediation could not start.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
     if (action === 'import_github_selection') {
@@ -498,7 +590,7 @@ var EvaHarness = (function() {
 
   function capabilities() {
     return {
-      actions: ['navigate', 'refresh', 'describe_workspaces', 'describe_workspace_tools', 'remove_workspace', 'list_github_repositories', 'continue_github_repositories', 'authorize_github', 'set_workspace_mcp_server', 'verify_workspace_mcp_server', 'import_github', 'run_terminal_command', 'type_terminal_command', 'plan_terminal_task', 'consider_terminal_task', 'inspect_form', 'set_field', 'submit_form', 'cancel_form', 'new_chat', 'voice_control'],
+      actions: ['navigate', 'refresh', 'describe_workspaces', 'describe_workspace_tools', 'remove_workspace', 'list_github_repositories', 'continue_github_repositories', 'authorize_github', 'set_workspace_mcp_server', 'verify_workspace_mcp_server', 'retry_workspace_run', 'run_repository_remediation', 'import_github', 'run_terminal_command', 'type_terminal_command', 'plan_terminal_task', 'consider_terminal_task', 'inspect_form', 'set_field', 'submit_form', 'cancel_form', 'new_chat', 'voice_control'],
       surfaces: Object.keys(navigation),
       aliases: Object.keys(aliases),
       nativeOnly: true
@@ -506,7 +598,7 @@ var EvaHarness = (function() {
   }
 
   function promptContract() {
-    var contract = '\n\nNATIVE EVA HARNESS:\nFor Eva application controls, use [[EVA_HARNESS]]{"action":"navigate","target":"workspaces"}[[/EVA_HARNESS]] instead of browser or desktop automation. Navigate targets: workspaces, skills, memory, assets, sessions, terminal, settings, models, personality, goals, background_jobs, schedules, accounts, tools_memory, learning, profile, voice, and agent_operations. To list or summarize current coding workspaces, use [[EVA_HARNESS]]{"action":"describe_workspaces"}[[/EVA_HARNESS]]. To list the user\'s owned GitHub repositories, use [[EVA_HARNESS]]{"action":"list_github_repositories"}[[/EVA_HARNESS]] and present its returned URLs for user selection. To import a GitHub repository only after the user explicitly requests that import and its exact HTTPS URL is known, use [[EVA_HARNESS]]{"action":"import_github","repository_url":"https://github.com/owner/repository"}[[/EVA_HARNESS]]. When an explicit GitHub listing or import request needs repository authorization, use [[EVA_HARNESS]]{"action":"authorize_github"}[[/EVA_HARNESS]]; this opens a native device-code flow and never exposes a token. Workspace-local MCP servers come from each imported project\'s mcp.json and are isolated from global MCP configuration. A direct user can request a named workspace MCP module be enabled; do not use browser or desktop automation for it. Do not open an empty import form or use browser, terminal, or desktop control for GitHub repository listing/import. Terminal commands execute only from a direct user request and cannot be initiated by a model marker. Native forms support inspect_form, set_field, submit_form, and cancel_form for direct user interaction. Other actions: new_chat and voice_control with optional enabled:false. These actions control Eva directly; never use browser, screenshots, or desktop automation for those same Eva surfaces.';
+    var contract = '\n\nNATIVE EVA HARNESS:\nFor Eva application controls, use [[EVA_HARNESS]]{"action":"navigate","target":"workspaces"}[[/EVA_HARNESS]] instead of browser or desktop automation. Navigate targets: workspaces, skills, memory, assets, sessions, terminal, settings, models, personality, goals, background_jobs, schedules, accounts, tools_memory, learning, profile, voice, and agent_operations. To list or summarize current coding workspaces, use [[EVA_HARNESS]]{"action":"describe_workspaces"}[[/EVA_HARNESS]]. To list the user\'s owned GitHub repositories, use [[EVA_HARNESS]]{"action":"list_github_repositories"}[[/EVA_HARNESS]] and present its returned URLs for user selection. To import a GitHub repository only after the user explicitly requests that import and its exact HTTPS URL is known, use [[EVA_HARNESS]]{"action":"import_github","repository_url":"https://github.com/owner/repository"}[[/EVA_HARNESS]]. When an explicit GitHub listing or import request needs repository authorization, use [[EVA_HARNESS]]{"action":"authorize_github"}[[/EVA_HARNESS]]; this opens a native device-code flow and never exposes a token. Workspace-local MCP servers come from each imported project\'s mcp.json and are isolated from global MCP configuration. When the user explicitly requests a named module, enable it with [[EVA_HARNESS]]{"action":"set_workspace_mcp_server","serverName":"<name>","enabled":true,"projectName":"<optional project>"}[[/EVA_HARNESS]]. When an explicit user request asks to retry a delayed coding run, use [[EVA_HARNESS]]{"action":"retry_workspace_run","runId":"<optional run id>"}[[/EVA_HARNESS]]. Do not use browser or desktop automation for these native workspace operations. Do not open an empty import form or use browser, terminal, or desktop control for GitHub repository listing/import. Terminal commands execute only from a direct user request and cannot be initiated by a model marker. Native forms support inspect_form, set_field, submit_form, and cancel_form for direct user interaction. Other actions: new_chat and voice_control with optional enabled:false. These actions control Eva directly; never use browser, screenshots, or desktop automation for those same Eva surfaces.';
     if (typeof evaTextPromptDescribe === 'function') {
       var schema = evaTextPromptDescribe();
       if (schema.open) contract += '\nCURRENT NATIVE FORM: ' + JSON.stringify(schema);
