@@ -223,9 +223,8 @@ var EvaHarness = (function() {
           };
         }
       }
-      var workspaceRemoval = rawPhrase.match(/^(?:please\s+)?(?:remove|delete|forget)\s+(?:the\s+)?(?:workspace|workspaces|project|projects|repository|repositories|repo|repos)\s+(.+?)[.!?]*$/i);
       var suffixedWorkspaceRemoval = rawPhrase.match(/^(?:please\s+)?(?:remove|delete|forget)\s+(?:the\s+)?(.+?)\s+(?:workspace|workspaces|project|projects|repository|repositories|repo|repos)(?:\s*,[\s\S]*)?[.!?]*$/i);
-      workspaceRemoval = workspaceRemoval || suffixedWorkspaceRemoval;
+      var workspaceRemoval = suffixedWorkspaceRemoval || rawPhrase.match(/^(?:please\s+)?(?:remove|delete|forget)\s+(?:the\s+)?(?:workspace|workspaces|project|projects|repository|repositories|repo|repos)\s+(.+?)[.!?]*$/i);
       if (workspaceRemoval) {
         return {
           action: 'remove_workspace', target: 'workspaces', label: 'Workspace Removal',
