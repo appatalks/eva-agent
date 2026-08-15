@@ -82,6 +82,7 @@ var EvaHarness = (function() {
     { id: 'set_skill_status', description: 'Enable or disable a named Skill after an explicit direct user request. args: {skillName, status}.' },
     { id: 'delete_skill', description: 'Delete a named Skill after an explicit direct user request. args: {skillName}.' },
     { id: 'run_skill', description: 'Resolve and run a named active Skill from an explicit direct user request. args: {requestText}.' },
+    { id: 'run_bounded_skill', description: 'Execute one bounded local document or MCP-builder operation, including PDF forms/tables/OCR, office PDF rendering, and XLSX recalculation. args: {skill, operation, root?, input?, inputs?, output?, options?}.' },
     { id: 'open_external_url', description: 'Open a credential-free HTTPS URL explicitly supplied by the user or verified inside a named active Skill. args: {url, skillName?}.' },
     { id: 'describe_sessions', description: 'Open Sessions and summarize saved chat sessions. Read-only.' },
     { id: 'describe_agents', description: 'Open Agent Operations and summarize active and recent agents. Read-only.' },
@@ -119,6 +120,43 @@ var EvaHarness = (function() {
   function resolveSurface(value) {
     var target = normalize(value);
     return aliases[target] || target;
+  }
+
+  function boundedSkillIntent(value) {
+    var phrase = String(value || '').trim().toLowerCase();
+    var skill = '';
+    if (/\b(?:docx|word\s+document|word\s+file)\b/.test(phrase)) skill = 'docx';
+    else if (/\bpdf\b/.test(phrase)) skill = 'pdf';
+    else if (/\b(?:pptx|powerpoint|presentation|slide\s+deck)\b/.test(phrase)) skill = 'pptx';
+    else if (/\b(?:xlsx|excel|spreadsheet|workbook)\b/.test(phrase)) skill = 'xlsx';
+    else if (/\b(?:mcp\s+server|fastmcp|mcp\s+builder)\b/.test(phrase)) skill = 'mcp-builder';
+    if (!skill) return null;
+    var operation = /\b(?:inspect|list|show)\b[^.\n]{0,80}\b(?:acroform|forms?|form\s+fields?|fields?\s+in\s+(?:the\s+)?pdf)\b/.test(phrase) && skill === 'pdf' ? 'inspect-form' :
+      /\b(?:fill|populate)\b[^.\n]{0,80}\bform\b/.test(phrase) && skill === 'pdf' ? 'fill-form' :
+      /\b(?:ocr|optical\s+character\s+recognition)\b/.test(phrase) && skill === 'pdf' ? 'ocr' :
+      /\btables?\b/.test(phrase) && skill === 'pdf' ? 'tables' :
+      /\brender\b/.test(phrase) && (skill === 'docx' || skill === 'pptx') ? 'render' :
+      /\bconvert\b[^.\n]{0,80}\b(?:pdf|portable\s+document)\b/.test(phrase) && (skill === 'docx' || skill === 'pptx') ? 'render' :
+      /\b(?:recalculate|recalc)\b/.test(phrase) ? 'recalculate' :
+      /\bmerge\b/.test(phrase) && skill === 'pdf' ? 'merge' :
+      /\bsplit\b/.test(phrase) && skill === 'pdf' ? 'split' :
+      /\bextract\b/.test(phrase) && skill === 'pdf' ? 'extract' :
+      /\b(?:edit|replace|update|set\s+(?:cell|text)|append)\b/.test(phrase) ? 'edit' :
+      /\b(?:validate|check|verify)\b/.test(phrase) ? 'validate' :
+      /\b(?:read|inspect|summarize|show)\b/.test(phrase) ? 'read' :
+      skill === 'mcp-builder' ? 'scaffold' : 'create';
+    return { skill: skill, operation: operation };
+  }
+
+  function modelBoundedSkillPathsMatchRequest(request, userRequest) {
+    if (String(request.root || 'artifacts').toLowerCase() !== 'artifacts') return false;
+    var requestedPaths = [request.input, request.output].concat(Array.isArray(request.inputs) ? request.inputs : [])
+      .filter(function(path) { return typeof path === 'string' && path.trim(); });
+    if (!requestedPaths.length) return false;
+    var original = String(userRequest || '').toLowerCase();
+    return requestedPaths.every(function(path) {
+      return original.indexOf(String(path).trim().toLowerCase()) >= 0;
+    });
   }
 
   function repositoryRemediationRoute(rawPhrase) {
@@ -238,6 +276,11 @@ var EvaHarness = (function() {
     }
     var phrase = rawPhrase.toLowerCase();
     var directUser = !!(options && options.directUser);
+    var skillAigRequest = directUser && (
+      /^(?:please\s+)?(?:use|run|execute)\s+(?:my\s+|the\s+)?(?:skill\s+)?[^.!?]+\bskill\b/i.test(rawPhrase) ||
+      /\b(?:check|inspect|review)\b[\s\S]{0,64}\bskills?\b[\s\S]{0,64}\b(?:use|run|execute)\b/i.test(rawPhrase)
+    );
+    if (skillAigRequest) return null;
     var lastRemediation = null;
     try {
       var savedRemediation = JSON.parse(localStorage.getItem('eva_last_repository_remediation') || 'null');
@@ -294,10 +337,12 @@ var EvaHarness = (function() {
       var runNamedSkill = /^(?:please\s+)?(?:run|use|execute)\s+(?:the\s+)?skill\s+.+/i.test(rawPhrase);
       var runMediaSkill = /^(?:(?:please|go\s+ahead(?:\s+and)?|okay|ok|yes)[,\s]+)*(?:open|play|watch|listen\s+to|launch)\s+(?:my|the)\s+.+?\b(?:playlist|station|stream|channel)\b(?:[\s,]+[A-Za-z0-9_.-]+){0,4}[.!?]*$/i.test(rawPhrase);
       if (runNamedSkill || runMediaSkill) {
+        if (runNamedSkill && !runMediaSkill && !/https:\/\/[^\s<>"']+/i.test(rawPhrase)) return null;
         return { action: 'run_skill', target: 'skills', label: 'Run Skill', requestText: rawPhrase };
       }
     }
-    var skillsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\bskills?\b|\bskills?\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
+    var skillExecutionContinuation = /\b(?:check|inspect|review)\b[\s\S]{0,64}\bskills?\b[\s\S]{0,64}\b(?:use|run|execute)\b/.test(phrase);
+    var skillsDescription = !skillExecutionContinuation && (/\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\bskills?\b|\bskills?\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase));
     if (skillsDescription) return { action: 'describe_skills', target: 'skills', label: 'Skills' };
     var sessionsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:sessions?|chat history|saved chats?)\b|\b(?:sessions?|chat history|saved chats?)\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
     if (sessionsDescription) return { action: 'describe_sessions', target: 'sessions', label: 'Sessions' };
@@ -514,6 +559,7 @@ var EvaHarness = (function() {
     if (navigationRoute) return navigationRoute;
     var genericQuestionOrRequest = /\?\s*$/.test(rawPhrase) || /^(?:please\b|(?:can|could|would|will)\s+you\b|(?:what|which|where|when|why|who|how|is|are|do|does|did|has|have)\b|(?:show|tell|find|check|inspect|report|list|search|calculate|compare|explain|summarize|create|update|remove|delete|move|copy|rename|install|build|test)\b)/i.test(rawPhrase);
     var explicitlyNegated = /\b(?:don'?t|do not|never|without|unless|only after|wait|when i say)\b/i.test(rawPhrase);
+    if (directUser && boundedSkillIntent(rawPhrase) && !explicitlyNegated) return null;
     if (directUser && genericQuestionOrRequest && !explicitlyNegated && !/[\r\n\0]/.test(rawPhrase) && rawPhrase.length <= 2000) {
       return { action: 'consider_terminal_task', target: 'terminal', label: 'Terminal', objective: rawPhrase, submit: true };
     }
@@ -604,6 +650,11 @@ var EvaHarness = (function() {
       userNativeRoute.action === 'run_repository_remediation' &&
       String(request.repositoryName || '').toLowerCase() === String(userNativeRoute.repositoryName || '').toLowerCase() &&
       String(request.objective || '') === String(userNativeRoute.objective || '');
+    var boundedIntent = boundedSkillIntent(context.userRequest || '');
+    var modelBoundedSkill = action === 'run_bounded_skill' && boundedIntent &&
+      boundedIntent.skill === String(request.skill || '').toLowerCase() &&
+      boundedIntent.operation === String(request.operation || '').toLowerCase() &&
+      modelBoundedSkillPathsMatchRequest(request, context.userRequest);
     var modelSkillMutation = userNativeRoute && action === userNativeRoute.action && (
       action === 'create_skill' ||
       (action === 'update_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase() && JSON.stringify(request.updates || {}) === JSON.stringify(userNativeRoute.updates || {})) ||
@@ -611,7 +662,7 @@ var EvaHarness = (function() {
       (action === 'delete_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase()) ||
       action === 'run_skill'
     );
-    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation) {
+    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation && !modelBoundedSkill) {
       return result(false, action, 'This native action requires direct user interaction.');
     }
     if (action === 'navigate') return navigate(request.target);
@@ -719,6 +770,28 @@ var EvaHarness = (function() {
         return result(true, 'run_skill', message, { outcome: 'completed' });
       }).catch(function(error) {
         return result(false, 'run_skill', error && error.message ? error.message : 'Skill execution failed.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'run_bounded_skill') {
+      if (context.source === 'model' && !modelBoundedSkill) return Promise.resolve(result(false, 'run_bounded_skill', 'The bounded skill action does not match the user request.', { outcome: 'failed', reason: 'failed' }));
+      var bridgeBase = typeof getSafeBridgeBaseUrl === 'function' ? getSafeBridgeBaseUrl() : 'http://localhost:8888';
+      var bridgeHeaders = typeof getBridgeCapabilityHeaders === 'function' ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' };
+      var boundedPayload = {
+        skill: String(request.skill || '').toLowerCase(), operation: String(request.operation || '').toLowerCase(),
+        root: context.source === 'model' ? 'artifacts' : String(request.root || 'artifacts').toLowerCase(), input: request.input, inputs: request.inputs,
+        output: request.output, options: request.options || {}
+      };
+      return fetch(bridgeBase.replace(/\/+$/, '') + '/v1/skills/execute', {
+        method: 'POST', headers: bridgeHeaders, body: JSON.stringify(boundedPayload)
+      }).then(function(response) {
+        return response.json().catch(function() { return {}; }).then(function(receipt) {
+          if (!response.ok) throw new Error(receipt.error && receipt.error.message ? receipt.error.message : 'Bounded skill request failed.');
+          var message = receipt.ok ? 'Completed ' + boundedPayload.skill + ' ' + boundedPayload.operation + ' and validated the result.' :
+            'Bounded skill failed: ' + String(receipt.error && receipt.error.message || 'validation failed');
+          return result(!!receipt.ok, 'run_bounded_skill', message, { outcome: receipt.ok ? 'completed' : 'failed', reason: receipt.ok ? '' : 'failed', receipt: receipt });
+        });
+      }).catch(function(error) {
+        return result(false, 'run_bounded_skill', error && error.message ? error.message : 'Bounded skill execution failed.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
     if (action === 'open_external_url') {
@@ -1032,7 +1105,7 @@ var EvaHarness = (function() {
   function promptContract() {
     var contract = '\n\nNATIVE EVA HARNESS:\nFor Eva application controls, use [[EVA_HARNESS]]{"action":"navigate","target":"workspaces"}[[/EVA_HARNESS]] instead of browser or desktop automation. Navigate targets: workspaces, skills, memory, assets, sessions, terminal, settings, models, personality, goals, background_jobs, schedules, accounts, tools_memory, learning, profile, voice, and agent_operations. To list or summarize current coding workspaces, use [[EVA_HARNESS]]{"action":"describe_workspaces"}[[/EVA_HARNESS]]. To list the user\'s owned GitHub repositories, use [[EVA_HARNESS]]{"action":"list_github_repositories"}[[/EVA_HARNESS]] and present its returned URLs for user selection. To import a GitHub repository only after the user explicitly requests that import and its exact HTTPS URL is known, use [[EVA_HARNESS]]{"action":"import_github","repository_url":"https://github.com/owner/repository"}[[/EVA_HARNESS]]. When an explicit GitHub listing or import request needs repository authorization, use [[EVA_HARNESS]]{"action":"authorize_github"}[[/EVA_HARNESS]]; this opens a native device-code flow and never exposes a token. Workspace-local MCP servers come from each imported project\'s mcp.json and are isolated from global MCP configuration. When the user explicitly requests a named module, enable it with [[EVA_HARNESS]]{"action":"set_workspace_mcp_server","serverName":"<name>","enabled":true,"projectName":"<optional project>"}[[/EVA_HARNESS]]. When an explicit user request asks to retry a delayed coding run, use [[EVA_HARNESS]]{"action":"retry_workspace_run","runId":"<optional run id>"}[[/EVA_HARNESS]]. Do not use browser or desktop automation for these native workspace operations. Do not open an empty import form or use browser, terminal, or desktop control for GitHub repository listing/import. Terminal commands execute only from a direct user request and cannot be initiated by a model marker. Native forms support inspect_form, set_field, submit_form, and cancel_form for direct user interaction. Other actions: new_chat and voice_control with optional enabled:false. These actions control Eva directly; never use browser, screenshots, or desktop automation for those same Eva surfaces.';
     contract += '\nFor requests to open, count, inspect, list, or summarize Workspaces, use describe_workspaces. It opens the native Workspaces view and returns the real count. Never use browser or desktop automation for this.';
-    contract += '\nThe complete native action manifest is available when interpreting typed and voice requests. Apply the same direct-user, confirmation, and validation requirements in both modes; awareness never bypasses an action gate. Skill creation and management must use create_skill, update_skill, set_skill_status, or delete_skill instead of Browser, Desktop, or Terminal automation. Spoken or typed requests to run an active Skill use run_skill. open_external_url is reserved for exact URLs in a direct user request or internal execution of a verified active Skill.';
+    contract += '\nThe complete native action manifest is available when interpreting typed and voice requests. Apply the same direct-user, confirmation, and validation requirements in both modes; awareness never bypasses an action gate. Skill creation and management must use create_skill, update_skill, set_skill_status, or delete_skill instead of Browser, Desktop, or Terminal automation. Spoken or typed requests to run an active Skill use run_skill. Document and MCP-builder requests use run_bounded_skill with the fixed skill, operation, relative paths, and options schema; never use Browser, Desktop, Terminal, or arbitrary file execution for them. open_external_url is reserved for exact URLs in a direct user request or internal execution of a verified active Skill.';
     contract += '\nAVAILABLE NATIVE ACTIONS:\n' + actionManifest.map(function(action) { return '- ' + action.id + ': ' + action.description; }).join('\n');
     if (typeof evaTextPromptDescribe === 'function') {
       var schema = evaTextPromptDescribe();

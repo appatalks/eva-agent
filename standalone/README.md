@@ -70,6 +70,14 @@ localhost port at startup. Copilot-backed cloud features require Copilot CLI to
 be authenticated once via `copilot auth login`; local-only LM Studio mode does
 not.
 
+The package includes `tools/skills/**` and the default-skills catalog as active
+runtime resources. Office-format Python packages are host dependencies, not
+vendored into the AppImage; run `./install.sh --check` to see their status and
+`./install.sh --skill-deps` to install missing optional packages. The bridge
+never installs a package during a user action. A trusted workspace root may be
+configured with `EVA_SKILLS_WORKSPACE_ROOTS` (paths separated by the platform
+path separator); otherwise bounded operations use Eva artifacts.
+
 ## Runtime Notes
 
 - Electron starts `tools/acp_bridge.py` with `python3` on `127.0.0.1` using a free dynamic port.

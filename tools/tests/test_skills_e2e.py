@@ -86,6 +86,7 @@ class FakeACP:
         return {"text": json.dumps({
             "name": "Summarize a webpage",
             "description": "Use when the user wants a concise summary of a web page or article.",
+            "category": "Documents & Data",
             "instructions": "1. Fetch the page.\n2. Extract the main text.\n3. Produce a 5 bullet summary.",
             "tools": ["browser"],
             "tags": ["summary", "web", "article"],
@@ -150,6 +151,7 @@ def main():
         check("evarise returns 200", st == 200)
         draft = body.get("draft", {})
         check("evarise draft has name", draft.get("name") == "Summarize a webpage")
+        check("evarise draft has category", draft.get("category") == "Documents & Data")
         check("evarise draft tools normalized to csv", draft.get("tools") == "browser")
 
         # 2. Save the skill.
@@ -162,11 +164,12 @@ def main():
         st, body = req("GET", "/v1/skills")
         check("list returns 200", st == 200)
         skills = body.get("skills", [])
-        check("list has 1 draft skill", len(skills) == 1 and skills[0]["Status"] == "draft")
+        check("list has 1 draft skill", len(skills) == 1 and skills[0]["Status"] == "draft" and skills[0]["Category"] == "Documents & Data")
 
         # 4. Disable via PATCH.
-        st, body = req("PATCH", "/v1/skills/" + sid, {"status": "disabled"})
+        st, body = req("PATCH", "/v1/skills/" + sid, {"status": "disabled", "category": "Information & Research"})
         check("patch disable returns 200", st == 200 and body.get("skill", {}).get("Status") == "disabled")
+        check("patch updates category", body.get("skill", {}).get("Category") == "Information & Research")
 
         # 5. Runtime injection: a matching message should surface the skill.
         #    Re-enable first, then check _build_memory_context (lexical fallback,
@@ -186,7 +189,33 @@ def main():
         st, body = req("GET", "/v1/skills")
         check("deleted skill removed from list", len(body.get("skills", [])) == 0)
 
-        # 8. Validation: missing instructions is rejected.
+        # 8. Editing a shipped skill creates an override instead of another
+        # managed seed version that startup backfill may replace.
+        _STORE["Skills"].append({
+            "SkillId": "skill-weather", "Name": "Weather Report",
+            "Description": "Provide current weather and forecast for a location",
+            "Category": "Information & Research",
+            "Instructions": "Use the requested location.", "Tools": "weather-news,data-retrieval",
+            "Tags": "weather,forecast", "Source": "seed", "Status": "active",
+            "CreatedAt": "2026-08-15T00:00:00Z", "UpdatedAt": "2026-08-15T00:00:00Z",
+        })
+        st, body = req("PATCH", "/v1/skills/skill-weather", {
+            "instructions": "Use Seattle when the request has no location."
+        })
+        edited_weather = body.get("skill", {})
+        check("editing a seed creates a user override", st == 200 and edited_weather.get("Source") == "user-override")
+        st, body = req("PATCH", "/v1/skills/skill-weather", {
+            "config": {"defaults": {"default_location": "Seattle"}, "allowed_fallbacks": ["Use web search"]}
+        })
+        config = json.loads(body.get("skill", {}).get("Config", "{}"))
+        check("weather default persists as structured Config", st == 200 and config.get("defaults", {}).get("default_location") == "Seattle")
+        st, body = req("PATCH", "/v1/skills/skill-weather", {
+            "defaults": {"default_location": "Portland"}
+        })
+        config = json.loads(body.get("skill", {}).get("Config", "{}"))
+        check("top-level defaults preserve allowed fallbacks", st == 200 and config.get("defaults", {}).get("default_location") == "Portland" and config.get("allowed_fallbacks") == ["Use web search"])
+
+        # 9. Validation: missing instructions is rejected.
         st, body = req("POST", "/v1/skills", {"name": "x"})
         check("create without instructions rejected (400)", st == 400)
 

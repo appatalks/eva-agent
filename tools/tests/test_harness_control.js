@@ -43,6 +43,7 @@ let createdSkillResponse = { skillName: 'Play my YouTube playlist', status: 'dra
 let mergeRequest = null;
 let pullRequestViewRequest = null;
 let branchDeleteRequest = null;
+let boundedSkillRequest = null;
 const fixtureRepository = 'fixture-owner/fixture-repository';
 const fixtureShortName = 'fixture-repository';
 const fixtureRepositoryUrl = 'https://github.com/fixture-owner/fixture-repository';
@@ -185,6 +186,15 @@ const sandbox = {
     if (allowDecline !== undefined) plannedTask.allowDecline = allowDecline;
     return Promise.resolve(plannedResult || { submitted: submit !== false });
   },
+  getSafeBridgeBaseUrl() { return 'http://localhost:8888'; },
+  getBridgeCapabilityHeaders() { return { 'Content-Type': 'application/json', 'Authorization': 'Bearer test' }; },
+  fetch(url, options) {
+    boundedSkillRequest = { url: url, options: options };
+    return Promise.resolve({
+      ok: true,
+      json() { return Promise.resolve({ ok: true, skill: 'pdf', operation: 'create', output: { root: 'artifacts', path: 'test.pdf' }, validation: { status: 'valid' }, warnings: [], error: null }); }
+    });
+  },
   document: {
     body: { classList: { contains() { return false; } } },
     getElementById(id) { return id === 'sessionPanel' ? sessionPanel : null; },
@@ -218,6 +228,25 @@ async function main() {
   assert.strictEqual(workspaceOpenCalls, 1);
   assert.strictEqual(workspaceDescriptionCalls, 1);
   assert.match(workspaceCountResult.message, /2 coding workspaces/);
+
+  const boundedRequest = { action: 'run_bounded_skill', skill: 'pdf', operation: 'create', output: 'test.pdf', options: { text: 'hello' } };
+  assert.strictEqual(harness.resolveNavigationRequest('Create a PDF report.', { directUser: true }), null);
+  const boundedResult = await harness.execute(boundedRequest, { source: 'voice', userRequest: 'Create a PDF report.' });
+  assert.strictEqual(boundedResult.ok, true);
+  assert.strictEqual(boundedSkillRequest.url, 'http://localhost:8888/v1/skills/execute');
+  assert.match(boundedSkillRequest.options.body, /"skill":"pdf"/);
+  const modelBoundedResult = await harness.execute(
+    { action: 'run_bounded_skill', skill: 'pdf', operation: 'create', output: 'requested.pdf', options: { text: 'hello' } },
+    { source: 'model', userRequest: 'Create requested.pdf as a PDF report.' }
+  );
+  assert.strictEqual(modelBoundedResult.ok, true);
+  assert.match(boundedSkillRequest.options.body, /"root":"artifacts"/);
+  const substitutedPathResult = await harness.execute(
+    { action: 'run_bounded_skill', skill: 'pdf', operation: 'create', root: 'workspace', output: 'unrelated.pdf', options: { text: 'hello' } },
+    { source: 'model', userRequest: 'Create requested.pdf as a PDF report.' }
+  );
+  assert.strictEqual(substitutedPathResult.ok, false);
+  assert.strictEqual(harness.capabilities().actions.includes('run_bounded_skill'), true);
   const assetsRoute = harness.resolveNavigationRequest('List my generated assets.', { directUser: true });
   assert.strictEqual(assetsRoute.action, 'describe_assets');
   const assetsResult = await harness.execute(assetsRoute, { source: 'voice', userRequest: 'List my generated assets.' });
@@ -230,6 +259,8 @@ async function main() {
   assert.strictEqual(skillsResult.ok, true);
   assert.strictEqual(skillsOpenCalls, 1);
   assert.match(skillsResult.message, /2 saved skills/);
+  assert.strictEqual(harness.resolveNavigationRequest('Use my Weather Report skill.', { directUser: true }), null);
+  assert.strictEqual(harness.resolveNavigationRequest('Check the weather skill and use it.', { directUser: true }), null);
   const sessionsRoute = harness.resolveNavigationRequest('Which saved sessions are available?', { directUser: true });
   assert.strictEqual(sessionsRoute.action, 'describe_sessions');
   const sessionsResult = await harness.execute(sessionsRoute, { source: 'voice', userRequest: 'Which saved sessions are available?' });

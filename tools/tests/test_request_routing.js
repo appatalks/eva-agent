@@ -18,6 +18,16 @@ assert.strictEqual(routing.classifyRequestType('List open GitHub issues for owne
 assert.strictEqual(routing.isGitHubOperation('Review GitHub pull requests for owner/repository.'), true);
 assert.strictEqual(routing.isGitHubOperation('Explain GitHub merge conflicts.'), false);
 assert.strictEqual(routing.needsDataRetrieval('Create a PDF report.'), true);
+assert.strictEqual(routing.isNativeWeatherLookup('What is the weather in Seattle?'), true);
+assert.strictEqual(routing.isNativeWeatherLookup('Use the browser to check the weather in Seattle.'), false);
+assert.strictEqual(routing.isNativeWeatherLookup('Check the weather in my browser.'), false);
+assert.strictEqual(routing.isExplicitInteractiveRequest('Open the weather website.'), true);
+assert.strictEqual(routing.isExplicitInteractiveRequest('Check the weather in my browser.'), true);
+assert.strictEqual(routing.isNarrowNativeOperation('Create a CSV report.'), true);
+assert.strictEqual(routing.needsDataRetrieval('Create a DOCX report.'), true);
+assert.strictEqual(routing.isNarrowNativeOperation('Validate this XLSX workbook.'), true);
+assert.strictEqual(routing.isNarrowNativeOperation('Scaffold a FastMCP server.'), true);
+assert.strictEqual(routing.isNarrowNativeOperation('Use the desktop app to check this CSV.'), false);
 
 const lmStudio = fs.readFileSync('core/js/providers/lm-studio.js', 'utf8');
 assert.match(lmStudio, /EvaRequestRouting\.needsDataRetrieval/);

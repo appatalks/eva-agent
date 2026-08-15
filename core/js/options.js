@@ -3300,11 +3300,17 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   var nativeRequest = String(renderOptions.nativeRequest || '');
   var nativeGitHubOperation = (window.EvaRequestRouting && typeof EvaRequestRouting.isGitHubOperation === 'function' &&
     EvaRequestRouting.isGitHubOperation(nativeRequest)) || /https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+/i.test(nativeRequest);
+  var nativeVisualForbidden = window.EvaRequestRouting && typeof EvaRequestRouting.isNarrowNativeOperation === 'function'
+    ? EvaRequestRouting.isNarrowNativeOperation(nativeRequest)
+    : /\b(?:weather|forecast|temperature|news|stock|github|pdf|docx|pptx|xlsx|csv|file|document|spreadsheet|presentation|mcp\s+server|fastmcp)\b/i.test(nativeRequest);
   text = text.replace(/\[\[EVA_BROWSER\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_BROWSER\]\])?/g, function (full, json) {
     var parsed = null;
     try { parsed = JSON.parse(json); } catch (e) { /* ignore malformed block */ }
     if (nativeGitHubOperation || (parsed && /github\.com/i.test(String(parsed.start_url || parsed.goal || '')))) {
       return '\n_GitHub operations use Eva\'s native GitHub MCP or gh tools instead of browser automation._\n';
+    }
+    if (nativeVisualForbidden) {
+      return '\n_This request uses Eva\'s narrower native capability instead of browser automation._\n';
     }
     if (!browserLaunch) {
       if (parsed && parsed.goal) browserLaunch = parsed;
@@ -3321,6 +3327,9 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   text = text.replace(/\[\[EVA_DESKTOP\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_DESKTOP\]\])?/g, function (full, json) {
     if (nativeGitHubOperation) {
       return '\n_GitHub operations use Eva\'s native GitHub MCP or gh tools instead of desktop automation._\n';
+    }
+    if (nativeVisualForbidden) {
+      return '\n_This request uses Eva\'s narrower native capability instead of desktop automation._\n';
     }
     if (!desktopLaunch) {
       try {

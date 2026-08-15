@@ -43,6 +43,14 @@ On first launch, choose **Eva (AIG)** in the model menu for the integrated exper
 
 For a source build, platform-specific packaging, Local Voices, providers, memory, MCP, or workspace setup, use the [technical documentation](README-2.md).
 
+## Bounded document abilities
+
+Eva ships native DOCX, PDF, PPTX, XLSX, and MCP Builder abilities. They perform
+bounded local operations through the bridge, validate outputs before reporting
+success, and never fall back to browser, desktop, terminal, package installation,
+or network access. Office-format dependencies are optional and are checked by
+`install.sh`; missing packages produce an actionable runtime receipt.
+
 ## Documentation
 
 - [README-2.md](README-2.md): setup, providers, memory, voice, MCP, workspaces, architecture, and roadmap
@@ -50,6 +58,8 @@ For a source build, platform-specific packaging, Local Voices, providers, memory
 - [docs/ai-development-guide.md](docs/ai-development-guide.md): focused development workflow, ownership map, and validation bundles
 - [docs/frontend-ownership.md](docs/frontend-ownership.md): browser feature owners, collaborators, and classic-script migration rules
 - [docs/testing-contracts.md](docs/testing-contracts.md): behavior, security, and compatibility test policy for refactors
+- [docs/eva_default_skills/README.md](docs/eva_default_skills/README.md): canonical default Skills catalog and category taxonomy
+- [docs/community_skills/README.md](docs/community_skills/README.md): inactive community Skills staging and review contract
 - [docs/deprecation-inventory.md](docs/deprecation-inventory.md): active compatibility paths and evidence required before removal
 - [docs/contracts/provider-routing.md](docs/contracts/provider-routing.md): selectable model routing and provider-mapping contract
 - [Website](https://appatalks.github.io/eva-agent/): features, comparison, install guide

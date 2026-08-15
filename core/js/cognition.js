@@ -558,6 +558,43 @@
   });
 
   registerCapability({
+    id: 'skill.execute',
+    description: 'Execute one bounded local DOCX, PDF, PPTX, XLSX, or MCP-builder operation, including PDF forms/tables/OCR, office PDF rendering, and XLSX recalculation. Args: {skill, operation, root?, input?, inputs?, output?, options?}. Paths are relative to Eva artifacts or a trusted approved workspace root; no installation, network, shell, browser, or desktop fallback is used.',
+    run: async function(args, context) {
+      args = args || {};
+      context = context || {};
+      var skill = String(args.skill || '').toLowerCase();
+      var operation = String(args.operation || '').toLowerCase();
+      if (!/^(?:docx|pdf|pptx|xlsx|mcp-builder)$/.test(skill)) throw new Error('Unsupported bounded skill.');
+      if (!/^[a-z][a-z0-9-]{0,31}$/.test(operation)) throw new Error('Invalid bounded skill operation.');
+      var root = String(args.root || 'artifacts').toLowerCase();
+      var requestPaths = [args.input, args.output].concat(Array.isArray(args.inputs) ? args.inputs : [])
+        .filter(function(path) { return typeof path === 'string' && path.trim(); });
+      var originalRequest = String(context.userMessage || '');
+      if (root !== 'artifacts' || !requestPaths.length || !requestPaths.every(function(path) {
+        return originalRequest.toLowerCase().indexOf(String(path).trim().toLowerCase()) >= 0;
+      })) {
+        throw new Error('Bounded Skill paths must be explicit in the user request and remain inside Eva artifacts.');
+      }
+      var payload = {
+        skill: skill, operation: operation, root: root,
+        input: args.input, inputs: args.inputs, output: args.output, options: args.options || {}
+      };
+      var response = await fetch(bridgeUrl().replace(/\/+$/, '') + '/v1/skills/execute', {
+        method: 'POST',
+        headers: (typeof getBridgeCapabilityHeaders === 'function') ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      var receipt = await response.json().catch(function() { return {}; });
+      if (!response.ok) throw new Error(receipt.error && receipt.error.message ? receipt.error.message : 'Bounded skill bridge request failed.');
+      if (!receipt.ok) throw new Error(receipt.error && receipt.error.message ? receipt.error.message : 'Bounded skill validation failed.');
+      var output = receipt.output && receipt.output.root === 'artifacts' && /^[A-Za-z0-9._-]{1,128}$/.test(String(receipt.output.path || ''))
+        ? '\n[[EVA_FILE]] ' + String(receipt.output.path) : '';
+      return { html: '<div class="cog-action-ok">' + skill + ' ' + operation + ' completed and passed validation.</div>' + output, receipt: receipt };
+    }
+  });
+
+  registerCapability({
     id: 'agent.spawn_batch',
     description: 'Actually launch 1-4 parallel background ACP agents and show them in Agent Operations. ' +
                  'args: {tasks:[{label:string,prompt:string,model?:string}]}. Use this whenever the user asks ' +

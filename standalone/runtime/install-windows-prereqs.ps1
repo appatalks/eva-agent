@@ -58,6 +58,42 @@ function Install-WingetPackage {
   if ($LASTEXITCODE -ne 0) { throw "winget failed to install $Id (exit code $LASTEXITCODE)." }
 }
 
+function Find-DocumentExecutable {
+  param([string[]]$Names)
+  foreach ($name in $Names) {
+    $command = Get-Command $name -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+  }
+  return ''
+}
+
+function Enable-DocumentSystemTools {
+  $requirements = @(
+    @{ Name = 'LibreOffice'; Commands = @('libreoffice.exe', 'soffice.exe'); Package = 'TheDocumentFoundation.LibreOffice' },
+    @{ Name = 'Poppler pdftoppm'; Commands = @('pdftoppm.exe'); Package = 'oschwartz10612.Poppler' },
+    @{ Name = 'Tesseract OCR'; Commands = @('tesseract.exe'); Package = 'UB-Mannheim.TesseractOCR' }
+  )
+  $receipt = @{}
+  foreach ($requirement in $requirements) {
+    $executable = Find-DocumentExecutable -Names $requirement.Commands
+    if (-not $executable) {
+      try {
+        Install-WingetPackage -Id $requirement.Package
+        $executable = Find-DocumentExecutable -Names $requirement.Commands
+      } catch {
+        Write-BootstrapLog "$($requirement.Name) setup unavailable: $($_.Exception.Message)"
+      }
+    }
+    $receipt[$requirement.Name] = @{ available = -not [string]::IsNullOrEmpty($executable); executable = $executable; package = $requirement.Package }
+    if ($executable) {
+      Write-BootstrapLog "$($requirement.Name) is ready: $executable"
+    } else {
+      Write-BootstrapLog "$($requirement.Name) remains unavailable; dependent Skills will return a structured missing_dependency receipt."
+    }
+  }
+  return $receipt
+}
+
 function Enable-LocalTranscription {
   param([string]$PythonLauncher, [string]$RuntimePath)
   $speechHome = Join-Path $RuntimePath 'speech'
@@ -77,6 +113,26 @@ function Enable-LocalTranscription {
     Write-BootstrapLog "Local transcription setup unavailable: $speechError"
   }
   return @{ Python = if ([string]::IsNullOrEmpty($speechError)) { $speechPython } else { '' }; Error = $speechError }
+}
+
+function Enable-BridgeRuntime {
+  param([string]$PythonLauncher, [string]$RuntimePath)
+  $bridgeHome = Join-Path $RuntimePath 'bridge'
+  $bridgePython = Join-Path $bridgeHome 'Scripts\python.exe'
+  & $PythonLauncher -3.12 -m venv $bridgeHome
+  if ($LASTEXITCODE -ne 0) { throw "could not create the Eva bridge runtime (exit code $LASTEXITCODE)." }
+  & $bridgePython -m pip install --upgrade pip
+  if ($LASTEXITCODE -ne 0) { throw "could not update pip for the Eva bridge runtime (exit code $LASTEXITCODE)." }
+  $packages = @(
+    'requests', 'azure-identity', 'msal', 'cryptography',
+    'python-docx', 'pypdf', 'reportlab', 'python-pptx', 'openpyxl',
+    'pdfplumber==0.11.9', 'pytesseract', 'Pillow==11.3.0'
+  )
+  & $bridgePython -m pip install @packages
+  if ($LASTEXITCODE -ne 0) { throw "could not install the Eva bridge and document dependencies (exit code $LASTEXITCODE)." }
+  & $bridgePython -c "import cryptography, docx, pypdf, reportlab, pptx, openpyxl, pdfplumber, pytesseract, PIL"
+  if ($LASTEXITCODE -ne 0) { throw 'The Eva bridge document dependencies could not be imported after installation.' }
+  return $bridgePython
 }
 
 function Test-LocalVoiceClone {
@@ -130,11 +186,10 @@ try {
   }
   if (-not $python) { throw 'Python 3.12 was not available after installation.' }
 
-  Write-BootstrapLog 'Installing protected-memory encryption dependency.'
-  & $python -3.12 -m pip install --user cryptography
-  if ($LASTEXITCODE -ne 0) { throw "could not install the protected-memory encryption dependency (exit code $LASTEXITCODE)." }
-  & $python -3.12 -c "import cryptography" 2>$null
-  if ($LASTEXITCODE -ne 0) { throw 'cryptography could not be imported after installation.' }
+  Write-BootstrapLog 'Installing the managed Eva bridge and document runtime.'
+  $bridgePython = Enable-BridgeRuntime -PythonLauncher $python -RuntimePath $runtimeRoot
+  Write-BootstrapLog 'Checking document system executables for bounded Skills.'
+  $documentTools = Enable-DocumentSystemTools
 
   $node = Get-Node24
   if (-not $node) {
@@ -201,7 +256,7 @@ try {
 
   $localSpeechPython = if ($voicePython) { $voicePython } else { $speechPython }
 
-  @{ python = $python; pythonArgs = @('-3.12'); node = $node; copilot = $copilot; localSpeechPython = $localSpeechPython; localSpeechError = $speechError; localVoiceClonePython = $voicePython; localVoiceCloneError = $voiceError; updatedAt = (Get-Date -Format o) } |
+  @{ python = $bridgePython; pythonArgs = @(); node = $node; copilot = $copilot; documentTools = $documentTools; localSpeechPython = $localSpeechPython; localSpeechError = $speechError; localVoiceClonePython = $voicePython; localVoiceCloneError = $voiceError; updatedAt = (Get-Date -Format o) } |
     ConvertTo-Json | Set-Content -Path $manifestPath -Encoding utf8
   Write-BootstrapLog 'Eva runtime prerequisites are ready.'
 

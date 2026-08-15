@@ -48,6 +48,33 @@
     return artifact || (!explanatory && (github || platform));
   }
 
+  function isExplicitInteractiveRequest(message) {
+    var text = String(message || '');
+    var interaction = '\\b(?:use|open|launch|control|click|navigate|check)\\b';
+    var interfaceName = '\\b(?:browser|desktop|website|web site|app)\\b';
+    var weather = '\\b(?:weather|forecast|temperature)\\b';
+    return new RegExp(
+      interaction + '[^.!?]{0,40}' + interfaceName + '|' +
+      interfaceName + '[^.!?]{0,40}' + interaction + '|' +
+      weather + '[^.!?]{0,80}' + interfaceName + '|' +
+      interfaceName + '[^.!?]{0,80}' + weather,
+      'i'
+    ).test(text);
+  }
+
+  function isNativeWeatherLookup(message) {
+    return /\b(?:weather|forecast|temperature|raining|snowing|humidity|wind speed)\b/i.test(String(message || '')) &&
+      !isExplicitInteractiveRequest(message);
+  }
+
+  function isNarrowNativeOperation(message) {
+    var text = String(message || '');
+    if (isExplicitInteractiveRequest(text)) return false;
+    var type = classifyRequestType(text);
+    if (['news-search', 'weather-search', 'financial-data', 'web-search', 'github-data', 'kusto-query', 'kusto-operator'].indexOf(type) >= 0) return true;
+    return /\b(?:create|generate|make|export|download|write|save|edit|replace|validate|inspect|merge|split|extract|recalculate|scaffold)\b[^.!?]{0,100}\b(?:pdf|docx|pptx|xlsx|csv|json|markdown|md|txt|file|report|document|spreadsheet|invoice|presentation|mcp\s+server|fastmcp)\b/i.test(text);
+  }
+
   function createTurnId() {
     if (root.crypto && typeof root.crypto.randomUUID === 'function') return 'turn-' + root.crypto.randomUUID();
     return 'turn-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 14);
@@ -57,6 +84,9 @@
     classifyRequestType: classifyRequestType,
     isGitHubOperation: function(message) { return classifyRequestType(message) === 'github-data'; },
     needsAcpPreflight: needsAcpPreflight,
+    isExplicitInteractiveRequest: isExplicitInteractiveRequest,
+    isNativeWeatherLookup: isNativeWeatherLookup,
+    isNarrowNativeOperation: isNarrowNativeOperation,
     createTurnId: createTurnId,
     needsDataRetrieval: function (message) {
       return needsAcpPreflight(message, classifyRequestType(message));

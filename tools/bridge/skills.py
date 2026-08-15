@@ -10,6 +10,14 @@ from bridge import state as _st
 
 _SKILL_SOURCE_MAX_BYTES = _cfg.SKILL_SOURCE_MAX_BYTES
 
+
+def _normalize_skill_category(value):
+    raw = str(value or "").strip()
+    for category in _cfg.SKILL_CATEGORIES:
+        if raw.casefold() == category.casefold():
+            return category
+    return "Uncategorized"
+
 def _safe_external_url(url):
     """Validate a user-supplied URL for server-side fetch.
     Returns (ok, error, pinned_ip). pinned_ip is a validated public IP the
@@ -124,7 +132,6 @@ def _http_get_text(url, max_bytes=_SKILL_SOURCE_MAX_BYTES):
         raw = b"".join(chunks)
         return raw.decode("utf-8", errors="replace"), ""
     return None, "too many redirects"
-    return None, "too many redirects"
 
 
 
@@ -224,6 +231,7 @@ _SKILL_EVARISE_PROMPT = (
     "fences) with exactly these keys:\n"
     '  "name": short title, <= 60 chars\n'
     '  "description": when Eva should use this skill, <= 2 sentences (this is matched to user requests)\n'
+    '  "category": exactly one of "Information & Research", "Documents & Data", "Development & Integrations", "Browser & Desktop Automation", "Vision & Media", "Communication", "Memory & Personalization", "Uncategorized"\n'
     '  "instructions": clear markdown steps Eva follows to perform the skill\n'
     '  "tools": array of capability/tool names it needs (e.g. "browser", "kusto", "git", "file.download"); [] if none\n'
     '  "tags": array of <= 6 lowercase keywords\n\n'
@@ -304,6 +312,7 @@ def _normalize_skill_draft(obj):
     return {
         "name": _s(obj.get("name"), 60) or "Untitled Skill",
         "description": _s(obj.get("description"), 400),
+        "category": _normalize_skill_category(obj.get("category")),
         "instructions": _s(obj.get("instructions"), 8000),
         "tools": _csv(obj.get("tools"), 200, 12),
         "tags": _csv(obj.get("tags"), 200, 6),
@@ -373,5 +382,372 @@ def _evarise_skill(raw_text):
     if err:
         return None, err
     return _normalize_skill_draft(obj), ""
+
+
+_SKILL_DECISION_REQUEST_CAP = 2000
+_SKILL_DECISION_LIST_CAP = 12
+_SKILL_DECISION_ITEM_CAP = 96
+_SKILL_MANAGEMENT_RE = re.compile(
+    r"\b(?:list|describe|show|summarize|inspect|review|check|manage|count)\b.{0,64}\bskills?\b|"
+    r"\bskills? (?:do i have|are available|can you access)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_SKILL_RE = re.compile(
+    r"\b(?:use|run|execute) (?:my |the )?(?:skill )?[\"']?([^.!?,\"']+?)"
+    r" skill\b|\bcheck (?:my |the )?[\"']?([^.!?,\"']+?) skill\b"
+    r"(?= and (?:use|run|execute) it\b)",
+    re.IGNORECASE,
+)
+_WEATHER_RE = re.compile(
+    r"\b(?:weather|forecast|temperature|raining|snowing|humidity|wind speed)\b",
+    re.IGNORECASE,
+)
+_WEATHER_LOCATION_RE = re.compile(
+    r"\b(?:weather|forecast|temperature|conditions?) (?:in|for|at|near) "
+    r"([A-Za-z][A-Za-z0-9 .,'-]{1,80}?)(?= (?:today|tomorrow|this weekend|this week|now|please)\b|[?.!,;]|$)|"
+    r"\b(?:in|for|at|near) ([A-Za-z][A-Za-z0-9 .,'-]{1,80}?)(?= (?:today|tomorrow|this weekend|this week|now|please)\b|[?.!,;]|$)",
+    re.IGNORECASE,
+)
+_LOCATION_STOPWORDS = {"this", "that", "today", "tomorrow", "the", "now", "please", "weekend", "week"}
+_TOOL_ALIASES = {
+    "weather-news": {"weather-news", "weather", "weather-retrieval", "forecast"},
+    "data-retrieval": {"data-retrieval", "data", "live-data"},
+    "web-search": {"web-search", "web", "search"},
+    "browser-control": {"browser-control", "browser", "playwright"},
+    "desktop-control": {"desktop-control", "desktop", "computer-use"},
+}
+
+
+def _bounded_decision_text(value, limit=_SKILL_DECISION_ITEM_CAP):
+    return " ".join(str(value or "").split())[:limit]
+
+
+def _skill_csv_values(value):
+    if isinstance(value, list):
+        values = value
+    else:
+        values = str(value or "").split(",")
+    result = []
+    seen = set()
+    for item in values:
+        normalized = _bounded_decision_text(item).strip()
+        key = normalized.casefold()
+        if normalized and key not in seen:
+            seen.add(key)
+            result.append(normalized)
+        if len(result) >= _SKILL_DECISION_LIST_CAP:
+            break
+    return result
+
+
+def _skill_config(row):
+    raw = row.get("Config", row.get("config", {})) if isinstance(row, dict) else {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(str(raw or "{}"))
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def normalize_skill_config(value):
+    """Validate and bound editable structured skill configuration."""
+    if value is None:
+        return "{}"
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("config must be valid JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("config must be an object")
+    defaults = value.get("defaults", value.get("configurable_defaults", value))
+    fallbacks = value.get("allowed_fallbacks", [])
+    if not isinstance(defaults, dict) or not isinstance(fallbacks, list):
+        raise ValueError("config defaults and allowed_fallbacks must be structured values")
+    normalized_defaults = {}
+    for key, item in list(defaults.items())[:24]:
+        safe_key = _bounded_decision_text(key, 64)
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", safe_key):
+            raise ValueError("config contains an invalid key")
+        if not isinstance(item, (str, int, float, bool)) and item is not None:
+            raise ValueError("config values must be scalar")
+        normalized_defaults[safe_key] = item if not isinstance(item, str) else _bounded_decision_text(item, 240)
+    normalized_fallbacks = _skill_csv_values(fallbacks)
+    return json.dumps(
+        {"defaults": normalized_defaults, "allowed_fallbacks": normalized_fallbacks},
+        ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    )
+
+
+def _skill_defaults_and_fallbacks(row):
+    config = _skill_config(row)
+    defaults = config.get("defaults", config.get("configurable_defaults", {}))
+    fallbacks = config.get("allowed_fallbacks", [])
+    if not isinstance(defaults, dict):
+        defaults = {}
+    if not isinstance(fallbacks, list):
+        fallbacks = []
+    return defaults, _skill_csv_values(fallbacks)
+
+
+def skill_live_capabilities(
+    acp_alive=False,
+    configured_data_paths=None,
+    local_mcp_tools=None,
+    local_capabilities=None,
+    browser_available=False,
+    desktop_available=False,
+):
+    """Normalize live bridge capability state for deterministic skill routing."""
+    native = set()
+    if isinstance(configured_data_paths, dict):
+        native = {str(key).strip().lower() for key, value in configured_data_paths.items() if value}
+    else:
+        native = {str(item).strip().lower() for item in (configured_data_paths or []) if str(item).strip()}
+    if acp_alive:
+        native.add("acp")
+
+    mcp = []
+    for item in (local_mcp_tools or []):
+        if isinstance(item, dict):
+            name = _bounded_decision_text(item.get("name", ""), 80)
+            description = _bounded_decision_text(item.get("description", ""), 160)
+            server = _bounded_decision_text(item.get("server", ""), 80)
+        else:
+            name, description, server = _bounded_decision_text(item, 80), "", ""
+        if name:
+            mcp.append({"name": name, "description": description, "server": server})
+
+    local = {str(item).strip().lower() for item in (local_capabilities or []) if str(item).strip()}
+    return {
+        "native": sorted(native)[:_SKILL_DECISION_LIST_CAP],
+        "mcp": mcp[:_SKILL_DECISION_LIST_CAP],
+        "local": sorted(local)[:_SKILL_DECISION_LIST_CAP],
+        "browser": bool(browser_available),
+        "desktop": bool(desktop_available),
+        "acp_alive": bool(acp_alive),
+    }
+
+
+def _explicit_skill_name(request):
+    match = _EXPLICIT_SKILL_RE.search(_bounded_decision_text(request, _SKILL_DECISION_REQUEST_CAP))
+    if not match:
+        return ""
+    return _bounded_decision_text(match.group(1) or match.group(2), 120).strip(" \t\"'")
+
+
+def _skill_tokens(value):
+    stop = {"a", "an", "and", "for", "in", "my", "of", "the", "this", "to", "use", "with", "skill"}
+    return [token for token in re.findall(r"[a-z0-9]+", str(value or "").casefold()) if token not in stop and len(token) > 1]
+
+
+def _skill_match_score(request, row):
+    request_tokens = set(_skill_tokens(request))
+    searchable = " ".join([
+        str(row.get("Name", row.get("name", ""))),
+        str(row.get("Description", row.get("description", ""))),
+        str(row.get("Tags", row.get("tags", ""))),
+        str(row.get("Category", row.get("category", ""))),
+    ])
+    skill_tokens = set(_skill_tokens(searchable))
+    overlap = len(request_tokens & skill_tokens)
+    phrase = str(row.get("Name", row.get("name", ""))).casefold().strip()
+    return overlap + (3 if phrase and phrase in request.casefold() else 0)
+
+
+def _mcp_tool_for(preferred, capabilities):
+    aliases = _TOOL_ALIASES.get(preferred, {preferred})
+    for item in capabilities.get("mcp", []):
+        haystack = " ".join((item.get("name", ""), item.get("description", ""), item.get("server", ""))).casefold()
+        if preferred == "weather-news" and re.search(r"\b(weather|forecast|temperature)\b", haystack):
+            return item.get("name", "")
+        if any(alias in haystack for alias in aliases):
+            return item.get("name", "")
+    return ""
+
+
+def _tool_available(preferred, capabilities):
+    aliases = _TOOL_ALIASES.get(preferred, {preferred})
+    native = set(capabilities.get("native", []))
+    local = set(capabilities.get("local", []))
+    native_available = bool(native & aliases)
+    mcp_tool = _mcp_tool_for(preferred, capabilities)
+    local_available = bool(local & aliases)
+    browser_available = preferred == "browser-control" and capabilities.get("browser", False)
+    desktop_available = preferred == "desktop-control" and capabilities.get("desktop", False)
+    return native_available, mcp_tool, local_available, browser_available, desktop_available
+
+
+def _fallback_tools(row):
+    _, fallback_texts = _skill_defaults_and_fallbacks(row)
+    tools = []
+    for text in fallback_texts:
+        lower = text.casefold()
+        if ("web" in lower and "search" in lower) or "web-search" in lower:
+            tools.append("web-search")
+        elif "browser" in lower and "search" in lower:
+            tools.append("browser-control")
+    return _skill_csv_values(tools)
+
+
+def skill_execution_decision(original_request, skills, capabilities=None, semantic_scores=None):
+    """Select one active skill and one live allowed capability without I/O."""
+    request = _bounded_decision_text(original_request, _SKILL_DECISION_REQUEST_CAP)
+    live = capabilities or skill_live_capabilities()
+    active = [
+        row for row in (skills or [])
+        if str(row.get("Status", row.get("status", "active"))).casefold() in {"active", "provisional"}
+    ]
+    decision = {
+        "original_request": request,
+        "selected_skill_id": "",
+        "selected_skill_name": "",
+        "selection_reason": "",
+        "preferred_tools": [],
+        "live_availability": {},
+        "availability_by_tier": {},
+        "selected_tool": "",
+        "fallback_reason": "",
+        "status": "no-match",
+    }
+    if _SKILL_MANAGEMENT_RE.search(request) and not _explicit_skill_name(request):
+        decision["status"] = "skill-management"
+        decision["selection_reason"] = "skill-management"
+        return decision
+
+    explicit_name = _explicit_skill_name(request)
+    selected = None
+    if explicit_name:
+        matches = [
+            row for row in active
+            if explicit_name.casefold() in str(row.get("Name", row.get("name", ""))).casefold()
+            or explicit_name.casefold() == str(row.get("SkillId", row.get("skillId", ""))).casefold()
+        ]
+        if len(matches) != 1:
+            decision["selection_reason"] = "explicit-name"
+            decision["status"] = "ambiguous" if len(matches) > 1 else "unavailable"
+            decision["fallback_reason"] = "Explicit skill name did not resolve to exactly one active skill."
+            return decision
+        selected = matches[0]
+        decision["selection_reason"] = "explicit-name"
+    elif _WEATHER_RE.search(request):
+        selected = next((row for row in active if str(row.get("SkillId", "")).casefold() == "skill-weather"), None)
+        if selected:
+            decision["selection_reason"] = "lexical"
+    else:
+        scored = []
+        for row in active:
+            skill_id = str(row.get("SkillId", row.get("skillId", "")))
+            semantic = (semantic_scores or {}).get(skill_id)
+            score = float(semantic) if semantic is not None else _skill_match_score(request, row)
+            if score > 0:
+                scored.append((score, skill_id, row, semantic is not None))
+        scored.sort(key=lambda item: (-item[0], item[1].casefold()))
+        if scored and (len(scored) == 1 or scored[0][0] > scored[1][0]):
+            selected = scored[0][2]
+            decision["selection_reason"] = "semantic" if scored[0][3] else "lexical"
+        elif scored:
+            decision["selection_reason"] = "semantic" if any(item[3] for item in scored) else "lexical"
+            decision["status"] = "ambiguous"
+            decision["fallback_reason"] = "More than one active skill matched with the same score."
+            return decision
+
+    if not selected:
+        return decision
+
+    skill_id = str(selected.get("SkillId", selected.get("skillId", "")))[:128]
+    skill_name = _bounded_decision_text(selected.get("Name", selected.get("name", "")), 120)
+    preferred = _skill_csv_values(selected.get("Tools", selected.get("tools", "")))
+    decision["selected_skill_id"] = skill_id
+    decision["selected_skill_name"] = skill_name
+    decision["preferred_tools"] = preferred
+    fallback = [tool for tool in _fallback_tools(selected) if tool not in preferred]
+    candidates = preferred + fallback
+    availability = {}
+    for tool in candidates:
+        native, mcp_tool, local, browser, desktop = _tool_available(tool, live)
+        decision["live_availability"][tool] = bool(native or mcp_tool or local or browser or desktop)
+        availability[tool] = {
+            "native": native, "mcp": bool(mcp_tool), "local": local,
+            "browser": browser, "desktop": desktop, "mcp_tool": mcp_tool,
+        }
+    decision["availability_by_tier"] = {
+        tool: {key: value for key, value in values.items() if key != "mcp_tool"}
+        for tool, values in availability.items()
+    }
+    for tier in ("native", "mcp", "local", "browser", "desktop"):
+        for tool in preferred:
+            if not availability.get(tool, {}).get(tier):
+                continue
+            decision["selected_tool"] = availability[tool].get("mcp_tool") if tier == "mcp" else tool
+            break
+        if decision["selected_tool"]:
+            break
+    if not decision["selected_tool"]:
+        for tier in ("native", "mcp", "local", "browser", "desktop"):
+            for tool in fallback:
+                if not availability.get(tool, {}).get(tier):
+                    continue
+                decision["selected_tool"] = availability[tool].get("mcp_tool") if tier == "mcp" else tool
+                decision["fallback_reason"] = "Preferred tools are unavailable; selected allowed fallback " + tool + "."
+                break
+            if decision["selected_tool"]:
+                break
+    if not decision["selected_tool"]:
+        decision["fallback_reason"] = "No preferred or allowed fallback capability is live."
+        decision["status"] = "unavailable"
+    else:
+        decision["status"] = "selected"
+    return decision
+
+
+def resolve_weather_location(request, skill_row=None, user_profile=None, approved_approximate_location=""):
+    """Resolve weather location in the approved precedence order."""
+    request = _bounded_decision_text(request, _SKILL_DECISION_REQUEST_CAP)
+    match = _WEATHER_LOCATION_RE.search(request)
+    explicit = _bounded_decision_text((match.group(1) or match.group(2)) if match else "", 120).strip(" ,.")
+    if explicit and not any(token in _LOCATION_STOPWORDS for token in _skill_tokens(explicit)):
+        return {"location": explicit, "source": "request"}
+    defaults, _ = _skill_defaults_and_fallbacks(skill_row or {})
+    configured = _bounded_decision_text(
+        defaults.get("default_location", defaults.get("weather_location", defaults.get("location", ""))), 120
+    ).strip()
+    if configured:
+        return {"location": configured, "source": "skill-default"}
+    if isinstance(user_profile, dict):
+        profile_value = user_profile.get("user_location", user_profile.get("location", ""))
+    else:
+        profile_value = ""
+        for row in user_profile or []:
+            relation = str(row.get("Relation", row.get("relation", ""))).casefold()
+            if relation in {"user_location", "location"}:
+                profile_value = row.get("Value", row.get("value", ""))
+                break
+    profile_value = _bounded_decision_text(profile_value, 120).strip()
+    if profile_value:
+        return {"location": profile_value, "source": "user-profile"}
+    approximate = _bounded_decision_text(approved_approximate_location, 120).strip()
+    if approximate:
+        return {"location": approximate, "source": "approved-approximate-geolocation"}
+    return {"location": "", "source": "unresolved"}
+
+
+def build_weather_retrieval_prompt(original_request, location, selected_tool=""):
+    """Build a bounded weather retrieval instruction tied to the resolved location."""
+    request = _bounded_decision_text(original_request, _SKILL_DECISION_REQUEST_CAP)
+    location = _bounded_decision_text(location, 120)
+    tool = _bounded_decision_text(selected_tool, 80)
+    if not location:
+        return (
+            "The weather request has no approved location. Ask the user for a city or region; "
+            "do not use browser or desktop automation and do not invent weather data.\n\nUser request: " + request
+        )
+    return (
+        "Retrieve current weather and forecast for the resolved location below using the selected live capability. "
+        "Treat the location as authoritative for this turn, return only real results, and never use browser or desktop automation.\n"
+        "Resolved location: " + location + "\nSelected capability: " + tool + "\n\nUser request: " + request
+    )
 
 

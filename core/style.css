@@ -842,7 +842,13 @@ body.skills-view-open .skills-panel {
 }
 body.eva-standalone.skills-view-open .skills-panel { top: auto; height: 100%; }
 body.skills-view-open .skills-panel .session-panel-header { padding: 16px 22px 11px; border-bottom-color: rgba(74,222,199,0.18); }
-body.skills-view-open .skills-panel-body { padding: 0; overflow: hidden; }
+body.skills-view-open .skills-panel-body {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
 .memory-inspector-panel { display: none; }
 body.memory-view-open #idContainer { display: none !important; }
 body.memory-view-open .eva-status-footer,
@@ -940,7 +946,7 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .memory-atom-detail-fields textarea:disabled { opacity: 0.55; }
 .memory-atom-detail-wide { grid-column: 1 / -1; }
 .memory-atom-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
-.skills-view-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(132px, 150px) minmax(132px, 150px) minmax(158px, 176px) auto; align-items: center; gap: 7px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
+.skills-view-toolbar { display: grid; grid-template-columns: minmax(180px, 1fr) repeat(4, minmax(126px, 150px)) auto; align-items: center; gap: 7px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
 .skills-view-toolbar input,
 .skills-view-toolbar select { min-width: 0; height: 32px; border: 1px solid rgba(74,222,199,0.18); border-radius: 3px; background: #0c1b19; color: #e5faf7; padding: 0 9px; font: 11px inherit; }
 .skills-view-toolbar select {
@@ -971,7 +977,10 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .skills-editor .auth-field select,
 .skills-editor .auth-field textarea,
 .skills-editor .auth-field input[type="file"] { background: #0c1b19; border-color: rgba(74,222,199,0.18); color: #e5faf7; }
-#skillsList { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 9px; padding: 12px; }
+#skillsList { display: grid; gap: 15px; padding: 12px; }
+.skills-category-group { display: grid; gap: 7px; min-width: 0; }
+.skills-category-heading { margin: 0; padding: 0 2px; color: #8ce4d7; font: 700 10px/1.3 monospace; letter-spacing: 0.08em; }
+.skills-category-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 9px; }
 .skill-card { display: flex; flex-direction: column; min-height: 170px; padding: 13px; border: 1px solid rgba(74,222,199,0.16); border-radius: 4px; background: linear-gradient(145deg, rgba(14,39,36,0.94), rgba(7,23,21,0.98)); }
 .skill-card-disabled { opacity: 0.65; }
 .skill-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
@@ -983,6 +992,7 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .skill-card-chips span { padding: 3px 6px; border-radius: 3px; background: rgba(74,222,199,0.08); color: #83bbb4; font: 9px monospace; }
 .skill-card-chips .skill-tool-chip { background: rgba(91,154,255,0.09); color: #91baff; }
 .skill-card-chips .skill-source-chip { background: rgba(255,190,92,0.08); color: #d9a95f; }
+.skill-card-chips .skill-category-chip { background: rgba(190,137,255,0.09); color: #c9a7ec; }
 .skill-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 13px; align-items: stretch; }
 .skills-editor .background-actions button,
 .memory-inspector-toolbar button {
@@ -1382,7 +1392,7 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
   .skills-library,
   .skills-editor { overflow: visible; }
   .skills-library { border-right: 0; border-bottom: 1px solid rgba(74,222,199,0.14); }
-  #skillsList { grid-template-columns: 1fr; }
+  .skills-category-list { grid-template-columns: 1fr; }
   .memory-inspector-body { grid-template-columns: 1fr; overflow: auto; }
   .memory-inspector-section { overflow: visible; border-right: 0; border-bottom: 1px solid rgba(74,222,199,0.14); }
   .memory-inspector-section:last-child { border-bottom: 0; }
