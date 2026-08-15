@@ -58,6 +58,7 @@
           "core/audio/eva_voice_profile-korean.wav",
           "core/audio/appatalks_voice_profile-english.wav",
           "tools/acp_bridge.py",
+          "tools/generate_skill_seed.py",
           "tools/skills/**",
           "tools/local_voices_bridge.py",
           "tools/voice_clone_module/**",
