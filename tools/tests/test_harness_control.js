@@ -327,6 +327,8 @@ async function main() {
   assert.deepStrictEqual(externalUrlRequest, { url: 'https://example.com/direct-resource', skillName: undefined, userRequest: directUrlRequest });
   const runSkillRoute = harness.resolveNavigationRequest(playSkillRequest, { directUser: true });
   assert.strictEqual(runSkillRoute.action, 'run_skill');
+  const capturedVoiceRoute = harness.resolveNavigationRequest('go ahead and play my youtube playlist at Apatox', { directUser: true });
+  assert.strictEqual(capturedVoiceRoute.action, 'run_skill');
   const playSkillResult = await harness.execute(runSkillRoute, { source: 'voice', userRequest: playSkillRequest });
   assert.strictEqual(playSkillResult.ok, true);
   assert.strictEqual(runSkillRequest, playSkillRequest);

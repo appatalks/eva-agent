@@ -292,7 +292,7 @@ var EvaHarness = (function() {
         return { action: 'open_external_url', target: 'skills', label: 'Open External URL', url: externalUrl.replace(/[),.;!?]+$/g, ''), userRequest: rawPhrase };
       }
       var runNamedSkill = /^(?:please\s+)?(?:run|use|execute)\s+(?:the\s+)?skill\s+.+/i.test(rawPhrase);
-      var runMediaSkill = /^(?:please\s+)?(?:open|play|watch|listen\s+to|launch)\s+(?:my|the)\s+.+\b(?:playlist|station|stream|channel)\b[.!?]*$/i.test(rawPhrase);
+      var runMediaSkill = /^(?:(?:please|go\s+ahead(?:\s+and)?|okay|ok|yes)[,\s]+)*(?:open|play|watch|listen\s+to|launch)\s+(?:my|the)\s+.+?\b(?:playlist|station|stream|channel)\b(?:[\s,]+[A-Za-z0-9_.-]+){0,4}[.!?]*$/i.test(rawPhrase);
       if (runNamedSkill || runMediaSkill) {
         return { action: 'run_skill', target: 'skills', label: 'Run Skill', requestText: rawPhrase };
       }
