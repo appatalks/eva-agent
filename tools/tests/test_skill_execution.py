@@ -35,6 +35,17 @@ class SkillExecutionTests(unittest.TestCase):
         self.assertEqual(ordinary["selected_skill_id"], "skill-weather")
         self.assertEqual(ordinary["selection_reason"], "lexical")
 
+    def test_whitespace_normalization_preserves_skill_and_location_routing(self):
+        request = "check" + (" " * 5000) + "the Weather Report skill and use it"
+        decision = skill_execution_decision(
+            request, self.skills,
+            skill_live_capabilities(configured_data_paths={"weather-news": True}),
+        )
+        self.assertEqual(decision["selected_skill_id"], "skill-weather")
+        weather = next(row for row in self.skills if row["SkillId"] == "skill-weather")
+        location = resolve_weather_location("weather" + (" " * 5000) + "in Seattle", weather)
+        self.assertEqual(location["location"], "Seattle")
+
     def test_skill_management_does_not_execute(self):
         decision = skill_execution_decision("list my saved skills", self.skills)
         self.assertEqual(decision["status"], "skill-management")

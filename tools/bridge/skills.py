@@ -388,14 +388,14 @@ _SKILL_DECISION_REQUEST_CAP = 2000
 _SKILL_DECISION_LIST_CAP = 12
 _SKILL_DECISION_ITEM_CAP = 96
 _SKILL_MANAGEMENT_RE = re.compile(
-    r"\b(?:list|describe|show|summarize|inspect|review|check|manage|count)\b[\s\S]{0,64}\bskills?\b|"
-    r"\bskills?\s+(?:do i have|are available|can you access)\b",
+    r"\b(?:list|describe|show|summarize|inspect|review|check|manage|count)\b.{0,64}\bskills?\b|"
+    r"\bskills? (?:do i have|are available|can you access)\b",
     re.IGNORECASE,
 )
 _EXPLICIT_SKILL_RE = re.compile(
-    r"\b(?:use|run|execute)\s+(?:my\s+|the\s+)?(?:skill\s+)?[\"']?([^.!?,\"']+?)"
-    r"\s+skill\b|\bcheck\s+(?:my\s+|the\s+)?[\"']?([^.!?,\"']+?)\s+skill\b"
-    r"(?=\s+and\s+(?:use|run|execute)\s+it\b)",
+    r"\b(?:use|run|execute) (?:my |the )?(?:skill )?[\"']?([^.!?,\"']+?)"
+    r" skill\b|\bcheck (?:my |the )?[\"']?([^.!?,\"']+?) skill\b"
+    r"(?= and (?:use|run|execute) it\b)",
     re.IGNORECASE,
 )
 _WEATHER_RE = re.compile(
@@ -403,9 +403,9 @@ _WEATHER_RE = re.compile(
     re.IGNORECASE,
 )
 _WEATHER_LOCATION_RE = re.compile(
-    r"\b(?:weather|forecast|temperature|conditions?)\s+(?:in|for|at|near)\s+"
-    r"([A-Za-z][A-Za-z0-9 .,'-]{1,80}?)(?=\s+(?:today|tomorrow|this weekend|this week|now|please)\b|[?.!,;]|$)|"
-    r"\b(?:in|for|at|near)\s+([A-Za-z][A-Za-z0-9 .,'-]{1,80}?)(?=\s+(?:today|tomorrow|this weekend|this week|now|please)\b|[?.!,;]|$)",
+    r"\b(?:weather|forecast|temperature|conditions?) (?:in|for|at|near) "
+    r"([A-Za-z][A-Za-z0-9 .,'-]{1,80}?)(?= (?:today|tomorrow|this weekend|this week|now|please)\b|[?.!,;]|$)|"
+    r"\b(?:in|for|at|near) ([A-Za-z][A-Za-z0-9 .,'-]{1,80}?)(?= (?:today|tomorrow|this weekend|this week|now|please)\b|[?.!,;]|$)",
     re.IGNORECASE,
 )
 _LOCATION_STOPWORDS = {"this", "that", "today", "tomorrow", "the", "now", "please", "weekend", "week"}
@@ -532,7 +532,7 @@ def skill_live_capabilities(
 
 
 def _explicit_skill_name(request):
-    match = _EXPLICIT_SKILL_RE.search(request)
+    match = _EXPLICIT_SKILL_RE.search(_bounded_decision_text(request, _SKILL_DECISION_REQUEST_CAP))
     if not match:
         return ""
     return _bounded_decision_text(match.group(1) or match.group(2), 120).strip(" \t\"'")
@@ -705,7 +705,7 @@ def skill_execution_decision(original_request, skills, capabilities=None, semant
 
 def resolve_weather_location(request, skill_row=None, user_profile=None, approved_approximate_location=""):
     """Resolve weather location in the approved precedence order."""
-    request = str(request or "")[:_SKILL_DECISION_REQUEST_CAP]
+    request = _bounded_decision_text(request, _SKILL_DECISION_REQUEST_CAP)
     match = _WEATHER_LOCATION_RE.search(request)
     explicit = _bounded_decision_text((match.group(1) or match.group(2)) if match else "", 120).strip(" ,.")
     if explicit and not any(token in _LOCATION_STOPWORDS for token in _skill_tokens(explicit)):
