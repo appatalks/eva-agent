@@ -31,6 +31,15 @@ let assetsOpenCalls = 0;
 let skillsOpenCalls = 0;
 let agentsOpenCalls = 0;
 let sessionsOpenCalls = 0;
+let createdSkillRequest = '';
+let updatedSkillRequest = null;
+let skillStatusRequest = null;
+let deletedSkillName = '';
+let externalUrlRequest = null;
+let runSkillRequest = '';
+let skillActivationConfirmation = 'ENABLE';
+let skillActivationPromptCount = 0;
+let createdSkillResponse = { skillName: 'Play my YouTube playlist', status: 'draft', reused: false, message: 'Created draft skill "Play my YouTube playlist".' };
 let mergeRequest = null;
 let pullRequestViewRequest = null;
 let branchDeleteRequest = null;
@@ -129,6 +138,30 @@ const window = {
   EvaSkills: {
     open() { skillsOpenCalls += 1; },
     describe() { return Promise.resolve('There are 2 saved skills, 1 active. Available examples: Research and Review.'); },
+    createFromRequest(requestText) {
+      createdSkillRequest = requestText;
+      return Promise.resolve(Object.assign({}, createdSkillResponse));
+    },
+    updateByName(skillName, updates) {
+      updatedSkillRequest = { skillName, updates };
+      return Promise.resolve('Updated skill "' + skillName + '".');
+    },
+    setStatusByName(skillName, status, confirmation) {
+      skillStatusRequest = { skillName, status, confirmation };
+      return Promise.resolve((status === 'active' ? 'Enabled' : 'Disabled') + ' skill "' + skillName + '".');
+    },
+    deleteByName(skillName) {
+      deletedSkillName = skillName;
+      return Promise.resolve('Deleted skill "' + skillName + '".');
+    },
+    openExternalUrl(url, skillName, userRequest) {
+      externalUrlRequest = { url, skillName, userRequest };
+      return Promise.resolve('Opened ' + url);
+    },
+    runFromRequest(requestText) {
+      runSkillRequest = requestText;
+      return Promise.resolve('Opened the verified playlist URL.');
+    },
   },
   EvaAgents: {
     open() { agentsOpenCalls += 1; },
@@ -164,7 +197,13 @@ const sandbox = {
   localStorage,
   describeSavedSessions() { return Promise.resolve('There are 2 saved chat sessions: Today and Planning.'); },
   toggleSessionPanel() { sessionsOpenCalls += 1; },
-  evaTextPrompt() { return Promise.resolve('MERGE'); },
+  evaTextPrompt(title) {
+    if (/^Activate Skill/.test(title)) {
+      skillActivationPromptCount += 1;
+      return Promise.resolve(skillActivationConfirmation);
+    }
+    return Promise.resolve('MERGE');
+  },
 };
 vm.runInNewContext(source, sandbox, { filename: 'core/js/harness-control.js' });
 const harness = sandbox.EvaHarness;
@@ -204,9 +243,100 @@ async function main() {
   assert.strictEqual(agentsOpenCalls, 1);
   assert.match(agentsResult.message, /1 active agent/);
   const manifestActions = harness.capabilities().actions;
+  assert.deepStrictEqual(harness.capabilities().voiceAwareActions, manifestActions);
   ['describe_workspaces', 'describe_assets', 'describe_skills', 'describe_sessions', 'describe_agents'].forEach(function(action) {
     assert.ok(manifestActions.includes(action), action + ' must be exposed in the native action manifest');
   });
+  ['create_skill', 'update_skill', 'set_skill_status', 'delete_skill', 'run_skill', 'open_external_url'].forEach(function(action) {
+    assert.ok(manifestActions.includes(action), action + ' must be exposed to typed and voice requests');
+  });
+  const playlistUrl = 'https://www.youtube.com/watch?v=MHiK7ytWxAQ&list=PLJNK8rrU0NUHblvj8wc83xP2HJAqUc2-n';
+  const createSkillPhrase = 'Create a new Skill to play my YouTube playlist when I ask for it ' + playlistUrl;
+  const createSkillRoute = harness.resolveNavigationRequest(createSkillPhrase, { directUser: true });
+  assert.strictEqual(createSkillRoute.action, 'create_skill');
+  const createSkillResult = await harness.execute(createSkillRoute, { source: 'voice', userRequest: createSkillPhrase });
+  assert.strictEqual(createSkillResult.ok, true);
+  assert.strictEqual(createdSkillRequest, createSkillPhrase);
+  assert.match(createSkillResult.message, /Created draft skill/);
+  assert.match(createSkillResult.message, /Enabled skill/);
+  assert.deepStrictEqual(skillStatusRequest, { skillName: 'Play my YouTube playlist', status: 'active', confirmation: 'ENABLE' });
+  assert.strictEqual(skillActivationPromptCount, 1);
+  createdSkillResponse = { skillName: 'Play my YouTube playlist', status: 'active', reused: true, message: 'Reused existing active skill "Play my YouTube playlist".' };
+  skillStatusRequest = null;
+  const promptCountBeforeActiveReuse = skillActivationPromptCount;
+  const activeReuseResult = await harness.execute(createSkillRoute, { source: 'voice', userRequest: createSkillPhrase });
+  assert.strictEqual(activeReuseResult.ok, true);
+  assert.match(activeReuseResult.message, /already active/);
+  assert.strictEqual(skillActivationPromptCount, promptCountBeforeActiveReuse);
+  assert.strictEqual(skillStatusRequest, null);
+  createdSkillResponse = { skillName: 'Play my YouTube playlist', status: 'draft', reused: true, message: 'Reused existing draft skill "Play my YouTube playlist".' };
+  const reusedDraftResult = await harness.execute(createSkillRoute, { source: 'voice', userRequest: createSkillPhrase });
+  assert.strictEqual(reusedDraftResult.ok, true);
+  assert.strictEqual(skillActivationPromptCount, promptCountBeforeActiveReuse + 1);
+  assert.deepStrictEqual(skillStatusRequest, { skillName: 'Play my YouTube playlist', status: 'active', confirmation: 'ENABLE' });
+  assert.strictEqual(harness.resolveNavigationRequest('How do I create a Skill?', { directUser: true }).action, 'consider_terminal_task');
+  assert.strictEqual(harness.resolveNavigationRequest('Can I create a Skill?', { directUser: true }).action, 'consider_terminal_task');
+  assert.strictEqual(harness.resolveNavigationRequest('Can you create a new Skill?', { directUser: true }).action, 'consider_terminal_task');
+  assert.strictEqual(harness.resolveNavigationRequest('Could you make a Skill?', { directUser: true }).action, 'consider_terminal_task');
+  ['Create a Skill?', 'Make a new Skill?', 'Add a Skill?', 'Teach a Skill?'].forEach(function(question) {
+    assert.strictEqual(harness.resolveNavigationRequest(question, { directUser: true }).action, 'consider_terminal_task');
+  });
+  const unsolicitedSkillCreate = await harness.execute(
+    { action: 'create_skill', requestText: 'Create an unrelated skill.' },
+    { source: 'model', userRequest: 'What is the weather?' }
+  );
+  assert.strictEqual(unsolicitedSkillCreate.ok, false);
+  const disableSkillRoute = harness.resolveNavigationRequest('Disable the skill "Play my YouTube playlist".', { directUser: true });
+  assert.strictEqual(disableSkillRoute.action, 'set_skill_status');
+  assert.strictEqual(disableSkillRoute.status, 'disabled');
+  assert.strictEqual((await harness.execute(disableSkillRoute, { source: 'voice', userRequest: 'Disable the skill "Play my YouTube playlist".' })).ok, true);
+  assert.deepStrictEqual(skillStatusRequest, { skillName: 'Play my YouTube playlist', status: 'disabled', confirmation: '' });
+  const enableSkillRoute = harness.resolveNavigationRequest('Enable the skill "Play my YouTube playlist".', { directUser: true });
+  skillStatusRequest = null;
+  skillActivationConfirmation = '';
+  assert.strictEqual((await harness.execute(enableSkillRoute, { source: 'voice', userRequest: 'Enable the skill "Play my YouTube playlist".' })).ok, false);
+  assert.strictEqual(skillStatusRequest, null);
+  skillActivationConfirmation = 'ENABLE';
+  assert.strictEqual((await harness.execute(enableSkillRoute, { source: 'voice', userRequest: 'Enable the skill "Play my YouTube playlist".' })).ok, true);
+  assert.deepStrictEqual(skillStatusRequest, { skillName: 'Play my YouTube playlist', status: 'active', confirmation: 'ENABLE' });
+  const renameSkillRoute = harness.resolveNavigationRequest('Rename the skill "Play my YouTube playlist" to "My music".', { directUser: true });
+  assert.strictEqual(renameSkillRoute.action, 'update_skill');
+  assert.strictEqual((await harness.execute(renameSkillRoute, { source: 'voice', userRequest: 'Rename the skill "Play my YouTube playlist" to "My music".' })).ok, true);
+  assert.strictEqual(updatedSkillRequest.skillName, 'Play my YouTube playlist');
+  assert.strictEqual(updatedSkillRequest.updates.name, 'My music');
+  const divergentModelUpdate = await harness.execute(
+    { action: 'update_skill', skillName: 'Play my YouTube playlist', updates: { name: 'Attacker skill' } },
+    { source: 'model', userRequest: 'Rename the skill "Play my YouTube playlist" to "My music".' }
+  );
+  assert.strictEqual(divergentModelUpdate.ok, false);
+  const deleteSkillRoute = harness.resolveNavigationRequest('Delete the skill "My music".', { directUser: true });
+  assert.strictEqual(deleteSkillRoute.action, 'delete_skill');
+  assert.strictEqual((await harness.execute(deleteSkillRoute, { source: 'voice', userRequest: 'Delete the skill "My music".' })).ok, true);
+  assert.strictEqual(deletedSkillName, 'My music');
+  const playSkillRequest = 'Play my YouTube playlist.';
+  const rawModelOpen = await harness.execute(
+    { action: 'open_external_url', url: playlistUrl, skillName: 'Play my YouTube playlist' },
+    { source: 'model', userRequest: playSkillRequest }
+  );
+  assert.strictEqual(rawModelOpen.ok, false);
+  assert.strictEqual(externalUrlRequest, null);
+  const directUrlRequest = 'Open https://example.com/direct-resource';
+  const directUrlRoute = harness.resolveNavigationRequest(directUrlRequest, { directUser: true });
+  assert.strictEqual(directUrlRoute.action, 'open_external_url');
+  assert.strictEqual((await harness.execute(directUrlRoute, { source: 'voice', userRequest: directUrlRequest })).ok, true);
+  assert.deepStrictEqual(externalUrlRequest, { url: 'https://example.com/direct-resource', skillName: undefined, userRequest: directUrlRequest });
+  const runSkillRoute = harness.resolveNavigationRequest(playSkillRequest, { directUser: true });
+  assert.strictEqual(runSkillRoute.action, 'run_skill');
+  const capturedVoiceRoute = harness.resolveNavigationRequest('go ahead and play my youtube playlist at Apatox', { directUser: true });
+  assert.strictEqual(capturedVoiceRoute.action, 'run_skill');
+  const playSkillResult = await harness.execute(runSkillRoute, { source: 'voice', userRequest: playSkillRequest });
+  assert.strictEqual(playSkillResult.ok, true);
+  assert.strictEqual(runSkillRequest, playSkillRequest);
+  const unsolicitedExternalOpen = await harness.execute(
+    { action: 'open_external_url', url: playlistUrl, skillName: 'Play my YouTube playlist' },
+    { source: 'model', userRequest: 'What music do I like?' }
+  );
+  assert.strictEqual(unsolicitedExternalOpen.ok, false);
   const pullUrl = 'https://github.com/example/repository/pull/183';
   const pullViewRoute = harness.resolveNavigationRequest(pullUrl, { directUser: true });
   assert.strictEqual(pullViewRoute.action, 'describe_github_pull_request');

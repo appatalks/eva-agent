@@ -77,6 +77,12 @@ var EvaHarness = (function() {
     { id: 'describe_workspaces', description: 'Open Workspaces and return the real workspace and active-run count. Read-only.' },
     { id: 'describe_assets', description: 'Open Assets and summarize generated and workspace files. Read-only.' },
     { id: 'describe_skills', description: 'Open Skills and summarize saved and active skills. Read-only.' },
+    { id: 'create_skill', description: 'Normalize, create, and activate a Skill from an explicit direct user request. args: {requestText}.' },
+    { id: 'update_skill', description: 'Update a named Skill after an explicit direct user request. args: {skillName, updates}.' },
+    { id: 'set_skill_status', description: 'Enable or disable a named Skill after an explicit direct user request. args: {skillName, status}.' },
+    { id: 'delete_skill', description: 'Delete a named Skill after an explicit direct user request. args: {skillName}.' },
+    { id: 'run_skill', description: 'Resolve and run a named active Skill from an explicit direct user request. args: {requestText}.' },
+    { id: 'open_external_url', description: 'Open a credential-free HTTPS URL explicitly supplied by the user or verified inside a named active Skill. args: {url, skillName?}.' },
     { id: 'describe_sessions', description: 'Open Sessions and summarize saved chat sessions. Read-only.' },
     { id: 'describe_agents', description: 'Open Agent Operations and summarize active and recent agents. Read-only.' },
     { id: 'describe_workspace_tools', description: 'Summarize enabled MCP tools for a workspace. args: {projectName?}. Read-only.' },
@@ -256,6 +262,41 @@ var EvaHarness = (function() {
     if (workspaceDescription) return { action: 'describe_workspaces', target: 'workspaces', label: 'Workspaces' };
     var assetsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:assets?|artifacts?|generated files?|workspace files?)\b|\b(?:assets?|artifacts?|generated files?|workspace files?)\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
     if (assetsDescription) return { action: 'describe_assets', target: 'assets', label: 'Assets' };
+    if (directUser) {
+      var createSkillRequest = !/\?\s*$/.test(rawPhrase) && /^(?:please\s+)?(?:create|make|add|teach)\b[\s\S]{0,48}\b(?:new\s+)?skills?\b/i.test(rawPhrase);
+      if (createSkillRequest) {
+        return { action: 'create_skill', target: 'skills', label: 'Create Skill', requestText: rawPhrase };
+      }
+      var skillStatusRequest = rawPhrase.match(/^(?:please\s+)?(enable|activate|disable|deactivate|turn\s+on|turn\s+off)\s+(?:the\s+)?skill\s+(?:named\s+|called\s+)?["']?(.+?)["']?[.!?]*$/i);
+      if (skillStatusRequest) {
+        return {
+          action: 'set_skill_status', target: 'skills', label: 'Skill Status',
+          skillName: String(skillStatusRequest[2] || '').trim(),
+          status: /^(?:enable|activate|turn\s+on)$/i.test(skillStatusRequest[1]) ? 'active' : 'disabled'
+        };
+      }
+      var deleteSkillRequest = rawPhrase.match(/^(?:please\s+)?(?:delete|remove|forget)\s+(?:the\s+)?skill\s+(?:named\s+|called\s+)?["']?(.+?)["']?[.!?]*$/i);
+      if (deleteSkillRequest) {
+        return { action: 'delete_skill', target: 'skills', label: 'Delete Skill', skillName: String(deleteSkillRequest[1] || '').trim() };
+      }
+      var renameSkillRequest = rawPhrase.match(/^(?:please\s+)?rename\s+(?:the\s+)?skill\s+["'](.+?)["']\s+to\s+["'](.+?)["'][.!?]*$/i);
+      if (renameSkillRequest) {
+        return { action: 'update_skill', target: 'skills', label: 'Update Skill', skillName: renameSkillRequest[1], updates: { name: renameSkillRequest[2] } };
+      }
+      var updateSkillRequest = rawPhrase.match(/^(?:please\s+)?update\s+(?:the\s+)?skill\s+["'](.+?)["']\s+(?:to|so\s+that|with)\s+([\s\S]+?)[.!?]*$/i);
+      if (updateSkillRequest) {
+        return { action: 'update_skill', target: 'skills', label: 'Update Skill', skillName: updateSkillRequest[1], updates: { instructions: updateSkillRequest[2].trim() } };
+      }
+      var externalUrl = (rawPhrase.match(/https:\/\/[^\s<>"']+/i) || [])[0] || '';
+      if (externalUrl && /\b(?:open|play|watch|listen|launch|visit)\b/i.test(rawPhrase)) {
+        return { action: 'open_external_url', target: 'skills', label: 'Open External URL', url: externalUrl.replace(/[),.;!?]+$/g, ''), userRequest: rawPhrase };
+      }
+      var runNamedSkill = /^(?:please\s+)?(?:run|use|execute)\s+(?:the\s+)?skill\s+.+/i.test(rawPhrase);
+      var runMediaSkill = /^(?:(?:please|go\s+ahead(?:\s+and)?|okay|ok|yes)[,\s]+)*(?:open|play|watch|listen\s+to|launch)\s+(?:my|the)\s+.+?\b(?:playlist|station|stream|channel)\b(?:[\s,]+[A-Za-z0-9_.-]+){0,4}[.!?]*$/i.test(rawPhrase);
+      if (runNamedSkill || runMediaSkill) {
+        return { action: 'run_skill', target: 'skills', label: 'Run Skill', requestText: rawPhrase };
+      }
+    }
     var skillsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\bskills?\b|\bskills?\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
     if (skillsDescription) return { action: 'describe_skills', target: 'skills', label: 'Skills' };
     var sessionsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:sessions?|chat history|saved chats?)\b|\b(?:sessions?|chat history|saved chats?)\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
@@ -563,7 +604,14 @@ var EvaHarness = (function() {
       userNativeRoute.action === 'run_repository_remediation' &&
       String(request.repositoryName || '').toLowerCase() === String(userNativeRoute.repositoryName || '').toLowerCase() &&
       String(request.objective || '') === String(userNativeRoute.objective || '');
-    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation) {
+    var modelSkillMutation = userNativeRoute && action === userNativeRoute.action && (
+      action === 'create_skill' ||
+      (action === 'update_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase() && JSON.stringify(request.updates || {}) === JSON.stringify(userNativeRoute.updates || {})) ||
+      (action === 'set_skill_status' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase() && String(request.status || '').toLowerCase() === String(userNativeRoute.status || '').toLowerCase()) ||
+      (action === 'delete_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase()) ||
+      action === 'run_skill'
+    );
+    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation) {
       return result(false, action, 'This native action requires direct user interaction.');
     }
     if (action === 'navigate') return navigate(request.target);
@@ -596,6 +644,90 @@ var EvaHarness = (function() {
         return result(true, 'describe_skills', message);
       }).catch(function(error) {
         return result(false, 'describe_skills', error && error.message ? error.message : 'Skills could not be described.');
+      });
+    }
+    if (action === 'create_skill') {
+      if (!window.EvaSkills || typeof EvaSkills.createFromRequest !== 'function') return Promise.resolve(result(false, 'create_skill', 'Native Skill creation is unavailable.'));
+      var skillRequest = context.source === 'model' ? String(context.userRequest || '') : String(request.requestText || '');
+      return Promise.resolve(EvaSkills.createFromRequest(skillRequest)).then(function(created) {
+        navigate('skills');
+        var skillName = String(created && created.skillName || 'Untitled Skill');
+        var draftMessage = String(created && created.message || 'Created a draft skill.');
+        if (String(created && created.status || '').toLowerCase() === 'active') {
+          return result(true, 'create_skill', draftMessage + ' It is already active.', { outcome: 'completed', reused: true });
+        }
+        if (typeof evaTextPrompt !== 'function') return result(true, 'create_skill', draftMessage + ' Review it in Skills before enabling it.', { outcome: 'draft' });
+        return Promise.resolve(evaTextPrompt('Activate Skill "' + skillName + '"?', '', {
+          maxLength: 6, placeholder: 'Type ENABLE', kind: 'skill_activation'
+        })).then(function(confirmation) {
+          if (String(confirmation || '').trim().toUpperCase() !== 'ENABLE') {
+            return result(true, 'create_skill', draftMessage + ' It remains a draft.', { outcome: 'draft' });
+          }
+          return Promise.resolve(EvaSkills.setStatusByName(skillName, 'active', 'ENABLE')).then(function(message) {
+            return result(true, 'create_skill', draftMessage + ' ' + message, { outcome: 'completed' });
+          });
+        });
+      }).catch(function(error) {
+        return result(false, 'create_skill', error && error.message ? error.message : 'Skill creation failed.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'update_skill') {
+      if (!window.EvaSkills || typeof EvaSkills.updateByName !== 'function') return Promise.resolve(result(false, 'update_skill', 'Native Skill updates are unavailable.'));
+      var skillUpdates = context.source === 'model' && userNativeRoute ? userNativeRoute.updates : request.updates;
+      return Promise.resolve(EvaSkills.updateByName(request.skillName, skillUpdates || {})).then(function(message) {
+        navigate('skills');
+        return result(true, 'update_skill', message, { outcome: 'completed' });
+      }).catch(function(error) {
+        return result(false, 'update_skill', error && error.message ? error.message : 'Skill update failed.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'set_skill_status') {
+      if (!window.EvaSkills || typeof EvaSkills.setStatusByName !== 'function') return Promise.resolve(result(false, 'set_skill_status', 'Native Skill status controls are unavailable.'));
+      var applySkillStatus = function() { return EvaSkills.setStatusByName(request.skillName, request.status, request.status === 'active' ? 'ENABLE' : ''); };
+      var skillStatusUpdate;
+      if (String(request.status || '').toLowerCase() === 'active') {
+        if (typeof evaTextPrompt !== 'function') return Promise.resolve(result(false, 'set_skill_status', 'Native Skill activation confirmation is unavailable.'));
+        skillStatusUpdate = Promise.resolve(evaTextPrompt('Activate Skill "' + String(request.skillName || '') + '"?', '', {
+          maxLength: 6, placeholder: 'Type ENABLE', kind: 'skill_activation'
+        })).then(function(confirmation) {
+          if (String(confirmation || '').trim().toUpperCase() !== 'ENABLE') throw new Error('Skill activation cancelled.');
+          return applySkillStatus();
+        });
+      } else {
+        skillStatusUpdate = Promise.resolve(applySkillStatus());
+      }
+      return skillStatusUpdate.then(function(message) {
+        navigate('skills');
+        return result(true, 'set_skill_status', message, { outcome: 'completed' });
+      }).catch(function(error) {
+        return result(false, 'set_skill_status', error && error.message ? error.message : 'Skill status update failed.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'delete_skill') {
+      if (!window.EvaSkills || typeof EvaSkills.deleteByName !== 'function') return Promise.resolve(result(false, 'delete_skill', 'Native Skill deletion is unavailable.'));
+      return Promise.resolve(EvaSkills.deleteByName(request.skillName)).then(function(message) {
+        navigate('skills');
+        return result(true, 'delete_skill', message, { outcome: 'completed' });
+      }).catch(function(error) {
+        return result(false, 'delete_skill', error && error.message ? error.message : 'Skill deletion failed.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'run_skill') {
+      if (!window.EvaSkills || typeof EvaSkills.runFromRequest !== 'function') return Promise.resolve(result(false, 'run_skill', 'Native Skill execution is unavailable.'));
+      var runRequest = context.source === 'model' ? String(context.userRequest || '') : String(request.requestText || '');
+      return Promise.resolve(EvaSkills.runFromRequest(runRequest)).then(function(message) {
+        return result(true, 'run_skill', message, { outcome: 'completed' });
+      }).catch(function(error) {
+        return result(false, 'run_skill', error && error.message ? error.message : 'Skill execution failed.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'open_external_url') {
+      if (!window.EvaSkills || typeof EvaSkills.openExternalUrl !== 'function') return Promise.resolve(result(false, 'open_external_url', 'Native external URL opening is unavailable.'));
+      var externalRequest = String(context.userRequest || request.userRequest || '');
+      return Promise.resolve(EvaSkills.openExternalUrl(request.url, request.skillName, externalRequest)).then(function(message) {
+        return result(true, 'open_external_url', message, { outcome: 'completed', url: String(request.url || '') });
+      }).catch(function(error) {
+        return result(false, 'open_external_url', error && error.message ? error.message : 'External URL opening failed.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
     if (action === 'describe_sessions') {
@@ -886,8 +1018,10 @@ var EvaHarness = (function() {
   }
 
   function capabilities() {
+    var actions = actionManifest.map(function(action) { return action.id; });
     return {
-      actions: actionManifest.map(function(action) { return action.id; }),
+      actions: actions,
+      voiceAwareActions: actions.slice(),
       manifest: actionManifest.slice(),
       surfaces: Object.keys(navigation),
       aliases: Object.keys(aliases),
@@ -898,6 +1032,7 @@ var EvaHarness = (function() {
   function promptContract() {
     var contract = '\n\nNATIVE EVA HARNESS:\nFor Eva application controls, use [[EVA_HARNESS]]{"action":"navigate","target":"workspaces"}[[/EVA_HARNESS]] instead of browser or desktop automation. Navigate targets: workspaces, skills, memory, assets, sessions, terminal, settings, models, personality, goals, background_jobs, schedules, accounts, tools_memory, learning, profile, voice, and agent_operations. To list or summarize current coding workspaces, use [[EVA_HARNESS]]{"action":"describe_workspaces"}[[/EVA_HARNESS]]. To list the user\'s owned GitHub repositories, use [[EVA_HARNESS]]{"action":"list_github_repositories"}[[/EVA_HARNESS]] and present its returned URLs for user selection. To import a GitHub repository only after the user explicitly requests that import and its exact HTTPS URL is known, use [[EVA_HARNESS]]{"action":"import_github","repository_url":"https://github.com/owner/repository"}[[/EVA_HARNESS]]. When an explicit GitHub listing or import request needs repository authorization, use [[EVA_HARNESS]]{"action":"authorize_github"}[[/EVA_HARNESS]]; this opens a native device-code flow and never exposes a token. Workspace-local MCP servers come from each imported project\'s mcp.json and are isolated from global MCP configuration. When the user explicitly requests a named module, enable it with [[EVA_HARNESS]]{"action":"set_workspace_mcp_server","serverName":"<name>","enabled":true,"projectName":"<optional project>"}[[/EVA_HARNESS]]. When an explicit user request asks to retry a delayed coding run, use [[EVA_HARNESS]]{"action":"retry_workspace_run","runId":"<optional run id>"}[[/EVA_HARNESS]]. Do not use browser or desktop automation for these native workspace operations. Do not open an empty import form or use browser, terminal, or desktop control for GitHub repository listing/import. Terminal commands execute only from a direct user request and cannot be initiated by a model marker. Native forms support inspect_form, set_field, submit_form, and cancel_form for direct user interaction. Other actions: new_chat and voice_control with optional enabled:false. These actions control Eva directly; never use browser, screenshots, or desktop automation for those same Eva surfaces.';
     contract += '\nFor requests to open, count, inspect, list, or summarize Workspaces, use describe_workspaces. It opens the native Workspaces view and returns the real count. Never use browser or desktop automation for this.';
+    contract += '\nThe complete native action manifest is available when interpreting typed and voice requests. Apply the same direct-user, confirmation, and validation requirements in both modes; awareness never bypasses an action gate. Skill creation and management must use create_skill, update_skill, set_skill_status, or delete_skill instead of Browser, Desktop, or Terminal automation. Spoken or typed requests to run an active Skill use run_skill. open_external_url is reserved for exact URLs in a direct user request or internal execution of a verified active Skill.';
     contract += '\nAVAILABLE NATIVE ACTIONS:\n' + actionManifest.map(function(action) { return '- ' + action.id + ': ' + action.description; }).join('\n');
     if (typeof evaTextPromptDescribe === 'function') {
       var schema = evaTextPromptDescribe();

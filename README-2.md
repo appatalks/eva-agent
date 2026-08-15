@@ -1772,7 +1772,15 @@ Skills are managed in a full main-window library/editor. It supports paste,
 URL, GitHub, and file import; Eva'rise preview; edit/reimport;
 enable/disable/delete; Active/Draft/Disabled filtering; normalized source
 categories with full provenance; tag/tool search; name/status/update sorting;
-and responsive organization controls.
+and responsive organization controls. Typed and spoken requests can use the
+same native management API to create, update, enable, disable, or delete a
+named Skill. Voice creation saves a draft and requires native `ENABLE`
+confirmation before activation. The complete allowlisted Eva Harness manifest
+is available while interpreting voice requests, but each action retains its
+normal direct-user and confirmation requirements. Active Skills may open a
+credential-free HTTPS URL only after
+an explicit open/play request and only when the exact URL came from that
+request or a structured action inside the deterministically matched Skill.
 
 The sidebar profile picker keeps sessions, prompts, model choices, voice preferences, and other browser-local settings separate per user. API credentials, MCP configuration, and the selected memory backend remain shared installation settings. Sessions open fresh on launch and support persistent custom titles. Saved skills can be edited and reimported through the existing skill ID, preserving database history.
 

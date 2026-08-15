@@ -972,6 +972,16 @@ except Exception as _cam_err:  # pragma: no cover - defensive
 # ACP Client — manages the copilot subprocess and JSON-RPC communication
 # ---------------------------------------------------------------------------
 
+def _sqlite_latest_skill_rows(memory):
+    return memory.query(
+        "SELECT SkillId, Name, Description, Instructions, Tools, Tags, Source, Status, CreatedAt, UpdatedAt "
+        "FROM ("
+        "SELECT rowid AS _rowid, Skills.*, ROW_NUMBER() OVER ("
+        "PARTITION BY SkillId ORDER BY UpdatedAt DESC, rowid DESC"
+        ") AS _latest FROM Skills"
+        ") WHERE _latest = 1 AND Status != 'deleted' ORDER BY UpdatedAt DESC, _rowid DESC"
+    )
+
 class BridgeHandler(BaseHTTPRequestHandler):
     """HTTP handler that bridges browser requests to ACP."""
 
@@ -2389,7 +2399,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             mem = _get_sqlite_mem()
             rows = mem.query(
                 f"SELECT * FROM Skills WHERE SkillId = '{safe}' "
-                f"ORDER BY UpdatedAt DESC LIMIT 1"
+                f"ORDER BY UpdatedAt DESC, rowid DESC LIMIT 1"
             )
         else:
             rows = _kusto_query_direct(cluster, db, _SKILLS_LATEST_QUERY + f" | where SkillId == '{safe}' | take 1")
@@ -2452,7 +2462,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if not mem.table_exists("Skills"):
                 self._json_response(200, {"skills": []})
                 return
-            rows = mem.query("SELECT * FROM Skills WHERE Status != 'deleted' ORDER BY UpdatedAt DESC")
+            rows = _sqlite_latest_skill_rows(mem)
             self._json_response(200, {"skills": rows or []})
         else:
             cluster, db = handle
