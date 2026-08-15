@@ -236,3 +236,5 @@ jobs:
           python3 tools/tests/test_pr_diff_secret_scan.py
           node tools/tests/test_cognition_provider.js
           node tools/tests/test_provider_token_budget.js
+          node tools/tests/test_harness_control.js
+          node tools/tests/test_skills_voice_management.js

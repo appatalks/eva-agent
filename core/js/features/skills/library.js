@@ -435,9 +435,198 @@ async function describeSkills() {
     ' active. Available examples: ' + names.join(', ') + (remaining > 0 ? ', and ' + remaining + ' more' : '') + '.';
 }
 
+function _managedSkillUrl(value) {
+  var raw = String(value || '').trim();
+  if (!raw || raw.length > 2048) throw new Error('A valid HTTPS URL is required.');
+  var parsed;
+  try { parsed = new URL(raw); } catch (_) { throw new Error('A valid HTTPS URL is required.'); }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error('Only credential-free HTTPS URLs can be opened.');
+  return parsed.href;
+}
+
+function _skillRequestUrl(value) {
+  var match = String(value || '').match(/https:\/\/[^\s<>"']+/i);
+  return match ? match[0].replace(/[),.;!?]+$/g, '') : '';
+}
+
+function _skillWithName(name) {
+  var expected = String(name || '').trim().toLowerCase();
+  if (!expected) throw new Error('Name the skill Eva should manage.');
+  var active = (_skillsState.skills || []).filter(function(skill) {
+    return String(_skillField(skill, 'Status', 'status') || '').toLowerCase() !== 'deleted';
+  });
+  var exact = active.filter(function(skill) {
+    return String(_skillField(skill, 'Name', 'name') || '').trim().toLowerCase() === expected;
+  });
+  if (exact.length === 1) return exact[0];
+  var partial = active.filter(function(skill) {
+    return String(_skillField(skill, 'Name', 'name') || '').trim().toLowerCase().indexOf(expected) !== -1;
+  });
+  if (partial.length === 1) return partial[0];
+  if (exact.length > 1 || partial.length > 1) throw new Error('More than one skill matches "' + name + '". Use its full name.');
+  throw new Error('No saved skill matches "' + name + '".');
+}
+
+async function createSkillFromRequest(requestText) {
+  var request = String(requestText || '').trim();
+  if (!request || request.length > 8000) throw new Error('Describe the skill Eva should create.');
+  var normalized = await _skillsBridge('/v1/skills/evarise', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source_type: 'paste', content: request })
+  });
+  var draft = normalized && normalized.draft;
+  if (!draft || !String(draft.instructions || '').trim()) throw new Error('Eva could not normalize that skill request.');
+  var url = _skillRequestUrl(request);
+  var tools = _skillCsv(draft.tools);
+  if (url) {
+    url = _managedSkillUrl(url);
+    var action = JSON.stringify({ action: 'open_external_url', url: url, skillName: String(draft.name || 'Untitled Skill') });
+    draft.instructions = String(draft.instructions || '').trim() +
+      '\n\nWhen the user asks to open or play this resource, use Eva\'s native harness action `[[EVA_HARNESS]]' + action + '[[/EVA_HARNESS]]`. Do not use Browser, Desktop, or Terminal automation.';
+    if (tools.indexOf('eva_harness.open_external_url') === -1) tools.push('eva_harness.open_external_url');
+  }
+  var created = await _skillsBridge('/v1/skills', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: String(draft.name || 'Untitled Skill'),
+      description: String(draft.description || ''),
+      instructions: String(draft.instructions || ''),
+      tools: tools.join(', '),
+      tags: String(draft.tags || ''),
+      source: 'voice',
+      status: 'draft'
+    })
+  });
+  await loadSkills();
+  var name = String(created && created.skill && (created.skill.Name || created.skill.name) || draft.name || 'Untitled Skill');
+  return { skillName: name, message: 'Created draft skill "' + name + '".' };
+}
+
+async function updateSkillByName(name, updates) {
+  await loadSkills();
+  var skill = _skillWithName(name);
+  var skillId = String(_skillField(skill, 'SkillId', 'skillId') || '');
+  var allowed = {};
+  ['name', 'description', 'instructions', 'tools', 'tags'].forEach(function(field) {
+    if (updates && String(updates[field] || '').trim()) allowed[field] = String(updates[field]).trim();
+  });
+  if (!Object.keys(allowed).length) throw new Error('Describe what Eva should update in that skill.');
+  allowed.source = 'edited';
+  var response = await _skillsBridge('/v1/skills/' + encodeURIComponent(skillId), {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(allowed)
+  });
+  await loadSkills();
+  return 'Updated skill "' + String(response && response.skill && (response.skill.Name || response.skill.name) || name) + '".';
+}
+
+async function setSkillStatusByName(name, status, confirmation) {
+  var normalizedStatus = String(status || '').toLowerCase();
+  if (['active', 'disabled'].indexOf(normalizedStatus) === -1) throw new Error('A skill can be enabled or disabled.');
+  if (normalizedStatus === 'active' && confirmation !== 'ENABLE') throw new Error('Type ENABLE to activate a skill.');
+  await loadSkills();
+  var skill = _skillWithName(name);
+  var skillId = String(_skillField(skill, 'SkillId', 'skillId') || '');
+  await _skillsBridge('/v1/skills/' + encodeURIComponent(skillId), {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: normalizedStatus })
+  });
+  await loadSkills();
+  return (normalizedStatus === 'active' ? 'Enabled' : 'Disabled') + ' skill "' + String(_skillField(skill, 'Name', 'name') || name) + '".';
+}
+
+async function deleteSkillByName(name) {
+  await loadSkills();
+  var skill = _skillWithName(name);
+  var skillId = String(_skillField(skill, 'SkillId', 'skillId') || '');
+  await _skillsBridge('/v1/skills/' + encodeURIComponent(skillId), { method: 'DELETE' });
+  await loadSkills();
+  return 'Deleted skill "' + String(_skillField(skill, 'Name', 'name') || name) + '".';
+}
+
+function _authorizedSkillUrls(skill) {
+  var instructions = String(_skillField(skill, 'Instructions', 'instructions') || '');
+  var urls = [];
+  var marker = /\[\[EVA_HARNESS\]\]\s*(\{[^\r\n]+\})\s*\[\[\/EVA_HARNESS\]\]/g;
+  var match;
+  while ((match = marker.exec(instructions)) !== null) {
+    try {
+      var action = JSON.parse(match[1]);
+      if (action && action.action === 'open_external_url') {
+        var url = _managedSkillUrl(action.url);
+        if (urls.indexOf(url) === -1) urls.push(url);
+      }
+    } catch (_) {}
+  }
+  return urls;
+}
+
+function _skillRequestTokens(value) {
+  var stop = { a: true, an: true, my: true, the: true, this: true, that: true, please: true, skill: true, use: true, run: true, open: true };
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(function(token) {
+    return token.length > 1 && !stop[token];
+  });
+}
+
+function _skillForRequest(requestText) {
+  var request = String(requestText || '').trim();
+  var explicit = request.match(/\b(?:run|use|execute)\s+(?:the\s+)?skill\s+["']?(.+?)["']?[.!?]*$/i);
+  if (explicit) return _skillWithName(explicit[1]);
+  var requestTokens = _skillRequestTokens(request);
+  var candidates = (_skillsState.skills || []).filter(function(skill) {
+    return String(_skillField(skill, 'Status', 'status') || '').toLowerCase() === 'active';
+  }).map(function(skill) {
+    var nameTokens = _skillRequestTokens(_skillField(skill, 'Name', 'name'));
+    var overlap = nameTokens.filter(function(token) { return requestTokens.indexOf(token) !== -1; }).length;
+    return { skill: skill, score: overlap, required: Math.min(2, nameTokens.length) };
+  }).filter(function(candidate) {
+    return candidate.required > 0 && candidate.score >= candidate.required;
+  }).sort(function(left, right) { return right.score - left.score; });
+  if (!candidates.length) throw new Error('No active skill matches that request.');
+  if (candidates.length > 1 && candidates[0].score === candidates[1].score) throw new Error('More than one active skill matches that request. Use the full skill name.');
+  return candidates[0].skill;
+}
+
+async function runSkillFromRequest(requestText) {
+  var request = String(requestText || '').trim();
+  if (!/\b(?:open|play|watch|listen|launch|visit|run|use|execute)\b/i.test(request)) throw new Error('Running a skill requires an explicit user request.');
+  await loadSkills();
+  var skill = _skillForRequest(request);
+  var urls = _authorizedSkillUrls(skill);
+  if (urls.length !== 1) throw new Error('That skill does not define one verified external resource.');
+  return openExternalUrlFromSkill(urls[0], String(_skillField(skill, 'Name', 'name') || ''), request);
+}
+
+async function openExternalUrlFromSkill(url, skillName, userRequest) {
+  var target = _managedSkillUrl(url);
+  var request = String(userRequest || '');
+  if (!/\b(?:open|play|watch|listen|launch|visit)\b/i.test(request)) throw new Error('Opening an external URL requires an explicit user request.');
+  var requestUrl = _skillRequestUrl(request);
+  var authorized = requestUrl && _managedSkillUrl(requestUrl) === target;
+  if (!authorized) {
+    await loadSkills();
+    var skill = _skillWithName(skillName);
+    var status = String(_skillField(skill, 'Status', 'status') || '').toLowerCase();
+    if (status !== 'active' || _authorizedSkillUrls(skill).indexOf(target) === -1) {
+      throw new Error('That URL is not authorized by the named active skill.');
+    }
+  }
+  window.open(target, '_blank', 'noopener');
+  return 'Opened ' + target;
+}
+
 async function toggleSkill(id, status) {
   if (!id) return;
   try {
+    if (status === 'active') {
+      if (typeof evaTextPrompt !== 'function') throw new Error('Native Skill activation confirmation is unavailable.');
+      var skill = (_skillsState.skills || []).find(function(item) { return String(_skillField(item, 'SkillId', 'skillId') || '') === String(id); });
+      var name = String(_skillField(skill, 'Name', 'name') || 'this skill');
+      var confirmation = await evaTextPrompt('Activate Skill "' + name + '"?', '', {
+        maxLength: 6, placeholder: 'Type ENABLE', kind: 'skill_activation'
+      });
+      if (String(confirmation || '').trim().toUpperCase() !== 'ENABLE') return;
+    }
     await _skillsBridge('/v1/skills/' + encodeURIComponent(id), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -506,5 +695,11 @@ window.EvaSkills = {
   open: function() { toggleSkillsPanel(true); },
   close: function() { toggleSkillsPanel(false); },
   refresh: loadSkills,
-  describe: describeSkills
+  describe: describeSkills,
+  createFromRequest: createSkillFromRequest,
+  updateByName: updateSkillByName,
+  setStatusByName: setSkillStatusByName,
+  deleteByName: deleteSkillByName,
+  runFromRequest: runSkillFromRequest,
+  openExternalUrl: openExternalUrlFromSkill
 };
