@@ -37,7 +37,7 @@ eva
 
 Eva is also added to your system application menu.
 
-Current standalone release: `Eva Standalone-5.6.1.AppImage`.
+Current standalone release: `Eva Standalone-5.6.2.AppImage`.
 
 On first launch, choose **Eva (AIG)** in the model menu for the integrated experience. Eva works with local SQLite memory by default; the Memory view lets you inspect record provenance, associations, history, and corrections before records are changed or removed from recall. Provider keys, Copilot, and other optional capabilities are configured in Settings.
 
