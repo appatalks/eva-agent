@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import time
 import zipfile
 from pathlib import Path
@@ -36,6 +37,7 @@ MAX_XLSX_RESULT_CHARS = 120000
 MAX_XLSX_ARCHIVE_ENTRIES = 512
 MAX_XLSX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
 MAX_XLSX_COMPRESSION_RATIO = 100
+MAX_PDF_PAGES = 200
 SUPPORTED_SKILLS = {"docx", "pdf", "pptx", "xlsx", "mcp-builder"}
 
 
@@ -97,8 +99,9 @@ def _configured_roots(artifacts_dir=None, approved_workspace_roots=None):
         configured = configured.split(os.pathsep)
     roots = {"artifacts": os.path.abspath(os.path.expanduser(str(artifact_root)))}
     workspace_roots = [os.path.abspath(os.path.expanduser(str(item))) for item in (configured or []) if str(item).strip()]
-    if workspace_roots:
-        roots["workspace"] = workspace_roots[0]
+    for index, workspace_root in enumerate(workspace_roots):
+        root_name = "workspace" if index == 0 else "workspace-" + str(index + 1)
+        roots[root_name] = workspace_root
     return roots
 
 
@@ -122,7 +125,7 @@ def _reject_symlink_components(root, relative):
 
 def _resolve_path(value, root_name, roots, kind="input", extension_set=None, directory=False):
     if root_name not in roots:
-        if root_name == "workspace":
+        if root_name == "workspace" or root_name.startswith("workspace-"):
             raise SkillExecutionError("workspace_root_unavailable", "No trusted approved workspace root is configured.")
         raise SkillExecutionError("invalid_root", "The root must be artifacts or an approved workspace.")
     relative = _safe_relative(value)
@@ -145,6 +148,8 @@ def _resolve_path(value, root_name, roots, kind="input", extension_set=None, dir
             raise SkillExecutionError("input_not_found", "The requested input file was not found as a regular file.", {"path": relative})
         if os.path.getsize(candidate) > MAX_INPUT_BYTES:
             raise SkillExecutionError("input_too_large", "The input exceeds Eva's bounded file size limit.", {"max_bytes": MAX_INPUT_BYTES})
+        if os.path.splitext(candidate)[1].lower() in {".docx", ".pptx", ".xlsx"}:
+            _preflight_ooxml_archive(candidate)
     elif os.path.lexists(candidate) and os.path.islink(candidate):
         raise SkillExecutionError("symlink_rejected", "The output path is a symlink.", {"path": relative})
     if extension_set and not directory and os.path.splitext(relative)[1].lower() not in extension_set:
@@ -336,9 +341,25 @@ def _validate_docx(path):
 
 
 def _validate_pdf(path):
+    validation, _text_value = _validated_pdf_text(path)
+    return validation
+
+
+def _validated_pdf_text(path):
     module = _dependency_validation("pypdf", "pypdf")
     reader = module.PdfReader(path, strict=False)
-    return {"status": "valid", "pages": len(reader.pages), "text_chars": sum(len(page.extract_text() or "") for page in reader.pages)}
+    page_count = len(reader.pages)
+    if page_count > MAX_PDF_PAGES:
+        raise SkillExecutionError("input_too_large", "The PDF has more pages than Eva can safely extract.", {"max_pages": MAX_PDF_PAGES})
+    parts = []
+    text_chars = 0
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        text_chars += len(text)
+        if text_chars > MAX_TEXT_CHARS:
+            raise SkillExecutionError("result_too_large", "The PDF text exceeds Eva's bounded extraction limit.", {"max_chars": MAX_TEXT_CHARS})
+        parts.append(text)
+    return {"status": "valid", "pages": page_count, "text_chars": text_chars}, "\n".join(parts)
 
 
 def _validate_pptx(path):
@@ -347,12 +368,12 @@ def _validate_pptx(path):
     return {"status": "valid", "slides": len(presentation.slides), "text_chars": sum(len(shape.text) for slide in presentation.slides for shape in slide.shapes if getattr(shape, "has_text_frame", False))}
 
 
-def _preflight_xlsx_archive(path):
+def _preflight_ooxml_archive(path):
     try:
         with zipfile.ZipFile(path) as archive:
             entries = archive.infolist()
     except (OSError, zipfile.BadZipFile) as exc:
-        raise SkillExecutionError("invalid_input", "The XLSX archive could not be inspected.", {"type": type(exc).__name__}) from exc
+        raise SkillExecutionError("invalid_input", "The Office archive could not be inspected.", {"type": type(exc).__name__}) from exc
     if len(entries) > MAX_XLSX_ARCHIVE_ENTRIES:
         raise SkillExecutionError("input_too_large", "The XLSX archive has too many entries.", {"max_entries": MAX_XLSX_ARCHIVE_ENTRIES})
     uncompressed = sum(entry.file_size for entry in entries)
@@ -361,6 +382,10 @@ def _preflight_xlsx_archive(path):
         raise SkillExecutionError("input_too_large", "The XLSX archive expands beyond Eva's fixed limit.", {"max_uncompressed_bytes": MAX_XLSX_UNCOMPRESSED_BYTES})
     if uncompressed and uncompressed > max(1, compressed) * MAX_XLSX_COMPRESSION_RATIO:
         raise SkillExecutionError("input_too_large", "The XLSX archive compression ratio exceeds Eva's fixed limit.", {"max_ratio": MAX_XLSX_COMPRESSION_RATIO})
+
+
+def _preflight_xlsx_archive(path):
+    _preflight_ooxml_archive(path)
 
 
 def _formula_summary(workbook):
@@ -636,12 +661,10 @@ def _pdf_operation(operation, request, roots):
         return _receipt("pdf", operation, [input_display], output, {"status": "valid", "pages": page_end - page_start + 1, "text_chars": len(full_text)}, warnings=warnings, result={"pages": page_results, "text": full_text, "text_chars": len(full_text), "truncated": truncated})
     if operation in ("read", "validate"):
         path, display = _resolve_path(request.get("input"), root_name, roots, extension_set={".pdf"})
-        validation = _validate_pdf(path)
+        validation, text = _validated_pdf_text(path)
         if operation == "validate":
             return _receipt("pdf", operation, [display], None, validation)
-        module = _dependency_validation("pypdf", "pypdf")
-        reader = module.PdfReader(path, strict=False)
-        return _receipt("pdf", operation, [display], None, validation, result={"pages": len(reader.pages), "text": "\n".join(page.extract_text() or "" for page in reader.pages)[:MAX_TEXT_CHARS]})
+        return _receipt("pdf", operation, [display], None, validation, result={"pages": validation["pages"], "text": text})
     if operation == "create":
         output_path, output = _resolve_path(request.get("output"), root_name, roots, kind="output", extension_set={".pdf"})
         reportlab = _dependency_validation("reportlab.pdfgen.canvas", "reportlab")
@@ -651,11 +674,12 @@ def _pdf_operation(operation, request, roots):
             canvas = reportlab.Canvas(path, pagesize=pagesizes.letter)
             y = 750
             for line in _text(options.get("text", options.get("content", ""))).splitlines() or [""]:
-                canvas.drawString(50, y, line[:110])
-                y -= 16
-                if y < 50:
-                    canvas.showPage()
-                    y = 750
+                for wrapped_line in textwrap.wrap(line, width=110, replace_whitespace=False, drop_whitespace=False) or [""]:
+                    canvas.drawString(50, y, wrapped_line)
+                    y -= 16
+                    if y < 50:
+                        canvas.showPage()
+                        y = 750
             canvas.save()
 
         _atomic_output(output_path, write)
@@ -700,18 +724,16 @@ def _pdf_operation(operation, request, roots):
         _atomic_output(output_path, write)
         return _receipt("pdf", operation, [input_display], output, _validate_pdf(output_path), result={"page": page_number})
     if operation == "extract":
-        module = _dependency_validation("pypdf", "pypdf")
         input_path, input_display = _resolve_path(request.get("input"), root_name, roots, extension_set={".pdf"})
         output_path, output = _resolve_path(request.get("output"), root_name, roots, kind="output", extension_set={".txt"})
-        reader = module.PdfReader(input_path, strict=False)
-        text = "\n".join(page.extract_text() or "" for page in reader.pages)[:MAX_TEXT_CHARS]
+        validation, text = _validated_pdf_text(input_path)
 
         def write(path):
             with open(path, "w", encoding="utf-8") as stream:
                 stream.write(text)
 
         _atomic_output(output_path, write)
-        return _receipt("pdf", operation, [input_display], output, {"status": "valid", "text_chars": len(text)}, result={"text_chars": len(text)})
+        return _receipt("pdf", operation, [input_display], output, validation, result={"text_chars": len(text)})
     raise SkillExecutionError("unsupported_operation", "Unsupported PDF operation.")
 
 

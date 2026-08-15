@@ -19,6 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 from skills import execute_bounded_skill
+from skills import document_ops
 from bridge import core as bridge_core
 
 
@@ -102,6 +103,15 @@ class BoundedSkillTests(unittest.TestCase):
         with open(os.path.join(self.artifacts, "merged.txt"), encoding="utf-8") as stream:
             self.assertIn("second page", stream.read())
 
+    def test_pdf_creation_wraps_long_lines_without_discarding_content(self):
+        long_line = "START " + ("content " * 250) + "END"
+        created = self.run_skill("pdf", "create", output="wrapped.pdf", options={"text": long_line})
+        self.assertTrue(created["ok"], created)
+        read = self.run_skill("pdf", "read", input="wrapped.pdf")
+        self.assertTrue(read["ok"], read)
+        self.assertIn("START", read["result"]["text"])
+        self.assertIn("END", read["result"]["text"])
+
     def test_xlsx_create_read_edit_validate_formula(self):
         created = self.run_skill("xlsx", "create", output="book.xlsx", options={"rows": [[1, 2], ["=SUM(A1:B1)", 4]]})
         self.assertTrue(created["ok"], created)
@@ -133,6 +143,28 @@ class BoundedSkillTests(unittest.TestCase):
             receipt = self.run_skill("xlsx", "read", input="compressed.xlsx")
         self.assertFalse(receipt["ok"])
         module_loader.assert_not_called()
+
+    def test_docx_and_pptx_archive_preflight_rejects_compression_bombs(self):
+        for extension in ("docx", "pptx"):
+            path = os.path.join(self.artifacts, "compressed." + extension)
+            with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("word/repetitive.bin", b"x" * (2 * 1024 * 1024))
+            with self.assertRaises(document_ops.SkillExecutionError) as error:
+                document_ops._preflight_ooxml_archive(path)
+            self.assertEqual(error.exception.code, "input_too_large")
+
+    def test_second_approved_workspace_root_is_addressable(self):
+        first_root = os.path.join(self.artifacts, "workspace-one")
+        second_root = os.path.join(self.artifacts, "workspace-two")
+        os.makedirs(first_root)
+        os.makedirs(second_root)
+        receipt = execute_bounded_skill(
+            {"skill": "mcp-builder", "operation": "scaffold", "root": "workspace-2", "output": "demo", "options": {"language": "python"}},
+            artifacts_dir=self.artifacts,
+            approved_workspace_roots=[first_root, second_root],
+        )
+        self.assertTrue(receipt["ok"], receipt)
+        self.assertEqual(receipt["output"]["root"], "workspace-2")
 
     @unittest.skipUnless(HAS_LIBREOFFICE, "LibreOffice is not installed")
     def test_xlsx_recalculate_writes_distinct_output_and_exposes_cached_result(self):
@@ -343,6 +375,23 @@ class BoundedSkillTests(unittest.TestCase):
         self.assertIn(b"400", response)
         self.assertIn(b"Connection: close", response)
 
+    def test_bridge_http_execute_rejects_transfer_encoding_and_closes_connection(self):
+        server = bridge_core.ThreadingHTTPServer(("127.0.0.1", 0), bridge_core.BridgeHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with patch.object(bridge_core, "_is_loopback_bind", return_value=True), patch.dict(os.environ, {"EVA_BRIDGE_TOKEN": ""}, clear=False), socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=2) as connection:
+                connection.sendall(
+                    b"POST /v1/skills/execute HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n{}"
+                )
+                response = connection.recv(4096)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        self.assertIn(b"400", response)
+        self.assertIn(b"Connection: close", response)
+
     def test_unknown_operations_are_rejected(self):
         receipt = self.run_skill("docx", "delete", output="should-not-exist.docx")
         self.assertFalse(receipt["ok"])
@@ -359,6 +408,9 @@ class BoundedSkillTests(unittest.TestCase):
         self.assertTrue(validation["ok"], validation)
         typescript = self.run_skill("mcp-builder", "scaffold", output="demo-ts", options={"language": "typescript"})
         self.assertTrue(typescript["ok"], typescript)
+        self.assertEqual(typescript["result"]["files"], ["src/index.ts", "tsconfig.json", "package.json"])
+        with open(os.path.join(self.artifacts, "demo-ts", "src", "index.ts"), encoding="utf-8") as stream:
+            self.assertIn("z.string()", stream.read())
         ts_validation = self.run_skill("mcp-builder", "validate", input="demo-ts", options={"language": "typescript"})
         self.assertTrue(ts_validation["ok"], ts_validation)
         with open(os.path.join(self.artifacts, "demo-server", "server.py"), "a", encoding="utf-8") as stream:

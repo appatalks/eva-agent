@@ -80,6 +80,14 @@ class SkillExecutionTests(unittest.TestCase):
         self.assertNotIn("browser", unavailable["selected_tool"])
         self.assertNotIn("desktop", unavailable["selected_tool"])
 
+    def test_bounded_document_capabilities_are_available_locally(self):
+        capabilities = skill_live_capabilities(local_capabilities={"skills.docx", "skills.pdf", "skills.pptx", "skills.xlsx", "skills.mcp-builder"})
+        for skill_id in ("skill-docx", "skill-pdf", "skill-pptx", "skill-xlsx", "skill-mcp-builder"):
+            skill = next(row for row in self.skills if row["SkillId"] == skill_id)
+            decision = skill_execution_decision("use " + skill["Name"], [skill], capabilities)
+            self.assertEqual(decision["status"], "selected", decision)
+            self.assertEqual(decision["selected_tool"], skill["Tools"].split(",")[0], decision)
+
     def test_weather_location_precedence_and_prompt(self):
         skill = next(row for row in self.skills if row["SkillId"] == "skill-weather")
         skill["Config"] = '{"defaults":{"default_location":"Austin"},"allowed_fallbacks":[]}'

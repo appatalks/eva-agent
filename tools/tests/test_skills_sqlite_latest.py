@@ -3,11 +3,13 @@
 import os
 import sys
 import tempfile
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 from bridge.core import _sqlite_latest_skill_rows
+from bridge.cognition import _active_skill_rows_for_decision
 from sqlite_memory import SqliteMemory
 
 
@@ -65,6 +67,10 @@ def main():
         assert playlist["Status"] == "active", playlist
         tied = next(item for item in latest if item["SkillId"] == "sk-tie")
         assert tied["Status"] == "active", tied
+        with patch("bridge.cognition._resolve_memory_backend", return_value="sqlite"), \
+                patch("bridge.cognition._get_sqlite_mem", return_value=memory):
+            decision_rows = _active_skill_rows_for_decision()
+        assert {item["SkillId"] for item in decision_rows} == {"sk-playlist", "sk-other", "sk-tie"}, decision_rows
 
         memory.ingest("Skills", COLUMNS, [row("sk-playlist", "deleted", "2026-08-15T00:03:00Z")])
         remaining = _sqlite_latest_skill_rows(memory)

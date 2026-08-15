@@ -996,6 +996,9 @@ def _sqlite_latest_skill_rows(memory):
 def _skill_live_capability_snapshot():
     """Build the decision layer's bounded view from current bridge state."""
     local_tools = []
+    local_capabilities = {
+        "skills.docx", "skills.pdf", "skills.pptx", "skills.xlsx", "skills.mcp-builder",
+    }
     manager = _st.local_mcp_manager
     if manager and manager.alive:
         for server_name, server in manager.servers.items():
@@ -1026,6 +1029,7 @@ def _skill_live_capability_snapshot():
         acp_alive=acp_alive,
         configured_data_paths=configured_paths,
         local_mcp_tools=local_tools,
+        local_capabilities=local_capabilities,
         browser_available=_BROWSER_AGENT is not None,
         desktop_available=_DESKTOP_AGENT is not None,
     )
@@ -2513,7 +2517,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         config_value = data.get("config", data.get("Config"))
         defaults_value = data.get("configurable_defaults", data.get("defaults"))
         if config_value is not None or defaults_value is not None:
-            config_value = config_value if config_value is not None else {"defaults": defaults_value}
+            if config_value is None:
+                config_value = {"defaults": defaults_value}
+                if "allowed_fallbacks" in data:
+                    config_value["allowed_fallbacks"] = data["allowed_fallbacks"]
             try:
                 fields["Config"] = normalize_skill_config(config_value)
             except ValueError as exc:
@@ -2559,6 +2566,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"skills": rows or []})
 
     def _skills_execute(self):
+        if self.headers.get_all("Transfer-Encoding"):
+            self.close_connection = True
+            self._json_response(400, {"error": {"message": "bounded skill requests must not use Transfer-Encoding"}})
+            return
         content_length_values = self.headers.get_all("Content-Length") or []
         if len(content_length_values) != 1:
             self.close_connection = True
@@ -2684,6 +2695,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(404, {"error": {"message": "Skill not found"}})
             return
         config_payload = data.get("config", data.get("Config"))
+        if config_payload is None and ("defaults" in data or "configurable_defaults" in data):
+            config_payload = {"defaults": data.get("configurable_defaults", data.get("defaults"))}
+            if "allowed_fallbacks" in data:
+                config_payload["allowed_fallbacks"] = data["allowed_fallbacks"]
         if "Config" in fields and isinstance(config_payload, dict) and "allowed_fallbacks" not in config_payload:
             current_raw_config = current.get("Config", "{}") or "{}"
             if isinstance(current_raw_config, dict):

@@ -49,7 +49,17 @@
   }
 
   function isExplicitInteractiveRequest(message) {
-    return /\b(?:use|open|launch|control|click|navigate)\b[^.!?]{0,40}\b(?:browser|desktop|website|web site|app)\b|\b(?:browser|desktop)\b[^.!?]{0,40}\b(?:weather|forecast|temperature)\b/i.test(String(message || ''));
+    var text = String(message || '');
+    var interaction = '\\b(?:use|open|launch|control|click|navigate|check)\\b';
+    var interfaceName = '\\b(?:browser|desktop|website|web site|app)\\b';
+    var weather = '\\b(?:weather|forecast|temperature)\\b';
+    return new RegExp(
+      interaction + '[^.!?]{0,40}' + interfaceName + '|' +
+      interfaceName + '[^.!?]{0,40}' + interaction + '|' +
+      weather + '[^.!?]{0,80}' + interfaceName + '|' +
+      interfaceName + '[^.!?]{0,80}' + weather,
+      'i'
+    ).test(text);
   }
 
   function isNativeWeatherLookup(message) {

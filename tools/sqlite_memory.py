@@ -39,7 +39,7 @@ _DEFAULT_SKILL_REQUIRED_FIELDS = {
     "preferred_tools", "allowed_fallbacks", "prerequisites", "configurable_defaults",
     "source", "license", "version",
 }
-_DEFAULT_SKILL_OPTIONAL_FIELDS = {"provenance"}
+_DEFAULT_SKILL_OPTIONAL_FIELDS = {"provenance", "source_commit", "license_file", "notice_file", "assets"}
 
 
 def _default_skill_manifest_path():
@@ -61,9 +61,9 @@ def _load_default_skill_rows():
     """Validate and project the canonical manifest into the compact Skills row shape."""
     path = _default_skill_manifest_path()
     try:
-        with open(path, "r", encoding="utf-8") as stream:
-            manifest = json.load(stream)
-    except (OSError, ValueError) as exc:
+        from generate_skill_seed import load_manifest
+        manifest = load_manifest(path)
+    except (ImportError, OSError, ValueError) as exc:
         raise RuntimeError("Could not read default Skills manifest " + path + ": " + str(exc)) from exc
     if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
         raise RuntimeError("Malformed default Skills manifest " + path + ": schema_version must be 1")

@@ -560,14 +560,24 @@
   registerCapability({
     id: 'skill.execute',
     description: 'Execute one bounded local DOCX, PDF, PPTX, XLSX, or MCP-builder operation, including PDF forms/tables/OCR, office PDF rendering, and XLSX recalculation. Args: {skill, operation, root?, input?, inputs?, output?, options?}. Paths are relative to Eva artifacts or a trusted approved workspace root; no installation, network, shell, browser, or desktop fallback is used.',
-    run: async function(args) {
+    run: async function(args, context) {
       args = args || {};
+      context = context || {};
       var skill = String(args.skill || '').toLowerCase();
       var operation = String(args.operation || '').toLowerCase();
       if (!/^(?:docx|pdf|pptx|xlsx|mcp-builder)$/.test(skill)) throw new Error('Unsupported bounded skill.');
       if (!/^[a-z][a-z0-9-]{0,31}$/.test(operation)) throw new Error('Invalid bounded skill operation.');
+      var root = String(args.root || 'artifacts').toLowerCase();
+      var requestPaths = [args.input, args.output].concat(Array.isArray(args.inputs) ? args.inputs : [])
+        .filter(function(path) { return typeof path === 'string' && path.trim(); });
+      var originalRequest = String(context.userMessage || '');
+      if (root !== 'artifacts' || !requestPaths.length || !requestPaths.every(function(path) {
+        return originalRequest.toLowerCase().indexOf(String(path).trim().toLowerCase()) >= 0;
+      })) {
+        throw new Error('Bounded Skill paths must be explicit in the user request and remain inside Eva artifacts.');
+      }
       var payload = {
-        skill: skill, operation: operation, root: String(args.root || 'artifacts').toLowerCase(),
+        skill: skill, operation: operation, root: root,
         input: args.input, inputs: args.inputs, output: args.output, options: args.options || {}
       };
       var response = await fetch(bridgeUrl().replace(/\/+$/, '') + '/v1/skills/execute', {

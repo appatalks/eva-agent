@@ -34,10 +34,13 @@ or the trusted `EVA_SKILLS_WORKSPACE_ROOTS`, rejects traversal and symlinks,
 and returns an action receipt. Missing Python or system packages are reported
 without installation. `skill-mcp-builder` scaffolds and validates small Python
 FastMCP or TypeScript MCP SDK projects without network access or package
-installation.
+installation. When `EVA_SKILLS_WORKSPACE_ROOTS` contains multiple path-separated
+entries, requests use `workspace` for the first and `workspace-2`, `workspace-3`,
+and so on for subsequent approved roots.
 
 The MCP Builder provenance and Apache-2.0 attribution are recorded in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The four document skills do
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), with the packaged license at
+[licenses/Apache-2.0.txt](licenses/Apache-2.0.txt). The four document skills do
 not copy or derive from vendor-specific skill files.
 
 ## Categories

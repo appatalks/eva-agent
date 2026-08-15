@@ -49,6 +49,23 @@ def test_malformed_manifest_fails_actionably():
         os.unlink(path)
 
 
+def test_catalog_rejects_unknown_tools_and_missing_apache_assets():
+    manifest = load_manifest()
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as stream:
+        manifest["skills"][0]["preferred_tools"] = ["arbitrary-shell"]
+        json.dump(manifest, stream)
+        path = stream.name
+    try:
+        try:
+            load_manifest(path)
+        except ValueError as error:
+            assert "unknown tools" in str(error)
+        else:
+            raise AssertionError("unknown catalog tool was accepted")
+    finally:
+        os.unlink(path)
+
+
 def test_existing_skills_table_gets_category_and_defaults_are_seeded():
     with tempfile.TemporaryDirectory(prefix="eva-skills-catalog-") as directory:
         database = os.path.join(directory, "memory.db")

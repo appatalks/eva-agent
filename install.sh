@@ -146,20 +146,22 @@ install_skill_runtime() {
   mkdir -p "$EVA_RUNTIME_HOME" || return 1
   "$host_python" -m venv --system-site-packages "$EVA_RUNTIME_HOME/.venv" || return 1
   "$EVA_RUNTIME_PYTHON" -m pip install --upgrade \
+    requests azure-identity msal cryptography \
     'pillow==11.3.0' python-docx pypdf reportlab python-pptx openpyxl 'pdfplumber==0.11.9' pytesseract
 }
 
 need_skill_runtime() {
   local missing=0 module
-  for module in docx pypdf reportlab pptx openpyxl pdfplumber pytesseract; do
-    "$PYTHON" -c "import $module" >/dev/null 2>&1 || missing=1
+  for module in requests azure.identity msal cryptography docx pypdf reportlab pptx openpyxl pdfplumber pytesseract; do
+    "$EVA_RUNTIME_PYTHON" -c "import $module" >/dev/null 2>&1 || missing=1
   done
-  "$PYTHON" -c 'from importlib.metadata import version; assert version("pdfplumber") == "0.11.9"; assert int(version("Pillow").split(".", 1)[0]) < 12' >/dev/null 2>&1 || missing=1
+  [ -x "$EVA_RUNTIME_PYTHON" ] || missing=1
+  "$EVA_RUNTIME_PYTHON" -c 'from importlib.metadata import version; assert version("pdfplumber") == "0.11.9"; assert int(version("Pillow").split(".", 1)[0]) < 12' >/dev/null 2>&1 || missing=1
   if [ "$missing" = "0" ]; then
-    ok "Managed document Skill runtime present"; PRESENT_COUNT=$((PRESENT_COUNT+1))
+    ok "Managed Eva bridge and document runtime present"; PRESENT_COUNT=$((PRESENT_COUNT+1))
     return
   fi
-  queue "Managed document Skill runtime" "install_skill_runtime"
+  queue "Managed Eva bridge and document runtime" "install_skill_runtime"
 }
 
 local_speech_overrides_are_expected() {

@@ -209,6 +209,11 @@ def main():
         })
         config = json.loads(body.get("skill", {}).get("Config", "{}"))
         check("weather default persists as structured Config", st == 200 and config.get("defaults", {}).get("default_location") == "Seattle")
+        st, body = req("PATCH", "/v1/skills/skill-weather", {
+            "defaults": {"default_location": "Portland"}
+        })
+        config = json.loads(body.get("skill", {}).get("Config", "{}"))
+        check("top-level defaults preserve allowed fallbacks", st == 200 and config.get("defaults", {}).get("default_location") == "Portland" and config.get("allowed_fallbacks") == ["Use web search"])
 
         # 9. Validation: missing instructions is rejected.
         st, body = req("POST", "/v1/skills", {"name": "x"})

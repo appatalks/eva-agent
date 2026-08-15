@@ -31,14 +31,49 @@ REQUIRED_FIELDS = {
     "source", "license", "version",
 }
 OPTIONAL_FIELDS = {"provenance"}
+OPTIONAL_FIELDS = {"provenance", "source_commit", "license_file", "notice_file", "assets"}
+ALLOWED_LICENSES = {"MIT", "Apache-2.0"}
+ALLOWED_TOOLS = {
+    "browser-control", "camera-vision", "data-retrieval", "desktop-control", "file.download",
+    "JSON metadata validation", "LibreOffice", "openpyxl", "pdfplumber", "Poppler", "pypdf",
+    "pytesseract", "Python ast", "python-docx", "python-pptx", "reportlab", "skills.docx",
+    "skills.mcp-builder", "skills.pdf", "skills.pptx", "skills.xlsx", "weather-news", "web-search",
+}
+MAX_NAME_CHARS = 60
+MAX_DESCRIPTION_CHARS = 500
+MAX_INSTRUCTIONS_CHARS = 8000
+MAX_LIST_ITEMS = 16
+MAX_LIST_ITEM_CHARS = 500
+UNSAFE_INSTRUCTION_RE = re.compile(r"(?:\brm\s+-rf\b|\bcurl\b[^\n|]{0,200}\|\s*(?:sh|bash)\b|\b(?:eval|exec|os\.system|subprocess)\s*\()", re.IGNORECASE)
 
 
-def load_manifest():
+def _relative_asset_path(value, manifest_directory, skill_id, field):
+    relative = str(value or "").strip()
+    if not relative or len(relative) > 240 or os.path.isabs(relative) or "\\" in relative:
+        raise ValueError(field + " must be a safe relative asset path for " + skill_id)
+    normalized = os.path.normpath(relative)
+    if normalized == "." or normalized.startswith(".." + os.sep) or normalized == "..":
+        raise ValueError(field + " must not escape the catalog directory for " + skill_id)
+    path = os.path.join(manifest_directory, normalized)
+    if not os.path.isfile(path):
+        raise ValueError(field + " is missing for " + skill_id + ": " + relative)
+    return relative
+
+
+def _validate_text_list(skill, skill_id, field):
+    values = skill[field]
+    if not isinstance(values, list) or not values or len(values) > MAX_LIST_ITEMS:
+        raise ValueError(field + " must be a non-empty bounded list for " + skill_id)
+    if any(not isinstance(item, str) or not item.strip() or len(item.strip()) > MAX_LIST_ITEM_CHARS for item in values):
+        raise ValueError(field + " must contain bounded non-empty strings for " + skill_id)
+
+
+def load_manifest(manifest_path=MANIFEST_PATH):
     try:
-        with open(MANIFEST_PATH, "r", encoding="utf-8") as stream:
+        with open(manifest_path, "r", encoding="utf-8") as stream:
             manifest = json.load(stream)
     except (OSError, ValueError) as exc:
-        raise ValueError("could not read " + MANIFEST_PATH + ": " + str(exc)) from exc
+        raise ValueError("could not read " + manifest_path + ": " + str(exc)) from exc
     if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
         raise ValueError("schema_version must be 1")
     categories = manifest.get("categories")
@@ -48,6 +83,7 @@ def load_manifest():
     if not isinstance(skills, list) or len(skills) != 15:
         raise ValueError("the canonical catalog must contain exactly 15 default skills")
     ids = set()
+    manifest_directory = os.path.dirname(os.path.abspath(manifest_path))
     for index, skill in enumerate(skills, 1):
         if not isinstance(skill, dict) or not REQUIRED_FIELDS.issubset(set(skill)) or set(skill) - REQUIRED_FIELDS - OPTIONAL_FIELDS:
             raise ValueError("skill " + str(index) + " has invalid fields")
@@ -56,13 +92,44 @@ def load_manifest():
             raise ValueError("skill ids must be unique and safe: " + skill_id)
         if skill["category"] not in PRIMARY_CATEGORIES:
             raise ValueError("invalid category for " + skill_id)
-        if not str(skill["name"]).strip() or not str(skill["description"]).strip() or not str(skill["instructions"]).strip():
+        name = str(skill["name"]).strip()
+        description = str(skill["description"]).strip()
+        instructions = str(skill["instructions"]).strip()
+        if not name or not description or not instructions:
             raise ValueError("name, description, and instructions are required for " + skill_id)
+        if len(name) > MAX_NAME_CHARS or len(description) > MAX_DESCRIPTION_CHARS or len(instructions) > MAX_INSTRUCTIONS_CHARS:
+            raise ValueError("text fields exceed catalog bounds for " + skill_id)
+        if UNSAFE_INSTRUCTION_RE.search(instructions):
+            raise ValueError("instructions contain an unsafe action for " + skill_id)
         for field in ("trigger_examples", "preferred_tools", "allowed_fallbacks", "prerequisites"):
-            if not isinstance(skill[field], list) or not skill[field] or any(not str(item).strip() for item in skill[field]):
-                raise ValueError(field + " must be a non-empty list for " + skill_id)
+            _validate_text_list(skill, skill_id, field)
+        unknown_tools = set(skill["preferred_tools"]) - ALLOWED_TOOLS
+        if unknown_tools:
+            raise ValueError("preferred_tools contains unknown tools for " + skill_id + ": " + ", ".join(sorted(unknown_tools)))
         if not isinstance(skill["configurable_defaults"], dict):
             raise ValueError("configurable_defaults must be an object for " + skill_id)
+        if len(skill["configurable_defaults"]) > 24 or any(
+            not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", str(key)) or
+            not isinstance(value, (str, int, float, bool)) and value is not None or
+            isinstance(value, str) and len(value) > 240
+            for key, value in skill["configurable_defaults"].items()
+        ):
+            raise ValueError("configurable_defaults contains invalid values for " + skill_id)
+        if str(skill["license"]).strip() not in ALLOWED_LICENSES:
+            raise ValueError("license must be a supported SPDX identifier for " + skill_id)
+        for field in ("license_file", "notice_file"):
+            if field in skill:
+                _relative_asset_path(skill[field], manifest_directory, skill_id, field)
+        if "assets" in skill:
+            if not isinstance(skill["assets"], list) or len(skill["assets"]) > MAX_LIST_ITEMS:
+                raise ValueError("assets must be a bounded list for " + skill_id)
+            for asset in skill["assets"]:
+                _relative_asset_path(asset, manifest_directory, skill_id, "assets")
+        if skill["license"] == "Apache-2.0":
+            if not re.fullmatch(r"[0-9a-f]{40}", str(skill.get("source_commit", ""))):
+                raise ValueError("Apache-2.0 skills require an immutable source_commit for " + skill_id)
+            if not skill.get("license_file") or not skill.get("notice_file"):
+                raise ValueError("Apache-2.0 skills require license_file and notice_file for " + skill_id)
         ids.add(skill_id)
     return manifest
 

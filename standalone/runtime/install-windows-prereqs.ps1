@@ -58,6 +58,42 @@ function Install-WingetPackage {
   if ($LASTEXITCODE -ne 0) { throw "winget failed to install $Id (exit code $LASTEXITCODE)." }
 }
 
+function Find-DocumentExecutable {
+  param([string[]]$Names)
+  foreach ($name in $Names) {
+    $command = Get-Command $name -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+  }
+  return ''
+}
+
+function Enable-DocumentSystemTools {
+  $requirements = @(
+    @{ Name = 'LibreOffice'; Commands = @('libreoffice.exe', 'soffice.exe'); Package = 'TheDocumentFoundation.LibreOffice' },
+    @{ Name = 'Poppler pdftoppm'; Commands = @('pdftoppm.exe'); Package = 'oschwartz10612.Poppler' },
+    @{ Name = 'Tesseract OCR'; Commands = @('tesseract.exe'); Package = 'UB-Mannheim.TesseractOCR' }
+  )
+  $receipt = @{}
+  foreach ($requirement in $requirements) {
+    $executable = Find-DocumentExecutable -Names $requirement.Commands
+    if (-not $executable) {
+      try {
+        Install-WingetPackage -Id $requirement.Package
+        $executable = Find-DocumentExecutable -Names $requirement.Commands
+      } catch {
+        Write-BootstrapLog "$($requirement.Name) setup unavailable: $($_.Exception.Message)"
+      }
+    }
+    $receipt[$requirement.Name] = @{ available = -not [string]::IsNullOrEmpty($executable); executable = $executable; package = $requirement.Package }
+    if ($executable) {
+      Write-BootstrapLog "$($requirement.Name) is ready: $executable"
+    } else {
+      Write-BootstrapLog "$($requirement.Name) remains unavailable; dependent Skills will return a structured missing_dependency receipt."
+    }
+  }
+  return $receipt
+}
+
 function Enable-LocalTranscription {
   param([string]$PythonLauncher, [string]$RuntimePath)
   $speechHome = Join-Path $RuntimePath 'speech'
@@ -152,6 +188,8 @@ try {
 
   Write-BootstrapLog 'Installing the managed Eva bridge and document runtime.'
   $bridgePython = Enable-BridgeRuntime -PythonLauncher $python -RuntimePath $runtimeRoot
+  Write-BootstrapLog 'Checking document system executables for bounded Skills.'
+  $documentTools = Enable-DocumentSystemTools
 
   $node = Get-Node24
   if (-not $node) {
@@ -218,7 +256,7 @@ try {
 
   $localSpeechPython = if ($voicePython) { $voicePython } else { $speechPython }
 
-  @{ python = $bridgePython; pythonArgs = @(); node = $node; copilot = $copilot; localSpeechPython = $localSpeechPython; localSpeechError = $speechError; localVoiceClonePython = $voicePython; localVoiceCloneError = $voiceError; updatedAt = (Get-Date -Format o) } |
+  @{ python = $bridgePython; pythonArgs = @(); node = $node; copilot = $copilot; documentTools = $documentTools; localSpeechPython = $localSpeechPython; localSpeechError = $speechError; localVoiceClonePython = $voicePython; localVoiceCloneError = $voiceError; updatedAt = (Get-Date -Format o) } |
     ConvertTo-Json | Set-Content -Path $manifestPath -Encoding utf8
   Write-BootstrapLog 'Eva runtime prerequisites are ready.'
 

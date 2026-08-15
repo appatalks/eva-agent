@@ -590,10 +590,14 @@ def _active_skill_rows_for_decision():
         if not mem.table_exists("Skills"):
             return []
         return mem.query(
-            "SELECT s.* FROM Skills s WHERE s.Status = 'active' OR (s.Status = 'provisional' AND EXISTS ("
+            "SELECT s.* FROM ("
+            "SELECT rowid AS _rowid, Skills.*, ROW_NUMBER() OVER ("
+            "PARTITION BY SkillId ORDER BY UpdatedAt DESC, rowid DESC"
+            ") AS _latest FROM Skills"
+            ") s WHERE s._latest = 1 AND (s.Status = 'active' OR (s.Status = 'provisional' AND EXISTS ("
             "SELECT 1 FROM SkillVersions v WHERE v.SkillId = s.SkillId AND v.Status = 'provisional' "
             "AND v.Version = (SELECT MAX(v2.Version) FROM SkillVersions v2 WHERE v2.SkillId = s.SkillId) "
-            "AND v.RiskLevel = 'low' AND (v.ExpiresAt = '' OR v.ExpiresAt > strftime('%Y-%m-%dT%H:%M:%SZ','now'))))"
+            "AND v.RiskLevel = 'low' AND (v.ExpiresAt = '' OR v.ExpiresAt > strftime('%Y-%m-%dT%H:%M:%SZ','now')))))"
         ) or []
     cluster, db = _get_kusto_config()
     if not cluster or not db or not _get_table_columns(cluster, db, "Skills"):

@@ -237,8 +237,11 @@
       "allowed_fallbacks": ["Return the structured validation error", "Provide the scaffold files as text when the target root is unavailable"],
       "prerequisites": ["The project directory is inside Eva artifacts or a trusted approved workspace root", "A user or maintainer can install declared dependencies separately when running the scaffold"],
       "configurable_defaults": {"root": "artifacts", "language": "python", "operation": "scaffold", "network": false, "install": false},
-      "source": "Adapted concepts from https://github.com/anthropics/skills/tree/main/skills/mcp-builder; reviewed 2026-08-15",
+      "source": "Adapted concepts from https://github.com/anthropics/skills/tree/f6656c1256d5a8adfa37db9110046ef20bac644c/skills/mcp-builder; reviewed 2026-08-15",
       "provenance": "Apache-2.0 attribution applies to the referenced concepts; Eva's scaffold, validator, source, and tests are independently authored and materially modified for Eva's bounded runtime.",
+      "source_commit": "f6656c1256d5a8adfa37db9110046ef20bac644c",
+      "license_file": "licenses/Apache-2.0.txt",
+      "notice_file": "THIRD_PARTY_NOTICES.md",
       "license": "Apache-2.0",
       "version": "1.0.0"
     }
