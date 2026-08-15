@@ -1040,6 +1040,8 @@ function getPythonInvocation() {
     return { command: windowsRuntime.python, args: windowsRuntime.pythonArgs };
   }
   if (process.platform === 'win32') return { command: 'py', args: ['-3'] };
+  const managedRuntime = path.join(process.env.HOME || '', '.local', 'share', 'eva', 'runtime', '.venv', 'bin', 'python');
+  if (fs.existsSync(managedRuntime)) return { command: managedRuntime, args: [] };
   return { command: 'python3', args: [] };
 }
 

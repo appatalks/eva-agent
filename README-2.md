@@ -398,6 +398,15 @@ standalone/
 | `@github/copilot` | Copilot CLI | `npm install -g @github/copilot` |
 | `azure-identity` | Kusto MCP auth | `pip install azure-identity` |
 | `requests` | AIG HTTP calls | `pip install requests` |
+| `python-docx` | DOCX create/read/edit/validate | `pip install python-docx` |
+| `pypdf` | PDF read/forms/merge/split/extract/validate | `pip install pypdf` |
+| `reportlab` | PDF creation and offline fixtures | `pip install reportlab` |
+| `pdfplumber==0.11.9` | Bounded PDF table/text structure extraction | Managed by `install.sh` |
+| `pytesseract` + Pillow `<12` | OCR binding and image handling | Managed by `install.sh` |
+| Poppler + Tesseract | Fixed PDF rendering and OCR executables | System package via `install.sh` |
+| `python-pptx` | PPTX create/read/edit/validate | `pip install python-pptx` |
+| `openpyxl` | XLSX create/read/edit/formula inspection | `pip install openpyxl` |
+| LibreOffice | XLSX recalculation and DOCX/PPTX PDF rendering | System package via `install.sh` |
 | Docker | GitHub MCP server | [docker.com](https://docker.com) |
 | Playwright | Browser agent | `pip install playwright && playwright install` |
 | pyautogui | Desktop agent | `pip install pyautogui` |
@@ -556,6 +565,7 @@ Options:
 | `/v1/skills` | POST | Create a new skill |
 | `/v1/skills/evarise` | POST | Normalize raw skill text into Eva schema |
 | `/v1/skills/auto-learn` | POST | Extract skill from conversation context |
+| `/v1/skills/execute` | POST | Execute one fixed DOCX, PDF, PPTX, XLSX, or MCP-builder operation, including PDF forms/tables/OCR, office PDF rendering, and XLSX recalculation, then return a validated receipt |
 | `/v1/skills/<id>` | PATCH | Update a skill (enable/disable/edit) |
 | `/v1/skills/<id>` | DELETE | Soft-delete a skill |
 

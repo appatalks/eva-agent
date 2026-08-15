@@ -271,6 +271,19 @@
           <textarea id="skillDraftDescription" rows="2" maxlength="400"></textarea>
         </div>
         <div class="auth-field">
+          <label for="skillDraftCategory">Category</label>
+          <select id="skillDraftCategory">
+            <option>Information &amp; Research</option>
+            <option>Documents &amp; Data</option>
+            <option>Development &amp; Integrations</option>
+            <option>Browser &amp; Desktop Automation</option>
+            <option>Vision &amp; Media</option>
+            <option>Communication</option>
+            <option>Memory &amp; Personalization</option>
+            <option selected>Uncategorized</option>
+          </select>
+        </div>
+        <div class="auth-field">
           <label for="skillDraftInstructions">Instructions</label>
           <textarea id="skillDraftInstructions" rows="6"></textarea>
         </div>
@@ -281,6 +294,10 @@
         <div class="auth-field">
           <label for="skillDraftTags">Tags (comma separated)</label>
           <input type="text" id="skillDraftTags" placeholder="pdf, export">
+        </div>
+        <div class="auth-field">
+          <label for="skillDraftConfig">Configurable defaults (JSON)</label>
+          <textarea id="skillDraftConfig" rows="3" placeholder='{"default_location":""}'></textarea>
         </div>
         <div class="background-actions">
           <button type="button" class="auth-save" id="skillSaveButton">Save skill</button>

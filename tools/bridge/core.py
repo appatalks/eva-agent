@@ -283,6 +283,8 @@ from bridge.cognition import (  # noqa: F401
     _maybe_promote_candidate,
     _track_candidate_observation,
     _extract_entity_candidates,
+    _active_skill_rows_for_decision,
+    _weather_user_profile_rows,
     _build_memory_context_sqlite,
     _post_response_reflection_sqlite,
     _build_memory_context,
@@ -384,8 +386,15 @@ from bridge.skills import (  # noqa: F401
     _fetch_skill_source,
     _parse_evarise_json,
     _normalize_skill_draft,
+    _normalize_skill_category,
     _evarise_skill,
+    skill_execution_decision,
+    skill_live_capabilities,
+    resolve_weather_location,
+    build_weather_retrieval_prompt,
+    normalize_skill_config,
 )
+from skills import execute_bounded_skill
 from bridge.utils import (  # noqa: F401
     _env_truthy,
     _is_loopback_bind,
@@ -429,6 +438,7 @@ _GOAL_STATUSES = _cfg.GOAL_STATUSES
 _GOAL_COLUMNS = _cfg.GOAL_COLUMNS
 _GOALS_LATEST_QUERY = _cfg.GOALS_LATEST_QUERY
 _SKILL_STATUSES = _cfg.SKILL_STATUSES
+_SKILL_CATEGORIES = _cfg.SKILL_CATEGORIES
 _SKILL_COLUMNS = _cfg.SKILL_COLUMNS
 _SKILLS_LATEST_QUERY = _cfg.SKILLS_LATEST_QUERY
 _BG_PROPOSAL_STATUSES = _cfg.BG_PROPOSAL_STATUSES
@@ -974,13 +984,70 @@ except Exception as _cam_err:  # pragma: no cover - defensive
 
 def _sqlite_latest_skill_rows(memory):
     return memory.query(
-        "SELECT SkillId, Name, Description, Instructions, Tools, Tags, Source, Status, CreatedAt, UpdatedAt "
+        "SELECT SkillId, Name, Description, Category, Instructions, Tools, Tags, Config, Source, Status, CreatedAt, UpdatedAt "
         "FROM ("
         "SELECT rowid AS _rowid, Skills.*, ROW_NUMBER() OVER ("
         "PARTITION BY SkillId ORDER BY UpdatedAt DESC, rowid DESC"
         ") AS _latest FROM Skills"
         ") WHERE _latest = 1 AND Status != 'deleted' ORDER BY UpdatedAt DESC, _rowid DESC"
     )
+
+
+def _skill_live_capability_snapshot():
+    """Build the decision layer's bounded view from current bridge state."""
+    local_tools = []
+    manager = _st.local_mcp_manager
+    if manager and manager.alive:
+        for server_name, server in manager.servers.items():
+            if not server.alive:
+                continue
+            for tool in server.tools:
+                local_tools.append({
+                    "name": tool.get("name", ""),
+                    "description": tool.get("description", ""),
+                    "server": server_name,
+                })
+    acp_alive = bool(_st.acp_client and getattr(_st.acp_client, "alive", False))
+    configured_paths = {}
+    if acp_alive:
+        configured_paths["web-search"] = True
+        if os.path.isdir(_ARTIFACTS_DIR) and os.access(_ARTIFACTS_DIR, os.W_OK):
+            configured_paths["file.download"] = True
+    if acp_alive:
+        for server_name in _st.configured_mcp_config.keys():
+            normalized = str(server_name).casefold()
+            if "weather" in normalized or "forecast" in normalized:
+                configured_paths["weather-news"] = True
+            if "data" in normalized or "finance" in normalized or "market" in normalized:
+                configured_paths["data-retrieval"] = True
+            if "web" in normalized or "search" in normalized:
+                configured_paths["web-search"] = True
+    return skill_live_capabilities(
+        acp_alive=acp_alive,
+        configured_data_paths=configured_paths,
+        local_mcp_tools=local_tools,
+        browser_available=_BROWSER_AGENT is not None,
+        desktop_available=_DESKTOP_AGENT is not None,
+    )
+
+
+def _skill_execution_for_request(user_message, approved_approximate_location=""):
+    """Resolve the skill, live tool, and Weather location for one request."""
+    rows = _active_skill_rows_for_decision()
+    decision = skill_execution_decision(user_message, rows, _skill_live_capability_snapshot())
+    selected = next(
+        (row for row in rows if str(row.get("SkillId", "")) == decision.get("selected_skill_id")),
+        None,
+    )
+    location = {"location": "", "source": "unresolved"}
+    if re.search(r"\b(?:weather|forecast|temperature|raining|snowing|humidity|wind speed)\b", str(user_message), re.IGNORECASE):
+        location = resolve_weather_location(
+            user_message,
+            selected,
+            _weather_user_profile_rows(),
+            approved_approximate_location=approved_approximate_location,
+        )
+    return decision, selected, location
 
 class BridgeHandler(BaseHTTPRequestHandler):
     """HTTP handler that bridges browser requests to ACP."""
@@ -1325,6 +1392,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._cron_create()
         elif parsed_path == "/v1/skills/auto-learn":
             self._skills_auto_learn()
+        elif parsed_path == "/v1/skills/execute":
+            self._skills_execute()
         elif parsed_path == "/v1/subagent/spawn":
             self._subagent_spawn()
         elif parsed_path == "/v1/subagent/spawn-batch":
@@ -2441,6 +2510,23 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if isinstance(val, list):
                     val = ", ".join(str(x).strip() for x in val if str(x).strip())
                 fields[col] = str(val).strip()[:limit]
+        config_value = data.get("config", data.get("Config"))
+        defaults_value = data.get("configurable_defaults", data.get("defaults"))
+        if config_value is not None or defaults_value is not None:
+            config_value = config_value if config_value is not None else {"defaults": defaults_value}
+            try:
+                fields["Config"] = normalize_skill_config(config_value)
+            except ValueError as exc:
+                return None, str(exc)
+        category = data.get("category", data.get("Category"))
+        if category is not None:
+            raw_category = str(category).strip()
+            normalized_category = _normalize_skill_category(raw_category)
+            if raw_category and normalized_category == "Uncategorized" and raw_category.casefold() != "uncategorized":
+                return None, "category must be one of: " + ", ".join(_SKILL_CATEGORIES)
+            fields["Category"] = normalized_category
+        elif creating:
+            fields["Category"] = "Uncategorized"
         status = data.get("status", data.get("Status"))
         if status is not None:
             status = str(status).strip().lower()
@@ -2471,6 +2557,38 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             rows = _kusto_query_direct(cluster, db, _SKILLS_LATEST_QUERY + " | where Status != 'deleted' | order by UpdatedAt desc")
             self._json_response(200, {"skills": rows or []})
+
+    def _skills_execute(self):
+        content_length_values = self.headers.get_all("Content-Length") or []
+        if len(content_length_values) != 1:
+            self.close_connection = True
+            self._json_response(400, {"error": {"message": "bounded skill requests require exactly one Content-Length"}})
+            return
+        try:
+            content_length = int(content_length_values[0])
+        except ValueError:
+            content_length = 0
+        if content_length <= 0:
+            self.close_connection = True
+            self._json_response(400, {"error": {"message": "bounded skill requests require a positive Content-Length"}})
+            return
+        if content_length > 1024 * 1024:
+            self.close_connection = True
+            self._json_response(413, {"error": {"message": "bounded skill request body exceeds the 1 MiB limit"}})
+            return
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "bounded skill requests must be JSON objects"}})
+            return
+        receipt = execute_bounded_skill(
+            data,
+            artifacts_dir=_cfg.ARTIFACTS_DIR,
+            approved_workspace_roots=_cfg.SKILLS_WORKSPACE_ROOTS,
+        )
+        self._json_response(200, receipt)
 
     def _skills_evarise(self):
         if not _is_loopback_bind():
@@ -2516,9 +2634,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "SkillId": "sk-" + uuid.uuid4().hex[:12],
             "Name": fields.get("Name", "Untitled Skill"),
             "Description": fields.get("Description", ""),
+            "Category": fields.get("Category", "Uncategorized"),
             "Instructions": fields.get("Instructions", ""),
             "Tools": fields.get("Tools", ""),
             "Tags": fields.get("Tags", ""),
+            "Config": fields.get("Config", "{}"),
             "Source": fields.get("Source", ""),
             "Status": fields.get("Status", "draft"),
             "CreatedAt": now,
@@ -2563,6 +2683,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not current:
             self._json_response(404, {"error": {"message": "Skill not found"}})
             return
+        config_payload = data.get("config", data.get("Config"))
+        if "Config" in fields and isinstance(config_payload, dict) and "allowed_fallbacks" not in config_payload:
+            current_raw_config = current.get("Config", "{}") or "{}"
+            if isinstance(current_raw_config, dict):
+                current_config = current_raw_config
+            else:
+                try:
+                    current_config = json.loads(str(current_raw_config))
+                except (TypeError, ValueError):
+                    current_config = {}
+            parsed_config = json.loads(fields["Config"])
+            fields["Config"] = normalize_skill_config({
+                "defaults": parsed_config.get("defaults", {}),
+                "allowed_fallbacks": current_config.get("allowed_fallbacks", []),
+            })
         now = self._goal_now()
         row = {col: current.get(col, "") for col in _SKILL_COLUMNS}
         row["SkillId"] = skill_id
@@ -2571,6 +2706,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not row.get("Status"):
             row["Status"] = "active"
         row.update(fields)
+        if str(current.get("Source", "")).lower() == "seed":
+            row["Source"] = "user-override"
         row["UpdatedAt"] = now
         if not self._write_skill_row(cluster, db, row):
             self._json_response(500, {"error": {"message": "Skill write failed"}})
@@ -3334,6 +3471,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "Return a JSON object with these fields:\n"
             '- "Name": short skill name (2-5 words)\n'
             '- "Description": one-sentence description of what this skill does\n'
+            '- "Category": exactly one of the primary Skills categories\n'
             '- "Instructions": step-by-step instructions Eva should follow (markdown)\n'
             '- "Tools": comma-separated list of tools/capabilities used\n'
             '- "Tags": comma-separated tags for categorization\n\n'
@@ -3401,6 +3539,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "SkillId": "sk-" + uuid.uuid4().hex[:12],
                 "Name": str(draft.get("Name") or draft.get("name") or "Untitled Skill")[:60],
                 "Description": str(draft.get("Description") or draft.get("description") or "")[:400],
+                "Category": _normalize_skill_category(draft.get("Category") or draft.get("category")),
                 "Instructions": str(draft.get("Instructions") or draft.get("instructions") or "")[:8000],
                 "Tools": str(draft.get("Tools") or draft.get("tools") or "")[:200],
                 "Tags": str(draft.get("Tags") or draft.get("tags") or "")[:200],
@@ -4205,6 +4344,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _request_type = _classify_request_type(msg_lower)
         _fast_route = _classify_fast_route(_routing_message)
         _passive_recall = _is_passive_memory_recall(_routing_message)
+        _approved_approximate_location = str(
+            os.environ.get("EVA_APPROVED_APPROXIMATE_LOCATION", "") or ""
+        )[:120]
+        _skill_decision, _selected_skill, _weather_location = _skill_execution_for_request(
+            _routing_message, _approved_approximate_location
+        )
         _acp_permission_mode = "passive_recall" if _passive_recall else (
             "workspace_auto" if acp_auto_approve else "interactive"
         )
@@ -4235,7 +4380,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # Cognition draft/revise stages opt in to recall via recall_query so
             # the cognitive layer (default ON) does not bypass persistent memory.
             if inject_memory and recall_query and _st.cognition_enabled:
-                memory_context = _build_memory_context(recall_query, conversation_id)
+                memory_context = _build_memory_context(recall_query, conversation_id, _skill_decision)
                 if memory_context:
                     print(f"[AIG] Internal call: injected {len(memory_context)} chars of memory context (recall)")
                 else:
@@ -4244,7 +4389,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 memory_context = ""
                 print("[AIG] Internal call: skipping memory injection")
         else:
-            memory_context = _build_memory_context(user_message, conversation_id) if _st.cognition_enabled else ""
+            memory_context = _build_memory_context(user_message, conversation_id, _skill_decision) if _st.cognition_enabled else ""
             if memory_context:
                 print(f"[AIG] Injected {len(memory_context)} chars of memory context")
         _memory_ms = round((time.perf_counter() - _memory_t0) * 1000.0, 1)
@@ -4271,6 +4416,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
         needs_acp_tools = preflight["needs_acp_tools"]
         _tool_profile = preflight["tool_profile"]
         _escalation = preflight["escalation"]
+        _selected_tool = str(_skill_decision.get("selected_tool", ""))
+        if _selected_tool in {"weather-news", "data-retrieval", "web-search"} or _request_type == "weather-search" and _selected_tool:
+            _tool_profile = "web"
+        if _request_type == "weather-search" and not _weather_location.get("location"):
+            needs_acp_tools = False
+            _tool_profile = "none"
+        if _request_type == "weather-search" and _skill_decision.get("status") == "unavailable":
+            needs_acp_tools = False
         _briefing_status = briefing_status() if _briefing_request else {}
         _briefing_state = _briefing_status.get("status", "idle")
         _briefing_preparing = _briefing_state == "preparing"
@@ -4301,6 +4454,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             no_tools=no_tools,
             acp_preflight=needs_acp_tools,
             tool_profile=_tool_profile,
+        )
+        audit_event(
+            "skill.execution", turn_id, _skill_decision.get("status", "no-match"),
+            skill_id=_skill_decision.get("selected_skill_id", ""),
+            skill_name=_skill_decision.get("selected_skill_name", ""),
+            selection_reason=_skill_decision.get("selection_reason", ""),
+            selected_tool=_skill_decision.get("selected_tool", ""),
+            fallback_reason=_skill_decision.get("fallback_reason", ""),
         )
         audit_event(
             "turn.accepted", turn_id, "started",
@@ -4344,24 +4505,38 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _preflight_ms = 0.0
         _preflight_attempted = bool(needs_acp_tools)
         _preflight_succeeded = False
+        _retrieval_message = user_message
+        if _request_type == "weather-search":
+            _retrieval_message = build_weather_retrieval_prompt(
+                user_message,
+                _weather_location.get("location", ""),
+                _skill_decision.get("selected_tool", ""),
+            )
         if needs_acp_tools:
             _preflight_t0 = time.perf_counter()
-            print(f"[AIG] Step 2: Using ACP ({_request_type})...")
+            print(f"[AIG] Step 2: Using {'local MCP' if _st.local_mode else 'ACP'} ({_request_type})...")
+            if _st.local_mode:
+                acp_data, acp_model_used = self._retrieve_local_data(_retrieval_message)
+                _preflight_succeeded = bool(acp_data)
+                needs_acp_tools = False
             # Ensure ACP is alive before attempting tool calls.
             # The CLI may have died between requests (idle timeout, crash).
-            if not _st.acp_client.alive:
-                ok, _ = _ensure_acp_model(_st.acp_client.model or "", tool_profile=_tool_profile)
+            if needs_acp_tools and (not _st.acp_client or not _st.acp_client.alive):
+                ok, _ = _ensure_acp_model(
+                    _st.acp_client.model if _st.acp_client else "",
+                    tool_profile=_tool_profile,
+                )
                 if not ok:
                     needs_acp_tools = False
                     print("[AIG] ACP restart failed, skipping data retrieval")
         if needs_acp_tools:
             # Use ACP to run the data query (it has MCP tools)
-            if raw_output_requested:
+            if raw_output_requested and _request_type != "weather-search":
                 acp_prompt = (
                     "You are a strict Kusto query executor. "
                     "Execute the appropriate Kusto MCP tool for the user request and return ONLY the final tool output text. "
                     "Do not add headings, markdown, explanations, or invented rows.\n\n"
-                    f"{user_message}"
+                    f"{_retrieval_message}"
                 )
             elif _request_type in ("news-search", "weather-search", "financial-data", "web-search"):
                 acp_prompt = (
@@ -4369,13 +4544,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "Use your available tools to search the web and find REAL, CURRENT information for the user's request. "
                     "Return factual results with sources. Do NOT invent or guess information. "
                     "If no tools return results, say 'No results found' — do NOT fabricate data.\n\n"
-                    f"{user_message}"
+                    f"{_retrieval_message}"
                 )
             elif _request_type in ("kusto-query", "kusto-operator"):
                 acp_prompt = (
                     "You are a data retrieval assistant. Execute the appropriate Kusto MCP tool to answer this request. "
                     "Return ONLY the raw data results, no commentary:\n\n"
-                    f"{user_message}"
+                    f"{_retrieval_message}"
                 )
             elif _request_type == "github-data":
                 acp_prompt = (
@@ -4384,7 +4559,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "API, repository, issue, pull request, workflow, release, branch, or comment operations. For a mutation, "
                     "honor the existing permission flow and report the real MCP/gh result only after it completes. If GitHub "
                     "MCP or gh is unavailable, say so plainly without opening a browser.\n\n"
-                    f"{user_message}"
+                    f"{_retrieval_message}"
                 )
             else:
                 # General request — let ACP use whatever tools it deems appropriate
@@ -4394,7 +4569,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "If no tools are needed, answer directly. Be factual and concise.\n"
                     f"If asked to create a file (PDF, CSV, etc.), write it to {_ARTIFACTS_DIR}/ using a short descriptive filename. "
                     "Return ONLY the filename (no path, no blob URLs) so the system can serve it.\n\n"
-                    f"{user_message}"
+                    f"{_retrieval_message}"
                 )
             # Continuous learning: while MCP tools are active, persist durable user facts.
             # Skipped in raw mode so strict query output is not polluted.
@@ -4443,6 +4618,32 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "- When asked your model: check [Runtime] and answer from there only.\n"
             "- Use the context below naturally as your own knowledge.\n\n"
         )
+
+        if _skill_decision.get("selected_skill_id") or _request_type == "weather-search":
+            _decision_lines = [
+                "\n[Execution Decision - AUTHORITATIVE]",
+                "The original user request remains the task after any skill inspection.",
+                "Selected skill: " + str(_skill_decision.get("selected_skill_name") or "none")[:120],
+                "Selection reason: " + str(_skill_decision.get("selection_reason") or "none")[:40],
+                "Preferred tools: " + ", ".join(_skill_decision.get("preferred_tools") or [])[:300],
+                "Live availability: " + ", ".join(
+                    key for key, value in (_skill_decision.get("live_availability") or {}).items() if value
+                )[:300] or "none",
+                "Selected tool: " + str(_skill_decision.get("selected_tool") or "none")[:96],
+                "Fallback reason: " + str(_skill_decision.get("fallback_reason") or "none")[:240],
+            ]
+            if _request_type == "weather-search":
+                _decision_lines.append(
+                    "Resolved weather location: " + str(_weather_location.get("location") or "none")[:120]
+                    + " (" + str(_weather_location.get("source") or "unresolved")[:48] + ")"
+                )
+                if not re.search(r"\b(?:use|open|launch|control|click|navigate)\b[^.!?]{0,40}\b(?:browser|desktop|website)\b", user_message, re.IGNORECASE):
+                    _decision_lines.append(
+                        "Weather is a native/data lookup. Never emit [[EVA_BROWSER]] or [[EVA_DESKTOP]] for this request."
+                    )
+                if not _weather_location.get("location"):
+                    _decision_lines.append("Ask for a city or region, or report that no approved weather source is available.")
+            eva_system += "\n".join(_decision_lines) + "\n"
 
         if native_terminal_plan:
             if native_terminal_candidate:
@@ -5218,9 +5419,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
         ):
             return "", ""
 
+        decision, selected_skill, weather_location = _skill_execution_for_request(user_message)
+        retrieval_message = user_message
+        _request_type = _classify_request_type(msg_lower)
+        if _request_type == "weather-search":
+            if not weather_location.get("location"):
+                return "", ""
+            retrieval_message = build_weather_retrieval_prompt(
+                user_message,
+                weather_location.get("location", ""),
+                decision.get("selected_tool", ""),
+            )
+
         # --- Local mode: use local MCP + LM Studio for tool-calling ---
         if _st.local_mode:
-            return BridgeHandler._retrieve_local_data(user_message)
+            return BridgeHandler._retrieve_local_data(retrieval_message)
 
         # --- Cloud mode: use ACP (Copilot CLI) ---
         if not _st.acp_client:
@@ -5233,8 +5446,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 print("[DataRetrieve] ACP restart failed")
                 return "", ""
 
-        _request_type = _classify_request_type(msg_lower)
         _tool_profile = _select_acp_tool_profile(user_message, _request_type)
+        if decision.get("selected_tool") in {"weather-news", "data-retrieval", "web-search"}:
+            _tool_profile = "web"
         print(f"[DataRetrieve] ACP query: type={_request_type} chars={len(user_message)}")
 
         if _request_type in ("news-search", "weather-search", "financial-data", "web-search"):
@@ -5243,13 +5457,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "Use your available tools to search the web and find REAL, CURRENT information for the user's request. "
                 "Return factual results with sources. Do NOT invent or guess information. "
                 "If no tools return results, say 'No results found' — do NOT fabricate data.\n\n"
-                f"{user_message}"
+                f"{retrieval_message}"
             )
         elif _request_type in ("kusto-query", "kusto-operator"):
             acp_prompt = (
                 "You are a data retrieval assistant. Execute the appropriate Kusto MCP tool to answer this request. "
                 "Return ONLY the raw data results, no commentary:\n\n"
-                f"{user_message}"
+                f"{retrieval_message}"
             )
         elif _request_type == "github-data":
             acp_prompt = (
@@ -5257,7 +5471,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "request. Do not use browser or desktop automation. Return factual GitHub results with repository, issue, "
                 "pull request, workflow, release, or branch identifiers when available. If the requested GitHub data is "
                 "unavailable, say so without inventing it.\n\n"
-                f"{user_message}"
+                f"{retrieval_message}"
             )
         else:
             acp_prompt = (
@@ -5266,7 +5480,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "If no tools are needed, answer directly. Be factual and concise.\n"
                 f"If asked to create a file (PDF, CSV, etc.), write it to {_ARTIFACTS_DIR}/ using a short descriptive filename. "
                 "Return ONLY the filename (no path, no blob URLs) so the system can serve it.\n\n"
-                f"{user_message}"
+                f"{retrieval_message}"
             )
         acp_prompt += _MEMORY_CAPTURE_DIRECTIVE
 
@@ -6375,6 +6589,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._cors_headers()
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if self.close_connection:
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
         except BrokenPipeError:

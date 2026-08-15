@@ -314,13 +314,15 @@ async function run() {
   assert.strictEqual(await page.locator('#memoryInspectorPanel').evaluate(function(panel) { return panel.classList.contains('skills-panel'); }), false, 'Memory inspector retained the shared Skills panel hook');
   await page.evaluate(function() {
     _skillsState.skills = [
-      { SkillId: 'skill-alpha', Name: 'Alpha Formatter', Description: 'Formats alpha reports', Status: 'active', Tools: 'file.download', Tags: 'format, report', Source: 'paste', UpdatedAt: '2026-08-08T10:00:00Z' },
-      { SkillId: 'skill-beta', Name: 'Beta Research', Description: 'Researches beta topics', Status: 'disabled', Tools: 'browser', Tags: 'research, web', Source: 'github:owner/repository', UpdatedAt: '2026-08-07T10:00:00Z' },
-      { SkillId: 'skill-draft', Name: 'Draft Analyzer', Description: 'A pending auto-learned capability', Status: 'draft', Tools: 'think', Tags: 'draft, learned', Source: 'file:draft-skill.md', UpdatedAt: '2026-08-06T10:00:00Z' }
+      { SkillId: 'skill-alpha', Name: 'Alpha Formatter', Description: 'Formats alpha reports', Category: 'Documents & Data', Status: 'active', Tools: 'file.download', Tags: 'format, report', Source: 'paste', UpdatedAt: '2026-08-08T10:00:00Z' },
+      { SkillId: 'skill-beta', Name: 'Beta Research', Description: 'Researches beta topics', Category: 'Information & Research', Status: 'disabled', Tools: 'browser', Tags: 'research, web', Source: 'github:owner/repository', UpdatedAt: '2026-08-07T10:00:00Z' },
+      { SkillId: 'skill-draft', Name: 'Draft Analyzer', Description: 'A pending auto-learned capability', Category: 'Uncategorized', Status: 'draft', Tools: 'think', Tags: 'draft, learned', Source: 'file:draft-skill.md', UpdatedAt: '2026-08-06T10:00:00Z' }
     ];
     renderSkillsList();
   });
   assert.strictEqual(await page.locator('.skill-card').count(), 3, 'Skills library did not render cards');
+  assert.strictEqual(await page.locator('.skills-category-group').count(), 3, 'Skills did not render grouped category sections');
+  assert.strictEqual(await page.locator('.skill-category-chip').count(), 3, 'Skills did not render category chips');
   assert.deepStrictEqual(await page.locator('.skills-view-toolbar select').evaluateAll(function(selects) {
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d');
@@ -341,6 +343,10 @@ async function run() {
   assert.strictEqual(await page.locator('.skill-card').count(), 1, 'Skills search did not filter cards');
   assert.match(await page.locator('.skill-card').innerText(), /Beta Research/);
   await page.locator('#skillsSearch').fill('');
+  await page.locator('#skillsCategoryFilter').selectOption('Information & Research');
+  assert.strictEqual(await page.locator('.skill-card').count(), 1, 'Category filter did not isolate a category');
+  assert.match(await page.locator('.skill-card').innerText(), /Beta Research/);
+  await page.locator('#skillsCategoryFilter').selectOption('all');
   await page.locator('#skillsStatusFilter').selectOption('active');
   assert.strictEqual(await page.locator('.skill-card').count(), 1, 'Skills status filter did not organize cards');
   assert.match(await page.locator('#skillsViewSummary').innerText(), /1 shown \| 1 active \| 3 total/);
@@ -359,6 +365,7 @@ async function run() {
   assert.match(await page.locator('.skill-card').first().innerText(), /Alpha Formatter/);
   await page.setViewportSize({ width: 480, height: 760 });
   assert.strictEqual(await page.locator('#skillsSourceFilter').isVisible(), true, 'Source filter is unavailable on mobile');
+  assert.strictEqual(await page.locator('#skillsCategoryFilter').isVisible(), true, 'Category filter is unavailable on mobile');
   assert.strictEqual(await page.locator('#skillsSort').isVisible(), true, 'Sort control is unavailable on mobile');
   var skillsToolbarOverflow = await page.locator('.skills-view-toolbar').evaluate(function(toolbar) {
     return toolbar.scrollWidth > toolbar.clientWidth;

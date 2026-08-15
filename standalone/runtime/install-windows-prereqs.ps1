@@ -79,6 +79,26 @@ function Enable-LocalTranscription {
   return @{ Python = if ([string]::IsNullOrEmpty($speechError)) { $speechPython } else { '' }; Error = $speechError }
 }
 
+function Enable-BridgeRuntime {
+  param([string]$PythonLauncher, [string]$RuntimePath)
+  $bridgeHome = Join-Path $RuntimePath 'bridge'
+  $bridgePython = Join-Path $bridgeHome 'Scripts\python.exe'
+  & $PythonLauncher -3.12 -m venv $bridgeHome
+  if ($LASTEXITCODE -ne 0) { throw "could not create the Eva bridge runtime (exit code $LASTEXITCODE)." }
+  & $bridgePython -m pip install --upgrade pip
+  if ($LASTEXITCODE -ne 0) { throw "could not update pip for the Eva bridge runtime (exit code $LASTEXITCODE)." }
+  $packages = @(
+    'requests', 'azure-identity', 'msal', 'cryptography',
+    'python-docx', 'pypdf', 'reportlab', 'python-pptx', 'openpyxl',
+    'pdfplumber==0.11.9', 'pytesseract', 'Pillow==11.3.0'
+  )
+  & $bridgePython -m pip install @packages
+  if ($LASTEXITCODE -ne 0) { throw "could not install the Eva bridge and document dependencies (exit code $LASTEXITCODE)." }
+  & $bridgePython -c "import cryptography, docx, pypdf, reportlab, pptx, openpyxl, pdfplumber, pytesseract, PIL"
+  if ($LASTEXITCODE -ne 0) { throw 'The Eva bridge document dependencies could not be imported after installation.' }
+  return $bridgePython
+}
+
 function Test-LocalVoiceClone {
   param([string]$VoicePython)
   if (-not (Test-Path $VoicePython)) { return $false }
@@ -130,11 +150,8 @@ try {
   }
   if (-not $python) { throw 'Python 3.12 was not available after installation.' }
 
-  Write-BootstrapLog 'Installing protected-memory encryption dependency.'
-  & $python -3.12 -m pip install --user cryptography
-  if ($LASTEXITCODE -ne 0) { throw "could not install the protected-memory encryption dependency (exit code $LASTEXITCODE)." }
-  & $python -3.12 -c "import cryptography" 2>$null
-  if ($LASTEXITCODE -ne 0) { throw 'cryptography could not be imported after installation.' }
+  Write-BootstrapLog 'Installing the managed Eva bridge and document runtime.'
+  $bridgePython = Enable-BridgeRuntime -PythonLauncher $python -RuntimePath $runtimeRoot
 
   $node = Get-Node24
   if (-not $node) {
@@ -201,7 +218,7 @@ try {
 
   $localSpeechPython = if ($voicePython) { $voicePython } else { $speechPython }
 
-  @{ python = $python; pythonArgs = @('-3.12'); node = $node; copilot = $copilot; localSpeechPython = $localSpeechPython; localSpeechError = $speechError; localVoiceClonePython = $voicePython; localVoiceCloneError = $voiceError; updatedAt = (Get-Date -Format o) } |
+  @{ python = $bridgePython; pythonArgs = @(); node = $node; copilot = $copilot; localSpeechPython = $localSpeechPython; localSpeechError = $speechError; localVoiceClonePython = $voicePython; localVoiceCloneError = $voiceError; updatedAt = (Get-Date -Format o) } |
     ConvertTo-Json | Set-Content -Path $manifestPath -Encoding utf8
   Write-BootstrapLog 'Eva runtime prerequisites are ready.'
 

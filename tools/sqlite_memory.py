@@ -19,8 +19,94 @@ Usage:
 
 import json
 import os
+import re
 import sqlite3
 import threading
+
+
+_DEFAULT_SKILL_CATEGORIES = {
+    "Information & Research",
+    "Documents & Data",
+    "Development & Integrations",
+    "Browser & Desktop Automation",
+    "Vision & Media",
+    "Communication",
+    "Memory & Personalization",
+    "Uncategorized",
+}
+_DEFAULT_SKILL_REQUIRED_FIELDS = {
+    "id", "name", "description", "category", "trigger_examples", "instructions",
+    "preferred_tools", "allowed_fallbacks", "prerequisites", "configurable_defaults",
+    "source", "license", "version",
+}
+_DEFAULT_SKILL_OPTIONAL_FIELDS = {"provenance"}
+
+
+def _default_skill_manifest_path():
+    """Return the catalog path next to the source or packaged tools directory."""
+    tools_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.environ.get("EVA_DEFAULT_SKILLS_MANIFEST", ""),
+        os.path.join(os.path.dirname(tools_dir), "docs", "eva_default_skills", "manifest.json"),
+        os.path.join(tools_dir, "docs", "eva_default_skills", "manifest.json"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    expected = os.path.join(os.path.dirname(tools_dir), "docs", "eva_default_skills", "manifest.json")
+    raise RuntimeError("Default Skills manifest not found; expected " + expected)
+
+
+def _load_default_skill_rows():
+    """Validate and project the canonical manifest into the compact Skills row shape."""
+    path = _default_skill_manifest_path()
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            manifest = json.load(stream)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Could not read default Skills manifest " + path + ": " + str(exc)) from exc
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        raise RuntimeError("Malformed default Skills manifest " + path + ": schema_version must be 1")
+    categories = manifest.get("categories")
+    if not isinstance(categories, list) or set(categories) != _DEFAULT_SKILL_CATEGORIES or len(categories) != len(_DEFAULT_SKILL_CATEGORIES):
+        raise RuntimeError("Malformed default Skills manifest " + path + ": categories do not match the primary taxonomy")
+    skills = manifest.get("skills")
+    if not isinstance(skills, list) or not skills:
+        raise RuntimeError("Malformed default Skills manifest " + path + ": skills must be a non-empty list")
+    rows = []
+    seen = set()
+    for index, skill in enumerate(skills):
+        if not isinstance(skill, dict) or not _DEFAULT_SKILL_REQUIRED_FIELDS.issubset(set(skill)) or set(skill) - _DEFAULT_SKILL_REQUIRED_FIELDS - _DEFAULT_SKILL_OPTIONAL_FIELDS:
+            raise RuntimeError("Malformed default Skills manifest " + path + ": skill " + str(index + 1) + " has invalid fields")
+        skill_id = str(skill["id"]).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", skill_id) or skill_id in seen:
+            raise RuntimeError("Malformed default Skills manifest " + path + ": invalid or duplicate id " + skill_id)
+        if not str(skill["name"]).strip() or not str(skill["instructions"]).strip():
+            raise RuntimeError("Malformed default Skills manifest " + path + ": skill " + skill_id + " needs name and instructions")
+        if skill["category"] not in _DEFAULT_SKILL_CATEGORIES:
+            raise RuntimeError("Malformed default Skills manifest " + path + ": invalid category for " + skill_id)
+        for field in ("trigger_examples", "preferred_tools", "allowed_fallbacks", "prerequisites"):
+            if not isinstance(skill[field], list) or any(not str(item).strip() for item in skill[field]):
+                raise RuntimeError("Malformed default Skills manifest " + path + ": " + field + " must be a non-empty-string list for " + skill_id)
+        if not isinstance(skill["configurable_defaults"], dict):
+            raise RuntimeError("Malformed default Skills manifest " + path + ": configurable_defaults must be an object for " + skill_id)
+        seen.add(skill_id)
+        rows.append({
+            "SkillId": skill_id,
+            "Name": str(skill["name"]).strip(),
+            "Description": str(skill["description"]).strip(),
+            "Category": skill["category"],
+            "Instructions": str(skill["instructions"]).strip(),
+            "Tools": ",".join(str(item).strip() for item in skill["preferred_tools"]),
+            "Tags": ",".join(str(item).strip() for item in skill["trigger_examples"]),
+            "Config": json.dumps({
+                "defaults": skill["configurable_defaults"],
+                "allowed_fallbacks": skill["allowed_fallbacks"],
+            }, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+            "Source": "seed",
+            "Status": "active",
+        })
+    return rows
 
 # ── Schema ──────────────────────────────────────────────────────────────────
 # Mirrors eva_seed.kql. Column order matches Kusto table definitions so
@@ -190,9 +276,11 @@ _SCHEMA = {
             ("SkillId", "TEXT NOT NULL"),
             ("Name", "TEXT NOT NULL"),
             ("Description", "TEXT DEFAULT ''"),
+            ("Category", "TEXT NOT NULL DEFAULT 'Uncategorized'"),
             ("Instructions", "TEXT DEFAULT ''"),
             ("Tools", "TEXT DEFAULT ''"),
             ("Tags", "TEXT DEFAULT ''"),
+            ("Config", "TEXT DEFAULT '{}'"),
             ("Source", "TEXT DEFAULT ''"),
             ("Status", "TEXT DEFAULT 'active'"),
             ("CreatedAt", "TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
@@ -200,6 +288,7 @@ _SCHEMA = {
         ],
         "indexes": [
             "CREATE INDEX IF NOT EXISTS idx_skills_id ON Skills(SkillId)",
+            "CREATE INDEX IF NOT EXISTS idx_skills_category ON Skills(Category)",
             "CREATE INDEX IF NOT EXISTS idx_skills_status ON Skills(Status)",
         ],
     },
@@ -501,116 +590,6 @@ _SEED = {
          "RelatedTopics": "style,preferences",
          "CreatedAt": "2026-01-01T00:00:00Z", "UpdatedAt": "2026-01-01T00:00:00Z"},
     ],
-    "Skills": [
-        {"SkillId": "skill-morning-briefing", "Name": "Morning Briefing",
-         "Description": "Deliver a personalized morning briefing with weather, news, and schedule",
-         "Instructions": (
-             "1. Check [User Profile] for user_location. If found, use it.\n"
-             "2. If no location stored, use web search to look up the user's approximate location via IP geolocation.\n"
-             "3. Use [Data Retrieved] for weather forecast and current conditions at that location.\n"
-             "4. Use [Data Retrieved] for top news headlines.\n"
-             "5. Combine into a concise briefing: weather summary, top 3-5 headlines, and any known schedule items.\n"
-             "6. Do NOT take screenshots to gather information. Do NOT ask the user for their location if it is in memory.\n"
-             "7. Present naturally in first person as Eva."
-         ),
-         "Tools": "web-search,weather-news,data-retrieval", "Tags": "briefing,weather,news,morning",
-         "Source": "seed", "Status": "active"},
-        {"SkillId": "skill-web-lookup", "Name": "Web Information Lookup",
-         "Description": "Search the web for current information, facts, or answers",
-         "Instructions": (
-             "1. The data pipeline retrieves web results automatically. Check [Data Retrieved] first.\n"
-             "2. If [Data Retrieved] has relevant results, synthesize them into a natural answer.\n"
-             "3. If no data was retrieved, say so honestly. Do NOT fabricate results.\n"
-             "4. Always cite sources when available.\n"
-             "5. Do NOT say you cannot search the web. The pipeline handles it."
-         ),
-         "Tools": "web-search,data-retrieval", "Tags": "search,web,lookup,find,research",
-         "Source": "seed", "Status": "active"},
-        {"SkillId": "skill-weather", "Name": "Weather Report",
-         "Description": "Provide current weather and forecast for a location",
-         "Instructions": (
-             "1. Determine location: check [User Profile] for user_location, or use the location specified in the request.\n"
-             "2. Weather data is in [Data Retrieved]. Use it as the authoritative source.\n"
-             "3. Present: current conditions, temperature, forecast summary.\n"
-             "4. Do NOT take screenshots. Do NOT fabricate weather data."
-         ),
-         "Tools": "weather-news,data-retrieval", "Tags": "weather,forecast,temperature,conditions",
-         "Source": "seed", "Status": "active"},
-        {"SkillId": "skill-news", "Name": "News Headlines",
-         "Description": "Provide current news headlines and summaries",
-         "Instructions": (
-             "1. News data is in [Data Retrieved]. Use it as the authoritative source.\n"
-             "2. Present top headlines with brief summaries.\n"
-             "3. Do NOT fabricate headlines, sources, or events.\n"
-             "4. Cite the source (AP, Reuters, etc.) only if it appears in the data."
-         ),
-         "Tools": "web-search,data-retrieval", "Tags": "news,headlines,current events",
-         "Source": "seed", "Status": "active"},
-        {"SkillId": "skill-location-deduction", "Name": "Location Deduction",
-         "Description": "Determine the user's location from available data",
-         "Instructions": (
-             "1. Check [User Profile] for stored user_location. If found, use it directly.\n"
-             "2. If not stored, use web search to perform IP-based geolocation lookup.\n"
-             "3. Once determined, state the location and use it for follow-up tasks (weather, news).\n"
-             "4. Do NOT take desktop screenshots to determine location.\n"
-             "5. Do NOT repeatedly ask the user for their location if you have tools to look it up."
-         ),
-         "Tools": "web-search,data-retrieval", "Tags": "location,geolocation,where,city",
-         "Source": "seed", "Status": "active"},
-        {"SkillId": "skill-desktop-control", "Name": "Desktop Application Control",
-         "Description": "Launch and operate desktop applications by sight",
-         "Instructions": (
-             "1. Emit [[EVA_DESKTOP]]{\"goal\":\"<plain-language task>\"}[[/EVA_DESKTOP]] marker.\n"
-             "2. The vision agent opens apps, clicks, and types via the real mouse/keyboard.\n"
-             "3. Write ONE short sentence about what you are about to do, then emit the marker.\n"
-             "4. Do NOT list manual steps. Do NOT say you cannot control desktop apps."
-         ),
-         "Tools": "desktop-control", "Tags": "desktop,app,launch,gimp,editor,file manager",
-         "Source": "seed", "Status": "active"},
-        {"SkillId": "skill-browser-agent", "Name": "Browser Task Automation",
-         "Description": "Control a real web browser to complete tasks",
-         "Instructions": (
-             "1. Emit [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<url>\"}[[/EVA_BROWSER]] marker.\n"
-             "2. The browser agent navigates, clicks, types, and reads pages.\n"
-             "3. Uses a persistent Chrome profile (stays logged in across runs).\n"
-             "4. Pauses at purchase/irreversible actions for user confirmation.\n"
-             "5. Write ONE short sentence about what you are about to do, then emit the marker.\n"
-             "6. Do NOT say you cannot open websites."
-         ),
-         "Tools": "browser-control", "Tags": "browser,website,shopping,navigate,form",
-         "Source": "seed", "Status": "active"},
-        {"SkillId": "skill-camera-vision", "Name": "Camera / Webcam Vision",
-         "Description": "See through the user's webcam to describe the physical world",
-         "Instructions": (
-             "1. Emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]] marker.\n"
-             "2. A frame is captured from the webcam and you describe what you see.\n"
-             "3. Use for: 'what am I holding', 'look at me', 'what do you see'.\n"
-             "4. Do NOT confuse with screenshots. Camera = physical world. Screenshot = monitor."
-         ),
-         "Tools": "camera-vision", "Tags": "camera,webcam,look,see,vision,picture",
-         "Source": "seed", "Status": "active"},
-        {"SkillId": "skill-file-creation", "Name": "File Creation (PDF, CSV, etc.)",
-         "Description": "Create downloadable files like PDFs, CSVs, or reports",
-         "Instructions": (
-             "1. When asked to create a file, the system writes it to EVA_ARTIFACTS_DIR.\n"
-             "2. After the file is written, end your message with: [[EVA_FILE]] <filename.ext>\n"
-             "3. The frontend converts this marker into a working download link.\n"
-             "4. Do NOT produce blob: URLs or markdown download links with blob: hrefs.\n"
-             "5. Do NOT claim a file was produced unless it was actually written."
-         ),
-         "Tools": "data-retrieval", "Tags": "pdf,csv,file,report,download,create,generate",
-         "Source": "seed", "Status": "active"},
-        {"SkillId": "skill-open-file", "Name": "Open File on Desktop",
-         "Description": "Open a file using the system's default application",
-         "Instructions": (
-             "1. When asked to open a file, use [[EVA_DESKTOP]] with a goal like 'open the file <path> with the default application'.\n"
-             "2. Do NOT re-create the file. Do NOT just provide a download link.\n"
-             "3. The desktop agent will use xdg-open or the system file handler to open it.\n"
-             "4. If the file was just created as an artifact, the path is ~/.config/eva-standalone/artifacts/<filename>."
-         ),
-         "Tools": "desktop-control", "Tags": "open,file,launch,view,pdf,csv",
-         "Source": "seed", "Status": "active"},
-    ],
 }
 
 
@@ -678,6 +657,7 @@ class SqliteMemory:
         # personality rows. Runs on every startup but the INSERT OR IGNORE
         # is a no-op when the row already exists (matched by Entity+Relation).
         self._migrate_legacy_identity_claims(conn)
+        self._migrate_skills_category(conn)
         self._backfill_skills(conn)
 
     def _migrate_legacy_identity_claims(self, conn):
@@ -703,7 +683,7 @@ class SqliteMemory:
 
     def _backfill_skills(self, conn):
         """Insert or update seed skills so core operational knowledge is always present."""
-        skill_rows = _SEED.get("Skills", [])
+        skill_rows = _load_default_skill_rows()
         if not skill_rows:
             return
         col_names = [c[0] for c in _SCHEMA["Skills"]["columns"]]
@@ -711,19 +691,30 @@ class SqliteMemory:
             sid = row.get("SkillId", "")
             if not sid:
                 continue
-            existing = conn.execute(
-                "SELECT Instructions FROM Skills WHERE SkillId = ? AND Source = 'seed' LIMIT 1",
+            override = conn.execute(
+                "SELECT 1 FROM Skills WHERE SkillId = ? AND Source = 'user-override' LIMIT 1",
                 (sid,),
             ).fetchone()
-            if existing and existing[0] == row.get("Instructions", ""):
+            if override:
+                continue
+            existing = conn.execute(
+                "SELECT Name, Description, Category, Instructions, Tools, Tags, Config FROM Skills "
+                "WHERE SkillId = ? AND Source = 'seed' LIMIT 1",
+                (sid,),
+            ).fetchone()
+            expected = (
+                row.get("Name", ""), row.get("Description", ""), row.get("Category", "Uncategorized"),
+                row.get("Instructions", ""), row.get("Tools", ""), row.get("Tags", ""), row.get("Config", "{}"),
+            )
+            if existing and tuple(existing) == expected:
                 continue  # already up to date
             if existing:
                 conn.execute(
-                    "UPDATE Skills SET Name=?, Description=?, Instructions=?, Tools=?, Tags=?, Status=?, "
+                    "UPDATE Skills SET Name=?, Description=?, Category=?, Instructions=?, Tools=?, Tags=?, Config=?, Status=?, "
                     "UpdatedAt=strftime('%Y-%m-%dT%H:%M:%SZ','now') "
                     "WHERE SkillId=? AND Source='seed'",
-                    (row.get("Name",""), row.get("Description",""), row.get("Instructions",""),
-                     row.get("Tools",""), row.get("Tags",""), row.get("Status","active"), sid),
+                    (row.get("Name",""), row.get("Description",""), row.get("Category", "Uncategorized"), row.get("Instructions",""),
+                     row.get("Tools",""), row.get("Tags",""), row.get("Config", "{}"), row.get("Status","active"), sid),
                 )
             else:
                 present = [c for c in col_names if c in row]
@@ -734,10 +725,35 @@ class SqliteMemory:
                 )
         conn.commit()
 
+    def _migrate_skills_category(self, conn):
+        """Add Category to legacy Skills tables and normalize missing values."""
+        if not self.table_exists("Skills"):
+            return
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(Skills)").fetchall()}
+        if "Category" not in columns:
+            conn.execute("ALTER TABLE Skills ADD COLUMN Category TEXT NOT NULL DEFAULT 'Uncategorized'")
+        if "Config" not in columns:
+            conn.execute("ALTER TABLE Skills ADD COLUMN Config TEXT NOT NULL DEFAULT '{}'")
+        conn.execute("UPDATE Skills SET Category = 'Uncategorized' WHERE Category IS NULL OR trim(Category) = ''")
+        conn.execute("UPDATE Skills SET Config = '{}' WHERE Config IS NULL OR trim(Config) = ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_skills_category ON Skills(Category)")
+        if self.table_exists("MemoryMigrations"):
+            conn.execute(
+                "INSERT OR IGNORE INTO MemoryMigrations (MigrationId, Details) VALUES (?, ?)",
+                ("skills-category-v1", "Added Skills.Category and mapped legacy rows to Uncategorized"),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO MemoryMigrations (MigrationId, Details) VALUES (?, ?)",
+                ("skills-config-v1", "Added Skills.Config for structured skill defaults and allowed fallbacks"),
+            )
+        conn.commit()
+
     def _seed(self, conn, tables=None):
         """Insert only the newly created tables' seed data into this database."""
         for table_name, rows in _SEED.items():
             if table_name not in _SCHEMA or tables is not None and table_name not in tables:
+                continue
+            if table_name == "Skills":
                 continue
             col_names = [c[0] for c in _SCHEMA[table_name]["columns"]]
             for row in rows:
@@ -757,6 +773,15 @@ class SqliteMemory:
                 conn.execute(
                     f"INSERT INTO {table_name} ({', '.join(present)}) VALUES ({placeholders})",
                     vals,
+                )
+        if tables is None or "Skills" in tables:
+            col_names = [c[0] for c in _SCHEMA["Skills"]["columns"]]
+            for row in _load_default_skill_rows():
+                present = [c for c in col_names if c in row]
+                placeholders = ", ".join("?" for _ in present)
+                conn.execute(
+                    f"INSERT INTO Skills ({', '.join(present)}) VALUES ({placeholders})",
+                    [row[c] for c in present],
                 )
         conn.commit()
 

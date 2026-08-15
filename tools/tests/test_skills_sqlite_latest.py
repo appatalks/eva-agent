@@ -12,7 +12,7 @@ from sqlite_memory import SqliteMemory
 
 
 COLUMNS = [
-    "SkillId", "Name", "Description", "Instructions", "Tools",
+    "SkillId", "Name", "Description", "Category", "Instructions", "Tools",
     "Tags", "Source", "Status", "CreatedAt", "UpdatedAt",
 ]
 
@@ -22,6 +22,7 @@ def row(skill_id, status, updated_at, name="Playlist"):
         "SkillId": skill_id,
         "Name": name,
         "Description": "Play the saved playlist.",
+        "Category": "Documents & Data",
         "Instructions": "Open the exact saved URL.",
         "Tools": "eva_harness.open_external_url",
         "Tags": "playlist",
@@ -33,6 +34,23 @@ def row(skill_id, status, updated_at, name="Playlist"):
 
 
 def main():
+    with tempfile.TemporaryDirectory(prefix="eva-skills-override-") as directory:
+        database = os.path.join(directory, "memory.db")
+        memory = SqliteMemory(database)
+        custom_weather = "Use Seattle as the default location when the request does not specify one."
+        memory.transaction(lambda connection: connection.execute(
+            "UPDATE Skills SET Instructions = ?, Source = 'user-override' WHERE SkillId = 'skill-weather'",
+            (custom_weather,),
+        ))
+
+        restarted = SqliteMemory(database)
+        weather = restarted.query(
+            "SELECT Instructions, Source FROM Skills WHERE SkillId = 'skill-weather' "
+            "ORDER BY UpdatedAt DESC, rowid DESC LIMIT 1"
+        )[0]
+        assert weather["Instructions"] == custom_weather, weather
+        assert weather["Source"] == "user-override", weather
+
     with tempfile.TemporaryDirectory(prefix="eva-skills-latest-") as directory:
         memory = SqliteMemory(os.path.join(directory, "memory.db"))
         memory.transaction(lambda connection: connection.execute("DELETE FROM Skills"))

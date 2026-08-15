@@ -23,6 +23,7 @@ var _skillsState = {
   query: '',
   statusFilter: 'all',
   sourceFilter: 'all',
+  categoryFilter: 'all',
   sort: 'updated'
 };
 
@@ -120,9 +121,13 @@ function _populateSkillDraft(draft) {
   var set = function (id, v) { var el = document.getElementById(id); if (el) el.value = v || ''; };
   set('skillDraftName', draft.name);
   set('skillDraftDescription', draft.description);
+  set('skillDraftCategory', draft.category || 'Uncategorized');
   set('skillDraftInstructions', draft.instructions);
   set('skillDraftTools', draft.tools);
   set('skillDraftTags', draft.tags);
+  var defaults = draft.configurable_defaults || draft.defaults || _skillDefaultsObject(draft);
+  if (defaults && typeof defaults === 'object') set('skillDraftConfig', JSON.stringify(defaults, null, 2));
+  else set('skillDraftConfig', '');
 }
 
 function cancelSkillDraft() {
@@ -139,12 +144,32 @@ async function saveSkill() {
   var skill = {
     name: get('skillDraftName'),
     description: get('skillDraftDescription'),
+    category: get('skillDraftCategory') || 'Uncategorized',
     instructions: get('skillDraftInstructions'),
     tools: get('skillDraftTools'),
     tags: get('skillDraftTags'),
     source: (_skillsState.draft && _skillsState.draft.source) || 'paste',
     status: 'draft'
   };
+  var configText = get('skillDraftConfig');
+  if (configText) {
+    var parsedConfig;
+    try {
+      parsedConfig = JSON.parse(configText);
+    } catch (_) {
+      _skillStatus('Configurable defaults must be valid JSON.', true);
+      return;
+    }
+    if (!parsedConfig || typeof parsedConfig !== 'object' || Array.isArray(parsedConfig)) {
+      _skillStatus('Configurable defaults must be a JSON object.', true);
+      return;
+    }
+    var priorConfig = (_skillsState.draft && _skillsState.draft.config) || {};
+    skill.config = {
+      defaults: parsedConfig,
+      allowed_fallbacks: Array.isArray(priorConfig.allowed_fallbacks) ? priorConfig.allowed_fallbacks : []
+    };
+  }
   if (!skill.name) { _skillStatus('Give the skill a name.', true); return; }
   if (!skill.instructions) { _skillStatus('The skill needs instructions.', true); return; }
   var btn = document.getElementById('skillSaveButton');
@@ -187,6 +212,24 @@ function _skillCsv(value) {
   return String(value || '').split(',').map(function(item) { return item.trim(); }).filter(Boolean);
 }
 
+function _skillConfigObject(skill) {
+  var raw = _skillField(skill, 'Config', 'config');
+  if (raw && typeof raw === 'object') return raw;
+  try {
+    var parsed = JSON.parse(String(raw || '{}'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function _skillDefaultsObject(skill) {
+  var config = _skillConfigObject(skill);
+  if (config.defaults && typeof config.defaults === 'object' && !Array.isArray(config.defaults)) return config.defaults;
+  if (config.configurable_defaults && typeof config.configurable_defaults === 'object' && !Array.isArray(config.configurable_defaults)) return config.configurable_defaults;
+  return config;
+}
+
 function _skillUpdatedAt(skill) {
   var value = _skillField(skill, 'UpdatedAt', 'updatedAt') || _skillField(skill, 'CreatedAt', 'createdAt');
   var timestamp = Date.parse(value || '');
@@ -202,6 +245,15 @@ function _skillSourceKind(value) {
   return 'unknown';
 }
 
+function _skillCategory(skill) {
+  var value = String(_skillField(skill, 'Category', 'category') || 'Uncategorized');
+  var categories = ['Information & Research', 'Documents & Data', 'Development & Integrations', 'Browser & Desktop Automation', 'Vision & Media', 'Communication', 'Memory & Personalization', 'Uncategorized'];
+  for (var i = 0; i < categories.length; i++) {
+    if (value.toLowerCase() === categories[i].toLowerCase()) return categories[i];
+  }
+  return 'Uncategorized';
+}
+
 function _filteredSkills() {
   var query = _skillsState.query.toLowerCase();
   var skills = _skillsState.skills.filter(function(skill) {
@@ -210,6 +262,7 @@ function _filteredSkills() {
     var source = _skillSourceKind(sourceValue);
     if (_skillsState.statusFilter !== 'all' && status !== _skillsState.statusFilter) return false;
     if (_skillsState.sourceFilter !== 'all' && source !== _skillsState.sourceFilter) return false;
+    if (_skillsState.categoryFilter !== 'all' && _skillCategory(skill) !== _skillsState.categoryFilter) return false;
     if (!query) return true;
     var searchable = [
       _skillField(skill, 'Name', 'name'),
@@ -217,6 +270,7 @@ function _filteredSkills() {
       _skillField(skill, 'Instructions', 'instructions'),
       _skillField(skill, 'Tools', 'tools'),
       _skillField(skill, 'Tags', 'tags'),
+      _skillCategory(skill),
       sourceValue,
       status
     ].join(' ').toLowerCase();
@@ -252,9 +306,11 @@ function editSkill(skill) {
   _skillsState.draft = {
     name: String(_skillField(skill, 'Name', 'name') || ''),
     description: String(_skillField(skill, 'Description', 'description') || ''),
+    category: _skillCategory(skill),
     instructions: String(_skillField(skill, 'Instructions', 'instructions') || ''),
     tools: String(_skillField(skill, 'Tools', 'tools') || ''),
     tags: String(_skillField(skill, 'Tags', 'tags') || ''),
+    config: _skillConfigObject(skill),
     source: String(_skillField(skill, 'Source', 'source') || 'edited')
   };
   _populateSkillDraft(_skillsState.draft);
@@ -278,13 +334,29 @@ function renderSkillsList() {
     listEl.appendChild(empty);
     return;
   }
-  skills.forEach(function (sk) {
+  var groups = {};
+  skills.forEach(function (skill) {
+    var category = _skillCategory(skill);
+    if (!groups[category]) groups[category] = [];
+    groups[category].push(skill);
+  });
+  Object.keys(groups).forEach(function (category) {
+    var group = document.createElement('section');
+    group.className = 'skills-category-group';
+    var heading = document.createElement('h3');
+    heading.className = 'skills-category-heading';
+    heading.textContent = category + ' (' + groups[category].length + ')';
+    group.appendChild(heading);
+    var groupList = document.createElement('div');
+    groupList.className = 'skills-category-list';
+    groups[category].forEach(function (sk) {
     var id = String(_skillField(sk, 'SkillId', 'skillId') || '');
     var name = String(_skillField(sk, 'Name', 'name') || 'Untitled');
     var desc = String(_skillField(sk, 'Description', 'description') || '');
     var status = String(_skillField(sk, 'Status', 'status') || 'active');
     var tools = String(_skillField(sk, 'Tools', 'tools') || '');
     var tags = String(_skillField(sk, 'Tags', 'tags') || '');
+    var category = _skillCategory(sk);
     var enabled = status === 'active' || status === 'provisional';
 
     var row = document.createElement('article');
@@ -337,9 +409,13 @@ function renderSkillsList() {
     });
     var source = String(_skillField(sk, 'Source', 'source') || 'unknown');
     var sourceChip = document.createElement('span'); sourceChip.className = 'skill-source-chip'; sourceChip.textContent = source; chips.appendChild(sourceChip);
+    var categoryChip = document.createElement('span'); categoryChip.className = 'skill-category-chip'; categoryChip.textContent = category; chips.appendChild(categoryChip);
     row.appendChild(chips);
     row.appendChild(actions);
-    listEl.appendChild(row);
+    groupList.appendChild(row);
+    });
+    group.appendChild(groupList);
+    listEl.appendChild(group);
   });
 }
 
@@ -366,6 +442,7 @@ function _buildSkillsWorkspace() {
     '<input id="skillsSearch" type="search" placeholder="Search names, tags, tools, instructions" aria-label="Search skills">' +
     '<select id="skillsStatusFilter" aria-label="Filter skills by status"><option value="all">All status</option><option value="active">Active</option><option value="provisional">Provisional</option><option value="draft">Draft</option><option value="disabled">Disabled</option></select>' +
     '<select id="skillsSourceFilter" aria-label="Filter skills by source"><option value="all">All sources</option><option value="paste">Paste</option><option value="url">URL</option><option value="github">GitHub</option><option value="file">File</option><option value="auto-learned">Auto-learned</option><option value="edited">Edited</option></select>' +
+    '<select id="skillsCategoryFilter" aria-label="Filter skills by category"><option value="all">All categories</option><option>Information &amp; Research</option><option>Documents &amp; Data</option><option>Development &amp; Integrations</option><option>Browser &amp; Desktop Automation</option><option>Vision &amp; Media</option><option>Communication</option><option>Memory &amp; Personalization</option><option>Uncategorized</option></select>' +
     '<select id="skillsSort" aria-label="Sort skills"><option value="updated">Recently updated</option><option value="name">Name</option><option value="status">Status</option></select>' +
     '<span id="skillsViewSummary">0 shown</span>';
 
@@ -395,6 +472,9 @@ function _buildSkillsWorkspace() {
   });
   document.getElementById('skillsSourceFilter').addEventListener('change', function(event) {
     _skillsState.sourceFilter = event.target.value; renderSkillsList();
+  });
+  document.getElementById('skillsCategoryFilter').addEventListener('change', function(event) {
+    _skillsState.categoryFilter = event.target.value; renderSkillsList();
   });
   document.getElementById('skillsSort').addEventListener('change', function(event) {
     _skillsState.sort = event.target.value; renderSkillsList();
@@ -508,6 +588,7 @@ async function createSkillFromRequest(requestText) {
     body: JSON.stringify({
       name: String(draft.name || 'Untitled Skill'),
       description: String(draft.description || ''),
+      category: String(draft.category || 'Uncategorized'),
       instructions: String(draft.instructions || ''),
       tools: tools.join(', '),
       tags: String(draft.tags || ''),
@@ -527,7 +608,7 @@ async function updateSkillByName(name, updates) {
   var skill = _skillWithName(name);
   var skillId = String(_skillField(skill, 'SkillId', 'skillId') || '');
   var allowed = {};
-  ['name', 'description', 'instructions', 'tools', 'tags'].forEach(function(field) {
+  ['name', 'description', 'category', 'instructions', 'tools', 'tags'].forEach(function(field) {
     if (updates && String(updates[field] || '').trim()) allowed[field] = String(updates[field]).trim();
   });
   if (!Object.keys(allowed).length) throw new Error('Describe what Eva should update in that skill.');

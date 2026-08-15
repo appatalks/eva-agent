@@ -41,6 +41,11 @@ def to_utc_iso(value):
 EVA_CONFIG_DIR = os.path.expanduser(os.environ.get("EVA_CONFIG_DIR", "~/.config/eva-standalone"))
 ARTIFACTS_DIR = os.path.join(EVA_CONFIG_DIR, "artifacts")
 PROTECTED_ARTIFACTS_DIR = os.path.join(EVA_CONFIG_DIR, "protected-artifacts")
+SKILLS_WORKSPACE_ROOTS = tuple(
+    os.path.abspath(os.path.expanduser(item.strip()))
+    for item in os.environ.get("EVA_SKILLS_WORKSPACE_ROOTS", "").split(os.pathsep)
+    if item.strip()
+)
 KUSTO_CLUSTER_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "kusto_cluster.txt")
 MCP_CONFIG_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "mcp_config.json")
 ALERTS_CONFIG_PATH = os.path.join(EVA_CONFIG_DIR, "alerts.json")
@@ -98,15 +103,25 @@ GOALS_LATEST_QUERY = (
 )
 
 # ── Skills ──────────────────────────────────────────────────────────
+SKILL_CATEGORIES = (
+    "Information & Research",
+    "Documents & Data",
+    "Development & Integrations",
+    "Browser & Desktop Automation",
+    "Vision & Media",
+    "Communication",
+    "Memory & Personalization",
+    "Uncategorized",
+)
 SKILL_STATUSES = {"active", "draft", "provisional", "disabled", "deleted"}
 SKILL_COLUMNS = [
-    "SkillId", "Name", "Description", "Instructions", "Tools",
-    "Tags", "Source", "Status", "CreatedAt", "UpdatedAt",
+    "SkillId", "Name", "Description", "Category", "Instructions", "Tools",
+    "Tags", "Config", "Source", "Status", "CreatedAt", "UpdatedAt",
 ]
 SKILLS_LATEST_QUERY = (
     "Skills | summarize arg_max(UpdatedAt, *) by SkillId "
-    "| project SkillId, Name, Description, Instructions, Tools, Tags, "
-    "Source, Status, CreatedAt, UpdatedAt"
+    "| project SkillId, Name, Description, Category=iff(isempty(Category), 'Uncategorized', Category), Instructions, Tools, Tags, "
+    "Config, Source, Status, CreatedAt, UpdatedAt"
 )
 SKILL_SOURCE_MAX_BYTES = 200 * 1024
 SKILL_INSTRUCTIONS_INJECT_CAP = 1500

@@ -81,7 +81,10 @@ queue() {  # queue "<description>" "<install command>"
 have_cmd()   { command -v "$1" >/dev/null 2>&1; }
 
 # Pick a Python interpreter to probe modules with (matches what the bridge runs).
+EVA_RUNTIME_HOME="${HOME}/.local/share/eva/runtime"
+EVA_RUNTIME_PYTHON="${EVA_RUNTIME_HOME}/.venv/bin/python"
 PYTHON="python3"; have_cmd python3 || PYTHON="python"
+[ -x "$EVA_RUNTIME_PYTHON" ] && PYTHON="$EVA_RUNTIME_PYTHON"
 have_pymod() { "$PYTHON" -c "import $1" >/dev/null 2>&1; }
 
 # version_ge "3.12.1" "3.12" -> 0 (true) when first >= second
@@ -135,6 +138,28 @@ detect_platform() {
 # pip install command (user scope so the bare-python3 bridge can import them).
 pip_install_cmd() {  # echoes a command that installs the given pip package(s)
   printf '%s -m pip install --user %s' "$PYTHON" "$*"
+}
+
+install_skill_runtime() {
+  local host_python="python3"
+  have_cmd python3 || host_python="python"
+  mkdir -p "$EVA_RUNTIME_HOME" || return 1
+  "$host_python" -m venv --system-site-packages "$EVA_RUNTIME_HOME/.venv" || return 1
+  "$EVA_RUNTIME_PYTHON" -m pip install --upgrade \
+    'pillow==11.3.0' python-docx pypdf reportlab python-pptx openpyxl 'pdfplumber==0.11.9' pytesseract
+}
+
+need_skill_runtime() {
+  local missing=0 module
+  for module in docx pypdf reportlab pptx openpyxl pdfplumber pytesseract; do
+    "$PYTHON" -c "import $module" >/dev/null 2>&1 || missing=1
+  done
+  "$PYTHON" -c 'from importlib.metadata import version; assert version("pdfplumber") == "0.11.9"; assert int(version("Pillow").split(".", 1)[0]) < 12' >/dev/null 2>&1 || missing=1
+  if [ "$missing" = "0" ]; then
+    ok "Managed document Skill runtime present"; PRESENT_COUNT=$((PRESENT_COUNT+1))
+    return
+  fi
+  queue "Managed document Skill runtime" "install_skill_runtime"
 }
 
 local_speech_overrides_are_expected() {
@@ -322,13 +347,15 @@ register_dependencies() {
 
   if [ "$WANT_SKILL_DEPS" = "1" ]; then
     hr; info "Skill toolchains (PDF / office / OCR)"; hr
-    need_pymod pypdf       pypdf       "pypdf (PDF read/merge/split)"
-    need_pymod reportlab   reportlab   "reportlab (PDF creation)"
-    need_pymod pdfplumber  pdfplumber  "pdfplumber (PDF tables/text)"
-    need_pymod pytesseract pytesseract "pytesseract (OCR binding)"
+    need_skill_runtime
     need_sys pdftotext "poppler-utils (pdftotext/pdfinfo)" poppler-utils poppler-utils poppler poppler-tools poppler
     need_sys qpdf      "qpdf (PDF transform)"               qpdf          qpdf          qpdf    qpdf          qpdf
     need_sys tesseract "tesseract OCR engine"               tesseract-ocr tesseract     tesseract tesseract-ocr tesseract
+    if have_cmd libreoffice || have_cmd soffice; then
+      ok "LibreOffice (office recalculation/rendering present)"; PRESENT_COUNT=$((PRESENT_COUNT+1))
+    else
+      need_sys libreoffice "LibreOffice (XLSX recalculation and DOCX/PPTX PDF rendering)" libreoffice libreoffice libreoffice-fresh libreoffice libreoffice
+    fi
   else
     info "Skipping skill toolchains (--no-skill-deps)"
   fi

@@ -20,6 +20,11 @@ Run the focused contract immediately after an edit. Run
 packaged Electron check when a change touches privileged IPC, UI lifecycle,
 workspace confinement, or bundled resources.
 
+Bounded skills use `python3 tools/tests/test_skills_document_ops.py` for local
+fixture creation, read, validation, malformed-input, confinement, dependency,
+receipt, and MCP scaffold contracts. These tests use temporary directories and
+mocked imports only; they never install packages or access the network.
+
 ## Static Tests Are Intentional In These Cases
 
 Keep source/static assertions when they protect:

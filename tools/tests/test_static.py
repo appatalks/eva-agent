@@ -95,6 +95,9 @@ def test_required_files():
         "tools/bridge/aig_request.py",
         "tools/bridge/aig_preflight.py",
         "tools/bridge/http_routes.py",
+        "tools/skills/__init__.py",
+        "tools/skills/document_ops.py",
+        "tools/skills/mcp_builder.py",
         "tools/kusto_mcp.py",
         "tools/tests/test_prompt_budget.js",
         "tools/tests/test_request_routing.js",
@@ -121,6 +124,9 @@ def test_required_files():
         "tools/tests/test_assets_api.js",
         "tools/tests/test_agents_api.js",
         "tools/tests/test_skills_api.js",
+        "tools/tests/test_skill_execution.py",
+        "tools/tests/test_skills_catalog.py",
+        "tools/tests/test_skills_document_ops.py",
         "tools/tests/test_workspaces_api.js",
         "tools/tests/test_sessions_api.js",
         "tools/tests/test_voice_listener_api.js",
@@ -622,6 +628,10 @@ def test_model_selector():
         html = f.read()
     with open("standalone/package.json") as f:
         package = json.load(f)
+    with open("tools/bridge/core.py") as f:
+        bounded_bridge = f.read()
+    with open("install.sh") as f:
+        bounded_installer = f.read()
 
     # Extract model select content
     match = re.search(r'<select id="selModel"[^>]*>(.*?)</select>', html, re.DOTALL)
@@ -745,6 +755,10 @@ def test_protected_memory_settings_contract():
         voice_view = f.read()
     with open("standalone/package.json") as f:
         package = json.load(f)
+    with open("tools/bridge/core.py") as f:
+        bounded_bridge = f.read()
+    with open("install.sh") as f:
+        bounded_installer = f.read()
     resource_filters = package["build"]["extraResources"][0]["filter"]
     required_markup = [
         'id="protectedMemoryPanel"',
@@ -759,6 +773,10 @@ def test_protected_memory_settings_contract():
     report("protected_memory_unlock_gates_writes", "storeButton.disabled = !enrolled || locked" in copilot and "storeFileButton.disabled = !enrolled || locked" in copilot)
     report("protected_memory_refreshes_on_settings_open", "refreshProtectedMemoryStatus" in options)
     report("protected_memory_module_packaged", "tools/protected_memory.py" in resource_filters)
+    report("bounded_skills_runtime_packaged", "tools/skills/**" in resource_filters)
+    report("bounded_skills_installer_dependencies", all(marker in bounded_installer for marker in ("python-docx", "pypdf", "reportlab", "python-pptx", "openpyxl")))
+    report("bounded_skills_native_bridge", "execute_bounded_skill" in bounded_bridge and '"/v1/skills/execute"' in bounded_bridge and "EVA_SKILLS_WORKSPACE_ROOTS" in open("tools/bridge/config.py").read())
+    report("bounded_skills_provenance", os.path.isfile("docs/eva_default_skills/THIRD_PARTY_NOTICES.md") and "Apache-2.0" in open("docs/eva_default_skills/THIRD_PARTY_NOTICES.md").read() and "2026-08-15" in open("docs/eva_default_skills/THIRD_PARTY_NOTICES.md").read())
     report("protected_memory_chat_capture_intercept", "function captureProtectedMemoryFromChat" in copilot and "await captureProtectedMemoryFromChat(protectedRawText)" in options)
     report("protected_memory_capture_does_not_route_raw_text", "if (input) input.innerHTML = ''" in copilot and "Stored in protected memory." in copilot)
 
@@ -1288,7 +1306,7 @@ def test_sidebar_workflow_contract():
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
     report("workflow_voice_skill_url_authorization", "Only credential-free HTTPS URLs can be opened" in skills_js and "not authorized by the named active skill" in skills_js and "explicit user request" in skills_js and "window.open(target, '_blank', 'noopener')" in skills_js)
     report("workflow_skills_main_view", "_buildSkillsWorkspace" in skills_js and "skills-view-open" in skills_js and "window.EvaSkills" in skills_js and "body.skills-view-open" in open("core/style.css").read())
-    report("workflow_skills_organization", all(value in skills_js for value in ("skillsSearch", "skillsStatusFilter", 'value=\"draft\"', "skillsSourceFilter", "skillsSort", "_filteredSkills", "_skillSourceKind", "skillsViewSummary")))
+    report("workflow_skills_organization", all(value in skills_js for value in ("skillsSearch", "skillsStatusFilter", 'value=\"draft\"', "skillsSourceFilter", "skillsCategoryFilter", "skillsSort", "_filteredSkills", "_skillSourceKind", "skillsViewSummary", "skills-category-group", "skill-category-chip")))
     report("workflow_skills_cross_navigation", "EvaSkills.close" in sessions_js and "EvaSkills.close" in open("core/js/features/agents/operations.js").read() and "EvaSkills.close" in open("core/js/features/assets/library.js").read() and "EvaSkills.close" in open("core/js/features/workspaces/monitor.js").read())
     report("workflow_profile_picker", 'id="profilePanel"' in html and re.search(r'src="core/js/profiles\.js(?:\?[^" ]+)?"', html) is not None and "function switchEvaProfile" in profiles_js)
     report("workflow_profile_awaits_session_save", "async function switchEvaProfile" in profiles_js and "await saveCurrentSession()" in profiles_js)

@@ -555,7 +555,7 @@ class KustoMemoryModel:
     _TRAIT_COLUMNS = ["TraitId", "Trait", "Value", "Confidence", "SourceMemoryIds", "Status", "Scope", "ScopeId", "CreatedAt", "UpdatedAt", "ExpiresAt"]
     _SCENARIO_COLUMNS = ["ScenarioId", "Scope", "ScopeId", "Title", "Summary", "Status", "CreatedAt", "UpdatedAt", "ExpiresAt"]
     _PROPOSAL_COLUMNS = ["ProposalId", "Kind", "Payload", "RiskLevel", "Status", "EvidenceRefs", "CreatedAt", "ReviewedAt", "ReviewedBy"]
-    _SKILL_COLUMNS = ["SkillId", "Name", "Description", "Instructions", "Tools", "Tags", "Source", "Status", "CreatedAt", "UpdatedAt"]
+    _SKILL_COLUMNS = ["SkillId", "Name", "Description", "Category", "Instructions", "Tools", "Tags", "Config", "Source", "Status", "CreatedAt", "UpdatedAt"]
     _TURN_STAGE_COLUMNS = ["TurnId", "Stage", "Status", "CreatedAt"]
 
     def __init__(self, cluster, database, query, ingest):
