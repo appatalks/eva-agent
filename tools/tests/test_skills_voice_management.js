@@ -12,10 +12,14 @@ let createPayload = null;
 let openedUrl = '';
 let activePatchCount = 0;
 let activationResponse = 'ENABLE';
+let evariseCount = 0;
+let createCount = 0;
+let failSkillList = false;
 
 async function backgroundBridgeRequest(path, options) {
   options = options || {};
   if (path === '/v1/skills/evarise') {
+    evariseCount += 1;
     return {
       draft: {
         name: 'Play my YouTube playlist',
@@ -27,6 +31,7 @@ async function backgroundBridgeRequest(path, options) {
     };
   }
   if (path === '/v1/skills' && options.method === 'POST') {
+    createCount += 1;
     createPayload = JSON.parse(options.body);
     const skill = {
       SkillId: 'sk-playlist',
@@ -41,7 +46,10 @@ async function backgroundBridgeRequest(path, options) {
     skills = [skill];
     return { skill };
   }
-  if (path === '/v1/skills' && options.method === 'GET') return { skills };
+  if (path === '/v1/skills' && options.method === 'GET') {
+    if (failSkillList) throw new Error('Skill list unavailable');
+    return { skills };
+  }
   if (path.indexOf('/v1/skills/') === 0 && options.method === 'PATCH') {
     const updates = JSON.parse(options.body);
     const skill = skills.find(function(item) { return item.SkillId === path.slice('/v1/skills/'.length); });
@@ -82,6 +90,17 @@ async function main() {
   await assert.rejects(window.EvaSkills.setStatusByName('Play my YouTube playlist', 'active', ''), /Type ENABLE/);
   await window.EvaSkills.setStatusByName('Play my YouTube playlist', 'active', 'ENABLE');
   assert.strictEqual(activePatchCount, 1);
+  const reused = await window.EvaSkills.createFromRequest(request);
+  assert.strictEqual(reused.reused, true);
+  assert.strictEqual(reused.status, 'active');
+  assert.match(reused.message, /Reused existing active skill/);
+  assert.strictEqual(evariseCount, 1);
+  assert.strictEqual(createCount, 1);
+  failSkillList = true;
+  await assert.rejects(window.EvaSkills.createFromRequest(request), /Skill list unavailable/);
+  assert.strictEqual(evariseCount, 1);
+  assert.strictEqual(createCount, 1);
+  failSkillList = false;
   activationResponse = '';
   await sandbox.toggleSkill('sk-playlist', 'active');
   assert.strictEqual(activePatchCount, 1);

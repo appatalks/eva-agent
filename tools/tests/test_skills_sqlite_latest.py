@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""SQLite Skill listing returns current state, not append-only history."""
+import os
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+
+from bridge.core import _sqlite_latest_skill_rows
+from sqlite_memory import SqliteMemory
+
+
+COLUMNS = [
+    "SkillId", "Name", "Description", "Instructions", "Tools",
+    "Tags", "Source", "Status", "CreatedAt", "UpdatedAt",
+]
+
+
+def row(skill_id, status, updated_at, name="Playlist"):
+    return {
+        "SkillId": skill_id,
+        "Name": name,
+        "Description": "Play the saved playlist.",
+        "Instructions": "Open the exact saved URL.",
+        "Tools": "eva_harness.open_external_url",
+        "Tags": "playlist",
+        "Source": "voice",
+        "Status": status,
+        "CreatedAt": "2026-08-15T00:00:00Z",
+        "UpdatedAt": updated_at,
+    }
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix="eva-skills-latest-") as directory:
+        memory = SqliteMemory(os.path.join(directory, "memory.db"))
+        memory.transaction(lambda connection: connection.execute("DELETE FROM Skills"))
+        memory.ingest("Skills", COLUMNS, [row("sk-playlist", "draft", "2026-08-15T00:00:00Z")])
+        memory.ingest("Skills", COLUMNS, [row("sk-playlist", "active", "2026-08-15T00:01:00Z")])
+        memory.ingest("Skills", COLUMNS, [row("sk-other", "active", "2026-08-15T00:02:00Z", "Other")])
+        memory.ingest("Skills", COLUMNS, [row("sk-tie", "draft", "2026-08-15T00:04:00Z", "Tie")])
+        memory.ingest("Skills", COLUMNS, [row("sk-tie", "active", "2026-08-15T00:04:00Z", "Tie")])
+        latest = _sqlite_latest_skill_rows(memory)
+        assert len(latest) == 3, latest
+        playlist = next(item for item in latest if item["SkillId"] == "sk-playlist")
+        assert playlist["Status"] == "active", playlist
+        tied = next(item for item in latest if item["SkillId"] == "sk-tie")
+        assert tied["Status"] == "active", tied
+
+        memory.ingest("Skills", COLUMNS, [row("sk-playlist", "deleted", "2026-08-15T00:03:00Z")])
+        remaining = _sqlite_latest_skill_rows(memory)
+        assert {item["SkillId"] for item in remaining} == {"sk-tie", "sk-other"}, remaining
+        memory.ingest("Skills", COLUMNS, [row("sk-tie", "deleted", "2026-08-15T00:04:00Z", "Tie")])
+        after_tied_delete = _sqlite_latest_skill_rows(memory)
+        assert [item["SkillId"] for item in after_tied_delete] == ["sk-other"], after_tied_delete
+
+    print("SQLite latest Skill listing tests: PASS")
+
+
+if __name__ == "__main__":
+    main()

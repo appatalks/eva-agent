@@ -401,7 +401,7 @@ function _buildSkillsWorkspace() {
   });
 }
 
-async function loadSkills() {
+async function loadSkills(strict) {
   try {
     var data = await _skillsBridge('/v1/skills', { method: 'GET' });
     _skillsState.skills = (data && Array.isArray(data.skills)) ? data.skills : [];
@@ -417,6 +417,7 @@ async function loadSkills() {
       note.textContent = (error && error.message) ? String(error.message) : 'Skills unavailable.';
       listEl.appendChild(note);
     }
+    if (strict === true) throw error;
   }
 }
 
@@ -470,6 +471,22 @@ function _skillWithName(name) {
 async function createSkillFromRequest(requestText) {
   var request = String(requestText || '').trim();
   if (!request || request.length > 8000) throw new Error('Describe the skill Eva should create.');
+  var url = _skillRequestUrl(request);
+  if (url) {
+    url = _managedSkillUrl(url);
+    await loadSkills(true);
+    var matches = (_skillsState.skills || []).filter(function(skill) {
+      return _authorizedSkillUrls(skill).indexOf(url) !== -1;
+    });
+    if (matches.length > 1) throw new Error('More than one saved Skill contains that exact URL. Resolve the duplicates in Skills first.');
+    if (matches.length === 1) {
+      var existingName = String(_skillField(matches[0], 'Name', 'name') || 'Untitled Skill');
+      var existingStatus = String(_skillField(matches[0], 'Status', 'status') || 'draft').toLowerCase();
+      var existingMessage = 'Reused existing ' + existingStatus + ' skill "' + existingName + '".';
+      _skillStatus(existingMessage);
+      return { skillName: existingName, status: existingStatus, reused: true, message: existingMessage };
+    }
+  }
   var normalized = await _skillsBridge('/v1/skills/evarise', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -477,7 +494,6 @@ async function createSkillFromRequest(requestText) {
   });
   var draft = normalized && normalized.draft;
   if (!draft || !String(draft.instructions || '').trim()) throw new Error('Eva could not normalize that skill request.');
-  var url = _skillRequestUrl(request);
   var tools = _skillCsv(draft.tools);
   if (url) {
     url = _managedSkillUrl(url);
@@ -501,7 +517,9 @@ async function createSkillFromRequest(requestText) {
   });
   await loadSkills();
   var name = String(created && created.skill && (created.skill.Name || created.skill.name) || draft.name || 'Untitled Skill');
-  return { skillName: name, message: 'Created draft skill "' + name + '".' };
+  var message = 'Created draft skill "' + name + '".';
+  _skillStatus(message);
+  return { skillName: name, status: 'draft', reused: false, message: message };
 }
 
 async function updateSkillByName(name, updates) {
@@ -518,7 +536,9 @@ async function updateSkillByName(name, updates) {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(allowed)
   });
   await loadSkills();
-  return 'Updated skill "' + String(response && response.skill && (response.skill.Name || response.skill.name) || name) + '".';
+  var message = 'Updated skill "' + String(response && response.skill && (response.skill.Name || response.skill.name) || name) + '".';
+  _skillStatus(message);
+  return message;
 }
 
 async function setSkillStatusByName(name, status, confirmation) {
@@ -532,7 +552,9 @@ async function setSkillStatusByName(name, status, confirmation) {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: normalizedStatus })
   });
   await loadSkills();
-  return (normalizedStatus === 'active' ? 'Enabled' : 'Disabled') + ' skill "' + String(_skillField(skill, 'Name', 'name') || name) + '".';
+  var message = (normalizedStatus === 'active' ? 'Enabled' : 'Disabled') + ' skill "' + String(_skillField(skill, 'Name', 'name') || name) + '".';
+  _skillStatus(message);
+  return message;
 }
 
 async function deleteSkillByName(name) {
@@ -541,7 +563,9 @@ async function deleteSkillByName(name) {
   var skillId = String(_skillField(skill, 'SkillId', 'skillId') || '');
   await _skillsBridge('/v1/skills/' + encodeURIComponent(skillId), { method: 'DELETE' });
   await loadSkills();
-  return 'Deleted skill "' + String(_skillField(skill, 'Name', 'name') || name) + '".';
+  var message = 'Deleted skill "' + String(_skillField(skill, 'Name', 'name') || name) + '".';
+  _skillStatus(message);
+  return message;
 }
 
 function _authorizedSkillUrls(skill) {

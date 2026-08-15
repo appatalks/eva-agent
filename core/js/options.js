@@ -1794,7 +1794,11 @@ async function sendData() {
             action: nativeRoute.action || 'navigate',
             label: nativeRoute.target || ''
           });
-          if ((nativeRoute.action === 'describe_workspaces' || nativeRoute.action === 'describe_workspace_tools' || nativeRoute.action === 'consider_terminal_task' || nativeRoute.action === 'continue_github_repositories') && nativeResult.ok && typeof speakText === 'function') speakText(nativeResult.message);
+          var spokenNativeActions = [
+            'describe_workspaces', 'describe_workspace_tools', 'consider_terminal_task', 'continue_github_repositories',
+            'describe_skills', 'create_skill', 'update_skill', 'set_skill_status', 'delete_skill', 'run_skill', 'open_external_url'
+          ];
+          if (spokenNativeActions.indexOf(nativeRoute.action) !== -1 && nativeResult.ok && typeof speakText === 'function') speakText(nativeResult.message);
           return;
         }
       }

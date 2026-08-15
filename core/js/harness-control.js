@@ -653,6 +653,9 @@ var EvaHarness = (function() {
         navigate('skills');
         var skillName = String(created && created.skillName || 'Untitled Skill');
         var draftMessage = String(created && created.message || 'Created a draft skill.');
+        if (String(created && created.status || '').toLowerCase() === 'active') {
+          return result(true, 'create_skill', draftMessage + ' It is already active.', { outcome: 'completed', reused: true });
+        }
         if (typeof evaTextPrompt !== 'function') return result(true, 'create_skill', draftMessage + ' Review it in Skills before enabling it.', { outcome: 'draft' });
         return Promise.resolve(evaTextPrompt('Activate Skill "' + skillName + '"?', '', {
           maxLength: 6, placeholder: 'Type ENABLE', kind: 'skill_activation'

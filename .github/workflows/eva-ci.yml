@@ -238,3 +238,4 @@ jobs:
           node tools/tests/test_provider_token_budget.js
           node tools/tests/test_harness_control.js
           node tools/tests/test_skills_voice_management.js
+          python3 tools/tests/test_skills_sqlite_latest.py

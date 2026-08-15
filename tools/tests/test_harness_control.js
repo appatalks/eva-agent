@@ -38,6 +38,8 @@ let deletedSkillName = '';
 let externalUrlRequest = null;
 let runSkillRequest = '';
 let skillActivationConfirmation = 'ENABLE';
+let skillActivationPromptCount = 0;
+let createdSkillResponse = { skillName: 'Play my YouTube playlist', status: 'draft', reused: false, message: 'Created draft skill "Play my YouTube playlist".' };
 let mergeRequest = null;
 let pullRequestViewRequest = null;
 let branchDeleteRequest = null;
@@ -138,7 +140,7 @@ const window = {
     describe() { return Promise.resolve('There are 2 saved skills, 1 active. Available examples: Research and Review.'); },
     createFromRequest(requestText) {
       createdSkillRequest = requestText;
-      return Promise.resolve({ skillName: 'Play my YouTube playlist', message: 'Created draft skill "Play my YouTube playlist".' });
+      return Promise.resolve(Object.assign({}, createdSkillResponse));
     },
     updateByName(skillName, updates) {
       updatedSkillRequest = { skillName, updates };
@@ -195,7 +197,13 @@ const sandbox = {
   localStorage,
   describeSavedSessions() { return Promise.resolve('There are 2 saved chat sessions: Today and Planning.'); },
   toggleSessionPanel() { sessionsOpenCalls += 1; },
-  evaTextPrompt(title) { return Promise.resolve(/^Activate Skill/.test(title) ? skillActivationConfirmation : 'MERGE'); },
+  evaTextPrompt(title) {
+    if (/^Activate Skill/.test(title)) {
+      skillActivationPromptCount += 1;
+      return Promise.resolve(skillActivationConfirmation);
+    }
+    return Promise.resolve('MERGE');
+  },
 };
 vm.runInNewContext(source, sandbox, { filename: 'core/js/harness-control.js' });
 const harness = sandbox.EvaHarness;
@@ -251,6 +259,20 @@ async function main() {
   assert.strictEqual(createdSkillRequest, createSkillPhrase);
   assert.match(createSkillResult.message, /Created draft skill/);
   assert.match(createSkillResult.message, /Enabled skill/);
+  assert.deepStrictEqual(skillStatusRequest, { skillName: 'Play my YouTube playlist', status: 'active', confirmation: 'ENABLE' });
+  assert.strictEqual(skillActivationPromptCount, 1);
+  createdSkillResponse = { skillName: 'Play my YouTube playlist', status: 'active', reused: true, message: 'Reused existing active skill "Play my YouTube playlist".' };
+  skillStatusRequest = null;
+  const promptCountBeforeActiveReuse = skillActivationPromptCount;
+  const activeReuseResult = await harness.execute(createSkillRoute, { source: 'voice', userRequest: createSkillPhrase });
+  assert.strictEqual(activeReuseResult.ok, true);
+  assert.match(activeReuseResult.message, /already active/);
+  assert.strictEqual(skillActivationPromptCount, promptCountBeforeActiveReuse);
+  assert.strictEqual(skillStatusRequest, null);
+  createdSkillResponse = { skillName: 'Play my YouTube playlist', status: 'draft', reused: true, message: 'Reused existing draft skill "Play my YouTube playlist".' };
+  const reusedDraftResult = await harness.execute(createSkillRoute, { source: 'voice', userRequest: createSkillPhrase });
+  assert.strictEqual(reusedDraftResult.ok, true);
+  assert.strictEqual(skillActivationPromptCount, promptCountBeforeActiveReuse + 1);
   assert.deepStrictEqual(skillStatusRequest, { skillName: 'Play my YouTube playlist', status: 'active', confirmation: 'ENABLE' });
   assert.strictEqual(harness.resolveNavigationRequest('How do I create a Skill?', { directUser: true }).action, 'consider_terminal_task');
   assert.strictEqual(harness.resolveNavigationRequest('Can I create a Skill?', { directUser: true }).action, 'consider_terminal_task');
