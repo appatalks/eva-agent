@@ -20,6 +20,7 @@ METADATA = {
     "authorization_endpoint": ISSUER + "/authorize",
     "token_endpoint": ISSUER + "/token",
     "device_authorization_endpoint": ISSUER + "/devicecode",
+    "code_challenge_methods_supported": ["S256"],
 }
 
 DEVICE_RESPONSE = {
@@ -63,6 +64,11 @@ class CapabilityTests(unittest.TestCase):
     def test_metadata_parsing_captures_the_device_endpoint(self):
         parsed = oauth_client.parse_authorization_server_metadata(METADATA, ISSUER)
         self.assertEqual(parsed["device_authorization_endpoint"], ISSUER + "/devicecode")
+
+    def test_metadata_without_s256_is_rejected(self):
+        metadata = dict(METADATA, code_challenge_methods_supported=[])
+        with self.assertRaises(oauth_client.OAuthError):
+            oauth_client.parse_authorization_server_metadata(metadata, ISSUER)
 
 
 class BeginDeviceAuthorizationTests(unittest.TestCase):
