@@ -228,15 +228,31 @@ def send_message(request, account_id="", from_address="", confirmation=None):
     normalized = decision["request"]
 
     if account["backend"] == "eva_direct":
-        results = _deliver_direct(account, document, normalized, decision["delivery_plan"])
+        deliveries, failures = _deliver_direct(account, document, normalized, decision["delivery_plan"])
+        if not deliveries:
+            audit_event("email_send", correlation_id=account["id"], outcome="failed")
+            raise EmailServiceError("; ".join(failures) or "delivery failed")
+        if failures:
+            # Some recipients already have the message. Say so, so the user does
+            # not resend and deliver it twice to the routes that succeeded.
+            audit_event(
+                "email_send", correlation_id=account["id"], outcome="partial",
+                **email_policy.audit_fields(normalized, backend=account["backend"]),
+            )
+            return {
+                "decision": "partially_sent",
+                "account_id": account["id"],
+                "deliveries": deliveries,
+                "failures": failures,
+            }
     else:
-        results = [_deliver_simple(account, normalized, account["address"])]
+        deliveries = [_deliver_simple(account, normalized, account["address"])]
 
     audit_event(
         "email_send", correlation_id=account["id"], outcome="sent",
         **email_policy.audit_fields(normalized, backend=account["backend"]),
     )
-    return {"decision": "sent", "account_id": account["id"], "deliveries": results}
+    return {"decision": "sent", "account_id": account["id"], "deliveries": deliveries}
 
 
 def _deliver_simple(account, normalized, from_address):
@@ -251,8 +267,14 @@ def _deliver_simple(account, normalized, from_address):
 
 
 def _deliver_direct(account, document, normalized, plan):
-    """Deliver Eva's own identity across its internal and relay routes."""
+    """Deliver Eva's own identity across its internal and relay routes.
+
+    Returns (deliveries, failures). A route that fails does not abort the others:
+    each route is an independent submission, and losing the record of a route
+    that already delivered would invite a duplicate resend.
+    """
     deliveries = []
+    failures = []
     for route in plan.get("routes", []):
         scoped = dict(normalized)
         scoped["to"] = [r for r in normalized.get("to", []) if r in route["recipients"]]
@@ -261,31 +283,31 @@ def _deliver_direct(account, document, normalized, plan):
         if not email_policy.all_recipients(scoped):
             continue
 
-        if route["route"] == "internal":
-            starttls = bool(route.get("smtp_starttls", True))
-            mailbox = ImapSmtpMailbox(
-                {"smtp_host": route["smtp_host"], "smtp_port": route["smtp_port"],
-                 "smtp_starttls": starttls, "smtp_allow_plaintext": not starttls,
-                 "imap_host": "", "imap_tls": True},
-                account["address"],
-            )
-            # An internal MTA accepts relay from the trusted network without submission auth.
-            secret = ""
-        else:
-            relay = _account_or_error(document, route["relay_account_id"], "send")
-            mailbox = _adapter_for(relay)
-            secret = _credential_for(relay["id"])
-
         try:
+            if route["route"] == "internal":
+                starttls = bool(route.get("smtp_starttls", True))
+                mailbox = ImapSmtpMailbox(
+                    {"smtp_host": route["smtp_host"], "smtp_port": route["smtp_port"],
+                     "smtp_starttls": starttls, "smtp_allow_plaintext": not starttls,
+                     "imap_host": "", "imap_tls": True},
+                    account["address"],
+                )
+                # An internal MTA accepts relay from the trusted network without submission auth.
+                secret = ""
+            else:
+                relay = _account_or_error(document, route["relay_account_id"], "send")
+                mailbox = _adapter_for(relay)
+                secret = _credential_for(relay["id"])
             result = mailbox.send(secret, scoped, from_address=plan["from"])
-        except MailboxError as exc:
+        except (MailboxError, EmailServiceError) as exc:
             audit_event(
-                "email_send", correlation_id=account["id"], outcome="failed",
+                "email_send", correlation_id=account["id"], outcome="route-failed",
                 route=route["route"],
             )
-            raise EmailServiceError(f"{route['route']} delivery failed: {exc}") from None
+            failures.append(f"{route['route']} delivery failed: {exc}")
+            continue
         deliveries.append({"route": route["route"], "recipient_count": result["recipient_count"]})
-    return deliveries
+    return deliveries, failures
 
 
 def morning_mail_summary(limit_per_account=5):
