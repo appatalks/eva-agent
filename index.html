@@ -1454,6 +1454,7 @@
             <label for="emailDirectConsent">Recipients who accept mail from Eva:</label>
             <input type="text" id="emailDirectConsent" placeholder="you@example.com, @lab.internal">
           </div>
+          <p class="auth-note">Both fields are required. Eva delivers only to the local domains listed, and only to recipients that appear here.</p>
         </div>
         <div class="background-actions">
           <button type="button" class="auth-toggle" id="emailSaveAccount">Save mailbox</button>
@@ -1464,8 +1465,8 @@
         <h4 class="settings-subhead">Sign in</h4>
         <p class="auth-note">Enter the app password or access token for the selected account id. It is held in memory by the bridge for this session only.</p>
         <div class="auth-field">
-          <label for="emailCredentialId">Account id:</label>
-          <input type="text" id="emailCredentialId" placeholder="personal" maxlength="64">
+          <label for="emailCredentialId">Account:</label>
+          <select id="emailCredentialId" style="width:100%"></select>
         </div>
         <div class="auth-field">
           <label for="emailCredential">Credential:</label>
@@ -1488,8 +1489,8 @@
 
         <h4 class="settings-subhead">Send a message</h4>
         <div class="auth-field">
-          <label for="emailSendFrom">From account id:</label>
-          <input type="text" id="emailSendFrom" placeholder="eva" maxlength="64">
+          <label for="emailSendFrom">Send from:</label>
+          <select id="emailSendFrom" style="width:100%"></select>
         </div>
         <div class="auth-field">
           <label for="emailSendTo">To:</label>

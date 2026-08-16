@@ -33,9 +33,29 @@ var EvaEmailSettings = (function() {
       .filter(Boolean);
   }
 
+  function fillAccountPickers() {
+    [['emailSendFrom', 'send'], ['emailCredentialId', null]].forEach(function(entry) {
+      var select = el(entry[0]);
+      if (!select) return;
+      var capability = entry[1];
+      var choices = state.accounts.filter(function(account) {
+        return !capability || (account.capabilities || []).indexOf(capability) >= 0;
+      });
+      var previous = select.value;
+      select.innerHTML = choices.length
+        ? choices.map(function(account) {
+            return '<option value="' + escapeHtml(account.id) + '">'
+              + escapeHtml(account.label) + ' — ' + escapeHtml(account.address) + '</option>';
+          }).join('')
+        : '<option value="">No eligible mailbox</option>';
+      if (previous && choices.some(function(a) { return a.id === previous; })) select.value = previous;
+    });
+  }
+
   function render() {
     var list = el('emailAccountList');
     if (!list) return;
+    fillAccountPickers();
     if (!state.accounts.length) {
       list.innerHTML = '<p class="auth-note">No mailbox configured yet.</p>';
       return;
@@ -128,6 +148,16 @@ var EvaEmailSettings = (function() {
     if (!account.id || !account.address) {
       status('emailAccountStatus', 'An account id and address are required.', true);
       return;
+    }
+    if (account.backend === 'eva_direct') {
+      if (!account.settings.internal_domains.length) {
+        status('emailAccountStatus', 'List at least one local domain, such as localhost.localdomain.', true);
+        return;
+      }
+      if (!account.settings.direct_consent.length) {
+        status('emailAccountStatus', 'List at least one recipient that accepts mail from Eva.', true);
+        return;
+      }
     }
     var others = state.accounts.filter(function(entry) { return entry.id !== account.id; });
     try {

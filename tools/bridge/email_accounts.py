@@ -278,7 +278,11 @@ def select_send_account(accounts, account_id="", from_address=""):
         for account in candidates:
             if account["id"] == wanted_id:
                 return account, ""
-        return None, "the requested account cannot send mail"
+        available = ", ".join(sorted(a["id"] for a in candidates))
+        return None, (
+            f"no sending account has the id '{wanted_id}'"
+            + (f"; available: {available}" if available else "")
+        )
 
     wanted_address = email_policy.normalize_address(from_address)
     if wanted_address:
@@ -361,6 +365,11 @@ def plan_direct_delivery(account, recipients, accounts=None):
     external = [r for r in recipients or [] if r not in internal]
 
     if mode == "internal" and external:
+        if not settings.get("internal_domains"):
+            return None, (
+                "no local domains are configured for Eva's identity, so every recipient "
+                "looks external; add the local domain in Email settings"
+            )
         return None, "Eva's direct identity is configured for internal delivery only"
     if mode == "relay":
         internal, external = [], list(recipients or [])
@@ -419,9 +428,15 @@ def authorize_send_for_account(account, request, global_allowlist, confirmation=
         missing = direct_consent_failures(account, email_policy.all_recipients(result["request"]))
         if missing:
             # Consent is not confirmable in the moment: the recipient must opt in first.
+            consent = (account.get("settings") or {}).get("direct_consent") or []
+            reason = (
+                "no recipients have been approved for Eva's identity yet; add them in Email settings"
+                if not consent else
+                "these recipients have not accepted mail from Eva's direct identity"
+            )
             return {
                 "decision": "rejected",
-                "reason": "these recipients have not accepted mail from Eva's direct identity",
+                "reason": reason,
                 "unconsented_recipients": missing,
             }
         plan, plan_error = plan_direct_delivery(

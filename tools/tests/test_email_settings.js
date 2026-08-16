@@ -34,6 +34,10 @@ check('credential field is a password input',
 check('credential field disables autocomplete',
   /id="emailCredential"[^>]*autocomplete="off"/.test(html));
 check('send form present', /id="emailSendTo"/.test(html) && /id="emailSendMessage"/.test(html));
+check('sender is chosen from a list, not typed',
+  /<select id="emailSendFrom"/.test(html));
+check('credential account is chosen from a list, not typed',
+  /<select id="emailCredentialId"/.test(html));
 check('allowlist field present', /id="emailAllowlist"/.test(html));
 check('account list region is live', /id="emailAccountList"[^>]*aria-live/.test(html));
 
@@ -76,6 +80,10 @@ check('confirmation echoes the server digest',
   /digest: result\.digest/.test(moduleSource));
 check('declining does not send', /decision: 'cancelled'/.test(moduleSource));
 check('partial delivery is surfaced', /partially_sent/.test(moduleSource));
+check('account pickers are populated from live accounts',
+  /function fillAccountPickers\(\)/.test(moduleSource));
+check('Eva identity setup requires local domains and consent',
+  /at least one local domain/.test(moduleSource) && /accepts mail from Eva/.test(moduleSource));
 
 console.log('\npanel lifecycle');
 const optionsSource = fs.readFileSync(path.join(root, 'core/js/options.js'), 'utf8');
