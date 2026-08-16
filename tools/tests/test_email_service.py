@@ -325,6 +325,42 @@ class CredentialTests(EmailServiceTestCase):
         with self.assertRaises(email_service.EmailValidationError):
             email_service.set_credential("eva", "not-needed")
 
+    def test_exim_status_requires_explicit_account_opt_in(self):
+        email_service.upsert_account({
+            "id": "eva", "backend": "eva_direct", "address": "eva@lab.internal",
+            "status": "connected", "settings": {"delivery_mode": "local_mta", "internal_smtp_host": "127.0.0.1"},
+        })
+        with self.assertRaises(email_service.EmailValidationError) as caught:
+            email_service.inspect_local_mta_status("eva", "1wtest-00000004LAd-0WIt")
+        self.assertIn("Enable Exim status", str(caught.exception))
+
+    def test_exim_status_returns_sanitized_transport_state(self):
+        email_service.upsert_account({
+            "id": "eva", "backend": "eva_direct", "address": "eva@lab.internal",
+            "status": "connected", "settings": {
+                "delivery_mode": "local_mta", "internal_smtp_host": "127.0.0.1", "exim_status": True,
+            },
+        })
+        email_service._remember_mta_submissions("eva", [{"mta_queue_id": "1wtest-00000004LAd-0WIt"}])
+        with mock.patch("bridge.exim_status.inspect", return_value={
+            "queue_id": "1wtest-00000004LAd-0WIt", "status": "failed", "access": "direct",
+            "detail": "Mailing to remote domains not supported", "completed": True,
+        }) as inspect:
+            result = email_service.inspect_local_mta_status("eva", "1wtest-00000004LAd-0WIt")
+        self.assertEqual(result["status"], "failed")
+        inspect.assert_called_once_with("1wtest-00000004LAd-0WIt", allow_sudo=False)
+
+    def test_exim_status_rejects_unknown_but_well_formed_queue_id(self):
+        email_service.upsert_account({
+            "id": "eva", "backend": "eva_direct", "address": "eva@lab.internal",
+            "status": "connected", "settings": {
+                "delivery_mode": "local_mta", "internal_smtp_host": "127.0.0.1", "exim_status": True,
+            },
+        })
+        with self.assertRaises(email_service.EmailValidationError) as caught:
+            email_service.inspect_local_mta_status("eva", "1wtest-00000004LAd-0WIt")
+        self.assertIn("not submitted by Eva", str(caught.exception))
+
     def test_removing_an_account_forgets_its_credential(self):
         email_service.set_credential("work", "hunter2")
         email_service.replace_accounts([], [])

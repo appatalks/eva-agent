@@ -51,6 +51,7 @@ python3 tools/tests/test_email_policy.py
 python3 tools/tests/test_email_accounts.py
 python3 tools/tests/test_email_service.py
 python3 tools/tests/test_email_routes.py
+python3 tools/tests/test_exim_status.py
 python3 tools/tests/test_mailbox_imap.py
 python3 tools/tests/test_oauth_client.py
 python3 tools/tests/test_remote_mcp.py

@@ -118,7 +118,7 @@ class _SMTPSinkHandler(socketserver.StreamRequestHandler):
                         break
                     lines.append(data_line.decode("utf-8", "replace"))
                 envelope["data"] = "".join(lines)
-                self.wfile.write(b"250 Queued\r\n")
+                self.wfile.write(b"250 Queued id=1wtest-00000004LAd-0WIt\r\n")
             elif upper.startswith("QUIT"):
                 self.wfile.write(b"221 Bye\r\n")
                 break
@@ -202,6 +202,14 @@ class UnauthenticatedDeliveryTests(LocalDeliveryTestCase):
         self.assertEqual(result["decision"], "sent")
         self.assertEqual(len(self.sink.received), 1)
         self.assertFalse(self.sink.received[0]["authenticated"])
+
+    def test_internal_delivery_retains_the_mta_queue_id_when_requested(self):
+        account = self.service.load_config()["accounts"][0]
+        account["settings"]["delivery_mode"] = "local_mta"
+        self.service.upsert_account(account)
+        result = self.send()
+        self.assertEqual(result["decision"], "submitted")
+        self.assertEqual(result["deliveries"][0]["mta_queue_id"], "1wtest-00000004LAd-0WIt")
 
     def test_envelope_carries_sender_and_recipient(self):
         self.send()

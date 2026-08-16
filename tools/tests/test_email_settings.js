@@ -44,6 +44,9 @@ check('account list region is live', /id="emailAccountList"[^>]*aria-live/.test(
 check('account list has a new-mailbox action', /id="emailNewAccount"/.test(html));
 check('best-effort local MTA mode is available',
   /id="emailDirectMode"/.test(html) && /value="local_mta"/.test(html));
+check('Exim inspection requires explicit opt-in controls',
+  /id="emailEximStatus"/.test(html) && /id="emailEximStatusSudo"/.test(html));
+check('local MTA status check control exists', /id="emailCheckMtaStatus"/.test(html));
 
 console.log('\nmodule');
 const context = {
@@ -100,6 +103,10 @@ check('declining does not send', /decision: 'cancelled'/.test(moduleSource));
 check('partial delivery is surfaced', /partially_sent/.test(moduleSource));
 check('local submission is not mislabeled as delivery',
   /decision === 'submitted'/.test(moduleSource) && /Final delivery is not verified/.test(moduleSource));
+check('submitted local MTA queue id enables status inspection',
+  /lastMtaSubmission/.test(moduleSource) && /mta_queue_id/.test(moduleSource) && /checkMtaStatus/.test(moduleSource));
+check('status lookup uses account and queue id only',
+  /\/v1\/email\/exim-status\?account_id=/.test(moduleSource));
 check('account pickers are populated from live accounts',
   /function fillAccountPickers\(\)/.test(moduleSource));
 check('Eva direct is excluded from the credential picker',

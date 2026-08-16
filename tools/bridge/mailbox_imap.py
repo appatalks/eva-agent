@@ -33,6 +33,7 @@ import email.header
 import email.message
 import email.utils
 import imaplib
+import re
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -290,7 +291,11 @@ class ImapSmtpMailbox:
                     client.auth("XOAUTH2", lambda _challenge=None: response)
                 else:
                     client.login(self.address, password)
-            client.send_message(message, from_addr=sender, to_addrs=envelope_recipients)
+            queue_id = ""
+            if self.settings.get("capture_queue_id"):
+                queue_id = self._send_and_capture_queue_id(client, sender, envelope_recipients, message)
+            else:
+                client.send_message(message, from_addr=sender, to_addrs=envelope_recipients)
         except smtplib.SMTPAuthenticationError:
             raise MailboxError(
                 "The mail server rejected the access token" if self.auth_mechanism == "xoauth2"
@@ -305,7 +310,30 @@ class ImapSmtpMailbox:
                 client.quit()
             except (smtplib.SMTPException, OSError):
                 pass
-        return {"message_id": message["Message-ID"], "recipient_count": len(envelope_recipients)}
+        return {
+            "message_id": message["Message-ID"],
+            "recipient_count": len(envelope_recipients),
+            "mta_queue_id": queue_id,
+        }
+
+    @staticmethod
+    def _send_and_capture_queue_id(client, sender, recipients, message):
+        """Submit through SMTP primitives so an Exim `250 id=` can be retained."""
+        code, response = client.mail(sender)
+        if code < 200 or code >= 300:
+            raise smtplib.SMTPSenderRefused(code, response, sender)
+        refused = {}
+        for recipient in recipients:
+            code, response = client.rcpt(recipient)
+            if code < 200 or code >= 300:
+                refused[recipient] = (code, response)
+        if len(refused) == len(recipients):
+            raise smtplib.SMTPRecipientsRefused(refused)
+        code, response = client.data(message.as_bytes())
+        if code < 200 or code >= 300:
+            raise smtplib.SMTPDataError(code, response)
+        match = re.search(r"\bid=([A-Za-z0-9-]{6,64})\b", response.decode("utf-8", "replace"))
+        return match.group(1) if match else ""
 
     @staticmethod
     def _safe_folder(folder):

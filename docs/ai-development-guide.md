@@ -73,6 +73,7 @@ Before removing a deprecated or fallback path, consult
 | Bounded document abilities | `tools/skills/document_ops.py`, `tools/skills/mcp_builder.py` | `python3 tools/tests/test_skills_document_ops.py` with the managed bridge interpreter |
 | Protected memory | `tools/protected_memory.py`, `tools/bridge/core.py` protected endpoints | `python3 tools/tests/test_protected_memory.py` |
 | Email accounts, policy, or delivery | `core/js/settings/email.js`, `tools/bridge/email_accounts.py`, `email_policy.py`, `email_service.py`, provider adapter | Email policy/service/routes/settings tests; local delivery test for SMTP changes |
+| Exim local-MTA transport status | `tools/bridge/exim_status.py`, `email_service.py` | `python3 tools/tests/test_exim_status.py` plus a manually approved local Exim check |
 | Voice, camera, browser, or desktop | Owning `core/js/` module plus matching `tools/` worker | Feature-specific focused test or manual capability check |
 
 ## Ownership Map

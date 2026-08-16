@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 from bridge import config as _cfg
 from bridge import email_accounts
@@ -31,9 +32,13 @@ _credential_lock = threading.RLock()
 
 # Account id -> secret. Process memory only; never serialized.
 _credentials = {}
+_mta_submission_lock = threading.RLock()
+_mta_submissions = {}
 
 MAX_FETCH_LIMIT = 50
 MAX_ACCOUNT_SUMMARY = 8
+MTA_SUBMISSION_TTL_SECONDS = 24 * 60 * 60
+MTA_SUBMISSION_MAX_PER_ACCOUNT = 100
 
 
 class EmailServiceError(Exception):
@@ -390,6 +395,7 @@ def send_message(request, account_id="", from_address="", confirmation=None):
                 "failures": failures,
             }
         if deliveries and all(delivery.get("route") == "local_mta" for delivery in deliveries):
+            _remember_mta_submissions(account["id"], deliveries)
             audit_event(
                 "email_send", correlation_id=account["id"], outcome="submitted",
                 **email_policy.audit_fields(normalized, backend=account["backend"]),
@@ -444,6 +450,7 @@ def _deliver_direct(account, document, normalized, plan):
                 mailbox = ImapSmtpMailbox(
                     {"smtp_host": route["smtp_host"], "smtp_port": route["smtp_port"],
                      "smtp_starttls": starttls, "smtp_allow_plaintext": not starttls,
+                     "capture_queue_id": route["route"] == "local_mta",
                      "imap_host": "", "imap_tls": True},
                     account["address"],
                 )
@@ -461,8 +468,68 @@ def _deliver_direct(account, document, normalized, plan):
             )
             failures.append(f"{route['route']} delivery failed: {exc}")
             continue
-        deliveries.append({"route": route["route"], "recipient_count": result["recipient_count"]})
+        delivery = {"route": route["route"], "recipient_count": result["recipient_count"]}
+        if result.get("mta_queue_id"):
+            delivery["mta_queue_id"] = result["mta_queue_id"]
+        if result.get("message_id"):
+            delivery["message_id"] = result["message_id"]
+        deliveries.append(delivery)
     return deliveries, failures
+
+
+def inspect_local_mta_status(account_id, queue_id):
+    """Return Exim transport state for a queue id captured from local submission."""
+    document = load_config()
+    account = _account_or_error(document, account_id, "send")
+    if account.get("backend") != "eva_direct":
+        raise EmailValidationError("Exim status is available only for Eva's local identity")
+    settings = account.get("settings") or {}
+    if settings.get("delivery_mode") != "local_mta":
+        raise EmailValidationError("Exim status is available only in best-effort local MTA mode")
+    if not settings.get("exim_status"):
+        raise EmailValidationError("Enable Exim status inspection for this identity in Email settings")
+    if not _known_mta_submission(account["id"], queue_id):
+        raise EmailValidationError("This Exim queue id was not submitted by Eva in the current session")
+    from bridge import exim_status
+    try:
+        result = exim_status.inspect(queue_id, allow_sudo=bool(settings.get("exim_status_sudo")))
+    except exim_status.EximStatusError as exc:
+        audit_event("email_mta_status", correlation_id=account["id"], outcome="unavailable")
+        raise EmailServiceError(str(exc)) from None
+    audit_event(
+        "email_mta_status", correlation_id=account["id"], outcome=result["status"],
+        access=result["access"],
+    )
+    return result
+
+
+def _remember_mta_submissions(account_id, deliveries):
+    """Keep only queue IDs captured from this bridge's local-MTA submissions."""
+    now = time.monotonic()
+    with _mta_submission_lock:
+        records = _mta_submissions.setdefault(account_id, {})
+        _purge_mta_submissions(records, now)
+        for delivery in deliveries:
+            queue_id = str(delivery.get("mta_queue_id") or "")
+            if queue_id:
+                records[queue_id] = now
+        if len(records) > MTA_SUBMISSION_MAX_PER_ACCOUNT:
+            for queue_id, _created in sorted(records.items(), key=lambda item: item[1])[:-MTA_SUBMISSION_MAX_PER_ACCOUNT]:
+                records.pop(queue_id, None)
+
+
+def _known_mta_submission(account_id, queue_id):
+    now = time.monotonic()
+    with _mta_submission_lock:
+        records = _mta_submissions.get(account_id, {})
+        _purge_mta_submissions(records, now)
+        return str(queue_id or "") in records
+
+
+def _purge_mta_submissions(records, now):
+    for queue_id, created in list(records.items()):
+        if now - created > MTA_SUBMISSION_TTL_SECONDS:
+            records.pop(queue_id, None)
 
 
 def morning_mail_summary(limit_per_account=5):

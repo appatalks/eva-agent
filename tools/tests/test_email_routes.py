@@ -29,6 +29,7 @@ class RouteWiringTests(unittest.TestCase):
         for route, handler in [
             ('"/v1/email/accounts"', "_email_accounts_get()"),
             ('"/v1/email/messages"', "_email_messages_list()"),
+            ('"/v1/email/exim-status"', "_email_exim_status()"),
         ]:
             self.assertIn(route, self.source, route)
             self.assertIn(handler, self.source, handler)
@@ -70,6 +71,14 @@ class RouteWiringTests(unittest.TestCase):
         start = self.source.index("def _email_body(self):")
         end = self.source.index("def _email_accounts_get(self):")
         self.assertIn("512 * 1024", self.source[start:end])
+
+    def test_exim_status_is_read_only_and_returns_503_when_access_is_unavailable(self):
+        start = self.source.index("def _email_exim_status(self):")
+        end = self.source.index("def _email_send_request(self):")
+        block = self.source[start:end]
+        self.assertIn("email_service.inspect_local_mta_status", block)
+        self.assertIn("self._json_response(503", block)
+        self.assertNotIn("subprocess", block)
 
     def test_refused_send_reports_why_not_just_a_status_code(self):
         start = self.source.index("def _email_send_request(self):")

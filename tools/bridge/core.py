@@ -1293,6 +1293,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._email_accounts_get()
         elif parsed_path == "/v1/email/messages":
             self._email_messages_list()
+        elif parsed_path == "/v1/email/exim-status":
+            self._email_exim_status()
         elif parsed_path == "/v1/notifications":
             self._notifications_list()
         elif parsed_path == "/v1/workspaces/projects":
@@ -4369,6 +4371,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": {"message": str(exc)}})
             return
         self._json_response(200, {"messages": messages})
+
+    def _email_exim_status(self):
+        from bridge import email_service
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        try:
+            result = email_service.inspect_local_mta_status(
+                (query.get("account_id") or [""])[0],
+                (query.get("queue_id") or [""])[0],
+            )
+        except email_service.EmailValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except email_service.EmailServiceError as exc:
+            self._json_response(503, {"error": {"message": str(exc)}})
+            return
+        self._json_response(200, result)
 
     def _email_send_request(self):
         """Authorize and deliver one message. Delivery requires a capability token."""

@@ -1768,6 +1768,8 @@ routing decisions only. Never records message content, tokens, keys, or MCP env 
 
 Email audit summaries record only outcome, route, counts, character lengths, and masked recipients. An `outcome=submitted` entry means the local MTA accepted the message; it does not prove final delivery. Inspect the receiving provider or mail-server queue for the final disposition.
 
+For an Eva-direct identity in **Best-effort local mail system** mode, Settings can optionally inspect Exim transport state after submission. Eva retains Exim's queue ID from the SMTP `250 id=` response for the current bridge session and reads only a bounded mainlog tail to report `delivered`, `deferred`, `failed`, `pending`, or `unknown`. `delivered` means Exim handed the message to its next SMTP hop, not that the recipient inbox accepted or displayed it. Inspection never sends mail or reads message bodies. When direct log access is unavailable, the optional sudo setting attempts only the fixed noninteractive command `sudo -n /usr/bin/tail -n 4000 /var/log/exim4/mainlog`; it never prompts for a password. Grant that exact read-only command or mail-log group access through normal system administration before enabling it.
+
 ## Settings Panel
 
 Ten tabs in a modal overlay:

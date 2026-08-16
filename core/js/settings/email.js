@@ -2,7 +2,7 @@
 // recipients, and sending. Credentials are handed to the bridge and never
 // stored in localStorage or written back into the DOM.
 var EvaEmailSettings = (function() {
-  var state = { accounts: [], allowlist: [], selectedId: '' };
+  var state = { accounts: [], allowlist: [], selectedId: '', lastMtaSubmission: null };
 
   function el(id) { return document.getElementById(id); }
 
@@ -128,6 +128,8 @@ var EvaEmailSettings = (function() {
         internal_smtp_host: (el('emailInternalHost') || {}).value || '127.0.0.1',
         internal_smtp_port: Number((el('emailInternalPort') || {}).value) || 25,
         internal_smtp_starttls: !!(el('emailInternalStarttls') || {}).checked,
+        exim_status: !!(el('emailEximStatus') || {}).checked,
+        exim_status_sudo: !!(el('emailEximStatusSudo') || {}).checked,
         direct_consent: directConsent
       });
       // Direct consent is stricter than ordinary recipient approval, so it also
@@ -171,6 +173,8 @@ var EvaEmailSettings = (function() {
     if (el('emailInternalHost')) el('emailInternalHost').value = settings.internal_smtp_host || '';
     if (el('emailInternalPort')) el('emailInternalPort').value = settings.internal_smtp_port || '';
     if (el('emailInternalStarttls')) el('emailInternalStarttls').checked = !!settings.internal_smtp_starttls;
+    if (el('emailEximStatus')) el('emailEximStatus').checked = !!settings.exim_status;
+    if (el('emailEximStatusSudo')) el('emailEximStatusSudo').checked = !!settings.exim_status_sudo;
     if (el('emailInternalDomains')) el('emailInternalDomains').value = (settings.internal_domains || []).join(', ');
     if (el('emailDirectConsent')) el('emailDirectConsent').value = (settings.direct_consent || []).join(', ');
     if (el('emailDirectMode')) el('emailDirectMode').value = settings.delivery_mode || 'internal';
@@ -193,6 +197,8 @@ var EvaEmailSettings = (function() {
     if (el('emailSmtpStarttls')) el('emailSmtpStarttls').checked = true;
     if (el('emailMorningPull')) el('emailMorningPull').checked = true;
     if (el('emailInternalStarttls')) el('emailInternalStarttls').checked = false;
+    if (el('emailEximStatus')) el('emailEximStatus').checked = false;
+    if (el('emailEximStatusSudo')) el('emailEximStatusSudo').checked = false;
     toggleBackendFields();
     status('emailAccountStatus', 'Creating a new mailbox.');
   }
@@ -341,6 +347,14 @@ var EvaEmailSettings = (function() {
         if (el('emailSendBody')) el('emailSendBody').value = '';
       } else if (decision === 'submitted') {
         status('emailSendStatus', 'Submitted to the local mail system. Final delivery is not verified.');
+        var localDelivery = (result.deliveries || []).find(function(delivery) {
+          return delivery.route === 'local_mta' && delivery.mta_queue_id;
+        });
+        state.lastMtaSubmission = localDelivery ? {
+          accountId: request.account_id,
+          queueId: localDelivery.mta_queue_id
+        } : null;
+        if (el('emailCheckMtaStatus')) el('emailCheckMtaStatus').disabled = !state.lastMtaSubmission;
         if (el('emailSendBody')) el('emailSendBody').value = '';
       } else if (decision === 'partially_sent') {
         status('emailSendStatus', 'Partly sent. Not delivered: ' + (result.failures || []).join('; '), true);
@@ -351,6 +365,30 @@ var EvaEmailSettings = (function() {
       }
     } catch (error) {
       status('emailSendStatus', 'Failed: ' + (error && error.message), true);
+    }
+  }
+
+  async function checkMtaStatus() {
+    if (!state.lastMtaSubmission) {
+      status('emailSendStatus', 'Send a best-effort local-MTA message first; Exim did not provide a queue id for this session.', true);
+      return;
+    }
+    status('emailSendStatus', 'Checking Exim transport status…');
+    try {
+      var result = await bridge('/v1/email/exim-status?account_id='
+        + encodeURIComponent(state.lastMtaSubmission.accountId)
+        + '&queue_id=' + encodeURIComponent(state.lastMtaSubmission.queueId), { method: 'GET' });
+      var labels = {
+        delivered: 'Exim delivered the message to its next SMTP hop.',
+        deferred: 'Exim deferred delivery; it remains queued for retry.',
+        failed: 'Exim reported permanent delivery failure.',
+        pending: 'Exim is still processing the message.',
+        unknown: 'Exim no longer has a recent status record for this queue id.'
+      };
+      status('emailSendStatus', (labels[result.status] || 'Exim status: ' + result.status)
+        + (result.detail ? ' ' + result.detail : ''), result.status === 'failed' || result.status === 'deferred');
+    } catch (error) {
+      status('emailSendStatus', 'Exim status unavailable: ' + (error && error.message), true);
     }
   }
 
@@ -369,7 +407,8 @@ var EvaEmailSettings = (function() {
       ['emailRemoveAccount', removeAccount],
       ['emailSaveCredential', saveCredential],
       ['emailSaveAllowlist', saveAllowlist],
-      ['emailSendMessage', sendFromForm]
+      ['emailSendMessage', sendFromForm],
+      ['emailCheckMtaStatus', checkMtaStatus]
     ];
     handlers.forEach(function(entry) {
       var button = el(entry[0]);

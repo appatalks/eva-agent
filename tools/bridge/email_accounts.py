@@ -213,6 +213,8 @@ def normalize_account(raw):
             "internal_smtp_host": _normalize_host(settings.get("internal_smtp_host")),
             "internal_smtp_port": _normalize_port(settings.get("internal_smtp_port"), 25),
             "internal_smtp_starttls": bool(settings.get("internal_smtp_starttls", True)),
+            "exim_status": bool(settings.get("exim_status", False)),
+            "exim_status_sudo": bool(settings.get("exim_status_sudo", False)),
             "relay_account_id": _clean(settings.get("relay_account_id"), 64),
         }
         account["allowlist"] = sorted(

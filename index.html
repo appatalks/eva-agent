@@ -1466,6 +1466,9 @@
             <input type="number" id="emailInternalPort" min="1" max="65535" step="1" placeholder="25">
           </div>
           <label class="background-toggle-row"><input type="checkbox" id="emailInternalStarttls"> Require STARTTLS on the local server</label>
+          <label class="background-toggle-row"><input type="checkbox" id="emailEximStatus"> Allow Exim transport-status inspection</label>
+          <label class="background-toggle-row"><input type="checkbox" id="emailEximStatusSudo"> Use non-interactive sudo when Exim logs are protected</label>
+          <p class="auth-note">Status inspection reads only a bounded Exim mainlog tail. It never sends mail or reads message bodies. The sudo option works only when your system already permits the fixed read-only command without a password prompt.</p>
           <div class="auth-field">
             <label for="emailInternalDomains">Local domains:</label>
             <input type="text" id="emailInternalDomains" placeholder="localhost.localdomain, lab.internal">
@@ -1526,6 +1529,7 @@
         </div>
         <div class="background-actions">
           <button type="button" class="auth-toggle" id="emailSendMessage">Send</button>
+          <button type="button" class="auth-toggle" id="emailCheckMtaStatus" disabled>Check local MTA status</button>
         </div>
         <div id="emailSendStatus" class="mcp-status" aria-live="polite"></div>
       </div>
