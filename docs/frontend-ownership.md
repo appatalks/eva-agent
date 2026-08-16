@@ -1,6 +1,6 @@
 # Frontend Ownership Map
 
-Status: living map. Last reviewed 2026-08-15 against Eva 5.6.2.
+Status: living map. Last reviewed 2026-08-16 against Eva 5.6.2.
 
 This map is the navigation contract for browser work. Read the owner, its
 immediate collaborators, and its focused test before changing a feature. The
@@ -27,6 +27,7 @@ module that loads before its dependency fails silently at runtime.
 | Internal cognition loop | `core/js/cognition.js` | `/v1/aig/chat`, footer status line |
 | Learning signals and consent | `core/js/learning.js` | bridge learning endpoints, settings |
 | In-app dialogs | `core/js/dialogs.js` | any surface needing a prompt Electron disables |
+| Aggregate runtime logging | `standalone/runtime-logger.js` | Electron, renderer, bridge, Local Voices, lifecycle, crash, and sanitized audit output; terminal content excluded |
 | External data snapshots | `core/js/external.js` | `core/external/*.data` files fetched at runtime |
 
 `core/js/pandora.js` is an experimental self-modification sketch. Model-produced
@@ -48,6 +49,7 @@ context.
 | Background controls and proposals | `core/js/settings/background.js` | `test_background_settings.js` |
 | Alert rules and delivery limits | `core/js/settings/alerts.js` | `test_alerts_settings.js` |
 | Audio devices and voice preferences | `core/js/settings/audio.js` | `test_audio_settings.js` |
+| Email accounts, recipient consent, and sending | `core/js/settings/email.js` | Custom IMAP/SMTP and Eva-direct only. Gmail/Outlook OAuth, Work IQ, and remote MCP are retained as disabled experimental groundwork; contract: `test_email_settings.js` plus bridge delivery tests |
 | Remaining settings orchestration | `core/js/options.js` | static suite plus domain-focused checks |
 
 Three settings surfaces do not live where their name suggests. Record the real

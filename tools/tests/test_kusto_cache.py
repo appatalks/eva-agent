@@ -2,7 +2,9 @@
 """Deterministic Kusto metadata TTL and invalidation tests."""
 import os
 import sys
+import io
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
 import unittest
 from unittest.mock import patch
 
@@ -100,6 +102,48 @@ class KustoMetadataCacheTests(unittest.TestCase):
                 kusto._invalidate_kusto_metadata_cache(include_schema=True)
         with _st.kusto_metadata_cache_lock:
             self.assertFalse(_st.kusto_metadata_cache)
+
+    def test_query_failure_omits_untrusted_response_content(self):
+        class Response:
+            status_code = 500
+            text = "private query literal from an upstream error"
+
+        class Session:
+            def post(self, *_args, **_kwargs):
+                return Response()
+
+            def close(self):
+                pass
+
+        output = io.StringIO()
+        with patch.object(_st, "kusto_token_cache", "test-token"), \
+                patch("requests.Session", return_value=Session()), redirect_stdout(output):
+            self.assertIsNone(kusto._kusto_query_direct("https://example.com", "Eva", "private query literal"))
+        self.assertNotIn("private query literal", output.getvalue())
+
+    def test_seed_query_and_ingest_failures_omit_response_content(self):
+        class Response:
+            status_code = 500
+            text = "private Kusto response literal"
+
+            def json(self):
+                return {"Exceptions": ["private Kusto response literal"]}
+
+        class Session:
+            def post(self, *_args, **_kwargs):
+                return Response()
+
+            def close(self):
+                pass
+
+        output = io.StringIO()
+        with patch.object(_st, "kusto_token_cache", "test-token"), \
+                patch("requests.Session", return_value=Session()), \
+                patch.object(kusto, "_get_table_columns", return_value=None), redirect_stdout(output):
+            _rows, error = kusto._kusto_query_with_error("https://example.com", "Eva", "private query literal")
+            self.assertFalse(kusto._kusto_ingest_direct("https://example.com", "Eva", "Table", ["Value"], [{"Value": "private query literal"}]))
+        self.assertNotIn("private Kusto response literal", error)
+        self.assertNotIn("private Kusto response literal", output.getvalue())
 
     def test_recall_queries_are_not_using_metadata_cache(self):
         with open(os.path.join(TOOLS_DIR, "bridge", "cognition.py"), encoding="utf-8") as handle:

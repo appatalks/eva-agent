@@ -62,6 +62,36 @@ _GITHUB_AUTH_FAILURE_RE = re.compile(
 )
 _GITHUB_TOOL_CONTEXT_RE = re.compile(r"(?:github|\bgh\b|repository|pull request|\bissue\b)", re.IGNORECASE)
 
+# Mailbox access is never covered by standing consent or workspace autonomy.
+# Reading a mailbox exposes far more than an ordinary file read, and sending is
+# irreversible and reaches third parties, so both always need a live decision.
+_MAIL_TOOL_NAME_RE = re.compile(
+    r"(?:send_?e?mail|read_?e?mail|fetch_?e?mail|list_?messages|search_?messages|"
+    r"mail_?folder|mailbox|(?<![a-z0-9])(?:imap|smtp)(?![a-z0-9]))",
+    re.IGNORECASE,
+)
+_MAIL_PATH_RE = re.compile(
+    r"/(?:me|users/[^/\s\"]+)/(?:messages|mailfolders|sendmail|mailboxsettings)\b",
+    re.IGNORECASE,
+)
+
+
+def _mail_scoped_tool_call(tool_call):
+    """Return True when a tool call reads or sends mail on any backend."""
+    tool_call = tool_call if isinstance(tool_call, dict) else {}
+    for value in (tool_call.get("title"), tool_call.get("name")):
+        if isinstance(value, str) and _MAIL_TOOL_NAME_RE.search(value):
+            return True
+    raw_input = tool_call.get("rawInput")
+    if isinstance(raw_input, dict):
+        try:
+            serialized = json.dumps(raw_input, separators=(",", ":"))[:4000]
+        except (TypeError, ValueError):
+            serialized = ""
+        if _MAIL_PATH_RE.search(serialized) or _MAIL_TOOL_NAME_RE.search(serialized):
+            return True
+    return False
+
 
 def _github_tool_update_text(value, details=None):
     """Collect bounded strings from an ACP tool result without recording them."""
@@ -701,6 +731,10 @@ class ACPClient:
             kind = str(update.get("kind") or "other")[:32]
             if status:
                 print(f"[ACP] Tool update: kind={kind} status={str(status)[:24]}")
+                self._dispatch_prompt_event(params, {
+                    "kind": "tool",
+                    "label": "Using " + kind.replace("_", " ") + " (" + str(status)[:24] + ")",
+                })
             if not self._github_auth_notified and _github_authorization_needed(update):
                 self._github_auth_notified = True
                 from bridge.alerts import _notify_enqueue
@@ -709,10 +743,6 @@ class ACPClient:
                     "Eva needs GitHub write access to continue the requested work. Starting device authorization now; complete the GitHub prompt when it appears.",
                     "github-auth-needed", 0.95, ["chat", "voice"],
                 )
-                self._dispatch_prompt_event(params, {
-                    "kind": "tool",
-                    "label": "Using " + kind.replace("_", " ") + " (" + str(status)[:24] + ")",
-                })
 
         elif update_type == "usage_update":
             session_id = str(params.get("sessionId") or params.get("session_id") or "")[:120]
@@ -773,6 +803,7 @@ class ACPClient:
         permission_mode = prompt_states[0].get("permission_mode", "interactive") \
             if len(prompt_states) == 1 else remembered_mode
         workspace_mode = permission_mode == "workspace_auto"
+        mail_scoped = _mail_scoped_tool_call(tool_call)
         execute_category = _workspace_execute_category(tool_call, self.cwd) \
             if workspace_mode and tool_kind == "execute" else ""
         _verbose_debug_emit(
@@ -803,6 +834,8 @@ class ACPClient:
             block_reason = ""
             if tool_kind in {"delete", "other"}:
                 block_reason = "unsupported_tool"
+            elif mail_scoped:
+                block_reason = "mailbox_access"
             elif tool_kind == "edit":
                 if _workspace_edit_target_is_protected(tool_call):
                     block_reason = "protected_path"
@@ -828,7 +861,7 @@ class ACPClient:
                                 tool_kind=tool_kind, option_count=len(options))
                 return
         allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
-        if tool_kind == "execute" and allow_once and _workspace_read_only_execute(tool_call, self.cwd):
+        if tool_kind == "execute" and allow_once and not mail_scoped and _workspace_read_only_execute(tool_call, self.cwd):
             self._send_response(rpc_id, {
                 "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
             })
@@ -838,7 +871,7 @@ class ACPClient:
             return
         routine_allowed = bool(_get_learning_consent().get("routine_tools")) and tool_kind in {
             "read", "search", "fetch", "think"
-        }
+        } and not mail_scoped
         if routine_allowed and allow_once:
             self._send_response(rpc_id, {"outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}})
             _telemetry_emit("acp_permission", decision="standing-consent", tool_kind=tool_kind, option_count=len(options))

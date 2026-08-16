@@ -1,6 +1,55 @@
 // Small in-app replacement for window.prompt(), which Electron disables.
 
 var _evaTextPromptResolve = null;
+var _evaActionConfirmResolve = null;
+
+function evaConfirmAction(options) {
+  _bindEvaActionConfirm();
+  options = options || {};
+  var dialog = document.getElementById('evaActionConfirm');
+  var title = document.getElementById('evaActionConfirmTitle');
+  var warning = document.getElementById('evaActionConfirmWarning');
+  var details = document.getElementById('evaActionConfirmDetails');
+  var approve = document.getElementById('evaActionConfirmApprove');
+  if (!dialog || !title || !warning || !details || !approve) return Promise.resolve(false);
+  if (_evaActionConfirmResolve) _evaActionConfirmResolve(false);
+  title.textContent = String(options.title || 'Confirm action');
+  warning.textContent = String(options.warning || 'Review this action before approving.');
+  details.textContent = String(options.details || '');
+  approve.textContent = String(options.confirmLabel || 'Confirm');
+  dialog.setAttribute('aria-hidden', 'false');
+  return new Promise(function(resolve) {
+    _evaActionConfirmResolve = resolve;
+    requestAnimationFrame(function() { approve.focus(); });
+  });
+}
+
+function _closeEvaActionConfirm(approved) {
+  var dialog = document.getElementById('evaActionConfirm');
+  if (dialog) dialog.setAttribute('aria-hidden', 'true');
+  var resolve = _evaActionConfirmResolve;
+  _evaActionConfirmResolve = null;
+  if (resolve) resolve(approved === true);
+}
+
+function _bindEvaActionConfirm() {
+  var dialog = document.getElementById('evaActionConfirm');
+  if (!dialog || dialog.dataset.bound === 'true') return;
+  dialog.dataset.bound = 'true';
+  var approve = document.getElementById('evaActionConfirmApprove');
+  var cancel = document.getElementById('evaActionConfirmCancel');
+  if (approve) approve.addEventListener('click', function() { _closeEvaActionConfirm(true); });
+  if (cancel) cancel.addEventListener('click', function() { _closeEvaActionConfirm(false); });
+  dialog.addEventListener('click', function(event) {
+    if (event.target === dialog) _closeEvaActionConfirm(false);
+  });
+  document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape' && dialog.getAttribute('aria-hidden') === 'false') {
+      event.preventDefault();
+      _closeEvaActionConfirm(false);
+    }
+  });
+}
 
 function evaTextPrompt(title, initialValue, options) {
   _bindEvaTextPrompt();
@@ -224,4 +273,7 @@ function _bindEvaTextPrompt() {
   });
 }
 
-document.addEventListener('DOMContentLoaded', _bindEvaTextPrompt);
+document.addEventListener('DOMContentLoaded', function() {
+  _bindEvaTextPrompt();
+  _bindEvaActionConfirm();
+});

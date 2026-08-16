@@ -84,6 +84,7 @@ files and are normalized before Eva uses them.
 - Persistent memory via Azure Data Explorer (Kusto) or local SQLite
 - Memory Inspector with searchable traceable records, provenance, associations, and append-only corrections
 - Signal text messaging (send-only via signal-cli, keyword-triggered fallback for local models)
+- Multi-account email settings and native harness controls for custom-domain IMAP/SMTP and Eva-direct delivery, with bounded mailbox reads, exact-message recipient confirmation, internal delivery, and best-effort local-MTA submission that remains explicitly labeled unverified. Gmail, Outlook/Microsoft OAuth, Work IQ, and remote-MCP mailbox groundwork is experimental and disabled until its complete connection flow ships.
 - Autonomous browser control (Playwright + CDP) and desktop control (pyautogui)
 - Webcam presence detection (OpenCV face + motion)
 - Inline image search (Wikimedia) and generation (gpt-image-1)
@@ -1763,15 +1764,22 @@ routing decisions only. Never records message content, tokens, keys, or MCP env 
 
 **Debug log:** `~/.config/eva-standalone/bridge_debug.log` (rotates at 10 MB). In-memory ring buffer (200 lines) for `/v1/logs`.
 
+**Aggregate runtime log:** `eva-runtime.log` under Electron's `app.getPath('userData')`. Typical locations are `~/.config/eva-standalone/eva-runtime.log` on Linux, `~/Library/Application Support/eva-standalone/eva-runtime.log` on macOS, and `%APPDATA%\\eva-standalone\\eva-runtime.log` on Windows. Eva Standalone collects Electron main-process output, renderer console messages, bridge and Local Voices stdout/stderr, child-process lifecycle, crashes, and privacy-safe audit summaries into this one file. It rotates at 10 MB and retains three backups (`.1` through `.3`). Files use mode `0600` on Linux/macOS; Windows relies on the current user's application-data ACL. Authorization headers, known provider tokens, prefixed/OAuth credential assignments and query parameters, and structured prompt/content fields are redacted. Interactive terminal/PTY content is intentionally excluded.
+
+Email audit summaries record only outcome, route, counts, character lengths, and masked recipients. An `outcome=submitted` entry means the local MTA accepted the message; it does not prove final delivery. Inspect the receiving provider or mail-server queue for the final disposition.
+
+For an Eva-direct identity in **Best-effort local mail system** mode, Settings can optionally inspect Exim transport state after submission. Eva retains Exim's queue ID from the SMTP `250 id=` response for the current bridge session and reads only a bounded mainlog tail to report `delivered`, `deferred`, `failed`, `pending`, or `unknown`. `delivered` means Exim handed the message to its next SMTP hop, not that the recipient inbox accepted or displayed it. Inspection never sends mail or reads message bodies. When direct log access is unavailable, the optional sudo setting attempts only the fixed noninteractive command `sudo -n /usr/bin/tail -n 4000 /var/log/exim4/mainlog`; it never prompts for a password. Grant that exact read-only command or mail-log group access through normal system administration before enabling it.
+
 ## Settings Panel
 
-Eight tabs in a modal overlay:
+Ten tabs in a modal overlay:
 
 | Tab | Contents |
 |---|---|
 | **General** | Theme, TTS engine/voice, auto-speak, camera presence, vision provider, data retrieval mode (cloud/local) with status |
 | **Models** | Model selector (grouped by provider), temperature, max tokens, reasoning effort, AIG backend selector, ACP model selector, adaptive review toggle and reviewer model |
 | **Auth** | API key inputs with show/hide toggles, ACP bridge URL, Signal sender/recipient numbers. Standalone encrypts provider keys with Electron safeStorage so they survive AppImage rebuilds. |
+| **Email** | Mailbox identities, direct-recipient consent, local/internal delivery modes, session credentials, global approved recipients, and manual sending. |
 | **Prompts** | Personality presets (Default/Concise/Advanced/Terminal/Custom), editable system prompt textarea |
 | **Goals** | Goals list with create/edit/delete |
 | **Background** | Background loop status, enable/interval controls, run-once, proposal audit/history, approval/rejection controls for pending records, recent activity |

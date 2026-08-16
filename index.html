@@ -25,6 +25,7 @@
   <script src="core/js/settings/cron.js?v=5.6.2"></script>
   <script src="core/js/settings/background.js?v=5.6.2"></script>
   <script src="core/js/settings/alerts.js?v=5.6.2"></script>
+  <script src="core/js/settings/email.js?v=5.6.2"></script>
   <script src="core/js/features/skills/auto-learn.js?v=5.6.2"></script>
   <script src="core/js/features/notifications/proactive.js?v=5.6.2"></script>
   <script src="core/js/features/permissions/acp.js?v=5.6.2"></script>
@@ -676,6 +677,18 @@
     </form>
   </div>
 
+  <div id="evaActionConfirm" class="eva-text-prompt" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="evaActionConfirmTitle">
+    <div class="eva-text-prompt-panel eva-action-confirm-panel">
+      <h2 id="evaActionConfirmTitle">Confirm action</h2>
+      <p id="evaActionConfirmWarning" class="eva-action-confirm-warning"></p>
+      <pre id="evaActionConfirmDetails" class="eva-action-confirm-details"></pre>
+      <div class="eva-text-prompt-actions">
+        <button id="evaActionConfirmCancel" type="button">Cancel</button>
+        <button id="evaActionConfirmApprove" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings Workspace -->
   <div class="settingsMenu" id="settingsMenu" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="settingsTitle">
     <div class="settings-header">
@@ -706,6 +719,7 @@
         <div class="settings-nav-group" aria-label="Connections">
           <span class="settings-nav-label">Connections</span>
           <button class="settings-tab" data-stab="auth" role="tab" aria-selected="false"><strong>Accounts</strong><small>Keys and notifications</small></button>
+          <button class="settings-tab" data-stab="email" role="tab" aria-selected="false"><strong>Email</strong><small>Mailboxes and sending</small></button>
           <button class="settings-tab" data-stab="mcp" role="tab" aria-selected="false"><strong>Tools &amp; memory</strong><small>MCP servers and storage</small></button>
         </div>
         <div class="settings-nav-group" aria-label="Privacy">
@@ -1385,6 +1399,140 @@
         <p class="auth-note" style="margin-bottom:6px">Recent metadata: kind / status / permission basis / applied effect</p>
         <div id="learningRecentSignals" class="learning-signal-list" aria-live="polite">No retained signal metadata.</div>
         <p class="auth-note">Routine consent applies to read, search, fetch, and think operations. Only explicitly allowlisted inspection commands can run without confirmation; interpreters, opaque execute, edit, and delete remain confirmation-gated.</p>
+      </div>
+
+      <!-- Email Tab -->
+      <div class="settings-panel" data-stab="email">
+        <h4 class="settings-subhead">Mailboxes</h4>
+        <p class="auth-note">Eva reads and sends through the accounts below. Credentials stay in the bridge process only and are re-entered after a restart; they are never written to disk.</p>
+        <p class="auth-note">Gmail, Outlook/Microsoft OAuth, Work IQ, and remote-MCP mailbox connections are experimental and disabled until their full connection, token lifecycle, and provider-validation flow is complete. Use a custom-domain IMAP/SMTP mailbox or Eva's local identity today.</p>
+        <div id="emailAccountList" class="learning-signal-list" aria-live="polite">Loading…</div>
+        <div class="background-actions">
+          <button type="button" class="auth-toggle" id="emailRefresh">Refresh</button>
+          <button type="button" class="auth-toggle" id="emailNewAccount">New mailbox</button>
+        </div>
+
+        <h4 class="settings-subhead">Add or update a mailbox</h4>
+        <div class="auth-field">
+          <label for="emailAccountId">Account id:</label>
+          <input type="text" id="emailAccountId" placeholder="personal" maxlength="64">
+        </div>
+        <div class="auth-field">
+          <label for="emailAccountLabel">Label:</label>
+          <input type="text" id="emailAccountLabel" placeholder="Personal mail" maxlength="60">
+        </div>
+        <div class="auth-field">
+          <label for="emailAccountAddress">Address:</label>
+          <input type="email" id="emailAccountAddress" placeholder="you@example.com" autocomplete="off">
+        </div>
+        <div class="auth-field">
+          <label for="emailAccountBackend">Kind:</label>
+          <select id="emailAccountBackend" style="width:100%">
+            <option value="">Detect from address</option>
+            <option value="imap_smtp">IMAP / SMTP mailbox</option>
+            <option value="eva_direct">Eva's own sending identity</option>
+          </select>
+        </div>
+        <div id="emailImapFields">
+          <div class="auth-field">
+            <label for="emailImapHost">IMAP host:</label>
+            <input type="text" id="emailImapHost" placeholder="detected from address">
+          </div>
+          <div class="auth-field">
+            <label for="emailSmtpHost">SMTP host:</label>
+            <input type="text" id="emailSmtpHost" placeholder="detected from address">
+          </div>
+          <div class="auth-field">
+            <label for="emailSmtpPort">SMTP port:</label>
+            <input type="number" id="emailSmtpPort" min="1" max="65535" step="1" placeholder="587">
+          </div>
+          <label class="background-toggle-row"><input type="checkbox" id="emailSmtpStarttls" checked> Require STARTTLS</label>
+          <label class="background-toggle-row"><input type="checkbox" id="emailMorningPull" checked> Include unread mail in the morning briefing</label>
+        </div>
+        <div id="emailDirectFields" hidden>
+          <p class="auth-note">Eva's own identity delivers through a local mail server. Internal-only mode requires prior recipient consent. Best-effort mode can submit external mail after you confirm the exact message, but delivery and inbox placement are not guaranteed.</p>
+          <div class="auth-field">
+            <label for="emailDirectMode">Delivery mode:</label>
+            <select id="emailDirectMode" style="width:100%">
+              <option value="internal">Internal domains only</option>
+              <option value="local_mta">Best-effort local mail system</option>
+            </select>
+          </div>
+          <div class="auth-field">
+            <label for="emailInternalHost">Local mail server:</label>
+            <input type="text" id="emailInternalHost" placeholder="127.0.0.1">
+          </div>
+          <div class="auth-field">
+            <label for="emailInternalPort">Port:</label>
+            <input type="number" id="emailInternalPort" min="1" max="65535" step="1" placeholder="25">
+          </div>
+          <label class="background-toggle-row"><input type="checkbox" id="emailInternalStarttls"> Require STARTTLS on the local server</label>
+          <label class="background-toggle-row"><input type="checkbox" id="emailEximStatus"> Allow Exim transport-status inspection</label>
+          <label class="background-toggle-row"><input type="checkbox" id="emailEximStatusSudo"> Use non-interactive sudo when Exim logs are protected</label>
+          <p class="auth-note">Status inspection reads only a bounded Exim mainlog tail. It never sends mail or reads message bodies. The sudo option works only when your system already permits the fixed read-only command without a password prompt.</p>
+          <div class="auth-field">
+            <label for="emailInternalDomains">Local domains:</label>
+            <input type="text" id="emailInternalDomains" placeholder="localhost.localdomain, lab.internal">
+          </div>
+          <div class="auth-field">
+            <label for="emailDirectConsent">Recipients who accept mail from Eva:</label>
+            <input type="text" id="emailDirectConsent" placeholder="you@example.com, @lab.internal">
+          </div>
+          <p class="auth-note">This list is saved on Eva's identity and also approves those recipients. In best-effort mode it is optional; recipients not listed here trigger confirmation for that exact message.</p>
+        </div>
+        <div class="background-actions">
+          <button type="button" class="auth-toggle" id="emailSaveAccount">Save mailbox</button>
+          <button type="button" class="auth-toggle" id="emailRemoveAccount">Remove</button>
+        </div>
+        <div id="emailAccountStatus" class="mcp-status" aria-live="polite"></div>
+
+        <h4 class="settings-subhead">Sign in</h4>
+        <p class="auth-note">Enter the app password or access token for the selected account id. It is held in memory by the bridge for this session only.</p>
+        <div class="auth-field">
+          <label for="emailCredentialId">Account:</label>
+          <select id="emailCredentialId" style="width:100%"></select>
+        </div>
+        <div class="auth-field">
+          <label for="emailCredential">Credential:</label>
+          <input type="password" id="emailCredential" autocomplete="off" placeholder="app password or access token">
+        </div>
+        <div class="background-actions">
+          <button type="button" class="auth-toggle" id="emailSaveCredential">Store for this session</button>
+        </div>
+        <div id="emailCredentialStatus" class="mcp-status" aria-live="polite"></div>
+
+        <h4 class="settings-subhead">Approved recipients</h4>
+        <p class="auth-note">This global list applies to ordinary mailboxes. Eva's own identity uses its stricter recipient-consent list above. Anything else needs your confirmation for that exact message. Use <code>@domain</code> to approve a whole domain.</p>
+        <div class="auth-field">
+          <label for="emailAllowlist">Allowed:</label>
+          <input type="text" id="emailAllowlist" placeholder="you@example.com, @lab.internal">
+        </div>
+        <div class="background-actions">
+          <button type="button" class="auth-toggle" id="emailSaveAllowlist">Save recipients</button>
+        </div>
+
+        <h4 class="settings-subhead">Send a message</h4>
+        <div class="auth-field">
+          <label for="emailSendFrom">Send from:</label>
+          <select id="emailSendFrom" style="width:100%"></select>
+        </div>
+        <div class="auth-field">
+          <label for="emailSendTo">To:</label>
+          <input type="text" id="emailSendTo" placeholder="someone@example.com">
+        </div>
+        <div class="auth-field">
+          <label for="emailSendSubject">Subject:</label>
+          <input type="text" id="emailSendSubject" maxlength="400">
+        </div>
+        <div class="auth-field">
+          <label for="emailSendBody">Message:</label>
+          <textarea id="emailSendBody" rows="4" style="width:100%"></textarea>
+        </div>
+        <div class="background-actions">
+          <button type="button" class="auth-toggle" id="emailSendMessage">Send</button>
+          <button type="button" class="auth-toggle" id="emailCheckMtaStatus" disabled>Check local MTA status</button>
+        </div>
+        <div id="emailSendStatus" class="mcp-status" aria-live="polite"></div>
       </div>
 
       <!-- MCP Tab -->

@@ -4,7 +4,7 @@
 
 [Website](https://appatalks.github.io/eva-agent/) | [Documentation](README-2.md) | [Issues](https://github.com/appatalks/eva-agent/issues) | License: MIT
 
-A voice-first AI assistant for conversation, memory, automation, and local or cloud-backed work. Eva can use voice, camera, browser, desktop, MCP tools, skills, and coding workspaces with optional auto approval, including GitHub device-login recovery when an authorized action needs additional access, while keeping control and configuration on your machine. Her complete native harness manifest is available when interpreting voice requests, including governed Skill creation, updates, enable/disable, deletion, and verified external links stored in active Skills; normal authorization and confirmation gates still apply.
+A voice-first AI assistant for conversation, memory, automation, and local or cloud-backed work. Eva can use voice, camera, browser, desktop, email, MCP tools, skills, and coding workspaces with optional auto approval, including GitHub device-login recovery when an authorized action needs additional access, while keeping control and configuration on your machine. Email supports governed mailbox access, internal delivery, and explicitly confirmed best-effort submission through a local mail system; SMTP acceptance is never presented as verified final delivery. Her complete native harness manifest is available when interpreting voice requests, including governed Skill creation, updates, enable/disable, deletion, and verified external links stored in active Skills; normal authorization and confirmation gates still apply.
 
 ## In Use
 

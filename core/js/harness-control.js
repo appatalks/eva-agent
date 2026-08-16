@@ -15,6 +15,7 @@ var EvaHarness = (function() {
     goal: 'goals', background: 'background_jobs', jobs: 'background_jobs',
     cron: 'schedules', schedule: 'schedules', auth: 'accounts', account: 'accounts',
     tools: 'tools_memory', mcp: 'tools_memory', tools_and_memory: 'tools_memory',
+    mail: 'email', mailbox: 'email', inbox: 'email', email_settings: 'email',
     privacy: 'learning', learning_controls: 'learning',
     user_profile: 'profile', profiles: 'profile',
     voice_mode: 'voice', eva_voice: 'voice',
@@ -61,6 +62,7 @@ var EvaHarness = (function() {
     background_jobs: function() { return openSettings('background'); },
     schedules: function() { return openSettings('cron'); },
     accounts: function() { return openSettings('auth'); },
+    email: function() { return openSettings('email'); },
     tools_memory: function() { return openSettings('mcp'); },
     learning: function() { return openSettings('learning'); },
     profile: function() {
@@ -74,6 +76,8 @@ var EvaHarness = (function() {
   var actionManifest = [
     { id: 'navigate', description: 'Open a native Eva surface. args: {target}. Read-only navigation.' },
     { id: 'refresh', description: 'Refresh a native surface. args: {target}. Read-only.' },
+    { id: 'describe_email', description: 'Open Email settings and summarize configured mailboxes and sign-in state. Read-only.' },
+    { id: 'send_email', description: 'Send one email after an explicit direct user request. args: {to, subject, body, accountId?}. A recipient that is not already approved requires the user to confirm that exact message.' },
     { id: 'describe_workspaces', description: 'Open Workspaces and return the real workspace and active-run count. Read-only.' },
     { id: 'describe_assets', description: 'Open Assets and summarize generated and workspace files. Read-only.' },
     { id: 'describe_skills', description: 'Open Skills and summarize saved and active skills. Read-only.' },
@@ -620,11 +624,22 @@ var EvaHarness = (function() {
     }
   }
 
+  function modelEmailRequestMatches(request, userRequest) {
+    var values = [request.to, request.subject, request.body];
+    var account = String(request.accountId || request.account_id || '').trim();
+    if (account) values.push(account);
+    var original = String(userRequest || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    return values.every(function(value) {
+      var expected = String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      return expected && original.indexOf(expected) >= 0;
+    });
+  }
+
   function execute(request, context) {
     request = request && typeof request === 'object' ? request : {};
     context = context && typeof context === 'object' ? context : {};
     var action = normalize(request.action);
-    var modelAllowed = { navigate: true, refresh: true, describe_workspaces: true, describe_assets: true, describe_skills: true, describe_sessions: true, describe_agents: true, describe_github_pull_request: true, inspect_form: true };
+    var modelAllowed = { navigate: true, refresh: true, describe_email: true, describe_workspaces: true, describe_assets: true, describe_skills: true, describe_sessions: true, describe_agents: true, describe_github_pull_request: true, inspect_form: true };
     var userRepositoryUrl = githubRepositoryUrl(context.userRequest);
     var requestedRepositoryUrl = String(request.repositoryUrl || request.repository_url || '').trim();
     var userNativeRoute = resolveNavigationRequest(context.userRequest || '', { directUser: true });
@@ -655,6 +670,7 @@ var EvaHarness = (function() {
       boundedIntent.skill === String(request.skill || '').toLowerCase() &&
       boundedIntent.operation === String(request.operation || '').toLowerCase() &&
       modelBoundedSkillPathsMatchRequest(request, context.userRequest);
+    var modelEmailSend = action === 'send_email' && modelEmailRequestMatches(request, context.userRequest);
     var modelSkillMutation = userNativeRoute && action === userNativeRoute.action && (
       action === 'create_skill' ||
       (action === 'update_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase() && JSON.stringify(request.updates || {}) === JSON.stringify(userNativeRoute.updates || {})) ||
@@ -662,7 +678,7 @@ var EvaHarness = (function() {
       (action === 'delete_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase()) ||
       action === 'run_skill'
     );
-    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation && !modelBoundedSkill) {
+    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation && !modelBoundedSkill && !modelEmailSend) {
       return result(false, action, 'This native action requires direct user interaction.');
     }
     if (action === 'navigate') return navigate(request.target);
@@ -1073,6 +1089,54 @@ var EvaHarness = (function() {
         return result(true, 'import_github', 'GitHub workspace imported.', { outcome: 'imported', project: project });
       }).catch(function(error) {
         return result(false, 'import_github', error && error.message ? error.message : 'GitHub workspace import failed.', { outcome: 'failed' });
+      });
+    }
+    if (action === 'describe_email') {
+      if (!window.EvaEmailSettings || typeof EvaEmailSettings.open !== 'function') {
+        return result(false, 'describe_email', 'Email settings are unavailable.');
+      }
+      return EvaEmailSettings.open().then(function() {
+        var accounts = EvaEmailSettings.accounts();
+        if (!accounts.length) return result(true, 'describe_email', 'No mailbox is configured.', { accounts: 0 });
+        var summary = accounts.map(function(account) {
+          var signedIn = account.backend === 'eva_direct'
+            ? 'no sign-in required'
+            : (account.credential_present ? 'signed in' : 'needs sign-in');
+          return account.label + ' <' + account.address + '> (' + account.backend + ', ' + signedIn + ')';
+        }).join('; ');
+        return result(true, 'describe_email', summary, { accounts: accounts.length });
+      }).catch(function(error) {
+        return result(false, 'describe_email', failureReason(error));
+      });
+    }
+    if (action === 'send_email') {
+      if (!window.EvaEmailSettings || typeof EvaEmailSettings.send !== 'function') {
+        return result(false, 'send_email', 'Email sending is unavailable.');
+      }
+      var to = String(request.to || '').trim();
+      var subject = String(request.subject || '').trim();
+      var body = String(request.body || '').trim();
+      if (!to || !subject || !body) {
+        return result(false, 'send_email', 'A recipient, subject, and message are required.');
+      }
+      return EvaEmailSettings.send({
+        to: to, subject: subject, body: body,
+        account_id: String(request.accountId || request.account_id || '').trim()
+      }).then(function(sendResult) {
+        var decision = sendResult && sendResult.decision;
+        if (decision === 'sent') return result(true, 'send_email', 'Sent the message.', { outcome: 'sent' });
+        if (decision === 'submitted') {
+          return result(true, 'send_email', 'Submitted the message to the local mail system; final delivery is not verified.', { outcome: 'submitted' });
+        }
+        if (decision === 'partially_sent') {
+          return result(true, 'send_email', 'Delivered to some recipients only.', {
+            outcome: 'partial', failures: sendResult.failures || []
+          });
+        }
+        if (decision === 'cancelled') return result(false, 'send_email', 'You declined the unapproved recipient.', { outcome: 'cancelled' });
+        return result(false, 'send_email', (sendResult && sendResult.reason) || 'The message was refused.', { outcome: 'refused' });
+      }).catch(function(error) {
+        return result(false, 'send_email', failureReason(error), { outcome: 'failed' });
       });
     }
     if (action === 'new_chat') {

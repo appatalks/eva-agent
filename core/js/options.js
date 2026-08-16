@@ -1371,6 +1371,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (body) body.scrollTop = 0;
     if (target === 'goals' && typeof loadGoals === 'function') loadGoals(false);
     if (target === 'background' && typeof loadBackgroundData === 'function') loadBackgroundData(false);
+    if (target === 'email' && window.EvaEmailSettings) EvaEmailSettings.refresh();
     return activeTab;
   }
 

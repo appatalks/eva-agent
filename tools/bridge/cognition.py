@@ -1233,7 +1233,7 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
                 "Effectiveness": 0.0,
             }]):
                 raise RuntimeError("reflection persistence failed")
-            print(f"[Cognition/SQLite] Auto-reflection #{_st.session_exchange_count}: {reflection_text[:100]}")
+            print(f"[Cognition/SQLite] Auto-reflection #{_st.session_exchange_count} persisted ({len(reflection_text)} chars)")
         except Exception as e:
             raise RuntimeError("reflection synthesis or persistence failed") from e
 
@@ -1263,7 +1263,7 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
                 "Timestamp": now,
             }]):
                 raise RuntimeError("summary persistence failed")
-            print(f"[Cognition/SQLite] Auto-summary: {summary_text[:100]}")
+            print(f"[Cognition/SQLite] Auto-summary persisted ({len(summary_text)} chars)")
             _st.session_conversation_buffer = _st.session_conversation_buffer[-10:]
         except Exception as e:
             raise RuntimeError("summary synthesis or persistence failed") from e
@@ -2077,7 +2077,7 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
         if not stage_event_exists("Reflections") and not _kusto_ingest_direct(cluster, db, "Reflections", ref_columns, ref_rows):
             raise RuntimeError("reflection persistence failed")
         complete_stage("reflection")
-        print(f"[Cognition] Auto-reflection #{_st.session_exchange_count}: {reflection_text[:100]}")
+        print(f"[Cognition] Auto-reflection #{_st.session_exchange_count} persisted ({len(reflection_text)} chars)")
 
     # 6. Auto-summarize — write a MemorySummary every 10 exchanges
     if _st.session_exchange_count % 10 == 0 and len(_st.session_conversation_buffer) >= 5 and stage_pending("summary"):
@@ -2106,7 +2106,7 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
         if not stage_event_exists("MemorySummaries") and not _kusto_ingest_direct(cluster, db, "MemorySummaries", sum_columns, sum_rows):
             raise RuntimeError("summary persistence failed")
         complete_stage("summary")
-        print(f"[Cognition] Auto-summary: {summary_text[:100]}")
+        print(f"[Cognition] Auto-summary persisted ({len(summary_text)} chars)")
 
         # Trim buffer to prevent unbounded growth
         _st.session_conversation_buffer = _st.session_conversation_buffer[-10:]

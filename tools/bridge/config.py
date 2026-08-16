@@ -49,6 +49,7 @@ SKILLS_WORKSPACE_ROOTS = tuple(
 KUSTO_CLUSTER_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "kusto_cluster.txt")
 MCP_CONFIG_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "mcp_config.json")
 ALERTS_CONFIG_PATH = os.path.join(EVA_CONFIG_DIR, "alerts.json")
+EMAIL_CONFIG_PATH = os.path.join(EVA_CONFIG_DIR, "email_accounts.json")
 NOTIFY_PATH = os.path.join(EVA_CONFIG_DIR, "notifications.jsonl")
 EMBEDDING_CACHE_PATH = os.path.join(EVA_CONFIG_DIR, "embeddings_cache.json")
 MEMORY_BACKEND_PREF_PATH = os.path.join(EVA_CONFIG_DIR, "memory_backend.txt")

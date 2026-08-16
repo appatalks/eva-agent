@@ -147,6 +147,15 @@ body.eva-standalone #settingsMenu {
 .eva-text-prompt-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .eva-text-prompt-actions button { padding: 8px 14px; border: 1px solid rgba(74,222,199,0.28); border-radius: 4px; background: transparent; color: #aee9e1; cursor: pointer; }
 .eva-text-prompt-actions button[type="submit"] { border-color: #4adec7; background: #4adec7; color: #07100f; font-weight: 700; }
+.eva-action-confirm-panel { width: min(620px, calc(100vw - 32px)); }
+.eva-action-confirm-warning { margin: 0 0 10px; color: #ffd27a; line-height: 1.45; }
+.eva-action-confirm-details {
+  max-height: min(52vh, 460px); margin: 0; padding: 12px; overflow: auto;
+  border: 1px solid rgba(174,233,225,0.2); border-radius: 4px;
+  background: rgba(0,0,0,0.22); color: #d9f7f2; white-space: pre-wrap;
+  overflow-wrap: anywhere; font: 12px/1.5 "IBM Plex Mono", monospace;
+}
+#evaActionConfirmApprove { border-color: #4adec7; background: #4adec7; color: #07100f; font-weight: 700; }
 
     #settingsMenu {
       display: none;

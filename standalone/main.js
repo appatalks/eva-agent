@@ -9,7 +9,13 @@ const { spawn } = require('child_process');
 const { fileURLToPath, pathToFileURL } = require('url');
 const { buildContextMenuTemplate } = require('./context-menu');
 const { TerminalBroker } = require('./terminal-broker');
+const { RuntimeLogger } = require('./runtime-logger');
 const { redactKnownPaths } = require('./workspace-projection');
+
+const runtimeLogger = new RuntimeLogger({
+  logPath: path.join(app.getPath('userData'), 'eva-runtime.log')
+});
+runtimeLogger.installProcessStreams();
 
 if (process.platform === 'win32') {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -1000,6 +1006,7 @@ function exitAfterFatalError(label, err) {
   try {
     forceKillBridgeSync();
   } finally {
+    runtimeLogger.close();
     process.exit(1);
   }
 }
@@ -1469,6 +1476,7 @@ function startBridge(port, bridgeToken, workspaceToken) {
     EVA_BRIDGE_TOKEN: bridgeToken,
     EVA_WORKSPACE_CAPABILITY: workspaceToken,
     KUSTO_DATABASE_LOCKED: '1',
+    EVA_RUNTIME_AUDIT_STDOUT: '1',
     PYTHONUNBUFFERED: '1'
   });
   if (process.platform === 'win32') {
@@ -1503,6 +1511,7 @@ function startBridge(port, bridgeToken, workspaceToken) {
   let stderrBuffer = '';
 
   bridgeProcess = child;
+  runtimeLogger.event('bridge', 'process_started', { pid: child.pid, port: port });
   child.evaAwaitingReady = true;
   child.evaClearStderrBuffer = function() {
     stderrBuffer = '';
@@ -1524,8 +1533,12 @@ function startBridge(port, bridgeToken, workspaceToken) {
   });
   child.on('error', function(err) {
     child.evaSpawnError = err;
+    runtimeLogger.event('bridge', 'process_error', { error: err && err.message });
   });
   child.on('exit', function(code, signal) {
+    runtimeLogger.event('bridge', 'process_exit', {
+      code: code, signal: signal, ready: readyBridgeProcess === child
+    });
     const wasReady = readyBridgeProcess === child;
     if (bridgeProcess === child) {
       bridgeProcess = null;
@@ -1681,6 +1694,7 @@ async function startLocalVoices(pythonPath, voiceId) {
     stdio: ['ignore', 'pipe', 'pipe']
   });
   localVoicesProcess = child;
+  runtimeLogger.event('local-voices', 'process_started', { pid: child.pid });
   localSpeechProfileId = '';
   let addressReady;
   const addressPromise = new Promise(function(resolve, reject) { addressReady = { resolve: resolve, reject: reject }; });
@@ -1697,7 +1711,8 @@ async function startLocalVoices(pythonPath, voiceId) {
   child.stderr.on('data', function(chunk) {
     process.stderr.write('[eva-local-voices] ' + chunk.toString());
   });
-  child.on('exit', function() {
+  child.on('exit', function(code, signal) {
+    runtimeLogger.event('local-voices', 'process_exit', { code: code, signal: signal });
     if (localVoicesProcess === child) {
       localVoicesProcess = null;
       localSpeechBaseUrl = '';
@@ -1913,6 +1928,8 @@ function createWindow(acpBaseUrl) {
       ]
     }
   });
+  runtimeLogger.event('electron', 'window_created', { version: app.getVersion() });
+  runtimeLogger.attachRenderer(mainWindow.webContents);
 
   // Window control IPC
   ipcMain.on('win-minimize', function() { mainWindow.minimize(); });
@@ -1923,6 +1940,7 @@ function createWindow(acpBaseUrl) {
   ipcMain.on('win-close', function() { mainWindow.close(); });
 
   mainWindow.once('ready-to-show', function() {
+    runtimeLogger.event('renderer', 'ready_to_show', {});
     mainWindow.show();
   });
   mainWindow.on('closed', function() {
@@ -1961,6 +1979,7 @@ function createWindow(acpBaseUrl) {
 }
 
 async function boot() {
+  runtimeLogger.event('electron', 'boot_started', { workspaceTerminal: workspaceTerminalEnabled() });
   bridgeCapabilityToken = crypto.randomBytes(32).toString('hex');
   workspaceCapabilityToken = crypto.randomBytes(32).toString('hex');
   initializeTerminalBroker();
@@ -1979,6 +1998,7 @@ async function boot() {
       child.evaAwaitingReady = false;
       if (typeof child.evaClearStderrBuffer === 'function') child.evaClearStderrBuffer();
       createWindow(acpBaseUrl);
+      runtimeLogger.event('electron', 'boot_ready', { bridgePort: port });
       return;
     } catch (err) {
       if (err && err.code === 'EADDRINUSE') {
@@ -2019,9 +2039,11 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on('before-quit', function() {
+    runtimeLogger.event('electron', 'before_quit', {});
     if (terminalBroker) terminalBroker.closeAll();
     stopBridge();
   });
+  app.on('will-quit', function() { runtimeLogger.close(); });
   app.on('window-all-closed', function() {
     app.quit();
   });
@@ -2039,9 +2061,15 @@ process.on('SIGTERM', function() {
 });
 
 process.on('uncaughtException', function(err) {
+  runtimeLogger.event('electron', 'uncaught_exception', {
+    error: err && err.stack ? err.stack : err
+  });
   exitAfterFatalError('Uncaught exception in Electron main process:', err);
 });
 
 process.on('unhandledRejection', function(reason) {
+  runtimeLogger.event('electron', 'unhandled_rejection', {
+    error: reason && reason.stack ? reason.stack : reason
+  });
   exitAfterFatalError('Unhandled promise rejection in Electron main process:', reason);
 });

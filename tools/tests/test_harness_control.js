@@ -44,6 +44,7 @@ let mergeRequest = null;
 let pullRequestViewRequest = null;
 let branchDeleteRequest = null;
 let boundedSkillRequest = null;
+let emailSendRequest = null;
 const fixtureRepository = 'fixture-owner/fixture-repository';
 const fixtureShortName = 'fixture-repository';
 const fixtureRepositoryUrl = 'https://github.com/fixture-owner/fixture-repository';
@@ -76,6 +77,11 @@ const window = {
         url: 'https://github.com/example/repository/pull/' + request.number
       });
     }
+  },
+  EvaEmailSettings: {
+    open() { return Promise.resolve(); },
+    accounts() { return [{ label: 'Eva', address: 'eva@example.com', backend: 'eva_direct' }]; },
+    send(request) { emailSendRequest = request; return Promise.resolve({ decision: 'sent' }); }
   },
   EvaWorkspaces: {
     openWorkbench() { workspaceOpenCalls += 1; },
@@ -176,6 +182,7 @@ const sandbox = {
   EvaAssets: window.EvaAssets,
   EvaSkills: window.EvaSkills,
   EvaAgents: window.EvaAgents,
+  EvaEmailSettings: window.EvaEmailSettings,
   runEvaTerminalCommand(command, submit) {
     submittedCommand = command;
     commandSubmitMode = submit;
@@ -678,6 +685,29 @@ async function main() {
 
   const gitSuffixMismatch = await harness.execute({ action: 'import_github', repository_url: url }, { source: 'model', userRequest: 'Please import https://github.com/example/repository.git.' });
   assert.strictEqual(gitSuffixMismatch.ok, false);
+
+  const describedEmail = await harness.execute({ action: 'describe_email' }, { source: 'model', userRequest: 'What email account is configured?' });
+  assert.strictEqual(describedEmail.ok, true);
+  assert.match(describedEmail.message, /eva@example\.com/);
+
+  const emailRequest = { action: 'send_email', to: 'peer@example.com', subject: 'Status', body: 'All green.', accountId: 'eva' };
+  const sentEmail = await harness.execute(emailRequest, {
+    source: 'model', userRequest: 'Send peer@example.com the subject Status with the body All green. from account eva.'
+  });
+  assert.strictEqual(sentEmail.ok, true);
+  assert.strictEqual(sentEmail.data.outcome, 'sent');
+  assert.strictEqual(emailSendRequest.to, 'peer@example.com');
+  assert.strictEqual(emailSendRequest.subject, 'Status');
+  assert.strictEqual(emailSendRequest.body, 'All green.');
+  assert.strictEqual(emailSendRequest.account_id, 'eva');
+
+  emailSendRequest = null;
+  const deniedEmail = await harness.execute(emailRequest, {
+    source: 'model', userRequest: 'Send peer@example.com the subject Status with the body Different message from account eva.'
+  });
+  assert.strictEqual(deniedEmail.ok, false);
+  assert.match(deniedEmail.message, /direct user interaction/);
+  assert.strictEqual(emailSendRequest, null);
 
   importResult = null;
   const cancelled = await harness.execute({ action: 'import_github', repository_url: url }, { source: 'model', userRequest: 'Please import https://github.com/example/repository.' });
