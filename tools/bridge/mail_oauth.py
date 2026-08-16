@@ -195,3 +195,36 @@ def complete_loopback_authorization(pending, client_id):
         )
     finally:
         server.close()
+
+
+def begin_device_authorization(provider_name, client_id):
+    """Start device-code sign-in. Returns (authorization, metadata)."""
+    profile = provider_profile(provider_name)
+    if not profile:
+        raise oauth_client.OAuthError("Unknown mail provider")
+    if profile["auth_style"] != "device_code":
+        raise oauth_client.OAuthError(
+            f"{profile['label']} does not allow device-code sign-in for mailbox access"
+        )
+    metadata = oauth_client.discover_authorization_server(profile["issuer"])
+    authorization = oauth_client.begin_device_authorization(
+        metadata, client_id, profile["scopes"]
+    )
+    return authorization, metadata
+
+
+def complete_device_authorization(metadata, client_id, authorization):
+    """Poll until the user approves the device sign-in."""
+    return oauth_client.poll_device_token(metadata, client_id, authorization)
+
+
+def authorize(provider_name, client_id):
+    """Run whichever sign-in style the provider supports."""
+    profile = provider_profile(provider_name)
+    if not profile:
+        raise oauth_client.OAuthError("Unknown mail provider")
+    if profile["auth_style"] == "device_code":
+        authorization, metadata = begin_device_authorization(provider_name, client_id)
+        return {"style": "device_code", "authorization": authorization, "metadata": metadata}
+    url, pending = begin_loopback_authorization(provider_name, client_id)
+    return {"style": "loopback", "url": url, "pending": pending}

@@ -140,6 +140,7 @@ def parse_authorization_server_metadata(document, expected_issuer=""):
         "issuer": issuer,
         "authorization_endpoint": authorization_endpoint,
         "token_endpoint": token_endpoint,
+        "device_authorization_endpoint": str(document.get("device_authorization_endpoint") or ""),
         "registration_endpoint": str(document.get("registration_endpoint") or ""),
         "code_challenge_methods_supported": methods,
     }
@@ -325,3 +326,109 @@ def refresh_access_token(metadata, client_id, refresh_token, resource, fetch=Non
     if not token["refresh_token"]:
         token["refresh_token"] = str(refresh_token)
     return token
+
+
+# ── Device authorization grant (RFC 8628) ──────────────────────────────
+#
+# Used where the provider supports it for mail scopes. Microsoft does; Google
+# restricts its device flow to sign-in, Drive file/appdata, and YouTube scopes,
+# so Gmail must use the loopback redirect instead.
+
+DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+DEVICE_MIN_INTERVAL_SECONDS = 5
+DEVICE_MAX_INTERVAL_SECONDS = 60
+DEVICE_MAX_WAIT_SECONDS = 900
+
+
+def supports_device_flow(metadata):
+    """Return True when the authorization server advertises a device endpoint."""
+    return _is_https_url((metadata or {}).get("device_authorization_endpoint"))
+
+
+def begin_device_authorization(metadata, client_id, scopes, fetch=None):
+    """Request a device and user code. Returns the codes and polling schedule."""
+    endpoint = (metadata or {}).get("device_authorization_endpoint") or ""
+    if not _is_https_url(endpoint):
+        raise OAuthError("This provider does not offer device-code sign-in")
+    if not str(client_id or "").strip():
+        raise OAuthError("Client id is required")
+
+    fetch = fetch or _http_json
+    scope = " ".join(str(s).strip() for s in scopes or [] if str(s or "").strip())
+    document = fetch(endpoint, method="POST", data={"client_id": client_id, "scope": scope})
+    if not isinstance(document, dict):
+        raise OAuthError("Device authorization response was not a JSON object")
+
+    device_code = str(document.get("device_code") or "")
+    user_code = str(document.get("user_code") or "")
+    verification_uri = str(
+        document.get("verification_uri") or document.get("verification_url") or ""
+    )
+    if not device_code or not user_code:
+        raise OAuthError("Device authorization response was incomplete")
+    if not _is_https_url(verification_uri):
+        raise OAuthError("Device verification URL must be HTTPS")
+
+    try:
+        interval = int(document.get("interval") or DEVICE_MIN_INTERVAL_SECONDS)
+    except (TypeError, ValueError):
+        interval = DEVICE_MIN_INTERVAL_SECONDS
+    try:
+        expires_in = int(document.get("expires_in") or DEVICE_MAX_WAIT_SECONDS)
+    except (TypeError, ValueError):
+        expires_in = DEVICE_MAX_WAIT_SECONDS
+
+    return {
+        "device_code": device_code,
+        "user_code": user_code,
+        "verification_uri": verification_uri,
+        "verification_uri_complete": str(document.get("verification_uri_complete") or ""),
+        "interval": min(max(interval, DEVICE_MIN_INTERVAL_SECONDS), DEVICE_MAX_INTERVAL_SECONDS),
+        "expires_in": min(max(expires_in, 0), DEVICE_MAX_WAIT_SECONDS),
+    }
+
+
+def poll_device_token(metadata, client_id, authorization, fetch=None, sleep=None, now=None, monotonic=None):
+    """Poll until the user approves the device, or raise a terminal error.
+
+    Honours the server's polling interval and `slow_down` backoff, and stops at
+    the advertised expiry rather than polling indefinitely.
+    """
+    import time as _time
+
+    fetch = fetch or _http_json
+    sleep = sleep or _time.sleep
+    monotonic = monotonic or _time.monotonic
+
+    device_code = str((authorization or {}).get("device_code") or "")
+    if not device_code:
+        raise OAuthError("No device code is available to poll")
+    interval = int(authorization.get("interval") or DEVICE_MIN_INTERVAL_SECONDS)
+    deadline = monotonic() + min(
+        int(authorization.get("expires_in") or DEVICE_MAX_WAIT_SECONDS), DEVICE_MAX_WAIT_SECONDS
+    )
+
+    while True:
+        if monotonic() >= deadline:
+            raise OAuthError("Device sign-in expired before it was approved")
+        sleep(interval)
+        document = fetch(metadata["token_endpoint"], method="POST", data={
+            "grant_type": DEVICE_GRANT_TYPE,
+            "client_id": client_id,
+            "device_code": device_code,
+        })
+        if not isinstance(document, dict):
+            raise OAuthError("Device token response was not a JSON object")
+        error = str(document.get("error") or "")
+        if not error:
+            return normalize_token_response(document, now=now)
+        if error == "authorization_pending":
+            continue
+        if error == "slow_down":
+            interval = min(interval + DEVICE_MIN_INTERVAL_SECONDS, DEVICE_MAX_INTERVAL_SECONDS)
+            continue
+        if error == "access_denied":
+            raise OAuthError("Device sign-in was refused")
+        if error == "expired_token":
+            raise OAuthError("Device sign-in expired before it was approved")
+        raise OAuthError(f"Device sign-in failed: {error[:80]}")
