@@ -15,8 +15,8 @@ var EvaEmailSettings = (function() {
   function editableAccount(account) {
     if (!account) return false;
     if (account.backend === 'imap_smtp') return true;
-    return account.backend === 'eva_direct'
-      && ((account.settings || {}).delivery_mode || 'internal') === 'internal';
+    var mode = (account.settings || {}).delivery_mode || 'internal';
+    return account.backend === 'eva_direct' && (mode === 'internal' || mode === 'local_mta');
   }
 
   function status(id, message, isError) {
@@ -123,7 +123,7 @@ var EvaEmailSettings = (function() {
       var domains = splitList((el('emailInternalDomains') || {}).value);
       var directConsent = splitList((el('emailDirectConsent') || {}).value);
       account.settings = Object.assign({}, account.settings || {}, {
-        delivery_mode: (account.settings || {}).delivery_mode || 'internal',
+        delivery_mode: (el('emailDirectMode') || {}).value || 'internal',
         internal_domains: domains,
         internal_smtp_host: (el('emailInternalHost') || {}).value || '127.0.0.1',
         internal_smtp_port: Number((el('emailInternalPort') || {}).value) || 25,
@@ -173,6 +173,7 @@ var EvaEmailSettings = (function() {
     if (el('emailInternalStarttls')) el('emailInternalStarttls').checked = !!settings.internal_smtp_starttls;
     if (el('emailInternalDomains')) el('emailInternalDomains').value = (settings.internal_domains || []).join(', ');
     if (el('emailDirectConsent')) el('emailDirectConsent').value = (settings.direct_consent || []).join(', ');
+    if (el('emailDirectMode')) el('emailDirectMode').value = settings.delivery_mode || 'internal';
     if (el('emailCredentialId')) el('emailCredentialId').value = account.id;
     if (el('emailSendFrom')) el('emailSendFrom').value = account.id;
     toggleBackendFields();
@@ -188,6 +189,7 @@ var EvaEmailSettings = (function() {
     });
     if (el('emailAccountId')) el('emailAccountId').disabled = false;
     if (el('emailAccountBackend')) el('emailAccountBackend').value = '';
+    if (el('emailDirectMode')) el('emailDirectMode').value = 'internal';
     if (el('emailSmtpStarttls')) el('emailSmtpStarttls').checked = true;
     if (el('emailMorningPull')) el('emailMorningPull').checked = true;
     if (el('emailInternalStarttls')) el('emailInternalStarttls').checked = false;
@@ -202,11 +204,12 @@ var EvaEmailSettings = (function() {
       return;
     }
     if (account.backend === 'eva_direct') {
-      if (!account.settings.internal_domains.length) {
+      var directMode = account.settings.delivery_mode || 'internal';
+      if (directMode === 'internal' && !account.settings.internal_domains.length) {
         status('emailAccountStatus', 'List at least one local domain, such as localhost.localdomain.', true);
         return;
       }
-      if (!account.settings.direct_consent.length) {
+      if (directMode === 'internal' && !account.settings.direct_consent.length) {
         status('emailAccountStatus', 'List at least one recipient that accepts mail from Eva.', true);
         return;
       }
@@ -292,9 +295,25 @@ var EvaEmailSettings = (function() {
     });
 
     if (result && result.decision === 'needs_confirmation') {
-      var unknown = (result.unknown_recipients || []).join(', ');
-      var approved = typeof confirm === 'function'
-        ? confirm('Send this message to ' + unknown + '?\n\nThey are not on the approved list.')
+      var normalized = result.request || message;
+      var body = String(normalized.body || '');
+      var bodyPreview = body.slice(0, 2000) + (body.length > 2000 ? '\n… [preview truncated]' : '');
+      var details = [
+        'To: ' + (normalized.to || []).join(', '),
+        'Cc: ' + (normalized.cc || []).join(', '),
+        'Bcc: ' + (normalized.bcc || []).join(', '),
+        'Subject: ' + String(normalized.subject || ''),
+        'Body (' + body.length + ' characters):',
+        bodyPreview
+      ].join('\n');
+      var approved = typeof evaConfirmAction === 'function'
+        ? await evaConfirmAction({
+            title: 'Confirm email submission',
+            warning: (result.reason || 'This recipient is not approved.')
+              + ' The local mail system may queue or bounce this message; final delivery is not verified.',
+            details: details,
+            confirmLabel: 'Submit email'
+          })
         : false;
       if (!approved) return { decision: 'cancelled' };
       payload.confirmation = { digest: result.digest, addresses: result.unknown_recipients };
@@ -319,6 +338,9 @@ var EvaEmailSettings = (function() {
       var decision = result && result.decision;
       if (decision === 'sent') {
         status('emailSendStatus', 'Sent.');
+        if (el('emailSendBody')) el('emailSendBody').value = '';
+      } else if (decision === 'submitted') {
+        status('emailSendStatus', 'Submitted to the local mail system. Final delivery is not verified.');
         if (el('emailSendBody')) el('emailSendBody').value = '';
       } else if (decision === 'partially_sent') {
         status('emailSendStatus', 'Partly sent. Not delivered: ' + (result.failures || []).join('; '), true);

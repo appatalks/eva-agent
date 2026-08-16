@@ -677,6 +677,18 @@
     </form>
   </div>
 
+  <div id="evaActionConfirm" class="eva-text-prompt" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="evaActionConfirmTitle">
+    <div class="eva-text-prompt-panel eva-action-confirm-panel">
+      <h2 id="evaActionConfirmTitle">Confirm action</h2>
+      <p id="evaActionConfirmWarning" class="eva-action-confirm-warning"></p>
+      <pre id="evaActionConfirmDetails" class="eva-action-confirm-details"></pre>
+      <div class="eva-text-prompt-actions">
+        <button id="evaActionConfirmCancel" type="button">Cancel</button>
+        <button id="evaActionConfirmApprove" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings Workspace -->
   <div class="settingsMenu" id="settingsMenu" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="settingsTitle">
     <div class="settings-header">
@@ -1437,7 +1449,14 @@
           <label class="background-toggle-row"><input type="checkbox" id="emailMorningPull" checked> Include unread mail in the morning briefing</label>
         </div>
         <div id="emailDirectFields" hidden>
-          <p class="auth-note">Eva's own identity delivers to a trusted local mail server. Recipients must have accepted mail from Eva before she can write to them.</p>
+          <p class="auth-note">Eva's own identity delivers through a local mail server. Internal-only mode requires prior recipient consent. Best-effort mode can submit external mail after you confirm the exact message, but delivery and inbox placement are not guaranteed.</p>
+          <div class="auth-field">
+            <label for="emailDirectMode">Delivery mode:</label>
+            <select id="emailDirectMode" style="width:100%">
+              <option value="internal">Internal domains only</option>
+              <option value="local_mta">Best-effort local mail system</option>
+            </select>
+          </div>
           <div class="auth-field">
             <label for="emailInternalHost">Local mail server:</label>
             <input type="text" id="emailInternalHost" placeholder="127.0.0.1">
@@ -1455,7 +1474,7 @@
             <label for="emailDirectConsent">Recipients who accept mail from Eva:</label>
             <input type="text" id="emailDirectConsent" placeholder="you@example.com, @lab.internal">
           </div>
-          <p class="auth-note">This list is saved on Eva's identity and also approves those recipients for that identity. Eva delivers only to the local domains listed, and only to recipients that appear here.</p>
+          <p class="auth-note">This list is saved on Eva's identity and also approves those recipients. In best-effort mode it is optional; recipients not listed here trigger confirmation for that exact message.</p>
         </div>
         <div class="background-actions">
           <button type="button" class="auth-toggle" id="emailSaveAccount">Save mailbox</button>

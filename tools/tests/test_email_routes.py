@@ -84,7 +84,7 @@ class RouteWiringTests(unittest.TestCase):
         end = self.source.index("def _email_message_delete(self")
         block = self.source[start:end]
         success = block[block.index("status = 200 if"):block.index("self._json_response(status")]
-        for decision in ("sent", "partially_sent", "needs_confirmation"):
+        for decision in ("sent", "submitted", "partially_sent", "needs_confirmation"):
             self.assertIn(decision, success, decision)
 
     def test_credential_endpoint_does_not_return_the_secret(self):

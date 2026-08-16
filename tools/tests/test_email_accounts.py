@@ -383,6 +383,74 @@ class DirectDeliveryPlanTests(unittest.TestCase):
         self.assertIsNone(plan)
         self.assertIn("direct identity", error)
 
+    def test_best_effort_local_mta_accepts_external_recipient_after_confirmation(self):
+        direct, error = accounts_module.normalize_account(account(
+            id="direct", backend="eva_direct", address="eva@home.example",
+            settings={
+                "delivery_mode": "local_mta",
+                "internal_smtp_host": "127.0.0.1",
+                "internal_smtp_port": 25,
+                "direct_consent": [],
+            },
+        ))
+        self.assertEqual(error, "")
+        request = send(to="outside@example.net")
+        pending = accounts_module.authorize_send_for_account(
+            direct, request, ["outside@example.net"], accounts=[direct]
+        )
+        self.assertEqual(pending["decision"], "needs_confirmation")
+        allowed = accounts_module.authorize_send_for_account(
+            direct, request, ["outside@example.net"],
+            {"digest": pending["digest"], "addresses": ["outside@example.net"]},
+            accounts=[direct],
+        )
+        self.assertEqual(allowed["decision"], "allowed")
+        self.assertEqual(allowed["delivery_plan"]["routes"][0]["route"], "local_mta")
+
+    def test_best_effort_confirmation_is_bound_to_the_exact_message(self):
+        direct, _ = accounts_module.normalize_account(account(
+            id="direct", backend="eva_direct", address="eva@home.example",
+            settings={"delivery_mode": "local_mta", "internal_smtp_host": "127.0.0.1"},
+        ))
+        request = send(to="outside@example.net")
+        pending = accounts_module.authorize_send_for_account(
+            direct, request, ["outside@example.net"], accounts=[direct]
+        )
+        changed = send(to="outside@example.net", body="Different body")
+        result = accounts_module.authorize_send_for_account(
+            direct, changed, ["outside@example.net"],
+            {"digest": pending["digest"], "addresses": ["outside@example.net"]},
+            accounts=[direct],
+        )
+        self.assertEqual(result["decision"], "needs_confirmation")
+
+    def test_best_effort_confirmation_is_bound_to_all_recipient_fields(self):
+        direct, _ = accounts_module.normalize_account(account(
+            id="direct", backend="eva_direct", address="eva@home.example",
+            settings={"delivery_mode": "local_mta", "internal_smtp_host": "127.0.0.1"},
+        ))
+        request = send(to="outside@example.net")
+        pending = accounts_module.authorize_send_for_account(
+            direct, request, ["outside@example.net"], accounts=[direct]
+        )
+        for field in ("to", "cc", "bcc"):
+            with self.subTest(field=field):
+                changed = send(to="outside@example.net")
+                changed[field] = "other@example.net"
+                result = accounts_module.authorize_send_for_account(
+                    direct, changed, ["@example.net"],
+                    {"digest": pending["digest"], "addresses": ["outside@example.net", "other@example.net"]},
+                    accounts=[direct],
+                )
+                self.assertEqual(result["decision"], "needs_confirmation")
+
+    def test_internal_mode_still_refuses_external_recipient(self):
+        direct = self.direct(delivery_mode="internal")
+        result = accounts_module.authorize_send_for_account(
+            direct, send(to="peer@company.example"), ["peer@company.example"], accounts=[self.relay]
+        )
+        self.assertEqual(result["decision"], "rejected")
+
     def test_authorized_send_carries_the_delivery_plan(self):
         result = accounts_module.authorize_send_for_account(
             self.direct(), send(to="box@lab.internal"), ["@lab.internal"], accounts=[self.relay]

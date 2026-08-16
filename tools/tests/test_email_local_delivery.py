@@ -297,6 +297,73 @@ class LocalPolicyTests(LocalDeliveryTestCase):
             self.send()
 
 
+class BestEffortLocalMTATests(LocalDeliveryTestCase):
+    def setUp(self):
+        super().setUp()
+        self.configure([])
+
+    def configure(self, consent):
+        self.service.upsert_account({
+            "id": "eva", "label": "Eva best effort", "backend": "eva_direct",
+            "address": "eva@lab.internal", "status": "connected",
+            "settings": {
+                "direct_consent": consent,
+                "delivery_mode": "local_mta",
+                "internal_domains": [],
+                "internal_smtp_host": "127.0.0.1",
+                "internal_smtp_port": self.sink.port,
+                "internal_smtp_starttls": False,
+            },
+        })
+
+    @staticmethod
+    def request(body="Best-effort message"):
+        return {
+            "to": "outside@example.net",
+            "subject": "Best-effort local MTA test",
+            "body": body,
+        }
+
+    def test_unconfirmed_external_message_never_reaches_the_mta(self):
+        result = self.service.send_message(self.request(), account_id="eva")
+        self.assertEqual(result["decision"], "needs_confirmation")
+        self.assertEqual(self.sink.received, [])
+
+    def test_confirmed_external_message_is_submitted_to_the_real_mta(self):
+        request = self.request()
+        pending = self.service.send_message(request, account_id="eva")
+        result = self.service.send_message(
+            request,
+            account_id="eva",
+            confirmation={
+                "digest": pending["digest"],
+                "addresses": pending["unknown_recipients"],
+            },
+        )
+        self.assertEqual(result["decision"], "submitted")
+        self.assertIn("not verified", result["warning"])
+        self.assertEqual(self.sink.received[0]["rcpt_to"], ["outside@example.net"])
+
+    def test_confirmation_cannot_authorize_changed_content(self):
+        pending = self.service.send_message(self.request(), account_id="eva")
+        result = self.service.send_message(
+            self.request(body="Changed after approval"),
+            account_id="eva",
+            confirmation={
+                "digest": pending["digest"],
+                "addresses": pending["unknown_recipients"],
+            },
+        )
+        self.assertEqual(result["decision"], "needs_confirmation")
+        self.assertEqual(self.sink.received, [])
+
+    def test_preconsented_recipient_submits_without_a_prompt(self):
+        self.configure(["outside@example.net"])
+        result = self.service.send_message(self.request(), account_id="eva")
+        self.assertEqual(result["decision"], "submitted")
+        self.assertEqual(len(self.sink.received), 1)
+
+
 class RelayRouteTests(unittest.TestCase):
     """The relay leg over a real STARTTLS-protected, authenticating SMTP server."""
 

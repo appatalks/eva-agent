@@ -11,6 +11,7 @@ const vm = require('vm');
 const root = path.resolve(__dirname, '..', '..');
 const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
 const moduleSource = fs.readFileSync(path.join(root, 'core/js/settings/email.js'), 'utf8');
+const dialogsSource = fs.readFileSync(path.join(root, 'core/js/dialogs.js'), 'utf8');
 const harnessSource = fs.readFileSync(path.join(root, 'core/js/harness-control.js'), 'utf8');
 
 let failures = 0;
@@ -41,6 +42,8 @@ check('credential account is chosen from a list, not typed',
 check('allowlist field present', /id="emailAllowlist"/.test(html));
 check('account list region is live', /id="emailAccountList"[^>]*aria-live/.test(html));
 check('account list has a new-mailbox action', /id="emailNewAccount"/.test(html));
+check('best-effort local MTA mode is available',
+  /id="emailDirectMode"/.test(html) && /value="local_mta"/.test(html));
 
 console.log('\nmodule');
 const context = {
@@ -75,12 +78,28 @@ check('credential is sent only to the credential endpoint',
   /\/v1\/email\/credential/.test(moduleSource));
 
 console.log('\nsend policy');
-check('unapproved recipients trigger a confirmation prompt',
-  /needs_confirmation/.test(moduleSource) && /confirm\(/.test(moduleSource));
+const sendFunction = moduleSource.slice(
+  moduleSource.indexOf('async function send(request)'),
+  moduleSource.indexOf('async function sendFromForm()')
+);
+check('unapproved recipients trigger the native confirmation surface',
+  /needs_confirmation/.test(sendFunction) && /evaConfirmAction/.test(sendFunction));
+check('email confirmation does not use generic browser confirm',
+  !/\bconfirm\(/.test(sendFunction));
+check('confirmation displays normalized To, Cc, Bcc, subject, and body preview',
+  /normalized\.to/.test(sendFunction)
+    && /normalized\.cc/.test(sendFunction)
+    && /normalized\.bcc/.test(sendFunction)
+    && /normalized\.subject/.test(sendFunction)
+    && /bodyPreview/.test(sendFunction));
+check('confirmation warns that final delivery is not verified',
+  /final delivery is not verified/i.test(sendFunction));
 check('confirmation echoes the server digest',
   /digest: result\.digest/.test(moduleSource));
 check('declining does not send', /decision: 'cancelled'/.test(moduleSource));
 check('partial delivery is surfaced', /partially_sent/.test(moduleSource));
+check('local submission is not mislabeled as delivery',
+  /decision === 'submitted'/.test(moduleSource) && /Final delivery is not verified/.test(moduleSource));
 check('account pickers are populated from live accounts',
   /function fillAccountPickers\(\)/.test(moduleSource));
 check('Eva direct is excluded from the credential picker',
@@ -126,6 +145,16 @@ check('open() activates the email tab',
   /\.settings-tab\[data-stab="email"\]/.test(moduleSource));
 check('open() does not call a nonexistent helper',
   !/openSettingsTab/.test(moduleSource));
+
+console.log('\nnative confirmation dialog');
+check('confirmation dialog markup exists',
+  /id="evaActionConfirm"/.test(html)
+    && /id="evaActionConfirmDetails"/.test(html)
+    && /id="evaActionConfirmWarning"/.test(html));
+check('native confirmation uses textContent for message details',
+  /details\.textContent/.test(dialogsSource) && /warning\.textContent/.test(dialogsSource));
+check('native confirmation returns false when cancelled',
+  /_closeEvaActionConfirm\(false\)/.test(dialogsSource));
 
 console.log('\nnative harness');check('email navigation target registered',
   /email: function\(\) \{ return openSettings\('email'\); \}/.test(harnessSource));

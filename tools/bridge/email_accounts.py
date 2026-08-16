@@ -40,7 +40,7 @@ from bridge import mail_oauth
 BACKENDS = ("workiq", "gmail_oauth", "imap_smtp", "eva_direct")
 CAPABILITIES = ("read", "send", "delete")
 STATUSES = ("connected", "needs_auth", "disabled", "error")
-DELIVERY_MODES = ("auto", "relay", "internal")
+DELIVERY_MODES = ("auto", "relay", "internal", "local_mta")
 
 MAX_ACCOUNTS = 12
 MAX_LABEL_CHARS = 60
@@ -220,6 +220,8 @@ def normalize_account(raw):
         )[:email_policy.MAX_ALLOWLIST_ENTRIES]
         if mode in ("internal", "auto") and internal_domains and not account["settings"]["internal_smtp_host"]:
             return None, "internal delivery requires an internal SMTP host"
+        if mode == "local_mta" and not account["settings"]["internal_smtp_host"]:
+            return None, "best-effort local delivery requires a local SMTP host"
         if mode == "relay" and not account["settings"]["relay_account_id"]:
             return None, "relay delivery requires a relay account"
         account["morning_pull"] = False
@@ -367,6 +369,20 @@ def plan_direct_delivery(account, recipients, accounts=None):
 
     settings = account.get("settings") or {}
     mode = settings.get("delivery_mode") or "internal"
+    if mode == "local_mta":
+        host = settings.get("internal_smtp_host")
+        if not host:
+            return None, "best-effort local delivery requires a local SMTP host"
+        return {
+            "from": account.get("address"),
+            "routes": [{
+                "route": "local_mta",
+                "recipients": list(recipients or []),
+                "smtp_host": host,
+                "smtp_port": settings.get("internal_smtp_port") or 25,
+                "smtp_starttls": bool(settings.get("internal_smtp_starttls", False)),
+            }],
+        }, ""
     internal = [r for r in recipients or [] if is_internal_recipient(account, r)]
     external = [r for r in recipients or [] if r not in internal]
 
@@ -435,16 +451,39 @@ def authorize_send_for_account(account, request, global_allowlist, confirmation=
         if missing:
             # Consent is not confirmable in the moment: the recipient must opt in first.
             consent = (account.get("settings") or {}).get("direct_consent") or []
-            reason = (
-                "no recipients have been approved for Eva's identity yet; add them in Email settings"
-                if not consent else
-                "these recipients have not accepted mail from Eva's direct identity"
-            )
-            return {
-                "decision": "rejected",
-                "reason": reason,
-                "unconsented_recipients": missing,
-            }
+            mode = (account.get("settings") or {}).get("delivery_mode") or "internal"
+            if mode == "local_mta":
+                confirmation = confirmation if isinstance(confirmation, dict) else {}
+                approved = {
+                    email_policy.normalize_address(value)
+                    for value in confirmation.get("addresses") or []
+                }
+                approved.discard("")
+                remaining = missing
+                if str(confirmation.get("digest") or "") == result.get("digest"):
+                    remaining = [address for address in missing if address not in approved]
+                if remaining:
+                    return {
+                        "decision": "needs_confirmation",
+                        "request": result["request"],
+                        "digest": result["digest"],
+                        "unknown_recipients": remaining,
+                        "reason": (
+                            "best-effort local submission cannot verify delivery; "
+                            "confirm this exact message and recipient"
+                        ),
+                    }
+            else:
+                reason = (
+                    "no recipients have been approved for Eva's identity yet; add them in Email settings"
+                    if not consent else
+                    "these recipients have not accepted mail from Eva's direct identity"
+                )
+                return {
+                    "decision": "rejected",
+                    "reason": reason,
+                    "unconsented_recipients": missing,
+                }
         plan, plan_error = plan_direct_delivery(
             account, email_policy.all_recipients(result["request"]), accounts
         )

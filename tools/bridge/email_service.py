@@ -389,6 +389,17 @@ def send_message(request, account_id="", from_address="", confirmation=None):
                 "deliveries": deliveries,
                 "failures": failures,
             }
+        if deliveries and all(delivery.get("route") == "local_mta" for delivery in deliveries):
+            audit_event(
+                "email_send", correlation_id=account["id"], outcome="submitted",
+                **email_policy.audit_fields(normalized, backend=account["backend"]),
+            )
+            return {
+                "decision": "submitted",
+                "account_id": account["id"],
+                "deliveries": deliveries,
+                "warning": "The local mail system accepted the message; final delivery is not verified.",
+            }
     else:
         deliveries = [_deliver_simple(account, normalized, account["address"])]
 
@@ -428,7 +439,7 @@ def _deliver_direct(account, document, normalized, plan):
             continue
 
         try:
-            if route["route"] == "internal":
+            if route["route"] in {"internal", "local_mta"}:
                 starttls = bool(route.get("smtp_starttls", True))
                 mailbox = ImapSmtpMailbox(
                     {"smtp_host": route["smtp_host"], "smtp_port": route["smtp_port"],

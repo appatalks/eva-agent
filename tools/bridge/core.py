@@ -4392,7 +4392,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except email_service.EmailServiceError as exc:
             self._json_response(502, {"error": {"message": str(exc)}})
             return
-        status = 200 if result.get("decision") in ("sent", "partially_sent", "needs_confirmation") else 400
+        status = 200 if result.get("decision") in (
+            "sent", "submitted", "partially_sent", "needs_confirmation"
+        ) else 400
         if status == 400:
             # Carry the refusal reason in the error envelope so the caller can
             # show why, not just that it failed.

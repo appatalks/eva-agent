@@ -1,6 +1,6 @@
 # Frontend Ownership Map
 
-Status: living map. Last reviewed 2026-08-15 against Eva 5.6.2.
+Status: living map. Last reviewed 2026-08-16 against Eva 5.6.2.
 
 This map is the navigation contract for browser work. Read the owner, its
 immediate collaborators, and its focused test before changing a feature. The
@@ -48,6 +48,7 @@ context.
 | Background controls and proposals | `core/js/settings/background.js` | `test_background_settings.js` |
 | Alert rules and delivery limits | `core/js/settings/alerts.js` | `test_alerts_settings.js` |
 | Audio devices and voice preferences | `core/js/settings/audio.js` | `test_audio_settings.js` |
+| Email accounts, recipient consent, and sending | `core/js/settings/email.js` | `test_email_settings.js`; bridge policy and delivery contracts remain under `tools/tests/test_email_*.py` |
 | Remaining settings orchestration | `core/js/options.js` | static suite plus domain-focused checks |
 
 Three settings surfaces do not live where their name suggests. Record the real

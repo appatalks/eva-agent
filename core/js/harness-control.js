@@ -1113,6 +1113,9 @@ var EvaHarness = (function() {
       }).then(function(sendResult) {
         var decision = sendResult && sendResult.decision;
         if (decision === 'sent') return result(true, 'send_email', 'Sent the message.', { outcome: 'sent' });
+        if (decision === 'submitted') {
+          return result(true, 'send_email', 'Submitted the message to the local mail system; final delivery is not verified.', { outcome: 'submitted' });
+        }
         if (decision === 'partially_sent') {
           return result(true, 'send_email', 'Delivered to some recipients only.', {
             outcome: 'partial', failures: sendResult.failures || []
