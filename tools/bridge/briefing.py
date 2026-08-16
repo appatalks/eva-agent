@@ -41,7 +41,7 @@ def briefing_prompt_context(allow_partial=False):
             return ""
         sources = dict(state.get("sources") or {})
     lines = []
-    for name in ("memory", "news", "weather", "markets"):
+    for name in ("memory", "mail", "news", "weather", "markets"):
         source = sources.get(name) or {}
         if source.get("status") == "ready" and source.get("summary"):
             lines.append(name.title() + ": " + str(source["summary"])[:1200])
@@ -72,6 +72,27 @@ def _memory_source():
     if proposals:
         return proposals[0].get("payload", {}).get("Summary", ""), "ready"
     return note or "No local briefing summary is available.", "partial"
+
+
+def _mail_source():
+    """Summarize unread mail for accounts opted into the morning routine.
+
+    Mail is never a required source: a locked or unreachable mailbox degrades the
+    briefing rather than failing it.
+    """
+    try:
+        from bridge.email_service import morning_mail_summary
+        summary, unavailable = morning_mail_summary()
+    except Exception as error:
+        return "Mail could not be read: " + type(error).__name__, "failed"
+    if summary:
+        note = ""
+        if unavailable:
+            note = "\n(Not read: " + ", ".join(str(label)[:40] for label in unavailable[:5]) + ")"
+        return summary + note, "ready"
+    if unavailable:
+        return "Locked or unreachable: " + ", ".join(str(label)[:40] for label in unavailable[:5]), "partial"
+    return "No unread mail.", "ready"
 
 
 def _live_source(name, prompt, timeout):
@@ -123,6 +144,8 @@ def _prepare_worker():
 
         memory_text, memory_status = _memory_source()
         _set_source("memory", memory_status, memory_text)
+        mail_text, mail_status = _mail_source()
+        _set_source("mail", mail_status, mail_text)
         live_sources = (
             ("news", "Provide a concise current morning news briefing with sources. Do not invent facts.", 60),
             ("weather", "Provide the current weather and short forecast for the configured user location, if available. Do not invent a location or facts.", 45),

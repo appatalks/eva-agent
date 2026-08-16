@@ -1289,6 +1289,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._background_activity()
         elif parsed_path == "/v1/alerts":
             self._alerts_list()
+        elif parsed_path == "/v1/email/accounts":
+            self._email_accounts_get()
+        elif parsed_path == "/v1/email/messages":
+            self._email_messages_list()
         elif parsed_path == "/v1/notifications":
             self._notifications_list()
         elif parsed_path == "/v1/workspaces/projects":
@@ -1448,6 +1452,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._alerts_settings_update()
         elif parsed_path == "/v1/signal/send":
             self._signal_send_request()
+        elif parsed_path == "/v1/email/accounts":
+            self._email_accounts_update()
+        elif parsed_path == "/v1/email/credential":
+            self._email_credential_set()
+        elif parsed_path == "/v1/email/send":
+            self._email_send_request()
         elif parsed_path == "/v1/notifications/seen":
             self._notifications_mark_seen()
         elif parsed_path == "/v1/workspaces/projects":
@@ -1502,6 +1512,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._memory_atom_delete(urllib.parse.unquote(parsed_path.split("/v1/memory/atoms/", 1)[1]))
         elif parsed_path.startswith("/v1/alerts/"):
             self._alerts_delete(urllib.parse.unquote(parsed_path.split("/v1/alerts/", 1)[1]))
+        elif re.fullmatch(r"/v1/email/messages/[^/]+", parsed_path):
+            self._email_message_delete(urllib.parse.unquote(parsed_path.rsplit("/", 1)[1]))
         elif parsed_path.startswith("/v1/skills/"):
             self._skills_delete(urllib.parse.unquote(parsed_path.split("/v1/skills/", 1)[1]))
         elif parsed_path.startswith("/v1/cron/"):
@@ -4223,6 +4235,116 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(502, {"error": {"message": "signal-cli could not deliver the message"}})
             return
         self._json_response(200, {"status": "sent"})
+
+    # ── Email ──────────────────────────────────────────────────────────
+    def _email_body(self):
+        """Read a bounded JSON object body for an email request."""
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return None, "Invalid Content-Length"
+        if content_length <= 0:
+            return None, "Empty request body"
+        if content_length > 512 * 1024:
+            return None, "Email request body exceeds the limit"
+        data, error = self._read_json_body()
+        if error:
+            return None, error
+        if not isinstance(data, dict):
+            return None, "Email request body must be an object"
+        return data, ""
+
+    def _email_accounts_get(self):
+        from bridge import email_service
+        self._json_response(200, {
+            "accounts": email_service.public_accounts(),
+            "allowlist": email_service.load_config().get("allowlist", []),
+        })
+
+    def _email_accounts_update(self):
+        from bridge import email_service
+        data, error = self._email_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        document, errors = email_service.replace_accounts(data.get("accounts"), data.get("allowlist"))
+        self._json_response(200, {
+            "accounts": email_service.public_accounts(document),
+            "allowlist": document.get("allowlist", []),
+            "errors": errors,
+        })
+
+    def _email_credential_set(self):
+        """Accept a mailbox secret held only in bridge memory."""
+        from bridge import email_service
+        data, error = self._email_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            email_service.set_credential(data.get("account_id"), data.get("credential"))
+        except email_service.EmailServiceError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        self._json_response(200, {"status": "stored"})
+
+    def _email_messages_list(self):
+        from bridge import email_service
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        try:
+            limit = int((query.get("limit") or ["10"])[0])
+        except ValueError:
+            limit = 10
+        try:
+            messages = email_service.fetch_messages(
+                (query.get("account_id") or [""])[0],
+                folder=(query.get("folder") or ["INBOX"])[0],
+                limit=limit,
+                unseen_only=(query.get("unseen") or [""])[0] == "1",
+            )
+        except email_service.EmailServiceError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        self._json_response(200, {"messages": messages})
+
+    def _email_send_request(self):
+        """Authorize and deliver one message. Delivery requires a capability token."""
+        from bridge import email_service
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "Email sending is restricted to loopback bind"}})
+            return
+        if not self._require_bridge_capability():
+            return
+        data, error = self._email_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            result = email_service.send_message(
+                data.get("message"),
+                account_id=str(data.get("account_id") or ""),
+                from_address=str(data.get("from") or ""),
+                confirmation=data.get("confirmation"),
+            )
+        except email_service.EmailServiceError as exc:
+            self._json_response(502, {"error": {"message": str(exc)}})
+            return
+        status = 200 if result.get("decision") in ("sent", "needs_confirmation") else 400
+        self._json_response(status, result)
+
+    def _email_message_delete(self, account_id):
+        from bridge import email_service
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        try:
+            email_service.delete_message(
+                account_id,
+                (query.get("folder") or ["INBOX"])[0],
+                (query.get("message_id") or [""])[0],
+            )
+        except email_service.EmailServiceError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        self._json_response(200, {"status": "deleted"})
 
     def _mcp_status(self):
         """Return current MCP server configuration status."""

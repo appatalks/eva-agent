@@ -45,6 +45,14 @@ EVA_OFFICIAL_MCP_TYPESCRIPT_ROOT=/tmp/eva-mcp-typescript-v2 \
 python3 tools/tests/test_openai_aig.py
 python3 tools/tests/test_pr_diff_secret_scan.py
 python3 tools/tests/test_acp_sessions.py
+python3 tools/tests/test_acp_mail_consent.py
+python3 tools/tests/test_email_policy.py
+python3 tools/tests/test_email_accounts.py
+python3 tools/tests/test_email_service.py
+python3 tools/tests/test_email_routes.py
+python3 tools/tests/test_mailbox_imap.py
+python3 tools/tests/test_oauth_client.py
+python3 tools/tests/test_remote_mcp.py
 node tools/tests/test_cognition_provider.js
 node tools/tests/test_provider_token_budget.js
 node tools/tests/test_harness_control.js
