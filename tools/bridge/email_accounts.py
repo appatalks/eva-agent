@@ -207,6 +207,7 @@ def normalize_account(raw):
             "internal_domains": internal_domains,
             "internal_smtp_host": _normalize_host(settings.get("internal_smtp_host")),
             "internal_smtp_port": _normalize_port(settings.get("internal_smtp_port"), 25),
+            "internal_smtp_starttls": bool(settings.get("internal_smtp_starttls", True)),
             "relay_account_id": _clean(settings.get("relay_account_id"), 64),
         }
         if mode in ("internal", "auto") and internal_domains and not account["settings"]["internal_smtp_host"]:
@@ -369,6 +370,7 @@ def plan_direct_delivery(account, recipients, accounts=None):
             "recipients": internal,
             "smtp_host": host,
             "smtp_port": settings.get("internal_smtp_port") or 25,
+            "smtp_starttls": bool(settings.get("internal_smtp_starttls", True)),
         })
 
     if external:

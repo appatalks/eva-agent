@@ -7,7 +7,10 @@ user's existing account.
 Transport rules:
 
 - IMAP always uses implicit TLS. SMTP uses STARTTLS on the submission port or
-  implicit TLS on 465; an unencrypted session is never attempted.
+  implicit TLS on 465. Plaintext submission requires an explicit
+  `smtp_allow_plaintext` setting, which exists only so Eva can hand mail to an
+  internal MTA on a trusted network; it is never the default and never applies
+  to an authenticated account.
 - Certificates are verified against the system trust store. There is no option
   to disable verification, because a mail password would be the thing exposed.
 - Fetches are bounded by message count and per-message body size, so a large
@@ -245,10 +248,13 @@ class ImapSmtpMailbox:
         try:
             client.ehlo()
             if port != IMPLICIT_TLS_SMTP_PORT:
-                if not self.settings.get("smtp_starttls", True):
+                if self.settings.get("smtp_starttls", True):
+                    client.starttls(context=context)
+                    client.ehlo()
+                elif not self.settings.get("smtp_allow_plaintext"):
                     raise MailboxError("SMTP requires STARTTLS on this port")
-                client.starttls(context=context)
-                client.ehlo()
+                elif password:
+                    raise MailboxError("Credentials are never sent over an unencrypted SMTP session")
             if password:
                 client.login(self.address, password)
             client.send_message(message, from_addr=sender, to_addrs=envelope_recipients)
