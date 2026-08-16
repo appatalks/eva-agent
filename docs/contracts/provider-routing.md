@@ -1,5 +1,8 @@
 # Provider Routing Contract
 
+Status: living contract. Last reviewed 2026-08-15 against `index.html` in Eva
+5.6.2.
+
 This contract documents the current model-selection behavior. It exists so
 model additions and routing refactors preserve saved selections and provider
 request behavior. The executable companion is `tools/tests/test_model_catalog.js`.
@@ -19,13 +22,23 @@ or remove a value without an explicit migration for existing local settings.
 | Local inference | `lm-studio` | `lmsSend()` |
 | Image generation | `dall-e-3` | `dalle3Send()` |
 
+The currently displayed GitHub Models values are `copilot-gpt-4o`,
+`copilot-gpt-4o-mini`, `copilot-o3-mini`, `copilot-gpt-5.6-sol`,
+`copilot-gpt-5.6-terra`, `copilot-gpt-5.6-luna`, `copilot-gpt-5`,
+`copilot-o4-mini`, `copilot-deepseek-r1`, and `copilot-llama-4-maverick`.
+
+`dall-e-3` is a persisted value with a current label of `Image (gpt-image-1)`.
+The label may change with the backing image model; the value must not.
+
 `core/js/model-routing.js` classifies browser selector values once, and both
 `updateButton()` and `sendData()` in `core/js/options.js` consume that result.
 A selector value must never reach the Invalid Model branch in normal use.
 
-`gpt-5-mini` remains accepted as a legacy persisted direct-OpenAI value even
-though it is not currently displayed in `#selModel`. Do not remove its route
-without an explicit saved-setting migration.
+`gpt-5-mini` is not displayed in `#selModel` but is not dead. It remains an
+accepted legacy persisted direct-OpenAI value, a direct GitHub Models mapping,
+a token-budget entry, and a live AIG backend (`openai:gpt-5-mini`) used for
+terminal planning. Do not remove its route without an explicit saved-setting
+migration.
 
 `core/js/settings/model-settings.js` owns model parameter controls, AIG model
 metadata, reasoning and temperature visibility, and theme-specific selector

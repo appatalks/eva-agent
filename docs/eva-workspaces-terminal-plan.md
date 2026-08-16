@@ -1,8 +1,20 @@
 # Eva Workspaces and Terminal Plan
 
-Status: active implementation plan. Phases 0-2 and the first workspace-agent,
-monitor, Assets, and Skills integration slices are implemented behind the
-Standalone workspace feature path.
+Status: active plan and implementation record. Last reviewed 2026-08-15 against
+Eva 5.6.2.
+
+| Phase | State | Evidence |
+| --- | --- | --- |
+| 0. Contracts and safety spike | Delivered | `--eva-workspace-terminal-v1` flag, `tools/bridge/workspaces.py` schema, `node tools/tests/test_workspace_projection.js` |
+| 1. Projects, worktrees, durable runs | Delivered | `projects`, `checkouts`, `coding_runs`, `agent_runs`, `terminal_sessions`, `run_attachments`, `approvals` tables; `python3 tools/tests/test_workspaces.py`, `test_workspaces_e2e.py` |
+| 2. Production terminal | Delivered | `standalone/terminal-broker.js`, `terminal-*` IPC channels, `node tools/tests/test_terminal_broker.js`, `test_terminal_e2e.js` |
+| 3. Coding agents and child runs | Delivered | Workspace agent dispatch, per-agent ACP conversation keys, auto-approval policy, isolated MCP credentials; `node tools/tests/test_workspaces_api.js`, `test_agents_api.js` |
+| 4. Review, evidence, and handoff | Partial | Native GitHub pull-request view/merge and merged-branch deletion, workspace GitHub delivery verification, live chat drawer, remediation context. A durable diff/review screen with changed-file navigation and patch export is not built |
+| 5. Eva Field and polish | Planned | No implementation |
+
+The first release target remains Eva Standalone. Phases marked Delivered are the
+implementation record; keep them and update their evidence rather than deleting
+the phase.
 
 ## Product decision
 
@@ -41,9 +53,16 @@ The plan builds on existing, useful pieces rather than starting over:
 - Eva already has browser-agent status and artifact handling that can become
   run attachments.
 
-The bridge now persists projects, checkouts, coding runs, and agent runs and
-links them to existing chat sessions. Durable terminal metadata, typed evidence,
-approval/audit UX, review, and multi-agent handoff remain later slices.
+The bridge persists projects, checkouts, coding runs, agent runs, terminal
+sessions, run attachments, and approvals in a bridge-owned SQLite database under
+`EVA_CONFIG_DIR`, and links them to existing chat sessions. Schema changes go
+through the numbered migration list in `tools/bridge/workspaces.py`; do not edit
+an applied migration in place.
+
+Eva also performs GitHub repository import, authenticated pull-request
+inspection, merge, and merged-branch deletion through Electron main-process IPC
+rather than a shell string. Typed review evidence, a durable diff screen, and
+multi-agent handoff remain later slices.
 
 ## Goals
 
@@ -238,13 +257,13 @@ an overlay.
 | --- | --- | --- |
 | New Chat / Eva | Main conversation or voice view | Keep as main views. |
 | Agents | Main Agent Operations view | Implemented; converge its records with `AgentRun`. |
-| Sessions | Main session explorer with chat preview and active-run links | Migrate from the legacy drawer next; keep direct session restoration working during transition. |
+| Sessions | Main session explorer with chat preview and active-run links | Not migrated. The drawer now has Chats and Active tabs (`#sessionPanel`, `toggleSessionPanel()`); direct session restoration must keep working during any move. |
 | Prompts / Models / Settings | Central settings workspace | Keep; these already navigate to a full settings surface. |
 | Skills | Main searchable skills library/editor with status/source filters and sorting | Implemented. |
 | Assets | Main unified library for generated artifacts and changed workspace files | Implemented; workspace paths remain opaque and open through Electron main. |
 | Workspaces | Main Workspace Monitor | Implemented. |
 | Terminal | Lower contextual dock while monitoring a workspace; resizable side surface elsewhere | Implemented. |
-| Profile | Settings/identity overlay | Move into Settings rather than creating another main domain. |
+| Profile | Settings/identity overlay | Not migrated; `#profilePanel` is still its own surface. |
 
 The next navigation slice should migrate Sessions. Do not build a
 generic tab canvas first; preserve each domain's existing data and actions while
@@ -275,10 +294,11 @@ copyable text, predictable focus, selection, and performance win every tie.
 
 ## Delivery sequence
 
-### Phase 0: contracts and safety spike
+### Phase 0: contracts and safety spike — Delivered
 
 Define JSON schemas and storage migrations for the records above. Add a
-feature flag, `eva_workspace_terminal_v1`, disabled by default. Validate
+feature flag, `--eva-workspace-terminal-v1` (or `EVA_WORKSPACE_TERMINAL_V1=1`),
+disabled by default. Validate
 `node-pty` prebuild/rebuild behavior in the current Electron/AppImage pipeline
 on supported operating systems. Prototype xterm mounting, PTY resize, close,
 and renderer reconnect with no agent integration. In parallel, implement a
@@ -286,11 +306,15 @@ read-only run-monitor stream and persisted monitor-tab layout fixture. A monitor
 may render agent status, events, selected attachments, and bounded output, but
 cannot create, resize, write to, kill, or revive a PTY.
 
+The installers now pass the flag from the generated launcher, so packaged
+installs run with the workspace path enabled while direct `electron .` runs do
+not.
+
 Exit criteria: a standalone-only test view can launch `/bin/sh` or the platform
 default shell in a fixed approved directory, stream ANSI output, resize, kill
 the process group, and never expose unrestricted spawn through preload.
 
-### Phase 1: projects, worktrees, and durable runs
+### Phase 1: projects, worktrees, and durable runs — Delivered
 
 Implement the workspace SQLite schema and migrations, project picker,
 canonical path checks, Git inspection, worktree creation, status/diff, and
@@ -302,12 +326,16 @@ Exit criteria: two runs from one repository can have independent branches and
 worktrees; closing/reopening Eva restores both records; cleanup cannot remove a
 dirty checkout without confirmation.
 
-### Phase 2: production terminal
+### Phase 2: production terminal — Delivered
 
 Ship the full Electron PTY broker, preload contract, xterm renderer, tab/dock
 UI, scrollback checkpointing, reconnect, command/search/copy controls, and
 focus shortcuts. Retire `_buildSimpleTerminal()` only behind the feature flag;
 retain a clear bridge-status fallback for static usage.
+
+`_buildSimpleTerminal()` still lives in `core/js/features/sessions/explorer.js`
+and remains the non-Electron fallback. Do not delete it while the static browser
+build is supported.
 
 Exit criteria: real interactive programs work, terminal state is correctly
 attached to a checkout, exit and cancellation propagate reliably, and no
@@ -341,7 +369,7 @@ Automated coverage must prove that:
 - An interactive terminal tab can be opened only through an explicit user
   action and receives its own permission and lifecycle checks.
 
-### Phase 3: coding agents and child runs
+### Phase 3: coding agents and child runs — Delivered
 
 Create `CodingRun` and `AgentRun` orchestration. Migrate existing subagent
 status/steering APIs through a compatibility adapter. Give agents isolated
@@ -354,7 +382,7 @@ Exit criteria: a parent can spawn two sibling agents against one project,
 navigate from each result to its worktree/session/terminal/audit, and obtain a
 reviewable diff without either agent modifying the parent's checkout.
 
-### Phase 4: review, browser evidence, and handoff
+### Phase 4: review, browser evidence, and handoff — Partial
 
 Add a durable diff/review screen, changed-file navigation, test evidence,
 artifact links, browser-run attachment, commit proposal, patch export, and
@@ -365,7 +393,7 @@ Exit criteria: a completed child run can be reviewed, committed, exported as a
 patch, merged after confirmation, or discarded; every outcome remains visible
 in the run history.
 
-### Phase 5: Eva Field and polish
+### Phase 5: Eva Field and polish — Planned
 
 Add the optional ASCII Field, interaction persistence, reduced-motion mode,
 theme integration, and the five-click visual easter egg. Perform desktop and
@@ -396,35 +424,35 @@ Add focused coverage as each phase lands:
   labels, color contrast, reduced motion, terminal selection, and hidden-tab
   CPU use.
 
-## First implementation slice
+## First implementation slice (historical)
 
-The smallest valuable next change is Phase 0 plus the data contract: add the
-feature flag, record schema/migration, a canonical project registration API,
-and a standalone Electron PTY proof of concept mounted in an isolated internal
-view. It deliberately excludes worktree mutation and agent command execution.
+The original first slice was Phase 0 plus the data contract: the feature flag,
+record schema and migrations, a canonical project registration API, and a
+Standalone Electron PTY proof of concept in an isolated internal view. It
+deliberately excluded worktree mutation and agent command execution.
 
-That slice answers the highest-risk question cheaply: whether Eva's current
-packaged Electron distribution can carry a secure, reliable PTY and xterm
-surface across its target platforms. Once it passes, Phase 1 can build project
-and worktree lifecycle on a stable boundary instead of embedding terminal
-logic in chat or ACP code.
+It answered the highest-risk question cheaply: whether Eva's packaged Electron
+distribution could carry a secure, reliable PTY and xterm surface. It passed on
+Linux, and Phases 1-3 built on that boundary.
 
-## Decisions to confirm before Phase 1
+## Resolved decisions
 
-- Whether managed worktrees should live in the project Git directory via
-  `git worktree add`, a user-selected location, or an Eva runtime root. The
-  recommended default is Git-managed worktrees with an Eva registry and an
-  optional custom location.
-- Which project roots are eligible: all local Git repositories by default is
-  recommended; home-directory-wide access is not.
-- Whether package installs may be approved once per run or must be approved
-  per command. The recommended default is once per run with a visible expiry.
-- The first supported operating systems for native PTY packaging. Linux is the
-  current proving ground; release-quality macOS and Windows support requires
-  their own native-module CI builds.
+| Question | Decision | Where it lives |
+| --- | --- | --- |
+| Managed worktree location | Git-managed worktrees under an Eva runtime root, `EVA_CONFIG_DIR/worktrees/<project>/<run>`, created with mode `0700` and never inside the source working tree | `WorkspaceStore.runtime_root` in `tools/bridge/workspaces.py` |
+| Eligible project roots | Explicitly selected or GitHub-imported local Git repositories, canonicalized and confinement-checked; no home-directory-wide access | `workspace-select-project`, `workspace-import-github` |
+| Project removal | Removing a project deletes Eva's managed run worktrees and record, and preserves the source repository | `delete_project()` |
+| First supported OS for native PTY packaging | Linux is the proving ground; macOS and Windows need their own native-module CI builds | `standalone/terminal-broker.js`, release workflow |
+
+## Open decisions
+
+- Whether package installs may be approved once per run with a visible expiry
+  or must be approved per command.
 - The exact name and visual character of the ASCII Field. Its behavior and
   safety boundary are fixed above; the artistic treatment can evolve without
   changing the execution model.
+- Whether the Sessions drawer becomes a main view before or after the durable
+  diff/review screen.
 
 ## Traycer Review: Adaptation Candidates
 

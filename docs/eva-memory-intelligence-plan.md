@@ -1,6 +1,20 @@
 # Eva Memory and Intelligence Improvement Plan
 
-Status: SQLite-first execution plan and implementation record.
+Status: SQLite-first execution plan and implementation record. Last reviewed
+2026-08-15 against Eva 5.6.2.
+
+| Phase | State | Evidence |
+| --- | --- | --- |
+| 0. Baseline and contracts | Delivered | `python3 tools/tests/test_memory_recall.py`, `test_learning.py`, `node tools/tests/test_provider_paths.js` |
+| 1. Memory trust boundary and Core Identity | Delivered | `CoreIdentity`, `IdentityClaims`, and untrusted-data framing in `tools/bridge/memory_model.py` |
+| 2. Correct learning lifecycle | Delivered | Fixed guidance strings derived from retained signals; deletion and consent revocation remove effects |
+| 3. Provider lifecycle normalization | Partial | Gemini parity, bridge-owned ACP reflection, and session-ID propagation shipped. Turn-ID deduplication landed for direct providers; stream-failure simulations for every adapter are still missing |
+| 4. Atoms, scenarios, and persona traits | Delivered | `MemoryAtoms`, `MemoryScenarios`, `ScenarioMembers`, `UserPersonaTraits`, `MemoryEvidence`, and `core/js/memory-inspector.js` |
+| 5. Reviewed skills and bounded intelligence loops | Partial | Draft-by-default skills, `LearningCandidates`/`LearningEvaluationPlans`, and bounded abilities in `tools/skills/`. Automatic demotion of poor-performing skill versions is not implemented |
+| 6. Evaluation, observability, and rollout | Partial | `tools/eval/run.py` with recorded fixtures exists. A full identity/prompt-injection/provider-parity corpus and feature-flagged rollout are not built |
+
+Keep delivered phases in place; they are the implementation record. Update the
+Evidence column rather than deleting a phase.
 
 ## Execution Status
 
@@ -215,7 +229,7 @@ telemetry limited to counts and IDs, never memory content.
 
 ## Implementation Phases
 
-### Phase 0: Baseline and Contracts
+### Phase 0: Baseline and Contracts — Delivered
 
 Create an architecture test matrix before behavior changes.
 
@@ -233,7 +247,7 @@ Exit criteria:
   duplication defects.
 - Existing memory, learning, and provider tests remain green.
 
-### Phase 1: Memory Trust Boundary and Core Identity
+### Phase 1: Memory Trust Boundary and Core Identity — Delivered
 
 Deliver the security foundation first.
 
@@ -265,7 +279,7 @@ Implemented initial slice:
 - User profiles and recalled durable facts are framed as untrusted memory data
   with action-marker neutralization in both SQLite and Kusto builders.
 
-### Phase 2: Correct Learning Lifecycle
+### Phase 2: Correct Learning Lifecycle — Delivered
 
 Make feedback meaningful and reversible.
 
@@ -303,7 +317,7 @@ Implemented initial slice:
 - Released protected values and active-skill workflow text are marker-neutralized;
   skills are explicitly reference data rather than a source of policy authority.
 
-### Phase 3: Provider Lifecycle Normalization
+### Phase 3: Provider Lifecycle Normalization — Partial
 
 Establish a single provider-neutral adapter contract.
 
@@ -338,11 +352,13 @@ Implemented initial slice:
 
 Remaining work:
 
-- Add response/turn IDs so retrying a transport request cannot duplicate a
-  completed reflection.
 - Add provider simulations for stream failures and every direct adapter.
 
-### Phase 4: Atoms, Scenarios, and Persona Traits
+Resolved since the initial slice: direct-provider reflection accepts an opaque
+turn ID, and SQLite persists a completed turn once even when the reflection
+request is retried.
+
+### Phase 4: Atoms, Scenarios, and Persona Traits — Delivered
 
 Add layered memory while retaining compatibility.
 
@@ -364,7 +380,20 @@ Exit criteria:
 - Every prompt-injected persona trait can be traced to one or more source IDs.
 - Users can inspect, correct, and remove active traits.
 
-### Phase 5: Reviewed Skills and Bounded Intelligence Loops
+Implemented:
+
+- `MemoryAtoms`, `MemoryScenarios`, `ScenarioMembers`, `MemoryEvidence`, and
+  `UserPersonaTraits` exist in SQLite with matching Kusto seed tables.
+- Legacy `Knowledge` migrates once into attributed, `unconfirmed` atoms;
+  originals are preserved and old `Eva` claims are not promoted.
+- The Memory Inspector (`core/js/memory-inspector.js`) traces a trait or
+  scenario to its source atoms and supports review, correction, supersession,
+  and deletion. Correcting or deleting a source atom disables the derived trait
+  before the next prompt.
+- A maintainer reset clears ordinary user memory while retaining `CoreIdentity`,
+  policy, skills, and workspace data.
+
+### Phase 5: Reviewed Skills and Bounded Intelligence Loops — Partial
 
 Improve operational intelligence without allowing uncontrolled self-modification.
 
@@ -385,7 +414,24 @@ Exit criteria:
 - Evaluation demonstrates better task continuity without increased unsafe
   action attempts.
 
-### Phase 6: Evaluation, Observability, and Rollout
+Implemented:
+
+- Every creation path produces a `draft`; extraction alone never counts as a
+  successful evaluation or activates a skill.
+- `LearningCandidates`, `LearningCandidateEvidence`, and
+  `LearningEvaluationPlans` record structured outcomes for later evaluation.
+- Bounded abilities live in `tools/skills/` under path confinement with HTTP
+  receipts; contract: `python3 tools/tests/test_skills_document_ops.py`.
+- Default Skills are generated from `docs/eva_default_skills/manifest.json`;
+  verify the Kusto projection with `python3 tools/generate_skill_seed.py --check`.
+
+Remaining work:
+
+- Automatic demotion or disabling of poor-performing skill versions.
+- Retrieval ranking that consistently favors active scenarios and approved
+  traits over generic global facts.
+
+### Phase 6: Evaluation, Observability, and Rollout — Partial
 
 Measure the intended improvement before enabling it broadly.
 
@@ -407,23 +453,22 @@ Exit criteria:
 - The new path meets a documented context budget and can be rolled back by
   feature flag.
 
-## Recommended Initial Implementation Slice
+## Initial Implementation Slice (historical)
 
-Start with Phase 0 plus the narrowest Phase 1 changes:
+The first slice was Phase 0 plus the narrowest Phase 1 changes:
 
-1. Add hostile durable-memory tests for SQLite and Kusto.
-2. Add a central `memory_prompt_data_block()` helper that quotes/neutralizes
-   memory values and labels them as non-authoritative data.
-3. Change `[User Profile]`, core facts, relevant facts, and active skill
-   injection to use that helper.
-4. Add a static, versioned Core Identity Charter containing Eva's approved
-   purpose and Data-inspired aspiration.
-5. Prevent automatic fact extraction from promoting claims about Eva into core
+1. Hostile durable-memory tests for SQLite and Kusto.
+2. A central `memory_prompt_data_block()` helper that quotes/neutralizes memory
+   values and labels them as non-authoritative data.
+3. `[User Profile]`, core facts, relevant facts, and active skill injection
+   routed through that helper.
+4. A static, versioned Core Identity Charter containing Eva's approved purpose
+   and Data-inspired aspiration.
+5. A block on automatic fact extraction promoting claims about Eva into core
    identity.
-6. Run the focused test suite, then add provider-specific regression tests.
 
-This produces a genuine improvement immediately: Eva gains a stable origin and
-personality foundation while untrusted remembered text loses the ability to
+It delivered the intended improvement immediately: Eva gained a stable origin
+and personality foundation while untrusted remembered text lost the ability to
 override it.
 
 ## Non-Goals

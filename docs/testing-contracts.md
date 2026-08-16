@@ -1,5 +1,7 @@
 # Testing Contracts
 
+Status: living contract. Last reviewed 2026-08-15 against `.github/workflows/eva-ci.yml`.
+
 Eva uses focused contracts to preserve behavior while modules move into clearer
 ownership boundaries. A test should protect a user-visible, security-sensitive,
 or compatibility-sensitive outcome rather than merely reward a function living
@@ -23,7 +25,55 @@ workspace confinement, or bundled resources.
 Bounded skills use `python3 tools/tests/test_skills_document_ops.py` for local
 fixture creation, read, validation, malformed-input, confinement, dependency,
 receipt, and MCP scaffold contracts. These tests use temporary directories and
-mocked imports only; they never install packages or access the network.
+mocked imports only; they never install packages or access the network. Run
+them with the managed bridge interpreter at
+`~/.local/share/eva/runtime/.venv/bin/python` so the document dependencies
+resolve without touching the system Python.
+
+## The Curated CI Set
+
+CI runs an explicit list, not test discovery. `tools/tests/` intentionally holds
+more contracts than CI executes; the rest are focused checks you run locally for
+the area you changed. The `eva-ci.yml` unit-test job currently runs:
+
+```text
+python3 tools/tests/test_static.py
+python3 tools/tests/test_local_mcp_modern.py
+python3 tools/tests/test_mcp_official_python.py
+EVA_OFFICIAL_MCP_TYPESCRIPT_ROOT=/tmp/eva-mcp-typescript-v2 \
+  python3 tools/tests/test_mcp_official_typescript.py
+python3 tools/tests/test_openai_aig.py
+python3 tools/tests/test_pr_diff_secret_scan.py
+node tools/tests/test_cognition_provider.js
+node tools/tests/test_provider_token_budget.js
+node tools/tests/test_harness_control.js
+node tools/tests/test_skills_voice_management.js
+python3 tools/tests/test_skills_sqlite_latest.py
+```
+
+Earlier jobs in the same workflow additionally scan for hardcoded secrets,
+validate HTML structure, syntax-check every JavaScript and Python file, verify
+model-selector consistency, assert the config templates contain no real values,
+and verify gitignore coverage.
+
+Add a test to this list only when it is fast, hermetic, and network-free. Update
+this section in the same change that edits the workflow.
+
+## Local-Only Validation
+
+Some checks are deliberately excluded from CI because they need hardware, a
+live provider, a packaged build, or a maintainer decision:
+
+| Location | Purpose | Committed |
+| --- | --- | --- |
+| `tools/local-tests/` | Memory-intelligence and Kusto end-to-end checks kept out of CI at the maintainer's request | Yes |
+| `tools/tests/local/` | Ad hoc regression scripts for the current investigation | No, ignored |
+| `tools/tests/test_workspace_electron_e2e.js`, `test_terminal_e2e.js` | Packaged Electron and PTY lifecycle | Yes, run manually |
+| `tools/tests/test_protected_memory.py` | Vault behavior; hardware provider paths need an enrolled key | Yes, run manually |
+| `tools/eval/run.py` | Offline response evaluation against recorded fixtures | Yes, run manually |
+
+Promote a local regression into the committed suite only when the user asks for
+a CI contract. Never make the application package test files.
 
 ## Static Tests Are Intentional In These Cases
 
@@ -54,8 +104,8 @@ For example:
   integration coverage.
 
 Do not delete a static check until its replacement has been run successfully in
-the same change. Record the old invariant and replacement validation in issue
-#158 when the change is part of the modularization sprint.
+the same change. Record the old invariant and its replacement validation in the
+change description or the tracking issue for the effort.
 
 ## Refactor Completion
 
@@ -66,5 +116,4 @@ Before calling a refactor slice complete:
 3. Run the static suite and any required integration or packaged test.
 4. Perform a rubber-duck review of load order, public globals, stored values,
    request paths, permission checks, and error behavior.
-5. Add a progress comment to issue #158 with commands, results, and residual
-   risk.
+5. Record commands, results, and residual risk where the work is reviewable.
