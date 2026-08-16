@@ -215,6 +215,9 @@ def normalize_account(raw):
             "internal_smtp_starttls": bool(settings.get("internal_smtp_starttls", True)),
             "relay_account_id": _clean(settings.get("relay_account_id"), 64),
         }
+        account["allowlist"] = sorted(
+            set(account["allowlist"]) | set(account["settings"]["direct_consent"])
+        )[:email_policy.MAX_ALLOWLIST_ENTRIES]
         if mode in ("internal", "auto") and internal_domains and not account["settings"]["internal_smtp_host"]:
             return None, "internal delivery requires an internal SMTP host"
         if mode == "relay" and not account["settings"]["relay_account_id"]:
@@ -232,7 +235,10 @@ def normalize_accounts(raw_accounts):
     errors = []
     seen_ids = set()
     seen_addresses = set()
-    for index, raw in enumerate(list(raw_accounts or [])[:MAX_ACCOUNTS]):
+    source = list(raw_accounts or [])
+    if len(source) > MAX_ACCOUNTS:
+        errors.append(f"no more than {MAX_ACCOUNTS} accounts are allowed")
+    for index, raw in enumerate(source[:MAX_ACCOUNTS]):
         account, error = normalize_account(raw)
         if error:
             errors.append(f"account {index}: {error}")

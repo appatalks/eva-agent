@@ -1454,6 +1454,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._signal_send_request()
         elif parsed_path == "/v1/email/accounts":
             self._email_accounts_update()
+        elif parsed_path == "/v1/email/account":
+            self._email_account_upsert()
+        elif parsed_path == "/v1/email/allowlist":
+            self._email_allowlist_update()
         elif parsed_path == "/v1/email/credential":
             self._email_credential_set()
         elif parsed_path == "/v1/email/send":
@@ -1512,6 +1516,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._memory_atom_delete(urllib.parse.unquote(parsed_path.split("/v1/memory/atoms/", 1)[1]))
         elif parsed_path.startswith("/v1/alerts/"):
             self._alerts_delete(urllib.parse.unquote(parsed_path.split("/v1/alerts/", 1)[1]))
+        elif re.fullmatch(r"/v1/email/accounts/[^/]+", parsed_path):
+            self._email_account_delete(urllib.parse.unquote(parsed_path.rsplit("/", 1)[1]))
         elif re.fullmatch(r"/v1/email/messages/[^/]+", parsed_path):
             self._email_message_delete(urllib.parse.unquote(parsed_path.rsplit("/", 1)[1]))
         elif parsed_path.startswith("/v1/skills/"):
@@ -4267,11 +4273,62 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if error:
             self._json_response(400, {"error": {"message": error}})
             return
-        document, errors = email_service.replace_accounts(data.get("accounts"), data.get("allowlist"))
+        try:
+            document, errors = email_service.replace_accounts(data.get("accounts"), data.get("allowlist"))
+        except email_service.EmailValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except email_service.EmailPersistenceError as exc:
+            self._json_response(500, {"error": {"message": str(exc)}})
+            return
+        if errors:
+            self._json_response(400, {
+                "error": {"message": "; ".join(errors)},
+                "errors": errors,
+            })
+            return
         self._json_response(200, {
             "accounts": email_service.public_accounts(document),
             "allowlist": document.get("allowlist", []),
-            "errors": errors,
+            "errors": [],
+        })
+
+    def _email_account_upsert(self):
+        from bridge import email_service
+        data, error = self._email_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            document = email_service.upsert_account(data.get("account"))
+        except email_service.EmailValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except email_service.EmailPersistenceError as exc:
+            self._json_response(500, {"error": {"message": str(exc)}})
+            return
+        self._json_response(200, {
+            "accounts": email_service.public_accounts(document),
+            "allowlist": document.get("allowlist", []),
+        })
+
+    def _email_allowlist_update(self):
+        from bridge import email_service
+        data, error = self._email_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            document = email_service.update_allowlist(data.get("allowlist"))
+        except email_service.EmailValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except email_service.EmailPersistenceError as exc:
+            self._json_response(500, {"error": {"message": str(exc)}})
+            return
+        self._json_response(200, {
+            "accounts": email_service.public_accounts(document),
+            "allowlist": document.get("allowlist", []),
         })
 
     def _email_credential_set(self):
@@ -4283,6 +4340,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         try:
             email_service.set_credential(data.get("account_id"), data.get("credential"))
+        except email_service.EmailValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        except email_service.EmailPersistenceError as exc:
+            self._json_response(500, {"error": {"message": str(exc)}})
+            return
         except email_service.EmailServiceError as exc:
             self._json_response(400, {"error": {"message": str(exc)}})
             return
@@ -4350,6 +4413,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": {"message": str(exc)}})
             return
         self._json_response(200, {"status": "deleted"})
+
+    def _email_account_delete(self, account_id):
+        from bridge import email_service
+        try:
+            document = email_service.delete_account(account_id)
+        except email_service.EmailPersistenceError as exc:
+            self._json_response(500, {"error": {"message": str(exc)}})
+            return
+        except email_service.EmailValidationError as exc:
+            self._json_response(400, {"error": {"message": str(exc)}})
+            return
+        self._json_response(200, {
+            "accounts": email_service.public_accounts(document),
+            "allowlist": document.get("allowlist", []),
+        })
 
     def _mcp_status(self):
         """Return current MCP server configuration status."""

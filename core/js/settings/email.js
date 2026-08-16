@@ -2,7 +2,7 @@
 // recipients, and sending. Credentials are handed to the bridge and never
 // stored in localStorage or written back into the DOM.
 var EvaEmailSettings = (function() {
-  var state = { accounts: [], allowlist: [] };
+  var state = { accounts: [], allowlist: [], selectedId: '' };
 
   function el(id) { return document.getElementById(id); }
 
@@ -10,6 +10,13 @@ var EvaEmailSettings = (function() {
     var div = document.createElement('div');
     div.appendChild(document.createTextNode(value == null ? '' : String(value)));
     return div.innerHTML;
+  }
+
+  function editableAccount(account) {
+    if (!account) return false;
+    if (account.backend === 'imap_smtp') return true;
+    return account.backend === 'eva_direct'
+      && ((account.settings || {}).delivery_mode || 'internal') === 'internal';
   }
 
   function status(id, message, isError) {
@@ -34,11 +41,12 @@ var EvaEmailSettings = (function() {
   }
 
   function fillAccountPickers() {
-    [['emailSendFrom', 'send'], ['emailCredentialId', null]].forEach(function(entry) {
+    [['emailSendFrom', 'send'], ['emailCredentialId', 'credential']].forEach(function(entry) {
       var select = el(entry[0]);
       if (!select) return;
       var capability = entry[1];
       var choices = state.accounts.filter(function(account) {
+        if (capability === 'credential') return account.backend !== 'eva_direct';
         return !capability || (account.capabilities || []).indexOf(capability) >= 0;
       });
       var previous = select.value;
@@ -64,7 +72,7 @@ var EvaEmailSettings = (function() {
     state.accounts.forEach(function(account) {
       var abilities = (account.capabilities || []).join(' / ') || 'none';
       var signedIn = account.credential_present;
-      var stateText = account.status === 'connected' && !signedIn
+      var stateText = account.status === 'connected' && account.backend !== 'eva_direct' && !signedIn
         ? 'needs sign-in'
         : account.status;
       html += '<div class="background-item" style="margin-bottom:8px;padding:8px;border:1px solid rgba(127,127,127,0.2);border-radius:6px">';
@@ -76,7 +84,14 @@ var EvaEmailSettings = (function() {
       html += '<div style="font-size:11px;opacity:0.6">id: ' + escapeHtml(account.id)
         + ' · ' + escapeHtml(account.backend) + ' · ' + escapeHtml(abilities);
       if (account.morning_pull) html += ' · morning briefing';
-      html += '</div></div>';
+      html += '</div>';
+      if (editableAccount(account)) {
+        html += '<button type="button" class="auth-toggle" data-email-edit="'
+          + escapeHtml(account.id) + '" style="margin-top:6px">Edit</button>';
+      } else {
+        html += '<span style="display:block;margin-top:6px;font-size:11px;opacity:0.6">Managed by provider setup</span>';
+      }
+      html += '</div>';
     });
     list.innerHTML = html;
   }
@@ -89,7 +104,6 @@ var EvaEmailSettings = (function() {
       var allowInput = el('emailAllowlist');
       if (allowInput && !allowInput.dataset.dirty) allowInput.value = state.allowlist.join(', ');
       render();
-      status('emailAccountStatus', '');
     } catch (error) {
       status('emailAccountStatus', 'Could not read mailboxes: ' + (error && error.message), true);
     }
@@ -97,26 +111,30 @@ var EvaEmailSettings = (function() {
 
   function collectAccount() {
     var backend = (el('emailAccountBackend') || {}).value || '';
-    var account = {
-      id: (el('emailAccountId') || {}).value || '',
-      label: (el('emailAccountLabel') || {}).value || '',
-      address: (el('emailAccountAddress') || {}).value || '',
-      status: 'connected'
-    };
+    var original = state.accounts.find(function(entry) { return entry.id === state.selectedId; });
+    var account = original ? JSON.parse(JSON.stringify(original)) : { status: 'connected' };
+    delete account.credential_present;
+    account.id = (el('emailAccountId') || {}).value || '';
+    account.label = (el('emailAccountLabel') || {}).value || '';
+    account.address = (el('emailAccountAddress') || {}).value || '';
     if (backend) account.backend = backend;
 
     if (backend === 'eva_direct') {
       var domains = splitList((el('emailInternalDomains') || {}).value);
-      account.settings = {
-        delivery_mode: 'internal',
+      var directConsent = splitList((el('emailDirectConsent') || {}).value);
+      account.settings = Object.assign({}, account.settings || {}, {
+        delivery_mode: (account.settings || {}).delivery_mode || 'internal',
         internal_domains: domains,
         internal_smtp_host: (el('emailInternalHost') || {}).value || '127.0.0.1',
         internal_smtp_port: Number((el('emailInternalPort') || {}).value) || 25,
         internal_smtp_starttls: !!(el('emailInternalStarttls') || {}).checked,
-        direct_consent: splitList((el('emailDirectConsent') || {}).value)
-      };
+        direct_consent: directConsent
+      });
+      // Direct consent is stricter than ordinary recipient approval, so it also
+      // serves as this account's allowlist without affecting other mailboxes.
+      account.allowlist = directConsent;
     } else {
-      var settings = {};
+      var settings = Object.assign({}, account.settings || {});
       var imapHost = (el('emailImapHost') || {}).value;
       var smtpHost = (el('emailSmtpHost') || {}).value;
       var smtpPort = Number((el('emailSmtpPort') || {}).value);
@@ -130,17 +148,51 @@ var EvaEmailSettings = (function() {
     return account;
   }
 
-  async function saveAccounts(accounts, allowlist) {
-    var payload = { accounts: accounts };
-    if (allowlist) payload.allowlist = allowlist;
-    var data = await bridge('/v1/email/accounts', {
-      method: 'POST',
-      body: JSON.stringify(payload)
-    });
-    if (data && data.errors && data.errors.length) {
-      throw new Error(data.errors.join('; '));
+  function loadAccount(id) {
+    var account = state.accounts.find(function(entry) { return entry.id === id; });
+    if (!editableAccount(account)) {
+      status('emailAccountStatus', 'This mailbox is managed by its provider setup.', true);
+      return;
     }
-    return data;
+    state.selectedId = account.id;
+    if (el('emailAccountId')) {
+      el('emailAccountId').value = account.id;
+      el('emailAccountId').disabled = true;
+    }
+    if (el('emailAccountLabel')) el('emailAccountLabel').value = account.label || '';
+    if (el('emailAccountAddress')) el('emailAccountAddress').value = account.address || '';
+    if (el('emailAccountBackend')) el('emailAccountBackend').value = account.backend || '';
+    var settings = account.settings || {};
+    if (el('emailImapHost')) el('emailImapHost').value = settings.imap_host || '';
+    if (el('emailSmtpHost')) el('emailSmtpHost').value = settings.smtp_host || '';
+    if (el('emailSmtpPort')) el('emailSmtpPort').value = settings.smtp_port || '';
+    if (el('emailSmtpStarttls')) el('emailSmtpStarttls').checked = settings.smtp_starttls !== false;
+    if (el('emailMorningPull')) el('emailMorningPull').checked = !!account.morning_pull;
+    if (el('emailInternalHost')) el('emailInternalHost').value = settings.internal_smtp_host || '';
+    if (el('emailInternalPort')) el('emailInternalPort').value = settings.internal_smtp_port || '';
+    if (el('emailInternalStarttls')) el('emailInternalStarttls').checked = !!settings.internal_smtp_starttls;
+    if (el('emailInternalDomains')) el('emailInternalDomains').value = (settings.internal_domains || []).join(', ');
+    if (el('emailDirectConsent')) el('emailDirectConsent').value = (settings.direct_consent || []).join(', ');
+    if (el('emailCredentialId')) el('emailCredentialId').value = account.id;
+    if (el('emailSendFrom')) el('emailSendFrom').value = account.id;
+    toggleBackendFields();
+    status('emailAccountStatus', 'Editing ' + account.id + '.');
+  }
+
+  function newAccount() {
+    state.selectedId = '';
+    ['emailAccountId', 'emailAccountLabel', 'emailAccountAddress', 'emailImapHost',
+      'emailSmtpHost', 'emailSmtpPort', 'emailInternalHost', 'emailInternalPort',
+      'emailInternalDomains', 'emailDirectConsent'].forEach(function(id) {
+      if (el(id)) el(id).value = '';
+    });
+    if (el('emailAccountId')) el('emailAccountId').disabled = false;
+    if (el('emailAccountBackend')) el('emailAccountBackend').value = '';
+    if (el('emailSmtpStarttls')) el('emailSmtpStarttls').checked = true;
+    if (el('emailMorningPull')) el('emailMorningPull').checked = true;
+    if (el('emailInternalStarttls')) el('emailInternalStarttls').checked = false;
+    toggleBackendFields();
+    status('emailAccountStatus', 'Creating a new mailbox.');
   }
 
   async function saveAccount() {
@@ -159,26 +211,32 @@ var EvaEmailSettings = (function() {
         return;
       }
     }
-    var others = state.accounts.filter(function(entry) { return entry.id !== account.id; });
     try {
-      await saveAccounts(others.concat([account]));
-      status('emailAccountStatus', 'Saved ' + account.id + '.');
+      await bridge('/v1/email/account', {
+        method: 'POST',
+        body: JSON.stringify({ account: account })
+      });
+      state.selectedId = account.id;
       await refresh();
+      loadAccount(account.id);
+      status('emailAccountStatus', 'Saved ' + account.id + '.');
     } catch (error) {
       status('emailAccountStatus', 'Rejected: ' + (error && error.message), true);
     }
   }
 
   async function removeAccount() {
-    var id = (el('emailAccountId') || {}).value;
+    var id = state.selectedId || (el('emailAccountId') || {}).value;
     if (!id) {
       status('emailAccountStatus', 'Enter the account id to remove.', true);
       return;
     }
+    if (typeof confirm === 'function' && !confirm('Remove mailbox ' + id + '?')) return;
     try {
-      await saveAccounts(state.accounts.filter(function(entry) { return entry.id !== id; }));
-      status('emailAccountStatus', 'Removed ' + id + '.');
+      await bridge('/v1/email/accounts/' + encodeURIComponent(id), { method: 'DELETE' });
+      newAccount();
       await refresh();
+      status('emailAccountStatus', 'Removed ' + id + '.');
     } catch (error) {
       status('emailAccountStatus', 'Could not remove: ' + (error && error.message), true);
     }
@@ -208,10 +266,13 @@ var EvaEmailSettings = (function() {
   async function saveAllowlist() {
     var input = el('emailAllowlist');
     try {
-      await saveAccounts(state.accounts, splitList(input ? input.value : ''));
+      await bridge('/v1/email/allowlist', {
+        method: 'POST',
+        body: JSON.stringify({ allowlist: splitList(input ? input.value : '') })
+      });
       if (input) delete input.dataset.dirty;
-      status('emailAccountStatus', 'Approved recipients updated.');
       await refresh();
+      status('emailAccountStatus', 'Approved recipients updated.');
     } catch (error) {
       status('emailAccountStatus', 'Rejected: ' + (error && error.message), true);
     }
@@ -281,6 +342,7 @@ var EvaEmailSettings = (function() {
   function bind() {
     var handlers = [
       ['emailRefresh', refresh],
+      ['emailNewAccount', newAccount],
       ['emailSaveAccount', saveAccount],
       ['emailRemoveAccount', removeAccount],
       ['emailSaveCredential', saveCredential],
@@ -303,6 +365,14 @@ var EvaEmailSettings = (function() {
     if (allow && !allow.dataset.bound) {
       allow.addEventListener('input', function() { allow.dataset.dirty = '1'; });
       allow.dataset.bound = '1';
+    }
+    var list = el('emailAccountList');
+    if (list && !list.dataset.bound) {
+      list.addEventListener('click', function(event) {
+        var button = event.target.closest('[data-email-edit]');
+        if (button) loadAccount(button.getAttribute('data-email-edit'));
+      });
+      list.dataset.bound = '1';
     }
   }
 
@@ -329,6 +399,7 @@ var EvaEmailSettings = (function() {
     open: open,
     refresh: refresh,
     send: send,
-    accounts: function() { return state.accounts.slice(); }
+    accounts: function() { return state.accounts.slice(); },
+    loadAccount: loadAccount
   };
 }());

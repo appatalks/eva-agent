@@ -40,20 +40,31 @@ class EmailServiceError(Exception):
     """Raised when an email operation cannot be completed."""
 
 
+class EmailValidationError(EmailServiceError):
+    """Raised when a caller supplies invalid email configuration."""
+
+
+class EmailPersistenceError(EmailServiceError):
+    """Raised when valid email configuration cannot be persisted."""
+
+
 def _default_document():
     return {"accounts": [], "allowlist": []}
 
 
-def load_config():
-    """Return the persisted account document. Never raises."""
+def _load_raw_config():
+    """Return the persisted document without rewriting opaque provider records."""
     document = _default_document()
     try:
         if os.path.isfile(_EMAIL_CONFIG_PATH):
             with open(_EMAIL_CONFIG_PATH, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
             if isinstance(data, dict):
-                accounts, _ = email_accounts.normalize_accounts(data.get("accounts"))
-                document["accounts"] = accounts
+                document = dict(data)
+                document["accounts"] = [
+                    dict(account) for account in data.get("accounts") or []
+                    if isinstance(account, dict)
+                ]
                 document["allowlist"] = [
                     entry for entry in (
                         str(v).strip().lower() for v in data.get("allowlist") or []
@@ -62,6 +73,13 @@ def load_config():
     except (OSError, json.JSONDecodeError) as exc:
         print(f"[Email] Could not load account config: {exc}", file=sys.stderr)
     return document
+
+
+def load_config():
+    """Return the normalized runtime view. Never raises or exposes secrets."""
+    raw = _load_raw_config()
+    accounts, _ = email_accounts.normalize_accounts(raw.get("accounts"))
+    return {"accounts": accounts, "allowlist": raw.get("allowlist", [])}
 
 
 def save_config(document):
@@ -81,19 +99,109 @@ def save_config(document):
 
 def replace_accounts(raw_accounts, raw_allowlist=None):
     """Validate and persist the full account set. Returns (document, errors)."""
+    if not isinstance(raw_accounts, list):
+        raise EmailValidationError("accounts must be a list")
     accounts, errors = email_accounts.normalize_accounts(raw_accounts)
     with _config_lock:
-        document = load_config()
-        document["accounts"] = accounts
+        document = _load_raw_config()
+        if errors:
+            return document, errors
+        replacement = dict(document)
+        replacement["accounts"] = accounts
         if raw_allowlist is not None:
-            document["allowlist"] = [
+            replacement["allowlist"] = [
                 entry for entry in (
                     str(v).strip().lower() for v in raw_allowlist or []
                 ) if entry
             ][:email_policy.MAX_ALLOWLIST_ENTRIES]
-        save_config(document)
-        _forget_orphaned_credentials({a["id"] for a in accounts})
-        return document, errors
+        if not save_config(replacement):
+            raise EmailPersistenceError("Email settings could not be saved")
+        _reconcile_credentials(document.get("accounts", []), accounts)
+        return load_config(), []
+
+
+def upsert_account(raw_account):
+    """Create or replace one account without rewriting unrelated accounts."""
+    account, error = email_accounts.normalize_account(raw_account)
+    if error:
+        raise EmailValidationError(error)
+    with _config_lock:
+        document = _load_raw_config()
+        existing_accounts = list(document.get("accounts", []))
+        previous = next(
+            (existing for existing in existing_accounts if existing["id"] == account["id"]),
+            None,
+        )
+        prospective = list(existing_accounts)
+        if previous:
+            index = next(i for i, existing in enumerate(prospective) if existing["id"] == account["id"])
+            prospective[index] = account
+        else:
+            prospective.append(account)
+        _validate_account_collection(prospective)
+        replacement = dict(document)
+        replacement["accounts"] = prospective
+        if not save_config(replacement):
+            raise EmailPersistenceError("Email settings could not be saved")
+        if previous and _credential_binding(previous) != _credential_binding(account):
+            clear_credential(account["id"])
+        return load_config()
+
+
+def delete_account(account_id):
+    """Delete one account after the updated document is safely persisted."""
+    account_id = str(account_id or "").strip()
+    if not account_id:
+        raise EmailValidationError("An account id is required")
+    with _config_lock:
+        document = _load_raw_config()
+        existing = document.get("accounts", [])
+        if not any(account["id"] == account_id for account in existing):
+            raise EmailValidationError("Unknown email account")
+        replacement = dict(document)
+        replacement["accounts"] = [account for account in existing if account["id"] != account_id]
+        if not save_config(replacement):
+            raise EmailPersistenceError("Email settings could not be saved")
+        clear_credential(account_id)
+        return load_config()
+
+
+def update_allowlist(raw_allowlist):
+    """Replace approved recipients without rewriting mailbox records."""
+    if not isinstance(raw_allowlist, list):
+        raise EmailValidationError("allowlist must be a list")
+    with _config_lock:
+        document = _load_raw_config()
+        replacement = dict(document)
+        replacement["allowlist"] = [
+            entry for entry in (
+                str(value).strip().lower() for value in raw_allowlist
+            ) if entry
+        ][:email_policy.MAX_ALLOWLIST_ENTRIES]
+        if not save_config(replacement):
+            raise EmailPersistenceError("Approved recipients could not be saved")
+        return load_config()
+
+
+def _validate_account_collection(accounts):
+    """Check collection invariants without normalizing unrelated opaque records."""
+    if len(accounts) > email_accounts.MAX_ACCOUNTS:
+        raise EmailValidationError(f"no more than {email_accounts.MAX_ACCOUNTS} accounts are allowed")
+    seen_ids = set()
+    seen_addresses = set()
+    for item in accounts:
+        account_id = str(item.get("id") or "").strip()
+        if account_id:
+            if account_id in seen_ids:
+                raise EmailValidationError("duplicate account id")
+            seen_ids.add(account_id)
+        address = email_policy.normalize_address(item.get("address"))
+        backend = str(item.get("backend") or "").strip().lower()
+        if address and backend:
+            key = (backend, address)
+            if key in seen_addresses:
+                raise EmailValidationError("duplicate address for this backend")
+            seen_addresses.add(key)
 
 
 def public_accounts(document=None):
@@ -116,6 +224,14 @@ def set_credential(account_id, secret):
         raise EmailServiceError("An account id is required")
     if not isinstance(secret, str) or not secret:
         raise EmailServiceError("A non-empty credential is required")
+    account = next(
+        (item for item in load_config().get("accounts", []) if item["id"] == account_id),
+        None,
+    )
+    if not account:
+        raise EmailValidationError("Unknown email account")
+    if account.get("backend") == "eva_direct":
+        raise EmailValidationError("Eva's direct identity does not use a credential")
     with _credential_lock:
         _credentials[account_id] = secret
     audit_event("email_credential_set", correlation_id=account_id, outcome="stored")
@@ -129,10 +245,29 @@ def clear_credential(account_id):
     return existed
 
 
-def _forget_orphaned_credentials(known_ids):
+def _credential_binding(account):
+    """Return the non-secret connection identity a held credential is bound to."""
+    settings = (account or {}).get("settings") or {}
+    return (
+        (account or {}).get("backend"),
+        (account or {}).get("address"),
+        settings.get("imap_host"),
+        settings.get("imap_port"),
+        settings.get("smtp_host"),
+        settings.get("smtp_port"),
+        settings.get("auth_mechanism"),
+    )
+
+
+def _reconcile_credentials(previous_accounts, replacement_accounts):
+    previous = {account["id"]: account for account in previous_accounts}
+    replacement = {account["id"]: account for account in replacement_accounts}
     with _credential_lock:
         for account_id in list(_credentials):
-            if account_id not in known_ids:
+            if account_id not in replacement or (
+                account_id in previous
+                and _credential_binding(previous[account_id]) != _credential_binding(replacement[account_id])
+            ):
                 _credentials.pop(account_id, None)
 
 
@@ -364,7 +499,7 @@ def capability_summary():
     for account in accounts[:MAX_ACCOUNT_SUMMARY]:
         abilities = "/".join(account.get("capabilities") or []) or "none"
         state = account.get("status", "unknown")
-        if state == "connected" and not account.get("credential_present"):
+        if state == "connected" and account.get("backend") != "eva_direct" and not account.get("credential_present"):
             state = "locked (needs sign-in)"
         notes = []
         if account.get("morning_pull"):

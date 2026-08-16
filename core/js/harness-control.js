@@ -1087,7 +1087,9 @@ var EvaHarness = (function() {
         var accounts = EvaEmailSettings.accounts();
         if (!accounts.length) return result(true, 'describe_email', 'No mailbox is configured.', { accounts: 0 });
         var summary = accounts.map(function(account) {
-          var signedIn = account.credential_present ? 'signed in' : 'needs sign-in';
+          var signedIn = account.backend === 'eva_direct'
+            ? 'no sign-in required'
+            : (account.credential_present ? 'signed in' : 'needs sign-in');
           return account.label + ' <' + account.address + '> (' + account.backend + ', ' + signedIn + ')';
         }).join('; ');
         return result(true, 'describe_email', summary, { accounts: accounts.length });

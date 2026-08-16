@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Contract: email bridge endpoints and the briefing mail source.
+"""Contract: email bridge endpoints and the briefing mail source."""
 
-Route wiring and the send authorization gate are asserted at the source level,
-because exercising them needs a live HTTP handler. The briefing mail source is
-exercised directly.
-"""
-
+import json
 import os
 import sys
+import tempfile
+import threading
 import unittest
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from bridge import briefing
+from bridge import briefing, core, email_service
 
 CORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bridge", "core.py")
 
@@ -33,12 +34,28 @@ class RouteWiringTests(unittest.TestCase):
             self.assertIn(handler, self.source, handler)
 
     def test_write_routes_are_registered(self):
-        for handler in ["_email_accounts_update()", "_email_credential_set()", "_email_send_request()"]:
+        for handler in [
+            "_email_accounts_update()", "_email_account_upsert()", "_email_allowlist_update()",
+            "_email_credential_set()", "_email_send_request()",
+        ]:
             self.assertIn(handler, self.source, handler)
 
     def test_delete_route_is_registered(self):
         self.assertIn(r'/v1/email/messages/[^/]+', self.source)
         self.assertIn("_email_message_delete(", self.source)
+        self.assertIn(r'/v1/email/accounts/[^/]+', self.source)
+        self.assertIn("_email_account_delete(", self.source)
+
+    def test_focused_mutations_do_not_require_full_document_replacement(self):
+        self.assertIn('parsed_path == "/v1/email/account"', self.source)
+        self.assertIn('parsed_path == "/v1/email/allowlist"', self.source)
+        self.assertIn("email_service.upsert_account(data.get(\"account\"))", self.source)
+        self.assertIn("email_service.update_allowlist(data.get(\"allowlist\"))", self.source)
+
+    def test_validation_and_persistence_failures_have_distinct_statuses(self):
+        self.assertIn("except email_service.EmailValidationError", self.source)
+        self.assertIn("except email_service.EmailPersistenceError", self.source)
+        self.assertIn("self._json_response(500", self.source)
 
     def test_send_requires_loopback_and_capability(self):
         start = self.source.index("def _email_send_request(self):")
@@ -76,6 +93,94 @@ class RouteWiringTests(unittest.TestCase):
         block = self.source[start:end]
         self.assertIn('{"status": "stored"}', block)
         self.assertNotIn('"credential":', block.split("data.get(\"credential\")")[-1])
+
+
+class FocusedMutationHTTPTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        cls.original_path = email_service._EMAIL_CONFIG_PATH
+        cls.original_token = os.environ.get("EVA_BRIDGE_TOKEN")
+        email_service._EMAIL_CONFIG_PATH = os.path.join(cls.directory.name, "email_accounts.json")
+        email_service._credentials.clear()
+        os.environ["EVA_BRIDGE_TOKEN"] = "email-route-test-token"
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), core.BridgeHandler)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+        email_service._EMAIL_CONFIG_PATH = cls.original_path
+        email_service._credentials.clear()
+        if cls.original_token is None:
+            os.environ.pop("EVA_BRIDGE_TOKEN", None)
+        else:
+            os.environ["EVA_BRIDGE_TOKEN"] = cls.original_token
+        cls.directory.cleanup()
+
+    def call(self, method, path, body=None):
+        request = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(body).encode("utf-8") if body is not None else None,
+            method=method,
+            headers={
+                "Authorization": "Bearer email-route-test-token",
+                "Content-Type": "application/json",
+                "Origin": self.base,
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, json.loads(response.read() or b"{}")
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read() or b"{}")
+
+    def test_focused_mutations_persist_and_invalid_edit_is_atomic(self):
+        account = {
+            "id": "eva", "label": "Eva local", "backend": "eva_direct",
+            "address": "eva@lab.internal", "status": "connected",
+            "allowlist": ["@localhost.localdomain"],
+            "settings": {
+                "direct_consent": ["@localhost.localdomain"],
+                "delivery_mode": "internal",
+                "internal_domains": ["localhost.localdomain"],
+                "internal_smtp_host": "127.0.0.1",
+                "internal_smtp_port": 25,
+                "internal_smtp_starttls": False,
+            },
+        }
+        self.assertEqual(self.call("POST", "/v1/email/account", {"account": account})[0], 200)
+        self.assertEqual(self.call(
+            "POST", "/v1/email/allowlist", {"allowlist": ["approved@example.com"]}
+        )[0], 200)
+
+        status, current = self.call("GET", "/v1/email/accounts")
+        self.assertEqual(status, 200)
+        self.assertEqual(current["accounts"][0]["settings"]["direct_consent"], ["@localhost.localdomain"])
+        self.assertEqual(current["accounts"][0]["settings"]["internal_domains"], ["localhost.localdomain"])
+        self.assertEqual(current["allowlist"], ["approved@example.com"])
+
+        status, rejected = self.call("POST", "/v1/email/account", {"account": {"id": "eva"}})
+        self.assertEqual(status, 400)
+        self.assertIn("address", rejected["error"]["message"])
+        _, unchanged = self.call("GET", "/v1/email/accounts")
+        self.assertEqual(unchanged["accounts"][0]["address"], "eva@lab.internal")
+        self.assertEqual(unchanged["allowlist"], ["approved@example.com"])
+
+        status, invalid_credential = self.call(
+            "POST", "/v1/email/credential", {"account_id": "", "credential": ""}
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("required", invalid_credential["error"]["message"])
+
+        status, deleted = self.call("DELETE", "/v1/email/accounts/eva")
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted["accounts"], [])
+        self.assertEqual(deleted["allowlist"], ["approved@example.com"])
 
 
 class BriefingMailSourceTests(unittest.TestCase):

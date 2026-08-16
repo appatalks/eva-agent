@@ -40,6 +40,7 @@ check('credential account is chosen from a list, not typed',
   /<select id="emailCredentialId"/.test(html));
 check('allowlist field present', /id="emailAllowlist"/.test(html));
 check('account list region is live', /id="emailAccountList"[^>]*aria-live/.test(html));
+check('account list has a new-mailbox action', /id="emailNewAccount"/.test(html));
 
 console.log('\nmodule');
 const context = {
@@ -82,8 +83,38 @@ check('declining does not send', /decision: 'cancelled'/.test(moduleSource));
 check('partial delivery is surfaced', /partially_sent/.test(moduleSource));
 check('account pickers are populated from live accounts',
   /function fillAccountPickers\(\)/.test(moduleSource));
+check('Eva direct is excluded from the credential picker',
+  /capability === 'credential'\) return account\.backend !== 'eva_direct'/.test(moduleSource));
+check('Eva direct is not shown as needing sign-in',
+  /account\.backend !== 'eva_direct' && !signedIn/.test(moduleSource));
 check('Eva identity setup requires local domains and consent',
   /at least one local domain/.test(moduleSource) && /accepts mail from Eva/.test(moduleSource));
+check('existing mailbox rows expose an edit action',
+  /data-email-edit/.test(moduleSource));
+check('unsupported provider and relay accounts are not editable',
+  /function editableAccount\(account\)/.test(moduleSource)
+    && /account\.backend === 'imap_smtp'/.test(moduleSource)
+    && /delivery_mode/.test(moduleSource)
+    && /Managed by provider setup/.test(moduleSource));
+check('editing loads direct consent and local domains',
+  /function loadAccount\(id\)/.test(moduleSource)
+    && /settings\.direct_consent/.test(moduleSource)
+    && /settings\.internal_domains/.test(moduleSource));
+check('direct consent also becomes the account-scoped allowlist',
+  /account\.allowlist = directConsent/.test(moduleSource));
+check('editing starts from the complete persisted account record',
+  /JSON\.parse\(JSON\.stringify\(original\)\)/.test(moduleSource));
+check('editing does not force existing accounts back to connected',
+  /original \? JSON\.parse/.test(moduleSource)
+    && !/account\.status = 'connected'/.test(moduleSource));
+check('saving one mailbox uses the focused endpoint',
+  /bridge\('\/v1\/email\/account'/.test(moduleSource));
+check('saving global recipients uses the focused endpoint',
+  /bridge\('\/v1\/email\/allowlist'/.test(moduleSource));
+check('deleting one mailbox uses its focused endpoint',
+  /\/v1\/email\/accounts\/.*encodeURIComponent/.test(moduleSource));
+check('frontend does not use full-document account replacement',
+  !/bridge\('\/v1\/email\/accounts',\s*\{\s*method: 'POST'/.test(moduleSource));
 
 console.log('\npanel lifecycle');
 const optionsSource = fs.readFileSync(path.join(root, 'core/js/options.js'), 'utf8');

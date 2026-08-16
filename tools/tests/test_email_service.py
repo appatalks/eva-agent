@@ -105,9 +105,174 @@ class ConfigTests(EmailServiceTestCase):
         self.assertEqual(email_service.load_config()["accounts"], [])
 
     def test_invalid_account_is_reported_not_persisted(self):
+        email_service.replace_accounts([account(id="existing")], ["old@custom.example"])
+        email_service.set_credential("existing", "held-secret")
         _, errors = email_service.replace_accounts([account(), {"id": "broken"}], [])
         self.assertEqual(len(errors), 1)
-        self.assertEqual(len(email_service.load_config()["accounts"]), 1)
+        persisted = email_service.load_config()
+        self.assertEqual([item["id"] for item in persisted["accounts"]], ["existing"])
+        self.assertEqual(persisted["allowlist"], ["old@custom.example"])
+        self.assertIn("existing", email_service._credentials)
+
+    def test_missing_accounts_list_never_clears_existing_accounts(self):
+        email_service.replace_accounts([account(id="existing")], [])
+        with self.assertRaises(email_service.EmailServiceError):
+            email_service.replace_accounts(None, [])
+        self.assertEqual(email_service.load_config()["accounts"][0]["id"], "existing")
+
+    def test_failed_disk_write_does_not_report_or_apply_success(self):
+        email_service.replace_accounts([account(id="existing")], ["old@custom.example"])
+        email_service.set_credential("existing", "held-secret")
+        with mock.patch.object(email_service, "save_config", return_value=False):
+            with self.assertRaises(email_service.EmailServiceError):
+                email_service.replace_accounts([account(id="new")], ["new@custom.example"])
+        persisted = email_service.load_config()
+        self.assertEqual([item["id"] for item in persisted["accounts"]], ["existing"])
+        self.assertEqual(persisted["allowlist"], ["old@custom.example"])
+        self.assertIn("existing", email_service._credentials)
+
+    def test_upsert_changes_one_account_without_rewriting_others(self):
+        email_service.replace_accounts([
+            account(id="first", label="First"),
+            account(id="second", label="Second", address="second@custom.example"),
+        ], ["old@custom.example"])
+        email_service.set_credential("first", "first-secret")
+        email_service.set_credential("second", "second-secret")
+        email_service.upsert_account(account(id="first", label="Updated"))
+        persisted = email_service.load_config()
+        labels = {item["id"]: item["label"] for item in persisted["accounts"]}
+        self.assertEqual(labels, {"first": "Updated", "second": "Second"})
+        self.assertEqual(persisted["allowlist"], ["old@custom.example"])
+        self.assertEqual(set(email_service._credentials), {"first", "second"})
+
+    def test_invalid_upsert_leaves_everything_unchanged(self):
+        email_service.replace_accounts([account(id="existing")], ["old@custom.example"])
+        email_service.set_credential("existing", "held-secret")
+        with self.assertRaises(email_service.EmailValidationError):
+            email_service.upsert_account({"id": "broken"})
+        persisted = email_service.load_config()
+        self.assertEqual([item["id"] for item in persisted["accounts"]], ["existing"])
+        self.assertEqual(persisted["allowlist"], ["old@custom.example"])
+        self.assertIn("existing", email_service._credentials)
+
+    def test_recipient_update_never_rewrites_accounts_or_credentials(self):
+        email_service.replace_accounts([account(id="existing")], ["old@custom.example"])
+        email_service.set_credential("existing", "held-secret")
+        email_service.update_allowlist(["new@custom.example"])
+        persisted = email_service.load_config()
+        self.assertEqual([item["id"] for item in persisted["accounts"]], ["existing"])
+        self.assertEqual(persisted["allowlist"], ["new@custom.example"])
+        self.assertIn("existing", email_service._credentials)
+
+    def test_failed_recipient_write_preserves_previous_value(self):
+        email_service.replace_accounts([account(id="existing")], ["old@custom.example"])
+        with mock.patch.object(email_service, "save_config", return_value=False):
+            with self.assertRaises(email_service.EmailPersistenceError):
+                email_service.update_allowlist(["new@custom.example"])
+        self.assertEqual(email_service.load_config()["allowlist"], ["old@custom.example"])
+
+    def test_delete_removes_only_target_and_its_credential(self):
+        email_service.replace_accounts([
+            account(id="first"),
+            account(id="second", address="second@custom.example"),
+        ], [])
+        email_service.set_credential("first", "first-secret")
+        email_service.set_credential("second", "second-secret")
+        email_service.delete_account("first")
+        self.assertEqual([item["id"] for item in email_service.load_config()["accounts"]], ["second"])
+        self.assertNotIn("first", email_service._credentials)
+        self.assertIn("second", email_service._credentials)
+
+    def test_failed_delete_write_preserves_account_and_credential(self):
+        email_service.replace_accounts([account(id="existing")], [])
+        email_service.set_credential("existing", "held-secret")
+        with mock.patch.object(email_service, "save_config", return_value=False):
+            with self.assertRaises(email_service.EmailPersistenceError):
+                email_service.delete_account("existing")
+        self.assertEqual(email_service.load_config()["accounts"][0]["id"], "existing")
+        self.assertIn("existing", email_service._credentials)
+
+    def test_upsert_clears_credential_when_connection_identity_changes(self):
+        email_service.replace_accounts([account(id="existing")], [])
+        email_service.set_credential("existing", "held-secret")
+        changed = account(id="existing", address="other@custom.example")
+        changed["settings"] = {
+            "imap_host": "imap.other.example",
+            "smtp_host": "smtp.other.example",
+        }
+        email_service.upsert_account(changed)
+        self.assertNotIn("existing", email_service._credentials)
+
+    def test_upsert_preserves_credential_for_non_connection_edit(self):
+        email_service.replace_accounts([account(id="existing", label="Old")], [])
+        email_service.set_credential("existing", "held-secret")
+        email_service.upsert_account(account(id="existing", label="New"))
+        self.assertIn("existing", email_service._credentials)
+
+    def test_upsert_preserves_account_order(self):
+        email_service.replace_accounts([
+            account(id="first"),
+            account(id="second", address="second@custom.example"),
+        ], [])
+        email_service.upsert_account(account(id="first", label="Updated"))
+        self.assertEqual(
+            [item["id"] for item in email_service.load_config()["accounts"]],
+            ["first", "second"],
+        )
+
+    def test_upsert_rejects_duplicate_backend_and_address(self):
+        email_service.replace_accounts([
+            account(id="first"),
+            account(id="second", address="second@custom.example"),
+        ], [])
+        duplicate = account(id="second", address="me@custom.example")
+        with self.assertRaises(email_service.EmailValidationError):
+            email_service.upsert_account(duplicate)
+        self.assertEqual(
+            [item["address"] for item in email_service.load_config()["accounts"]],
+            ["me@custom.example", "second@custom.example"],
+        )
+
+    def test_upsert_rejects_more_than_the_account_limit(self):
+        accounts = [
+            account(id=f"account{i}", address=f"user{i}@custom.example")
+            for i in range(12)
+        ]
+        email_service.replace_accounts(accounts, [])
+        with self.assertRaises(email_service.EmailValidationError):
+            email_service.upsert_account(account(id="overflow", address="overflow@custom.example"))
+        self.assertEqual(len(email_service.load_config()["accounts"]), 12)
+
+    def test_upsert_preserves_opaque_provider_settings(self):
+        email_service.save_config({
+            "accounts": [
+                {
+                    "id": "provider", "backend": "workiq", "address": "user@company.example",
+                    "status": "needs_auth", "settings": {"provider_state": "preserve-me"},
+                },
+                account(id="editable"),
+            ],
+            "allowlist": [],
+        })
+        email_service.upsert_account(account(id="editable", label="Updated"))
+        with open(self.config_path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        provider = next(item for item in raw["accounts"] if item["id"] == "provider")
+        self.assertEqual(provider["settings"], {"provider_state": "preserve-me"})
+
+    def test_upsert_preserves_unknown_legacy_record(self):
+        legacy = {
+            "id": "legacy", "backend": "unsupported_provider",
+            "address": "legacy@example.com", "opaque": {"keep": True},
+        }
+        email_service.save_config({
+            "accounts": [legacy, account(id="editable")],
+            "allowlist": [],
+        })
+        email_service.upsert_account(account(id="editable", label="Updated"))
+        with open(self.config_path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        self.assertIn(legacy, raw["accounts"])
 
 
 class CredentialTests(EmailServiceTestCase):
@@ -135,6 +300,18 @@ class CredentialTests(EmailServiceTestCase):
     def test_empty_credential_is_rejected(self):
         with self.assertRaises(email_service.EmailServiceError):
             email_service.set_credential("work", "")
+
+    def test_unknown_account_credential_is_rejected(self):
+        with self.assertRaises(email_service.EmailValidationError):
+            email_service.set_credential("missing", "secret")
+
+    def test_eva_direct_does_not_accept_a_credential(self):
+        email_service.upsert_account({
+            "id": "eva", "backend": "eva_direct", "address": "eva@lab.internal",
+            "status": "connected", "settings": {"delivery_mode": "internal"},
+        })
+        with self.assertRaises(email_service.EmailValidationError):
+            email_service.set_credential("eva", "not-needed")
 
     def test_removing_an_account_forgets_its_credential(self):
         email_service.set_credential("work", "hunter2")
@@ -232,13 +409,13 @@ class EvaDirectDeliveryTests(EmailServiceTestCase):
         ], ["@lab.internal", "peer@company.example"])
         email_service.set_credential("owned", "hunter2")
 
-    def test_direct_consent_does_not_replace_the_send_allowlist(self):
+    def test_direct_consent_is_the_identity_scoped_send_allowlist(self):
         email_service.replace_accounts(email_service.load_config()["accounts"], [])
         result = email_service.send_message(
             send_request(to="box@lab.internal"), account_id="direct"
         )
-        self.assertEqual(result["decision"], "needs_confirmation")
-        self.assertEqual(FakeMailbox.instances, [])
+        self.assertEqual(result["decision"], "sent")
+        self.assertEqual(len(FakeMailbox.instances), 1)
 
     def test_internal_recipient_uses_the_internal_mta_without_credentials(self):
         result = email_service.send_message(

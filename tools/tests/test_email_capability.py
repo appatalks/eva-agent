@@ -74,6 +74,7 @@ class CapabilityAwarenessTests(unittest.TestCase):
         summary = self.service.capability_summary()
         self.assertIn("Eva's own identity", summary)
         self.assertIn("internal delivery", summary)
+        self.assertNotIn("locked (needs sign-in)", summary)
 
     def test_summary_always_states_the_recipient_constraint(self):
         self.service.replace_accounts([

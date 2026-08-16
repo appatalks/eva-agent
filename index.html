@@ -1396,6 +1396,7 @@
         <div id="emailAccountList" class="learning-signal-list" aria-live="polite">Loading…</div>
         <div class="background-actions">
           <button type="button" class="auth-toggle" id="emailRefresh">Refresh</button>
+          <button type="button" class="auth-toggle" id="emailNewAccount">New mailbox</button>
         </div>
 
         <h4 class="settings-subhead">Add or update a mailbox</h4>
@@ -1454,7 +1455,7 @@
             <label for="emailDirectConsent">Recipients who accept mail from Eva:</label>
             <input type="text" id="emailDirectConsent" placeholder="you@example.com, @lab.internal">
           </div>
-          <p class="auth-note">Both fields are required. Eva delivers only to the local domains listed, and only to recipients that appear here.</p>
+          <p class="auth-note">This list is saved on Eva's identity and also approves those recipients for that identity. Eva delivers only to the local domains listed, and only to recipients that appear here.</p>
         </div>
         <div class="background-actions">
           <button type="button" class="auth-toggle" id="emailSaveAccount">Save mailbox</button>
@@ -1478,7 +1479,7 @@
         <div id="emailCredentialStatus" class="mcp-status" aria-live="polite"></div>
 
         <h4 class="settings-subhead">Approved recipients</h4>
-        <p class="auth-note">Eva may write to these without asking. Anything else needs your confirmation for that exact message. Use <code>@domain</code> to approve a whole domain.</p>
+        <p class="auth-note">This global list applies to ordinary mailboxes. Eva's own identity uses its stricter recipient-consent list above. Anything else needs your confirmation for that exact message. Use <code>@domain</code> to approve a whole domain.</p>
         <div class="auth-field">
           <label for="emailAllowlist">Allowed:</label>
           <input type="text" id="emailAllowlist" placeholder="you@example.com, @lab.internal">
