@@ -223,6 +223,56 @@ class SendTests(unittest.TestCase):
         with self.assertRaises(mailbox_imap.MailboxError):
             box.send("password", self.normalized)
 
+    def test_partial_recipient_refusal_is_returned(self):
+        class PartiallyRefusingSMTP(FakeSMTP):
+            def send_message(self, message, from_addr=None, to_addrs=None):
+                super().send_message(message, from_addr=from_addr, to_addrs=to_addrs)
+                return {"hidden@company.example": (550, b"refused")}
+
+        with mock.patch.object(mailbox_imap.smtplib, "SMTP", PartiallyRefusingSMTP):
+            result = mailbox().send("password", self.normalized)
+        self.assertEqual(result["recipient_count"], 1)
+        self.assertEqual(result["refused_recipients"], ["hidden@company.example"])
+
+
+class UidMailboxTests(unittest.TestCase):
+    def test_recent_summaries_and_follow_up_operations_use_uids(self):
+        class FakeIMAP:
+            def __init__(self):
+                self.calls = []
+
+            def select(self, folder, readonly=False):
+                self.calls.append(("SELECT", folder, readonly))
+                return "OK", []
+
+            def uid(self, command, *args):
+                self.calls.append((command,) + args)
+                if command == "SEARCH":
+                    return "OK", [b"41 42"]
+                if command == "FETCH":
+                    return "OK", [(b"42", raw_message())]
+                if command == "STORE":
+                    return "OK", []
+                raise AssertionError(command)
+
+            def expunge(self):
+                self.calls.append(("EXPUNGE",))
+
+        connection = FakeIMAP()
+        box = mailbox()
+        with mock.patch.object(box, "_imap_connect", return_value=connection), \
+                mock.patch.object(box, "_close"):
+            summaries = box.fetch_recent("password")
+            box.fetch_message("password", "INBOX", summaries[0]["uid"])
+            box.delete_message("password", "INBOX", summaries[0]["uid"])
+        self.assertEqual(summaries[0]["uid"], "42")
+        self.assertIn(("SEARCH", None, "ALL"), connection.calls)
+        self.assertEqual([call for call in connection.calls if call[0] == "FETCH"], [
+            ("FETCH", "42", "(RFC822)"), ("FETCH", "41", "(RFC822)"),
+            ("FETCH", "42", "(RFC822)")
+        ])
+        self.assertIn(("STORE", "42", "+FLAGS", "\\Deleted"), connection.calls)
+
 
 class TlsContextTests(unittest.TestCase):
     def test_certificate_verification_is_always_enabled(self):

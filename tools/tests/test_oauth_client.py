@@ -108,6 +108,11 @@ class AuthorizationServerMetadataTests(unittest.TestCase):
         with self.assertRaises(oauth.OAuthError):
             oauth.parse_authorization_server_metadata(document, ISSUER)
 
+    def test_refuses_a_server_that_omits_pkce_metadata(self):
+        document = dict(SERVER_METADATA, code_challenge_methods_supported=[])
+        with self.assertRaises(oauth.OAuthError):
+            oauth.parse_authorization_server_metadata(document, ISSUER)
+
     def test_refuses_non_https_endpoints(self):
         for field in ("authorization_endpoint", "token_endpoint"):
             document = dict(SERVER_METADATA, **{field: "http://evil.test/x"})
@@ -117,6 +122,12 @@ class AuthorizationServerMetadataTests(unittest.TestCase):
     def test_refuses_issuer_mismatch(self):
         with self.assertRaises(oauth.OAuthError):
             oauth.parse_authorization_server_metadata(SERVER_METADATA, "https://evil.test")
+
+    def test_refuses_issuer_path_mismatch(self):
+        with self.assertRaises(oauth.OAuthError):
+            oauth.parse_authorization_server_metadata(
+                SERVER_METADATA, "https://login.microsoftonline.com/other-tenant"
+            )
 
     def test_discovery_falls_back_to_openid_configuration(self):
         def failing(url, **kwargs):

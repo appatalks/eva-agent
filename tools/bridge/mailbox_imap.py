@@ -210,16 +210,19 @@ class ImapSmtpMailbox:
             if status != "OK":
                 raise MailboxError("The requested mail folder is unavailable")
             criteria = "UNSEEN" if unseen_only else "ALL"
-            status, data = connection.search(None, criteria)
+            status, data = connection.uid("SEARCH", None, criteria)
             if status != "OK":
                 raise MailboxError("The mail server refused the search")
             identifiers = (data[0] or b"").split()[-limit:]
             messages = []
             for identifier in reversed(identifiers):
-                status, payload = connection.fetch(identifier, "(RFC822)")
+                identifier = self._safe_identifier(identifier.decode("ascii", "strict"))
+                status, payload = connection.uid("FETCH", identifier, "(RFC822)")
                 if status != "OK" or not payload or not isinstance(payload[0], tuple):
                     continue
-                messages.append(summarize_message(payload[0][1]))
+                summary = summarize_message(payload[0][1])
+                summary["uid"] = self._safe_identifier(identifier)
+                messages.append(summary)
             return messages
         finally:
             self._close(connection)
@@ -231,10 +234,12 @@ class ImapSmtpMailbox:
             status, _ = connection.select(self._safe_folder(folder), readonly=True)
             if status != "OK":
                 raise MailboxError("The requested mail folder is unavailable")
-            status, payload = connection.fetch(self._safe_identifier(message_id), "(RFC822)")
+            identifier = self._safe_identifier(message_id)
+            status, payload = connection.uid("FETCH", identifier, "(RFC822)")
             if status != "OK" or not payload or not isinstance(payload[0], tuple):
                 raise MailboxError("The requested message could not be read")
             summary = summarize_message(payload[0][1], preview_chars=MAX_PREVIEW_CHARS)
+            summary["uid"] = identifier
             parsed = email.message_from_bytes(payload[0][1])
             summary["body"] = _plain_text_body(parsed, MAX_BODY_CHARS)
             return summary
@@ -249,7 +254,7 @@ class ImapSmtpMailbox:
             if status != "OK":
                 raise MailboxError("The requested mail folder is unavailable")
             identifier = self._safe_identifier(message_id)
-            status, _ = connection.store(identifier, "+FLAGS", "\\Deleted")
+            status, _ = connection.uid("STORE", identifier, "+FLAGS", "\\Deleted")
             if status != "OK":
                 raise MailboxError("The message could not be marked for deletion")
             connection.expunge()
@@ -292,10 +297,11 @@ class ImapSmtpMailbox:
                 else:
                     client.login(self.address, password)
             queue_id = ""
+            refused = {}
             if self.settings.get("capture_queue_id"):
-                queue_id = self._send_and_capture_queue_id(client, sender, envelope_recipients, message)
+                queue_id, refused = self._send_and_capture_queue_id(client, sender, envelope_recipients, message)
             else:
-                client.send_message(message, from_addr=sender, to_addrs=envelope_recipients)
+                refused = client.send_message(message, from_addr=sender, to_addrs=envelope_recipients) or {}
         except smtplib.SMTPAuthenticationError:
             raise MailboxError(
                 "The mail server rejected the access token" if self.auth_mechanism == "xoauth2"
@@ -312,7 +318,8 @@ class ImapSmtpMailbox:
                 pass
         return {
             "message_id": message["Message-ID"],
-            "recipient_count": len(envelope_recipients),
+            "recipient_count": len(envelope_recipients) - len(refused),
+            "refused_recipients": sorted(str(recipient) for recipient in refused),
             "mta_queue_id": queue_id,
         }
 
@@ -333,7 +340,7 @@ class ImapSmtpMailbox:
         if code < 200 or code >= 300:
             raise smtplib.SMTPDataError(code, response)
         match = re.search(r"\bid=([A-Za-z0-9-]{6,64})\b", response.decode("utf-8", "replace"))
-        return match.group(1) if match else ""
+        return (match.group(1) if match else ""), refused
 
     @staticmethod
     def _safe_folder(folder):

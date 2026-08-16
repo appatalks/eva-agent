@@ -326,10 +326,8 @@ def _kusto_query_direct(cluster_url, database, query, is_mgmt=False):
             elif resp.status_code == 401:
                 print("[Cognition] Kusto query still unauthorized after refresh; verify tenant/account RBAC for cluster/database")
             else:
-                err_text = resp.text[:200].replace("\n", " ").strip()
-                query_preview = query[:120].replace("\n", " ")
-                print(f"[Cognition] Kusto query HTTP {resp.status_code}: {err_text}")
-                print(f"[Cognition] Failed query: {query_preview}")
+                print(f"[Cognition] Kusto query HTTP {resp.status_code}; response content omitted")
+                print("[Cognition] Kusto query failed; query content omitted")
             return None
         except (_requests_mod.exceptions.SSLError, _requests_mod.exceptions.ConnectionError) as e:
             if attempt < 2:
@@ -372,14 +370,14 @@ def _kusto_query_with_error(cluster_url, database, query, is_mgmt=False):
             if resp.status_code == 200:
                 try:
                     data = resp.json()
-                except ValueError as error:
-                    return None, f"Kusto returned invalid JSON: {_short_kusto_error(error)}"
+                except ValueError:
+                    return None, "Kusto returned invalid JSON; response content omitted"
                 exceptions = data.get("Exceptions", [])
                 if exceptions:
-                    return None, _short_kusto_error(exceptions[0])
+                    return None, "Kusto returned an error response; response content omitted"
                 one_api = data.get("OneApiErrors", [])
                 if one_api:
-                    return None, _short_kusto_error(one_api[0])
+                    return None, "Kusto returned an error response; response content omitted"
                 tables = data.get("Tables", [])
                 if tables:
                     rows = tables[0].get("Rows", [])
@@ -390,15 +388,14 @@ def _kusto_query_with_error(cluster_url, database, query, is_mgmt=False):
             if resp.status_code == 401 and attempt == 0 and _refresh_kusto_token():
                 headers["Authorization"] = f"Bearer {_st.kusto_token_cache}"
                 continue
-            error_text = resp.text[:300] if resp.text else "empty response"
-            return None, f"Kusto API error {resp.status_code}: {error_text}"
-        except (_requests_mod.exceptions.SSLError, _requests_mod.exceptions.ConnectionError) as error:
+            return None, f"Kusto API error {resp.status_code}; response content omitted"
+        except (_requests_mod.exceptions.SSLError, _requests_mod.exceptions.ConnectionError):
             if attempt < 2:
                 time.sleep(1)
                 continue
-            return None, f"Kusto connection error: {_short_kusto_error(error)}"
-        except Exception as error:
-            return None, f"Kusto query error: {_short_kusto_error(error)}"
+            return None, "Kusto connection error"
+        except Exception:
+            return None, "Kusto query error"
 
 
 
@@ -485,12 +482,12 @@ def _kusto_ingest_direct(cluster_url, database, table, columns, rows_data):
                     body = resp.json()
                     exceptions = body.get("Exceptions", [])
                     if exceptions:
-                        print(f"[Cognition] Kusto ingest error in response: {exceptions[0][:200]}")
+                        print("[Cognition] Kusto ingest error in response; response content omitted")
                         return False
                     # Also check OneApiErrors
                     one_api = body.get("OneApiErrors", [])
                     if one_api:
-                        print(f"[Cognition] Kusto ingest OneApiError: {one_api[0]}")
+                        print("[Cognition] Kusto ingest error in response; response content omitted")
                         return False
                 except Exception:
                     pass
@@ -503,17 +500,17 @@ def _kusto_ingest_direct(cluster_url, database, table, columns, rows_data):
             elif resp.status_code == 401:
                 print("[Cognition] Kusto ingest still unauthorized after refresh; verify tenant/account RBAC for cluster/database")
             else:
-                print(f"[Cognition] Kusto ingest failed ({resp.status_code}): {resp.text[:500]}")
+                print(f"[Cognition] Kusto ingest failed ({resp.status_code}); response content omitted")
                 return False
-        except (_requests_mod.exceptions.SSLError, _requests_mod.exceptions.ConnectionError) as e:
+        except (_requests_mod.exceptions.SSLError, _requests_mod.exceptions.ConnectionError):
             if attempt < 2:
-                print(f"[Cognition] Kusto ingest SSL retry {attempt+1}/3: {e}")
+                print(f"[Cognition] Kusto ingest SSL retry {attempt+1}/3")
                 time.sleep(1)
             else:
-                print(f"[Cognition] Kusto ingest failed after 3 retries: {e}")
+                print("[Cognition] Kusto ingest failed after 3 retries")
                 return False
-        except Exception as e:
-            print(f"[Cognition] Kusto ingest error: {e}")
+        except Exception:
+            print("[Cognition] Kusto ingest error")
             return False
 
 # ---------------------------------------------------------------------------

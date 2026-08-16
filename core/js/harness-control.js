@@ -624,11 +624,22 @@ var EvaHarness = (function() {
     }
   }
 
+  function modelEmailRequestMatches(request, userRequest) {
+    var values = [request.to, request.subject, request.body];
+    var account = String(request.accountId || request.account_id || '').trim();
+    if (account) values.push(account);
+    var original = String(userRequest || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    return values.every(function(value) {
+      var expected = String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      return expected && original.indexOf(expected) >= 0;
+    });
+  }
+
   function execute(request, context) {
     request = request && typeof request === 'object' ? request : {};
     context = context && typeof context === 'object' ? context : {};
     var action = normalize(request.action);
-    var modelAllowed = { navigate: true, refresh: true, describe_workspaces: true, describe_assets: true, describe_skills: true, describe_sessions: true, describe_agents: true, describe_github_pull_request: true, inspect_form: true };
+    var modelAllowed = { navigate: true, refresh: true, describe_email: true, describe_workspaces: true, describe_assets: true, describe_skills: true, describe_sessions: true, describe_agents: true, describe_github_pull_request: true, inspect_form: true };
     var userRepositoryUrl = githubRepositoryUrl(context.userRequest);
     var requestedRepositoryUrl = String(request.repositoryUrl || request.repository_url || '').trim();
     var userNativeRoute = resolveNavigationRequest(context.userRequest || '', { directUser: true });
@@ -659,6 +670,7 @@ var EvaHarness = (function() {
       boundedIntent.skill === String(request.skill || '').toLowerCase() &&
       boundedIntent.operation === String(request.operation || '').toLowerCase() &&
       modelBoundedSkillPathsMatchRequest(request, context.userRequest);
+    var modelEmailSend = action === 'send_email' && modelEmailRequestMatches(request, context.userRequest);
     var modelSkillMutation = userNativeRoute && action === userNativeRoute.action && (
       action === 'create_skill' ||
       (action === 'update_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase() && JSON.stringify(request.updates || {}) === JSON.stringify(userNativeRoute.updates || {})) ||
@@ -666,7 +678,7 @@ var EvaHarness = (function() {
       (action === 'delete_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase()) ||
       action === 'run_skill'
     );
-    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation && !modelBoundedSkill) {
+    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation && !modelBoundedSkill && !modelEmailSend) {
       return result(false, action, 'This native action requires direct user interaction.');
     }
     if (action === 'navigate') return navigate(request.target);

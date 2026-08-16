@@ -358,6 +358,14 @@ var EvaEmailSettings = (function() {
         if (el('emailSendBody')) el('emailSendBody').value = '';
       } else if (decision === 'partially_sent') {
         status('emailSendStatus', 'Partly sent. Not delivered: ' + (result.failures || []).join('; '), true);
+        var partialLocalDelivery = (result.deliveries || []).find(function(delivery) {
+          return delivery.route === 'local_mta' && delivery.mta_queue_id;
+        });
+        state.lastMtaSubmission = partialLocalDelivery ? {
+          accountId: request.account_id,
+          queueId: partialLocalDelivery.mta_queue_id
+        } : null;
+        if (el('emailCheckMtaStatus')) el('emailCheckMtaStatus').disabled = !state.lastMtaSubmission;
       } else if (decision === 'cancelled') {
         status('emailSendStatus', 'Cancelled.');
       } else {

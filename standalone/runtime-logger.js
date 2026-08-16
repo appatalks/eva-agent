@@ -34,6 +34,7 @@ const MCP_DIAGNOSTIC_RE = /(\[MCP:[^\]]+\])\s+.*/g;
 const CONTENT_DIAGNOSTIC_RES = [
   /(Auto-(?:reflection|summary)(?:\s+#\d+)?:)\s+.*/gi,
   /(JSON parse failed, first \d+ chars:)\s+.*/gi,
+  /(Failed query:)\s+.*/gi,
   /(Kusto (?:query HTTP \d+|ingest error in response|ingest failed \(\d+\)):)\s+.*/gi,
   /(Embedding API failed \(\d+\):)\s+.*/gi
 ];

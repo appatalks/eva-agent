@@ -56,6 +56,7 @@ try {
   logger.write('test', 'info', 'prefix {\\"content\\":\\"first \\\\\\"private-tail\\"} suffix');
   logger.write('test', 'info', '[eva-acp] [Cognition/SQLite] Auto-summary: private plain summary');
   logger.write('test', 'info', '[eva-acp] [MCP:example] private server diagnostic');
+  logger.write('test', 'info', '[Cognition] Failed query: private KQL literal');
 
   const renderer = new EventEmitter();
   logger.attachRenderer(renderer);
@@ -94,6 +95,8 @@ try {
   assert(!contents.includes('private-tail'));
   assert(!contents.includes('private plain summary'));
   assert(!contents.includes('private server diagnostic'));
+    assert(!contents.includes('private KQL literal'));
+    assert(!redactRuntimeText('[Cognition] Failed query: private-value', 500).includes('private-value'));
   assert(!contents.includes('x'.repeat(100)));
   assert(contents.includes('<redacted>'));
   assert.strictEqual(fs.statSync(logPath).mode & 0o777, 0o600);

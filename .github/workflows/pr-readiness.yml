@@ -281,8 +281,6 @@ jobs:
             --json number,title,headRefName,headRefOid,isCrossRepository,isDraft,author,labels,statusCheckRollup \
             > readiness/pr.json
           gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" > readiness/diff.patch
-          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments?per_page=100" \
-            > readiness/all-inline-comments.json
           owner="${GITHUB_REPOSITORY%%/*}"
           repository="${GITHUB_REPOSITORY#*/}"
           gh api graphql \
@@ -319,7 +317,7 @@ jobs:
         run: |
           python3 .github/scripts/scan_pr_diff_secrets.py readiness/diff.patch \
             --text-path readiness/pr.json \
-            --text-path readiness/all-inline-comments.json \
+            --text-path readiness/inline-comments.json \
             --text-path readiness/reviews.json \
             --text-path readiness/evidence.md \
             --json-output readiness/credential-scan.json

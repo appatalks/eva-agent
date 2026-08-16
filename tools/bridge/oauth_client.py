@@ -125,7 +125,7 @@ def parse_authorization_server_metadata(document, expected_issuer=""):
     issuer = str(document.get("issuer") or "")
     if not _is_https_url(issuer):
         raise OAuthError("Authorization server metadata has no HTTPS issuer")
-    if expected_issuer and not _same_origin(expected_issuer, issuer):
+    if expected_issuer and issuer != str(expected_issuer):
         raise OAuthError("Authorization server issuer does not match the advertised server")
     authorization_endpoint = str(document.get("authorization_endpoint") or "")
     token_endpoint = str(document.get("token_endpoint") or "")
@@ -134,7 +134,7 @@ def parse_authorization_server_metadata(document, expected_issuer=""):
     if not _is_https_url(token_endpoint):
         raise OAuthError("Token endpoint must be HTTPS")
     methods = [str(m) for m in document.get("code_challenge_methods_supported") or []]
-    if methods and PKCE_METHOD not in methods:
+    if PKCE_METHOD not in methods:
         raise OAuthError("Authorization server does not support PKCE S256")
     return {
         "issuer": issuer,

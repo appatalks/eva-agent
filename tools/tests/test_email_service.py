@@ -21,6 +21,8 @@ from bridge import config as _cfg
 class FakeMailbox:
     instances = []
     fail_with = None
+    refused_recipients = []
+    mta_queue_id = ""
 
     def __init__(self, settings, address, timeout=None):
         self.settings = settings
@@ -40,8 +42,10 @@ class FakeMailbox:
 
     def send(self, password, normalized, from_address="", reply_to=""):
         self.sent.append({"password": password, "request": normalized, "from": from_address})
-        return {"message_id": "<x@test>", "recipient_count": len(normalized.get("to", []))
-                + len(normalized.get("cc", [])) + len(normalized.get("bcc", []))}
+        recipient_count = len(normalized.get("to", [])) + len(normalized.get("cc", [])) + len(normalized.get("bcc", []))
+        return {"message_id": "<x@test>", "recipient_count": recipient_count - len(FakeMailbox.refused_recipients),
+            "refused_recipients": list(FakeMailbox.refused_recipients),
+            "mta_queue_id": FakeMailbox.mta_queue_id}
 
 
 def account(**overrides):
@@ -76,6 +80,8 @@ class EmailServiceTestCase(unittest.TestCase):
 
         FakeMailbox.instances = []
         FakeMailbox.fail_with = None
+        FakeMailbox.refused_recipients = []
+        FakeMailbox.mta_queue_id = ""
         adapter_patcher = mock.patch.object(email_service, "ImapSmtpMailbox", FakeMailbox)
         adapter_patcher.start()
         self.addCleanup(adapter_patcher.stop)
@@ -417,6 +423,16 @@ class SendTests(EmailServiceTestCase):
         self.assertEqual(result["decision"], "sent")
         self.assertEqual(len(FakeMailbox.instances[0].sent), 1)
 
+    def test_partial_recipient_refusal_is_reported(self):
+        email_service.update_allowlist(["peer@company.example", "watcher@company.example"])
+        FakeMailbox.refused_recipients = ["watcher@company.example"]
+        result = email_service.send_message(
+            send_request(cc="watcher@company.example"), account_id="work"
+        )
+        self.assertEqual(result["decision"], "partially_sent")
+        self.assertEqual(result["deliveries"][0]["recipient_count"], 1)
+        self.assertTrue(result["failures"])
+
     def test_unknown_recipient_is_not_delivered(self):
         result = email_service.send_message(send_request(to="stranger@elsewhere.example"), account_id="work")
         self.assertEqual(result["decision"], "needs_confirmation")
@@ -439,6 +455,23 @@ class SendTests(EmailServiceTestCase):
     def test_authorize_does_not_deliver(self):
         email_service.authorize(send_request(), account_id="work")
         self.assertEqual(FakeMailbox.instances, [])
+
+    def test_partial_local_mta_submission_retains_its_queue_id(self):
+        email_service.replace_accounts([account(
+            id="eva", backend="eva_direct", address="eva@custom.example", settings={
+                "direct_consent": ["first@company.example", "second@company.example"],
+                "delivery_mode": "local_mta", "internal_domains": [],
+                "internal_smtp_host": "mail.custom.example", "internal_smtp_starttls": False,
+                "exim_status": True,
+            },
+        )], [])
+        FakeMailbox.refused_recipients = ["second@company.example"]
+        FakeMailbox.mta_queue_id = "1abcDEF-000000-xy"
+        result = email_service.send_message(send_request(
+            to=["first@company.example", "second@company.example"]
+        ), account_id="eva")
+        self.assertEqual(result["decision"], "partially_sent")
+        self.assertTrue(email_service._known_mta_submission("eva", FakeMailbox.mta_queue_id))
 
 
 class EvaDirectDeliveryTests(EmailServiceTestCase):

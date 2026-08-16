@@ -382,6 +382,7 @@ def send_message(request, account_id="", from_address="", confirmation=None):
             audit_event("email_send", correlation_id=account["id"], outcome="failed")
             raise EmailServiceError("; ".join(failures) or "delivery failed")
         if failures:
+            _remember_mta_submissions(account["id"], deliveries)
             # Some recipients already have the message. Say so, so the user does
             # not resend and deliver it twice to the routes that succeeded.
             audit_event(
@@ -409,6 +410,21 @@ def send_message(request, account_id="", from_address="", confirmation=None):
     else:
         deliveries = [_deliver_simple(account, normalized, account["address"])]
 
+    failures = []
+    for delivery in deliveries:
+        refused = delivery.pop("refused_recipients", [])
+        if refused:
+            failures.append(f"{delivery['route']} refused {len(refused)} recipient(s)")
+    if failures:
+        audit_event(
+            "email_send", correlation_id=account["id"], outcome="partial",
+            **email_policy.audit_fields(normalized, backend=account["backend"]),
+        )
+        return {
+            "decision": "partially_sent", "account_id": account["id"],
+            "deliveries": deliveries, "failures": failures,
+        }
+
     audit_event(
         "email_send", correlation_id=account["id"], outcome="sent",
         **email_policy.audit_fields(normalized, backend=account["backend"]),
@@ -424,7 +440,10 @@ def _deliver_simple(account, normalized, from_address):
     except MailboxError as exc:
         audit_event("email_send", correlation_id=account["id"], outcome="failed")
         raise EmailServiceError(str(exc)) from None
-    return {"route": "account", "recipient_count": result["recipient_count"]}
+    return {
+        "route": "account", "recipient_count": result["recipient_count"],
+        "refused_recipients": result.get("refused_recipients", []),
+    }
 
 
 def _deliver_direct(account, document, normalized, plan):
@@ -474,6 +493,9 @@ def _deliver_direct(account, document, normalized, plan):
         if result.get("message_id"):
             delivery["message_id"] = result["message_id"]
         deliveries.append(delivery)
+        refused = result.get("refused_recipients", [])
+        if refused:
+            failures.append(f"{route['route']} refused {len(refused)} recipient(s)")
     return deliveries, failures
 
 
