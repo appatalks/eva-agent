@@ -731,6 +731,10 @@ class ACPClient:
             kind = str(update.get("kind") or "other")[:32]
             if status:
                 print(f"[ACP] Tool update: kind={kind} status={str(status)[:24]}")
+                self._dispatch_prompt_event(params, {
+                    "kind": "tool",
+                    "label": "Using " + kind.replace("_", " ") + " (" + str(status)[:24] + ")",
+                })
             if not self._github_auth_notified and _github_authorization_needed(update):
                 self._github_auth_notified = True
                 from bridge.alerts import _notify_enqueue
@@ -739,10 +743,6 @@ class ACPClient:
                     "Eva needs GitHub write access to continue the requested work. Starting device authorization now; complete the GitHub prompt when it appears.",
                     "github-auth-needed", 0.95, ["chat", "voice"],
                 )
-                self._dispatch_prompt_event(params, {
-                    "kind": "tool",
-                    "label": "Using " + kind.replace("_", " ") + " (" + str(status)[:24] + ")",
-                })
 
         elif update_type == "usage_update":
             session_id = str(params.get("sessionId") or params.get("session_id") or "")[:120]
