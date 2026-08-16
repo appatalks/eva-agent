@@ -170,23 +170,31 @@ class EvaDirectConsentTests(unittest.TestCase):
     def setUp(self):
         self.direct, _ = accounts_module.normalize_account(
             account(id="direct", backend="eva_direct", address="eva@home.example",
-                    settings={"direct_consent": ["peer@company.example", "@lab.internal"]})
+                    settings={"direct_consent": ["peer@company.example", "@lab.internal"],
+                              "delivery_mode": "relay", "relay_account_id": "owned"})
         )
+        self.relay, _ = accounts_module.normalize_account(
+            account(id="owned", backend="imap_smtp", address="me@home.example")
+        )
+        self.pool = [self.direct, self.relay]
 
     def test_consenting_recipient_is_allowed(self):
-        result = accounts_module.authorize_send_for_account(self.direct, send(), ["peer@company.example"])
+        result = accounts_module.authorize_send_for_account(
+            self.direct, send(), ["peer@company.example"], accounts=self.pool
+        )
         self.assertEqual(result["decision"], "allowed")
         self.assertEqual(result["backend"], "eva_direct")
 
     def test_domain_consent_covers_internal_hosts(self):
         result = accounts_module.authorize_send_for_account(
-            self.direct, send(to="box@lab.internal"), ["@lab.internal"]
+            self.direct, send(to="box@lab.internal"), ["@lab.internal"], accounts=self.pool
         )
         self.assertEqual(result["decision"], "allowed")
 
     def test_unconsented_recipient_is_rejected_not_confirmable(self):
         result = accounts_module.authorize_send_for_account(
-            self.direct, send(to="stranger@elsewhere.example"), ["stranger@elsewhere.example"]
+            self.direct, send(to="stranger@elsewhere.example"), ["stranger@elsewhere.example"],
+            accounts=self.pool,
         )
         self.assertEqual(result["decision"], "rejected")
         self.assertEqual(result["unconsented_recipients"], ["stranger@elsewhere.example"])
@@ -197,8 +205,140 @@ class EvaDirectConsentTests(unittest.TestCase):
         result = accounts_module.authorize_send_for_account(
             self.direct, request, [],
             {"digest": pending["digest"], "addresses": ["stranger@elsewhere.example"]},
+            accounts=self.pool,
         )
         self.assertEqual(result["decision"], "rejected")
+
+
+class DomainAlignmentTests(unittest.TestCase):
+    def test_same_domain_is_aligned(self):
+        self.assertTrue(accounts_module.domains_aligned("eva@home.example", "me@home.example"))
+
+    def test_subdomain_from_is_aligned(self):
+        self.assertTrue(accounts_module.domains_aligned("eva@bot.home.example", "me@home.example"))
+
+    def test_cross_domain_is_never_aligned(self):
+        self.assertFalse(accounts_module.domains_aligned("eva@home.example", "me@gmail.com"))
+
+    def test_lookalike_suffix_is_not_alignment(self):
+        self.assertFalse(accounts_module.domains_aligned("eva@evilhome.example", "me@home.example"))
+
+    def test_invalid_addresses_are_not_aligned(self):
+        self.assertFalse(accounts_module.domains_aligned("nonsense", "me@home.example"))
+
+
+class DirectDeliveryPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.relay, _ = accounts_module.normalize_account(
+            account(id="owned", backend="imap_smtp", address="me@home.example")
+        )
+
+    def direct(self, **settings):
+        base = {
+            "direct_consent": ["@lab.internal", "peer@company.example"],
+            "delivery_mode": "auto",
+            "internal_domains": ["lab.internal"],
+            "internal_smtp_host": "mail.lab.internal",
+            "relay_account_id": "owned",
+        }
+        base.update(settings)
+        record, error = accounts_module.normalize_account(
+            account(id="direct", backend="eva_direct", address="eva@home.example", settings=base)
+        )
+        self.assertEqual(error, "", error)
+        return record
+
+    def test_internal_recipient_uses_the_internal_mta(self):
+        plan, error = accounts_module.plan_direct_delivery(
+            self.direct(), ["box@lab.internal"], [self.relay]
+        )
+        self.assertEqual(error, "")
+        self.assertEqual(plan["routes"][0]["route"], "internal")
+        self.assertEqual(plan["routes"][0]["smtp_host"], "mail.lab.internal")
+
+    def test_external_recipient_uses_the_relay(self):
+        plan, error = accounts_module.plan_direct_delivery(
+            self.direct(), ["peer@company.example"], [self.relay]
+        )
+        self.assertEqual(error, "")
+        self.assertEqual(plan["routes"][0]["route"], "relay")
+        self.assertEqual(plan["routes"][0]["relay_account_id"], "owned")
+
+    def test_mixed_recipients_split_across_both_routes(self):
+        plan, error = accounts_module.plan_direct_delivery(
+            self.direct(), ["box@lab.internal", "peer@company.example"], [self.relay]
+        )
+        self.assertEqual(error, "")
+        routes = {route["route"]: route["recipients"] for route in plan["routes"]}
+        self.assertEqual(routes["internal"], ["box@lab.internal"])
+        self.assertEqual(routes["relay"], ["peer@company.example"])
+
+    def test_internal_only_mode_refuses_external_recipients(self):
+        plan, error = accounts_module.plan_direct_delivery(
+            self.direct(delivery_mode="internal"), ["peer@company.example"], [self.relay]
+        )
+        self.assertIsNone(plan)
+        self.assertIn("internal delivery only", error)
+
+    def test_subdomain_of_internal_domain_stays_internal(self):
+        plan, _ = accounts_module.plan_direct_delivery(
+            self.direct(), ["box@rack.lab.internal"], [self.relay]
+        )
+        self.assertEqual(plan["routes"][0]["route"], "internal")
+
+    def test_misaligned_relay_domain_is_refused(self):
+        foreign, _ = accounts_module.normalize_account(
+            account(id="owned", backend="gmail_oauth", address="me@gmail.com")
+        )
+        plan, error = accounts_module.plan_direct_delivery(
+            self.direct(), ["peer@company.example"], [foreign]
+        )
+        self.assertIsNone(plan)
+        self.assertIn("SPF and DMARC", error)
+
+    def test_missing_relay_account_is_refused(self):
+        plan, error = accounts_module.plan_direct_delivery(
+            self.direct(), ["peer@company.example"], []
+        )
+        self.assertIsNone(plan)
+        self.assertIn("no longer exists", error)
+
+    def test_disconnected_relay_is_refused(self):
+        self.relay["status"] = "needs_auth"
+        plan, error = accounts_module.plan_direct_delivery(
+            self.direct(), ["peer@company.example"], [self.relay]
+        )
+        self.assertIsNone(plan)
+        self.assertIn("cannot send", error)
+
+    def test_internal_mode_requires_a_configured_mta(self):
+        record, error = accounts_module.normalize_account(account(
+            id="direct", backend="eva_direct", address="eva@home.example",
+            settings={"delivery_mode": "internal", "internal_domains": ["lab.internal"]},
+        ))
+        self.assertIsNone(record)
+        self.assertIn("internal SMTP host", error)
+
+    def test_relay_mode_requires_a_relay_account(self):
+        record, error = accounts_module.normalize_account(account(
+            id="direct", backend="eva_direct", address="eva@home.example",
+            settings={"delivery_mode": "relay"},
+        ))
+        self.assertIsNone(record)
+        self.assertIn("relay account", error)
+
+    def test_plan_rejects_a_non_direct_account(self):
+        plan, error = accounts_module.plan_direct_delivery(self.relay, ["peer@company.example"], [])
+        self.assertIsNone(plan)
+        self.assertIn("direct identity", error)
+
+    def test_authorized_send_carries_the_delivery_plan(self):
+        result = accounts_module.authorize_send_for_account(
+            self.direct(), send(to="box@lab.internal"), ["@lab.internal"], accounts=[self.relay]
+        )
+        self.assertEqual(result["decision"], "allowed")
+        self.assertEqual(result["delivery_plan"]["routes"][0]["route"], "internal")
+        self.assertEqual(result["delivery_plan"]["from"], "eva@home.example")
 
 
 class AccountAuthorizationTests(unittest.TestCase):

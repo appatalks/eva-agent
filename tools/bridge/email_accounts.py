@@ -15,6 +15,21 @@ Eva's own identity cannot inherit a user mailbox's reputation, so it may only go
 to recipients who explicitly accepted Eva as a direct sender. That list is a
 consent record, not a convenience allowlist, and an unlisted recipient is
 rejected outright rather than offered for confirmation.
+
+Eva's direct identity delivers over two routes:
+
+- **internal** - a single configured internal MTA, used for recipients in the
+  configured internal domains. Delivery never performs a per-recipient host
+  lookup, so a recipient address cannot steer a connection at an arbitrary host
+  on the local network.
+- **relay** - the user's existing authenticated SMTP account, used for everyone
+  else. Eva's From address must be aligned with that account's domain, because a
+  cross-domain From fails SPF and DMARC and is silently filtered. Alignment is
+  checked when the account is saved, not when a message fails to arrive.
+
+A relay route additionally requires that `eva@<domain>` already exist as a
+permitted send-as identity on the relaying provider. This module cannot verify
+that remotely; it reports the requirement so setup can surface it.
 """
 
 import re
@@ -24,6 +39,7 @@ from bridge import email_policy
 BACKENDS = ("workiq", "gmail_oauth", "imap_smtp", "eva_direct")
 CAPABILITIES = ("read", "send", "delete")
 STATUSES = ("connected", "needs_auth", "disabled", "error")
+DELIVERY_MODES = ("auto", "relay", "internal")
 
 MAX_ACCOUNTS = 12
 MAX_LABEL_CHARS = 60
@@ -177,12 +193,26 @@ def normalize_account(raw):
             canonical = email_policy.normalize_address(entry)
             if canonical:
                 consent.append(canonical)
+        mode = _clean(settings.get("delivery_mode"), 16).lower()
+        if mode not in DELIVERY_MODES:
+            mode = "internal" if settings.get("internal_only", True) else "auto"
+        internal_domains = sorted({
+            domain for domain in (
+                _normalize_host(value) for value in settings.get("internal_domains") or []
+            ) if domain
+        })[:50]
         account["settings"] = {
             "direct_consent": sorted(set(consent))[:email_policy.MAX_ALLOWLIST_ENTRIES],
-            "smtp_host": _normalize_host(settings.get("smtp_host")),
-            "smtp_port": _normalize_port(settings.get("smtp_port"), 587),
-            "internal_only": bool(settings.get("internal_only", True)),
+            "delivery_mode": mode,
+            "internal_domains": internal_domains,
+            "internal_smtp_host": _normalize_host(settings.get("internal_smtp_host")),
+            "internal_smtp_port": _normalize_port(settings.get("internal_smtp_port"), 25),
+            "relay_account_id": _clean(settings.get("relay_account_id"), 64),
         }
+        if mode in ("internal", "auto") and internal_domains and not account["settings"]["internal_smtp_host"]:
+            return None, "internal delivery requires an internal SMTP host"
+        if mode == "relay" and not account["settings"]["relay_account_id"]:
+            return None, "relay delivery requires a relay account"
         account["morning_pull"] = False
     else:
         account["settings"] = {}
@@ -277,7 +307,97 @@ def direct_consent_failures(account, recipients):
     return [r for r in recipients or [] if not email_policy.is_allowlisted(r, addresses, domains)]
 
 
-def authorize_send_for_account(account, request, global_allowlist, confirmation=None):
+def domain_of(address):
+    """Return the lowercase domain of an address, or an empty string."""
+    canonical = email_policy.normalize_address(address)
+    return canonical.rsplit("@", 1)[-1] if canonical else ""
+
+
+def domains_aligned(from_address, relay_address):
+    """Return True when a From domain can pass SPF/DMARC through a relay domain.
+
+    Exact match, or From at a subdomain of the relay domain. A cross-domain From
+    is never treated as aligned, because the resulting mail fails authentication
+    at the receiving provider.
+    """
+    from_domain = domain_of(from_address)
+    relay_domain = domain_of(relay_address)
+    if not from_domain or not relay_domain:
+        return False
+    return from_domain == relay_domain or from_domain.endswith("." + relay_domain)
+
+
+def is_internal_recipient(account, address):
+    """Return True when a recipient belongs to a configured internal domain."""
+    settings = (account or {}).get("settings") or {}
+    domain = domain_of(address)
+    if not domain:
+        return False
+    for internal in settings.get("internal_domains") or []:
+        if domain == internal or domain.endswith("." + internal):
+            return True
+    return False
+
+
+def plan_direct_delivery(account, recipients, accounts=None):
+    """Split recipients across Eva's internal and relay routes.
+
+    Returns (plan, error). A message may legitimately span both routes; each
+    route is reported separately so the caller delivers once per route rather
+    than guessing a single destination.
+    """
+    if not isinstance(account, dict) or account.get("backend") != "eva_direct":
+        return None, "delivery planning applies only to Eva's direct identity"
+
+    settings = account.get("settings") or {}
+    mode = settings.get("delivery_mode") or "internal"
+    internal = [r for r in recipients or [] if is_internal_recipient(account, r)]
+    external = [r for r in recipients or [] if r not in internal]
+
+    if mode == "internal" and external:
+        return None, "Eva's direct identity is configured for internal delivery only"
+    if mode == "relay":
+        internal, external = [], list(recipients or [])
+
+    routes = []
+    if internal:
+        host = settings.get("internal_smtp_host")
+        if not host:
+            return None, "internal delivery requires an internal SMTP host"
+        routes.append({
+            "route": "internal",
+            "recipients": internal,
+            "smtp_host": host,
+            "smtp_port": settings.get("internal_smtp_port") or 25,
+        })
+
+    if external:
+        relay_id = settings.get("relay_account_id")
+        if not relay_id:
+            return None, "sending outside the internal network requires a relay account"
+        relay = next((a for a in accounts or [] if a.get("id") == relay_id), None)
+        if not relay:
+            return None, "the configured relay account no longer exists"
+        if not usable(relay, "send"):
+            return None, "the configured relay account cannot send mail"
+        if not domains_aligned(account.get("address"), relay.get("address")):
+            return None, (
+                "Eva's address must be on the same domain as the relay account, "
+                "otherwise the message fails SPF and DMARC"
+            )
+        routes.append({
+            "route": "relay",
+            "recipients": external,
+            "relay_account_id": relay["id"],
+            "relay_backend": relay["backend"],
+        })
+
+    if not routes:
+        return None, "no recipients to deliver"
+    return {"from": account.get("address"), "routes": routes}, ""
+
+
+def authorize_send_for_account(account, request, global_allowlist, confirmation=None, accounts=None):
     """Apply account-specific rules on top of the shared send policy."""
     if not usable(account, "send"):
         return {"decision": "rejected", "reason": "the selected account cannot send mail"}
@@ -297,6 +417,12 @@ def authorize_send_for_account(account, request, global_allowlist, confirmation=
                 "reason": "these recipients have not accepted mail from Eva's direct identity",
                 "unconsented_recipients": missing,
             }
+        plan, plan_error = plan_direct_delivery(
+            account, email_policy.all_recipients(result["request"]), accounts
+        )
+        if plan_error:
+            return {"decision": "rejected", "reason": plan_error}
+        result["delivery_plan"] = plan
 
     result["account_id"] = account["id"]
     result["backend"] = account["backend"]
