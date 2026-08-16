@@ -277,7 +277,12 @@ var EvaEmailSettings = (function() {
   }
 
   function open() {
-    if (typeof openSettingsTab === 'function') openSettingsTab('email');
+    var settingsButton = el('evaSettingsBtn');
+    if (settingsButton && !document.body.classList.contains('settings-open')) {
+      settingsButton.click();
+    }
+    var tab = document.querySelector('.settings-tab[data-stab="email"]');
+    if (tab && !tab.classList.contains('active')) tab.click();
     bind();
     toggleBackendFields();
     return refresh();

@@ -54,6 +54,22 @@ class RouteWiringTests(unittest.TestCase):
         end = self.source.index("def _email_accounts_get(self):")
         self.assertIn("512 * 1024", self.source[start:end])
 
+    def test_refused_send_reports_why_not_just_a_status_code(self):
+        start = self.source.index("def _email_send_request(self):")
+        end = self.source.index("def _email_message_delete(self")
+        block = self.source[start:end]
+        # bridge-client surfaces error.message; without it the caller only sees "HTTP 400".
+        self.assertIn('result["error"] = {"message": result.get("reason")', block)
+        self.assertIn('"partially_sent"', block)
+
+    def test_partial_delivery_is_not_reported_as_a_client_error(self):
+        start = self.source.index("def _email_send_request(self):")
+        end = self.source.index("def _email_message_delete(self")
+        block = self.source[start:end]
+        success = block[block.index("status = 200 if"):block.index("self._json_response(status")]
+        for decision in ("sent", "partially_sent", "needs_confirmation"):
+            self.assertIn(decision, success, decision)
+
     def test_credential_endpoint_does_not_return_the_secret(self):
         start = self.source.index("def _email_credential_set(self):")
         end = self.source.index("def _email_messages_list(self):")

@@ -77,8 +77,18 @@ check('confirmation echoes the server digest',
 check('declining does not send', /decision: 'cancelled'/.test(moduleSource));
 check('partial delivery is surfaced', /partially_sent/.test(moduleSource));
 
-console.log('\nnative harness');
-check('email navigation target registered',
+console.log('\npanel lifecycle');
+const optionsSource = fs.readFileSync(path.join(root, 'core/js/options.js'), 'utf8');
+check('opening the Email tab loads mailboxes',
+  /target === 'email' && window\.EvaEmailSettings\) EvaEmailSettings\.refresh\(\)/.test(optionsSource));
+check('open() opens settings through the real button',
+  /'evaSettingsBtn'/.test(moduleSource));
+check('open() activates the email tab',
+  /\.settings-tab\[data-stab="email"\]/.test(moduleSource));
+check('open() does not call a nonexistent helper',
+  !/openSettingsTab/.test(moduleSource));
+
+console.log('\nnative harness');check('email navigation target registered',
   /email: function\(\) \{ return openSettings\('email'\); \}/.test(harnessSource));
 check('mail aliases resolve to email',
   /mail: 'email'/.test(harnessSource) && /inbox: 'email'/.test(harnessSource));
