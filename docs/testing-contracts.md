@@ -53,6 +53,7 @@ python3 tools/tests/test_email_routes.py
 python3 tools/tests/test_mailbox_imap.py
 python3 tools/tests/test_oauth_client.py
 python3 tools/tests/test_remote_mcp.py
+python3 tools/tests/test_mail_oauth.py
 node tools/tests/test_cognition_provider.js
 node tools/tests/test_provider_token_budget.js
 node tools/tests/test_harness_control.js

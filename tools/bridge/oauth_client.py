@@ -145,13 +145,18 @@ def parse_authorization_server_metadata(document, expected_issuer=""):
     }
 
 
-def build_authorization_url(metadata, client_id, redirect_uri, resource, scopes, state, challenge):
-    """Return the browser URL that starts an authorization-code+PKCE flow."""
+def build_authorization_url(metadata, client_id, redirect_uri, resource, scopes, state, challenge, extra_params=None):
+    """Return the browser URL that starts an authorization-code+PKCE flow.
+
+    `resource` is the RFC 8707 indicator. It is omitted when empty, because some
+    providers (Google among them) do not implement it; when supplied it must be
+    HTTPS so a token cannot be minted for an unverified audience.
+    """
     if not is_loopback_redirect(redirect_uri):
         raise OAuthError("Redirect URI must be a loopback address with an explicit port")
     if not str(client_id or "").strip():
         raise OAuthError("Client id is required")
-    if not _is_https_url(resource):
+    if resource and not _is_https_url(resource):
         raise OAuthError("Resource indicator must be HTTPS")
     query = {
         "response_type": "code",
@@ -160,11 +165,16 @@ def build_authorization_url(metadata, client_id, redirect_uri, resource, scopes,
         "state": state,
         "code_challenge": challenge,
         "code_challenge_method": PKCE_METHOD,
-        "resource": resource,
     }
+    if resource:
+        query["resource"] = resource
     scope = " ".join(str(s).strip() for s in scopes or [] if str(s or "").strip())
     if scope:
         query["scope"] = scope
+    for key, value in (extra_params or {}).items():
+        safe_key = str(key).strip()
+        if safe_key and safe_key not in query:
+            query[safe_key] = str(value)
     endpoint = metadata["authorization_endpoint"]
     separator = "&" if urllib.parse.urlparse(endpoint).query else "?"
     return endpoint + separator + urllib.parse.urlencode(query)
@@ -285,14 +295,16 @@ def discover_authorization_server(issuer, fetch=None):
 def exchange_code(metadata, client_id, code, verifier, redirect_uri, resource, fetch=None, now=None):
     """Exchange an authorization code for tokens."""
     fetch = fetch or _http_json
-    document = fetch(metadata["token_endpoint"], method="POST", data={
+    payload = {
         "grant_type": "authorization_code",
         "client_id": client_id,
         "code": code,
         "code_verifier": verifier,
         "redirect_uri": redirect_uri,
-        "resource": resource,
-    })
+    }
+    if resource:
+        payload["resource"] = resource
+    document = fetch(metadata["token_endpoint"], method="POST", data=payload)
     return normalize_token_response(document, now=now)
 
 
@@ -301,12 +313,14 @@ def refresh_access_token(metadata, client_id, refresh_token, resource, fetch=Non
     if not str(refresh_token or ""):
         raise OAuthError("No refresh token is available; re-authorization is required")
     fetch = fetch or _http_json
-    document = fetch(metadata["token_endpoint"], method="POST", data={
+    payload = {
         "grant_type": "refresh_token",
         "client_id": client_id,
         "refresh_token": refresh_token,
-        "resource": resource,
-    })
+    }
+    if resource:
+        payload["resource"] = resource
+    document = fetch(metadata["token_endpoint"], method="POST", data=payload)
     token = normalize_token_response(document, now=now)
     if not token["refresh_token"]:
         token["refresh_token"] = str(refresh_token)

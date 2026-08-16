@@ -20,6 +20,12 @@ Transport rules:
 
 Credentials are passed in per call and are never stored on the instance,
 logged, or included in an error message.
+
+Two authentication mechanisms are supported. `password` is a classic or
+app-specific password. `xoauth2` presents a short-lived OAuth access token and
+is preferred wherever the provider offers it: nothing durable is stored, the
+grant is scope-limited, and the user can revoke it without changing a password.
+Google requires XOAUTH2 for OAuth mail access; app passwords are its legacy path.
 """
 
 import email
@@ -38,6 +44,14 @@ MAX_FETCH_MESSAGES = 50
 MAX_PREVIEW_CHARS = 2000
 MAX_BODY_CHARS = 200000
 IMPLICIT_TLS_SMTP_PORT = 465
+AUTH_MECHANISMS = ("password", "xoauth2")
+
+
+def xoauth2_string(address, access_token):
+    """Return the SASL XOAUTH2 initial response for a mailbox and access token."""
+    if not address or not access_token:
+        raise MailboxError("XOAUTH2 requires a mailbox address and an access token")
+    return f"user={address}\x01auth=Bearer {access_token}\x01\x01"
 
 
 class MailboxError(Exception):
@@ -148,6 +162,18 @@ class ImapSmtpMailbox:
             raise MailboxError("Mailbox address is not a valid email address")
         self.timeout = timeout
 
+    @property
+    def auth_mechanism(self):
+        mechanism = str(self.settings.get("auth_mechanism") or "password").lower()
+        return mechanism if mechanism in AUTH_MECHANISMS else "password"
+
+    def _imap_authenticate(self, connection, secret):
+        if self.auth_mechanism == "xoauth2":
+            response = xoauth2_string(self.address, secret)
+            connection.authenticate("XOAUTH2", lambda _challenge: response.encode("utf-8"))
+        else:
+            connection.login(self.address, secret)
+
     def _imap_connect(self, password):
         host = self.settings.get("imap_host")
         port = int(self.settings.get("imap_port") or 993)
@@ -162,13 +188,16 @@ class ImapSmtpMailbox:
         except (OSError, ssl.SSLError, imaplib.IMAP4.error) as exc:
             raise MailboxError(f"Could not reach the IMAP server: {type(exc).__name__}") from None
         try:
-            connection.login(self.address, password)
+            self._imap_authenticate(connection, password)
         except imaplib.IMAP4.error:
             try:
                 connection.logout()
             except (OSError, imaplib.IMAP4.error):
                 pass
-            raise MailboxError("The mail server rejected the account credentials") from None
+            raise MailboxError(
+                "The mail server rejected the access token" if self.auth_mechanism == "xoauth2"
+                else "The mail server rejected the account credentials"
+            ) from None
         return connection
 
     def fetch_recent(self, password, folder="INBOX", limit=10, unseen_only=False):
@@ -256,10 +285,17 @@ class ImapSmtpMailbox:
                 elif password:
                     raise MailboxError("Credentials are never sent over an unencrypted SMTP session")
             if password:
-                client.login(self.address, password)
+                if self.auth_mechanism == "xoauth2":
+                    response = xoauth2_string(sender, password)
+                    client.auth("XOAUTH2", lambda _challenge=None: response)
+                else:
+                    client.login(self.address, password)
             client.send_message(message, from_addr=sender, to_addrs=envelope_recipients)
         except smtplib.SMTPAuthenticationError:
-            raise MailboxError("The mail server rejected the account credentials") from None
+            raise MailboxError(
+                "The mail server rejected the access token" if self.auth_mechanism == "xoauth2"
+                else "The mail server rejected the account credentials"
+            ) from None
         except smtplib.SMTPRecipientsRefused:
             raise MailboxError("The mail server refused every recipient") from None
         except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
