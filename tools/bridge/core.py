@@ -4756,6 +4756,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "- Use the context below naturally as your own knowledge.\n\n"
         )
 
+        try:
+            from bridge.email_service import capability_summary as _email_capability
+            eva_system += _email_capability() + "\n\n"
+        except ImportError:
+            pass
+
         if _skill_decision.get("selected_skill_id") or _request_type == "weather-search":
             _decision_lines = [
                 "\n[Execution Decision - AUTHORITATIVE]",

@@ -55,6 +55,8 @@ python3 tools/tests/test_oauth_client.py
 python3 tools/tests/test_remote_mcp.py
 python3 tools/tests/test_mail_oauth.py
 python3 tools/tests/test_device_flow.py
+python3 tools/tests/test_email_capability.py
+python3 tools/tests/test_email_local_delivery.py
 node tools/tests/test_cognition_provider.js
 node tools/tests/test_provider_token_budget.js
 node tools/tests/test_harness_control.js

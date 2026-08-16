@@ -33,6 +33,7 @@ _credential_lock = threading.RLock()
 _credentials = {}
 
 MAX_FETCH_LIMIT = 50
+MAX_ACCOUNT_SUMMARY = 8
 
 
 class EmailServiceError(Exception):
@@ -312,3 +313,57 @@ def morning_mail_summary(limit_per_account=5):
             f"Unread mail - {account['label']}", messages
         ))
     return "\n\n".join(block for block in blocks if block), unavailable
+
+
+def capability_summary():
+    """Describe Eva's current email ability truthfully for prompt context.
+
+    Derived from live configuration rather than a static claim, so Eva never
+    asserts an ability she does not currently have. Never raises.
+    """
+    try:
+        document = load_config()
+        accounts = public_accounts(document)
+    except Exception:
+        return (
+            "[Email Capability]\n"
+            "Email status could not be read. Do not claim you can send or read email."
+        )
+
+    if not accounts:
+        return (
+            "[Email Capability]\n"
+            "No email account is configured, so you cannot read or send email right now. "
+            "If the user asks, say so plainly and offer to set one up in Settings. "
+            "Never claim a message was sent."
+        )
+
+    lines = []
+    for account in accounts[:MAX_ACCOUNT_SUMMARY]:
+        abilities = "/".join(account.get("capabilities") or []) or "none"
+        state = account.get("status", "unknown")
+        if state == "connected" and not account.get("credential_present"):
+            state = "locked (needs sign-in)"
+        notes = []
+        if account.get("morning_pull"):
+            notes.append("in morning routine")
+        if account.get("backend") == "eva_direct":
+            mode = (account.get("settings") or {}).get("delivery_mode", "internal")
+            notes.append(f"Eva's own identity, {mode} delivery")
+        suffix = f"; {', '.join(notes)}" if notes else ""
+        lines.append(
+            f"  - {account.get('label')} <{account.get('address')}>: {abilities}; {state}{suffix}"
+        )
+
+    return (
+        "[Email Capability]\n"
+        "You can work with these mailboxes:\n"
+        + "\n".join(lines)
+        + "\n"
+        "You never choose a recipient on your own authority. An address must already be "
+        "approved, or the user confirms that exact message first; the bridge enforces this "
+        "and will refuse otherwise. A locked account needs the user to sign in before you "
+        "can use it. Never state that mail was sent, read, or deleted unless the operation "
+        "actually returned success."
+    )
+
