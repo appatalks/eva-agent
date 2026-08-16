@@ -561,7 +561,7 @@ def _capture_active_kusto_env(mcp_config):
         cached = _load_cached_kusto_cluster()
         if cached:
             _st.active_kusto_cluster = cached
-            print(f"[Bridge] Kusto cluster restored from cache: {cached}")
+            print("[Bridge] Kusto cluster restored from cache")
     if prior_cluster != _st.active_kusto_cluster or prior_db != _st.active_kusto_db:
         _invalidate_kusto_metadata_cache(include_schema=True)
 

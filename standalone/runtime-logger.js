@@ -17,6 +17,7 @@ const PRIVATE_KEY_BLOCK_RE = /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----[\s\S]*?
 const BEARER_RE = /\bBearer\s+[^\s,;]+/gi;
 const PROVIDER_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})\b/g;
 const URL_SECRET_RE = /([?&](?:[A-Za-z0-9_.-]*(?:(?:api|private)[_-]?key|token|secret|password|credential|signature|sig)[A-Za-z0-9_.-]*|code|device[_-]?code|user[_-]?code)=)[^&#\s]+/gi;
+const KUSTO_ENDPOINT_RE = /https?:\/\/[A-Za-z0-9.-]+\.kusto\.windows\.net(?:\/[^\s]*)?/gi;
 const JSON_SECRET_RE = new RegExp(
   "([\"'][A-Za-z0-9_.-]*" + SECRET_KEY_FRAGMENT + "[A-Za-z0-9_.-]*[\"']\\s*:\\s*)[\"'][^\"']*[\"']",
   'gi'
@@ -170,6 +171,7 @@ function redactRuntimeText(value, limit) {
   text = text.replace(SECRET_ASSIGNMENT_RE, '$1$2=<redacted>');
   text = text.replace(PROVIDER_TOKEN_RE, '<redacted>');
   text = text.replace(URL_SECRET_RE, '$1<redacted>');
+  text = text.replace(KUSTO_ENDPOINT_RE, '<redacted-kusto-endpoint>');
   text = text.replace(JSON_SECRET_RE, '$1"<redacted>"');
   text = text.replace(BODY_FIELD_RE, '$1"<content omitted>"');
   text = text.replace(ESCAPED_BODY_FIELD_RE, '$1\\"<content omitted>\\"');

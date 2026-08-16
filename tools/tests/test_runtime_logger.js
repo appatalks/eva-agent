@@ -30,6 +30,7 @@ try {
   logger.write('test', 'info', 'PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMII-private-key-material\n-----END PRIVATE KEY-----');
   logger.write('test', 'info', 'https://example.com/callback?access_token=oauth-access&refresh_token=oauth-refresh');
   logger.write('test', 'info', 'https://example.com/callback?code=oauth-authorization-code&device_code=device-secret');
+  logger.write('test', 'info', 'Kusto cluster: https://private-cluster.kusto.windows.net/private-path');
   logger.write('test', 'info', '"body":"' + 'x'.repeat(160) + '"');
   logger.write('test', 'info', JSON.stringify({
     model: 'example',
@@ -75,6 +76,7 @@ try {
   assert(!contents.includes('oauth-refresh'));
   assert(!contents.includes('oauth-authorization-code'));
   assert(!contents.includes('device-secret'));
+  assert(!contents.includes('private-cluster'));
   assert(!contents.includes('private multimodal prompt'));
   assert(!contents.includes('json-secret'));
   assert(!contents.includes('private short prompt'));
@@ -129,6 +131,10 @@ try {
   ).includes('MII-private-value'));
   assert(!redactRuntimeText('https://x.test/?refresh_token=private-value', 500).includes('private-value'));
   assert(!redactRuntimeText('https://x.test/callback?code=private-value', 500).includes('private-value'));
+  assert.strictEqual(
+    redactRuntimeText('https://private-cluster.kusto.windows.net/', 500),
+    '<redacted-kusto-endpoint>'
+  );
   assert(!redactRuntimeText(JSON.stringify({ messages: [{ content: [{ text: 'private-value' }] }] }), 500).includes('private-value'));
   assert(!redactRuntimeText('{"content":"private-value"}', 500).includes('private-value'));
   assert(!redactRuntimeText('prefix {"messages":[{"content":[{"text":"private-value"}]}]} suffix', 500).includes('private-value'));
