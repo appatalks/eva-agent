@@ -1,8 +1,21 @@
 # Protected Memory Plan
 
-Status: first local implementation slice complete on the `protected-memory` branch.
-The FIDO2 PRF adapter, Kusto encrypted schema, cloud-release confirmation, and
-production hardening remain planned follow-up work.
+Status: local SQLite vault implemented and shipping. Last reviewed 2026-08-15
+against Eva 5.6.2.
+
+| Area | State | Evidence |
+| --- | --- | --- |
+| Encrypted vault service | Delivered | AES-256-GCM envelope, per-record data keys, wrapped vault key in `tools/protected_memory.py` |
+| SQLite backend and access control | Delivered | Isolated `<userData>/protected.sqlite3`; SQLite authorizer denies protected tables, including via local MCP |
+| Protected artifacts | Delivered | Chunked encrypted files under `<userData>/protected-artifacts`, excluded from normal artifact listing and purge |
+| Key provider | Partial | `YkmanChallengeResponseProvider` (YubiKey OTP challenge-response, touch-configured). There is deliberately no software fallback. FIDO2 HMAC-secret/PRF remains the preferred provider and is not implemented |
+| Capture and unlock UI | Delivered | Tools & memory settings panel plus chat capture interception in `core/js/providers/copilot.js` |
+| Release policy | Partial | Unlock asks whether Eva may release matching values to the active model; the grant currently lasts until the user locks the vault. The one-turn or short-idle grant remains the production target |
+| Kusto backend | Planned | Matching encrypted schemas and tool guards are not implemented |
+| Recovery and rotation | Planned | Second-key enrollment and key rotation are not implemented |
+
+Validation: `python3 tools/tests/test_protected_memory.py`. Hardware provider
+paths require an enrolled YubiKey and are run manually.
 
 ## Existing asset storage
 

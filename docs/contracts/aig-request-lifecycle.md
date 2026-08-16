@@ -1,5 +1,7 @@
 # AIG Request Lifecycle Contract
 
+Status: living contract. Last reviewed 2026-08-15 against Eva 5.6.2.
+
 `POST /v1/aig/chat` remains owned by `BridgeHandler._aig_chat()` in
 `tools/bridge/core.py`. The handler parses HTTP input, emits errors/responses,
 coordinates memory, retrieval, responder execution, streaming, reflection, and
