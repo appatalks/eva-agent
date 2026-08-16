@@ -27,6 +27,7 @@ module that loads before its dependency fails silently at runtime.
 | Internal cognition loop | `core/js/cognition.js` | `/v1/aig/chat`, footer status line |
 | Learning signals and consent | `core/js/learning.js` | bridge learning endpoints, settings |
 | In-app dialogs | `core/js/dialogs.js` | any surface needing a prompt Electron disables |
+| Aggregate runtime logging | `standalone/runtime-logger.js` | Electron, renderer, bridge, Local Voices, lifecycle, crash, and sanitized audit output; terminal content excluded |
 | External data snapshots | `core/js/external.js` | `core/external/*.data` files fetched at runtime |
 
 `core/js/pandora.js` is an experimental self-modification sketch. Model-produced

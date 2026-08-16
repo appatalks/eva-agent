@@ -34,6 +34,7 @@
       "main.js",
       "preload.js",
       "context-menu.js",
+      "runtime-logger.js",
       "workspace-projection.js",
       "terminal-broker.js"
     ],

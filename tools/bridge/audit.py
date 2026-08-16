@@ -10,7 +10,11 @@ from bridge import config as _cfg
 _AUDIT_PATH = _cfg.AUDIT_LOG_PATH
 _AUDIT_MAX_BYTES = _cfg.AUDIT_LOG_MAX_BYTES
 _AUDIT_TEXT_LIMIT = _cfg.AUDIT_LOG_TEXT_LIMIT
-_SENSITIVE_KEY_RE = re.compile(r"(?:api[_-]?key|authorization|credential|cookie|password|secret|token)", re.I)
+_SENSITIVE_KEY_RE = re.compile(r"(?:(?:api|private)[_-]?key|authorization|credential|cookie|password|secret|token)", re.I)
+_AUTHORIZATION_HEADER_RE = re.compile(r"\bAuthorization\s*[:=]\s*[^\r\n]*", re.I)
+_PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )?PRIVATE KEY-----"
+)
 _BEARER_RE = re.compile(r"\bBearer\s+[^\s,;]+", re.I)
 _ASSIGNMENT_SECRET_RE = re.compile(
     r"\b(?:api[_-]?key|authorization|credential|cookie|password|secret|token)\s*[:=]\s*[^\s,;]+",
@@ -21,6 +25,24 @@ _CORRELATION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,120}$")
 _URL_SECRET_RE = re.compile(r"([?&](?:api[_-]?key|token|signature|sig|password|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)=)[^&#\s]+", re.I)
 _audit_lock = threading.Lock()
 
+_RUNTIME_AUDIT_BASE_FIELDS = {
+    "ts", "event", "outcome", "backend", "route", "status",
+    "kind", "tool_kind", "decision",
+    "error_type", "permission_basis", "recipients",
+}
+_RUNTIME_AUDIT_SUFFIXES = (
+    "_count", "_chars", "_bytes", "_ms", "_rate", "_percent", "_attempts",
+)
+
+
+def _runtime_audit_record(record):
+    """Project a sanitized audit record into privacy-safe operational metadata."""
+    forwarded = {}
+    for key, value in (record or {}).items():
+        if key in _RUNTIME_AUDIT_BASE_FIELDS or key.endswith(_RUNTIME_AUDIT_SUFFIXES):
+            forwarded[key] = value
+    return forwarded
+
 
 def _clip(value, limit=_AUDIT_TEXT_LIMIT):
     text = str(value or "").strip()
@@ -29,6 +51,8 @@ def _clip(value, limit=_AUDIT_TEXT_LIMIT):
 
 def _sanitize_text(value):
     text = _clip(value)
+    text = _PRIVATE_KEY_BLOCK_RE.sub("<redacted-private-key>", text)
+    text = _AUTHORIZATION_HEADER_RE.sub("Authorization: <redacted>", text)
     text = _BEARER_RE.sub("Bearer <redacted>", text)
     text = _ASSIGNMENT_SECRET_RE.sub("<redacted>", text)
     text = _PROVIDER_TOKEN_RE.sub("<redacted>", text)
@@ -80,6 +104,10 @@ def audit_event(event, correlation_id="", outcome="", **fields):
                 os.chmod(_AUDIT_PATH, 0o600)
             except OSError:
                 pass
+        if os.environ.get("EVA_RUNTIME_AUDIT_STDOUT") == "1":
+            print("[Audit] " + json.dumps(
+                _runtime_audit_record(record), sort_keys=True, separators=(",", ":")
+            ))
         return record
     except Exception:
         return None
