@@ -1,4 +1,4 @@
-"""Provider profiles and the loopback callback that completes a browser sign-in.
+"""Experimental provider profiles and OAuth helpers for future mailbox sign-in.
 
 Google does not permit the OAuth device flow for mailbox scopes; its allowed
 device scopes are limited to sign-in, Drive file/appdata, and YouTube. Google
@@ -21,6 +21,12 @@ import threading
 import urllib.parse
 
 from bridge import oauth_client
+
+# The transport and OAuth primitives are retained as groundwork, but no account
+# creation or UI flow exposes hosted providers until credential storage,
+# refresh, revocation, and live provider validation form one complete feature.
+EXPERIMENTAL_DISABLED = True
+EXPERIMENTAL_DISABLED_MESSAGE = "Hosted mailbox OAuth is experimental and disabled until the complete connection flow is available"
 
 # Public client identifiers only. These are not secrets, and PKCE is what
 # actually protects the exchange; no client secret is stored or required.
@@ -155,6 +161,8 @@ class LoopbackCallbackServer:
 
 def begin_loopback_authorization(provider_name, client_id):
     """Prepare a browser authorization request. Returns (url, pending_state)."""
+    if EXPERIMENTAL_DISABLED:
+        raise oauth_client.OAuthError(EXPERIMENTAL_DISABLED_MESSAGE)
     profile = provider_profile(provider_name)
     if not profile:
         raise oauth_client.OAuthError("Unknown mail provider")
@@ -186,6 +194,8 @@ def begin_loopback_authorization(provider_name, client_id):
 
 def complete_loopback_authorization(pending, client_id):
     """Wait for the redirect and exchange the code for tokens."""
+    if EXPERIMENTAL_DISABLED:
+        raise oauth_client.OAuthError(EXPERIMENTAL_DISABLED_MESSAGE)
     server = pending["server"]
     try:
         code = server.wait_for_code(pending["state"])
@@ -199,6 +209,8 @@ def complete_loopback_authorization(pending, client_id):
 
 def begin_device_authorization(provider_name, client_id):
     """Start device-code sign-in. Returns (authorization, metadata)."""
+    if EXPERIMENTAL_DISABLED:
+        raise oauth_client.OAuthError(EXPERIMENTAL_DISABLED_MESSAGE)
     profile = provider_profile(provider_name)
     if not profile:
         raise oauth_client.OAuthError("Unknown mail provider")
@@ -215,11 +227,15 @@ def begin_device_authorization(provider_name, client_id):
 
 def complete_device_authorization(metadata, client_id, authorization):
     """Poll until the user approves the device sign-in."""
+    if EXPERIMENTAL_DISABLED:
+        raise oauth_client.OAuthError(EXPERIMENTAL_DISABLED_MESSAGE)
     return oauth_client.poll_device_token(metadata, client_id, authorization)
 
 
 def authorize(provider_name, client_id):
     """Run whichever sign-in style the provider supports."""
+    if EXPERIMENTAL_DISABLED:
+        raise oauth_client.OAuthError(EXPERIMENTAL_DISABLED_MESSAGE)
     profile = provider_profile(provider_name)
     if not profile:
         raise oauth_client.OAuthError("Unknown mail provider")

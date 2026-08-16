@@ -43,19 +43,24 @@ def ok(result, request_id=1, headers=None):
 
 def client(*responses, token="access-token"):
     transport = FakeTransport(*responses)
-    instance = remote_mcp.RemoteMCPClient(ENDPOINT, lambda: token, transport=transport)
+    instance = remote_mcp.RemoteMCPClient(ENDPOINT, lambda: token, transport=transport, experimental_enabled=True)
     return instance, transport
 
 
 class ConstructionTests(unittest.TestCase):
+    def test_remote_mcp_is_disabled_without_explicit_internal_enablement(self):
+        with self.assertRaises(remote_mcp.RemoteMCPError) as caught:
+            remote_mcp.RemoteMCPClient(ENDPOINT, lambda: "t")
+        self.assertIn("experimental and disabled", str(caught.exception))
+
     def test_refuses_a_non_https_endpoint(self):
         for endpoint in ["http://workiq.svc.cloud.microsoft/mcp", "ftp://x/y", "", "not a url"]:
             with self.assertRaises(remote_mcp.RemoteMCPError):
-                remote_mcp.RemoteMCPClient(endpoint, lambda: "t")
+                remote_mcp.RemoteMCPClient(endpoint, lambda: "t", experimental_enabled=True)
 
     def test_requires_a_token_provider(self):
         with self.assertRaises(remote_mcp.RemoteMCPError):
-            remote_mcp.RemoteMCPClient(ENDPOINT, None)
+            remote_mcp.RemoteMCPClient(ENDPOINT, None, experimental_enabled=True)
 
     def test_missing_token_raises_reauthorization(self):
         instance, _ = client(token="")

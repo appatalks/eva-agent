@@ -41,6 +41,8 @@ check('credential account is chosen from a list, not typed',
   /<select id="emailCredentialId"/.test(html));
 check('allowlist field present', /id="emailAllowlist"/.test(html));
 check('account list region is live', /id="emailAccountList"[^>]*aria-live/.test(html));
+check('hosted-provider experimentation is visibly disabled',
+  /Gmail, Outlook\/Microsoft OAuth, Work IQ, and remote-MCP mailbox connections are experimental and disabled/.test(html));
 check('account list has a new-mailbox action', /id="emailNewAccount"/.test(html));
 check('best-effort local MTA mode is available',
   /id="emailDirectMode"/.test(html) && /value="local_mta"/.test(html));

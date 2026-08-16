@@ -1,10 +1,14 @@
-"""Streamable-HTTP MCP client for remote, OAuth-protected servers.
+"""Experimental Streamable-HTTP MCP client for remote, OAuth-protected servers.
 
 Eva's existing `local_mcp` client speaks JSON-RPC over stdio to allowlisted local
 subprocesses. That transport cannot reach a hosted server such as Work IQ, which
 requires HTTPS plus an Entra bearer token. This module adds only that transport;
 authorization decisions live in `bridge.oauth_client` and mail policy lives in
 `bridge.email_policy`.
+
+No configured Eva workflow currently invokes this module. It remains disabled
+as email-provider groundwork until remote connection setup, token persistence,
+refresh, revocation, and live validation are completed as one user workflow.
 
 Boundaries enforced here:
 
@@ -27,6 +31,7 @@ PROTOCOL_VERSION = "2025-06-18"
 DEFAULT_TIMEOUT = 60
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 CLIENT_NAME = "eva-bridge"
+EXPERIMENTAL_DISABLED_MESSAGE = "Remote MCP mailbox providers are experimental and disabled until the complete connection flow is available"
 
 
 class RemoteMCPError(Exception):
@@ -97,7 +102,9 @@ def tool_result_text(result):
 class RemoteMCPClient:
     """One authenticated connection to a remote MCP endpoint."""
 
-    def __init__(self, endpoint, token_provider, timeout=DEFAULT_TIMEOUT, transport=None):
+    def __init__(self, endpoint, token_provider, timeout=DEFAULT_TIMEOUT, transport=None, experimental_enabled=False):
+        if not experimental_enabled:
+            raise RemoteMCPError(EXPERIMENTAL_DISABLED_MESSAGE)
         if not _is_https_url(endpoint):
             raise RemoteMCPError("Remote MCP endpoint must be an HTTPS URL")
         if not callable(token_provider):

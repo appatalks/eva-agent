@@ -17,6 +17,12 @@ from bridge import oauth_client
 
 
 class ProviderProfileTests(unittest.TestCase):
+    def test_hosted_oauth_execution_is_experimentally_disabled(self):
+        self.assertTrue(mail_oauth.EXPERIMENTAL_DISABLED)
+        with self.assertRaises(oauth_client.OAuthError) as caught:
+            mail_oauth.begin_loopback_authorization("google", "client-1")
+        self.assertIn("experimental and disabled", str(caught.exception))
+
     def test_google_requires_the_browser_flow(self):
         profile = mail_oauth.provider_profile("google")
         self.assertEqual(profile["auth_style"], "loopback")

@@ -15,7 +15,7 @@ def account(**overrides):
     record = {
         "id": "work",
         "label": "Work",
-        "backend": "workiq",
+        "backend": "imap_smtp",
         "address": "user@company.example",
         "status": "connected",
     }
@@ -30,7 +30,7 @@ def send(**overrides):
 
 
 class BackendSuggestionTests(unittest.TestCase):
-    def test_known_providers_use_the_implemented_adapter(self):
+    def test_address_inference_does_not_activate_experimental_backends(self):
         for address in ["person@gmail.com", "person@outlook.com", "person@custom.example"]:
             self.assertEqual(accounts_module.suggest_backend(address), "imap_smtp", address)
 
@@ -41,13 +41,13 @@ class BackendSuggestionTests(unittest.TestCase):
     def test_invalid_address_suggests_nothing(self):
         self.assertEqual(accounts_module.suggest_backend("nonsense"), "")
 
-    def test_gmail_gets_published_hosts_and_oauth(self):
+    def test_gmail_profile_remains_groundwork_only(self):
         hosts = accounts_module.suggest_imap_smtp_hosts("person@gmail.com")
         self.assertEqual(hosts["imap_host"], "imap.gmail.com")
         self.assertEqual(hosts["smtp_host"], "smtp.gmail.com")
         self.assertEqual(hosts["auth_mechanism"], "xoauth2")
 
-    def test_outlook_gets_published_hosts_and_oauth(self):
+    def test_outlook_profile_remains_groundwork_only(self):
         hosts = accounts_module.suggest_imap_smtp_hosts("person@outlook.com")
         self.assertEqual(hosts["imap_host"], "outlook.office365.com")
         self.assertEqual(hosts["auth_mechanism"], "xoauth2")
@@ -60,22 +60,23 @@ class BackendSuggestionTests(unittest.TestCase):
 
 
 class ProviderAccountTests(unittest.TestCase):
-    def test_gmail_account_is_configured_without_any_input(self):
-        record, error = accounts_module.normalize_account(
+    def test_gmail_account_is_explicitly_disabled(self):
+        _record, error = accounts_module.normalize_account(
             {"id": "personal", "address": "person@gmail.com", "status": "connected"}
         )
-        self.assertEqual(error, "")
-        self.assertEqual(record["backend"], "imap_smtp")
-        self.assertEqual(record["settings"]["imap_host"], "imap.gmail.com")
-        self.assertEqual(record["settings"]["auth_mechanism"], "xoauth2")
+        self.assertIn("experimental and disabled", error)
 
-    def test_outlook_account_is_configured_without_any_input(self):
-        record, error = accounts_module.normalize_account(
+    def test_outlook_account_is_explicitly_disabled(self):
+        _record, error = accounts_module.normalize_account(
             {"id": "work", "address": "person@outlook.com", "status": "connected"}
         )
-        self.assertEqual(error, "")
-        self.assertEqual(record["settings"]["imap_host"], "outlook.office365.com")
-        self.assertEqual(record["settings"]["auth_mechanism"], "xoauth2")
+        self.assertIn("experimental and disabled", error)
+
+    def test_workiq_backend_is_explicitly_disabled(self):
+        _record, error = accounts_module.normalize_account(
+            {"id": "work", "backend": "workiq", "address": "person@company.example", "status": "connected"}
+        )
+        self.assertIn("experimental and disabled", error)
 
     def test_custom_domain_defaults_to_password_auth(self):
         record, _ = accounts_module.normalize_account(
@@ -83,13 +84,12 @@ class ProviderAccountTests(unittest.TestCase):
         )
         self.assertEqual(record["settings"]["auth_mechanism"], "password")
 
-    def test_explicit_settings_override_provider_defaults(self):
-        record, _ = accounts_module.normalize_account({
+    def test_disabled_provider_cannot_be_reenabled_with_manual_settings(self):
+        _record, error = accounts_module.normalize_account({
             "id": "personal", "address": "person@gmail.com", "status": "connected",
             "settings": {"auth_mechanism": "password"},
         })
-        self.assertEqual(record["settings"]["auth_mechanism"], "password")
-        self.assertEqual(record["settings"]["imap_host"], "imap.gmail.com")
+        self.assertIn("experimental and disabled", error)
 
     def test_unknown_mechanism_falls_back_to_password(self):
         record, _ = accounts_module.normalize_account({
@@ -107,7 +107,7 @@ class NormalizeAccountTests(unittest.TestCase):
 
     def test_infers_backend_from_address(self):
         record, error = accounts_module.normalize_account(
-            {"id": "personal", "address": "person@gmail.com", "status": "connected"}
+            {"id": "personal", "address": "person@custom.example", "status": "connected"}
         )
         self.assertEqual(error, "")
         self.assertEqual(record["backend"], "imap_smtp")
@@ -174,7 +174,7 @@ class SelectionTests(unittest.TestCase):
     def setUp(self):
         self.accounts, _ = accounts_module.normalize_accounts([
             account(id="work", address="user@company.example"),
-            account(id="personal", backend="gmail_oauth", address="person@gmail.com"),
+            account(id="personal", backend="imap_smtp", address="person@custom.example"),
             account(id="direct", backend="eva_direct", address="eva@home.example",
                     settings={"direct_consent": ["peer@company.example"]}),
         ])
@@ -197,7 +197,7 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(chosen["id"], "personal")
 
     def test_from_address_selects_the_matching_account(self):
-        chosen, _ = accounts_module.select_send_account(self.accounts, from_address="person@gmail.com")
+        chosen, _ = accounts_module.select_send_account(self.accounts, from_address="person@custom.example")
         self.assertEqual(chosen["id"], "personal")
 
     def test_unknown_from_address_is_an_error_not_a_fallback(self):
@@ -339,7 +339,7 @@ class DirectDeliveryPlanTests(unittest.TestCase):
 
     def test_misaligned_relay_domain_is_refused(self):
         foreign, _ = accounts_module.normalize_account(
-            account(id="owned", backend="gmail_oauth", address="me@gmail.com")
+            account(id="owned", backend="imap_smtp", address="me@other.example")
         )
         plan, error = accounts_module.plan_direct_delivery(
             self.direct(), ["peer@company.example"], [foreign]

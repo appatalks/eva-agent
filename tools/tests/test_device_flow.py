@@ -186,13 +186,16 @@ class PollDeviceTokenTests(unittest.TestCase):
 
 
 class ProviderDispatchTests(unittest.TestCase):
-    def test_google_refuses_device_sign_in(self):
+    def test_hosted_provider_execution_is_experimentally_disabled(self):
         with self.assertRaises(oauth_client.OAuthError) as caught:
             mail_oauth.begin_device_authorization("google", "client-1")
-        self.assertIn("does not allow device-code", str(caught.exception))
+        self.assertIn("experimental and disabled", str(caught.exception))
 
-    def test_microsoft_is_configured_for_device_sign_in(self):
+    def test_microsoft_profile_remains_groundwork_only(self):
         self.assertEqual(mail_oauth.provider_profile("microsoft")["auth_style"], "device_code")
+        with self.assertRaises(oauth_client.OAuthError) as caught:
+            mail_oauth.begin_device_authorization("microsoft", "client-1")
+        self.assertIn("experimental and disabled", str(caught.exception))
 
     def test_unknown_provider_is_refused(self):
         with self.assertRaises(oauth_client.OAuthError):

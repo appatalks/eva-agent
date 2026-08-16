@@ -38,6 +38,7 @@ from bridge import email_policy
 from bridge import mail_oauth
 
 BACKENDS = ("workiq", "gmail_oauth", "imap_smtp", "eva_direct")
+EXPERIMENTAL_BACKENDS = {"workiq", "gmail_oauth"}
 CAPABILITIES = ("read", "send", "delete")
 STATUSES = ("connected", "needs_auth", "disabled", "error")
 DELIVERY_MODES = ("auto", "relay", "internal", "local_mta")
@@ -68,6 +69,18 @@ def suggest_backend(address):
     if not canonical:
         return ""
     return "imap_smtp"
+
+
+def experimental_provider_message(address="", backend=""):
+    """Explain why unfinished hosted-provider flows are unavailable."""
+    provider = mail_oauth.provider_for_address(address)
+    if backend == "workiq":
+        return "Work IQ email is experimental and disabled until the complete connection flow is available"
+    if backend == "gmail_oauth" or provider == "google":
+        return "Gmail OAuth is experimental and disabled until the complete connection flow is available"
+    if provider == "microsoft":
+        return "Outlook/Microsoft OAuth is experimental and disabled until the complete connection flow is available"
+    return ""
 
 
 def suggest_imap_smtp_hosts(address):
@@ -129,6 +142,9 @@ def normalize_account(raw):
     backend = _clean(raw.get("backend"), 32).lower() or suggest_backend(address)
     if backend not in BACKENDS:
         return None, f"backend must be one of: {', '.join(BACKENDS)}"
+    experimental_message = experimental_provider_message(address, backend)
+    if experimental_message:
+        return None, experimental_message
 
     allowed = _BACKEND_DEFAULT_CAPABILITIES[backend]
     requested = raw.get("capabilities")

@@ -84,7 +84,7 @@ files and are normalized before Eva uses them.
 - Persistent memory via Azure Data Explorer (Kusto) or local SQLite
 - Memory Inspector with searchable traceable records, provenance, associations, and append-only corrections
 - Signal text messaging (send-only via signal-cli, keyword-triggered fallback for local models)
-- Multi-account email settings and native harness controls, with bounded mailbox reads, exact-message recipient confirmation, internal delivery, and best-effort local-MTA submission that remains explicitly labeled unverified
+- Multi-account email settings and native harness controls for custom-domain IMAP/SMTP and Eva-direct delivery, with bounded mailbox reads, exact-message recipient confirmation, internal delivery, and best-effort local-MTA submission that remains explicitly labeled unverified. Gmail, Outlook/Microsoft OAuth, Work IQ, and remote-MCP mailbox groundwork is experimental and disabled until its complete connection flow ships.
 - Autonomous browser control (Playwright + CDP) and desktop control (pyautogui)
 - Webcam presence detection (OpenCV face + motion)
 - Inline image search (Wikimedia) and generation (gpt-image-1)

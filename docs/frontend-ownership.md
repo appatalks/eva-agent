@@ -49,7 +49,7 @@ context.
 | Background controls and proposals | `core/js/settings/background.js` | `test_background_settings.js` |
 | Alert rules and delivery limits | `core/js/settings/alerts.js` | `test_alerts_settings.js` |
 | Audio devices and voice preferences | `core/js/settings/audio.js` | `test_audio_settings.js` |
-| Email accounts, recipient consent, and sending | `core/js/settings/email.js` | `test_email_settings.js`; bridge policy and delivery contracts remain under `tools/tests/test_email_*.py` |
+| Email accounts, recipient consent, and sending | `core/js/settings/email.js` | Custom IMAP/SMTP and Eva-direct only. Gmail/Outlook OAuth, Work IQ, and remote MCP are retained as disabled experimental groundwork; contract: `test_email_settings.js` plus bridge delivery tests |
 | Remaining settings orchestration | `core/js/options.js` | static suite plus domain-focused checks |
 
 Three settings surfaces do not live where their name suggests. Record the real
