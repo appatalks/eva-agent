@@ -532,4 +532,3 @@ def capability_summary():
         "can use it. Never state that mail was sent, read, or deleted unless the operation "
         "actually returned success."
     )
-
