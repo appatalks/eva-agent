@@ -15,6 +15,7 @@ var EvaHarness = (function() {
     goal: 'goals', background: 'background_jobs', jobs: 'background_jobs',
     cron: 'schedules', schedule: 'schedules', auth: 'accounts', account: 'accounts',
     tools: 'tools_memory', mcp: 'tools_memory', tools_and_memory: 'tools_memory',
+    mail: 'email', mailbox: 'email', inbox: 'email', email_settings: 'email',
     privacy: 'learning', learning_controls: 'learning',
     user_profile: 'profile', profiles: 'profile',
     voice_mode: 'voice', eva_voice: 'voice',
@@ -61,6 +62,7 @@ var EvaHarness = (function() {
     background_jobs: function() { return openSettings('background'); },
     schedules: function() { return openSettings('cron'); },
     accounts: function() { return openSettings('auth'); },
+    email: function() { return openSettings('email'); },
     tools_memory: function() { return openSettings('mcp'); },
     learning: function() { return openSettings('learning'); },
     profile: function() {
@@ -74,6 +76,8 @@ var EvaHarness = (function() {
   var actionManifest = [
     { id: 'navigate', description: 'Open a native Eva surface. args: {target}. Read-only navigation.' },
     { id: 'refresh', description: 'Refresh a native surface. args: {target}. Read-only.' },
+    { id: 'describe_email', description: 'Open Email settings and summarize configured mailboxes and sign-in state. Read-only.' },
+    { id: 'send_email', description: 'Send one email after an explicit direct user request. args: {to, subject, body, accountId?}. A recipient that is not already approved requires the user to confirm that exact message.' },
     { id: 'describe_workspaces', description: 'Open Workspaces and return the real workspace and active-run count. Read-only.' },
     { id: 'describe_assets', description: 'Open Assets and summarize generated and workspace files. Read-only.' },
     { id: 'describe_skills', description: 'Open Skills and summarize saved and active skills. Read-only.' },
@@ -1073,6 +1077,49 @@ var EvaHarness = (function() {
         return result(true, 'import_github', 'GitHub workspace imported.', { outcome: 'imported', project: project });
       }).catch(function(error) {
         return result(false, 'import_github', error && error.message ? error.message : 'GitHub workspace import failed.', { outcome: 'failed' });
+      });
+    }
+    if (action === 'describe_email') {
+      if (!window.EvaEmailSettings || typeof EvaEmailSettings.open !== 'function') {
+        return result(false, 'describe_email', 'Email settings are unavailable.');
+      }
+      return EvaEmailSettings.open().then(function() {
+        var accounts = EvaEmailSettings.accounts();
+        if (!accounts.length) return result(true, 'describe_email', 'No mailbox is configured.', { accounts: 0 });
+        var summary = accounts.map(function(account) {
+          var signedIn = account.credential_present ? 'signed in' : 'needs sign-in';
+          return account.label + ' <' + account.address + '> (' + account.backend + ', ' + signedIn + ')';
+        }).join('; ');
+        return result(true, 'describe_email', summary, { accounts: accounts.length });
+      }).catch(function(error) {
+        return result(false, 'describe_email', failureReason(error));
+      });
+    }
+    if (action === 'send_email') {
+      if (!window.EvaEmailSettings || typeof EvaEmailSettings.send !== 'function') {
+        return result(false, 'send_email', 'Email sending is unavailable.');
+      }
+      var to = String(request.to || '').trim();
+      var subject = String(request.subject || '').trim();
+      var body = String(request.body || '').trim();
+      if (!to || !subject || !body) {
+        return result(false, 'send_email', 'A recipient, subject, and message are required.');
+      }
+      return EvaEmailSettings.send({
+        to: to, subject: subject, body: body,
+        account_id: String(request.accountId || request.account_id || '').trim()
+      }).then(function(sendResult) {
+        var decision = sendResult && sendResult.decision;
+        if (decision === 'sent') return result(true, 'send_email', 'Sent the message.', { outcome: 'sent' });
+        if (decision === 'partially_sent') {
+          return result(true, 'send_email', 'Delivered to some recipients only.', {
+            outcome: 'partial', failures: sendResult.failures || []
+          });
+        }
+        if (decision === 'cancelled') return result(false, 'send_email', 'You declined the unapproved recipient.', { outcome: 'cancelled' });
+        return result(false, 'send_email', (sendResult && sendResult.reason) || 'The message was refused.', { outcome: 'refused' });
+      }).catch(function(error) {
+        return result(false, 'send_email', failureReason(error), { outcome: 'failed' });
       });
     }
     if (action === 'new_chat') {
