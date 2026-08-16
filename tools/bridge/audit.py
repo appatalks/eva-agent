@@ -12,9 +12,6 @@ _AUDIT_MAX_BYTES = _cfg.AUDIT_LOG_MAX_BYTES
 _AUDIT_TEXT_LIMIT = _cfg.AUDIT_LOG_TEXT_LIMIT
 _SENSITIVE_KEY_RE = re.compile(r"(?:(?:api|private)[_-]?key|authorization|credential|cookie|password|secret|token)", re.I)
 _AUTHORIZATION_HEADER_RE = re.compile(r"\bAuthorization\s*[:=]\s*[^\r\n]*", re.I)
-_PRIVATE_KEY_BLOCK_RE = re.compile(
-    r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )?PRIVATE KEY-----"
-)
 _BEARER_RE = re.compile(r"\bBearer\s+[^\s,;]+", re.I)
 _ASSIGNMENT_SECRET_RE = re.compile(
     r"\b(?:api[_-]?key|authorization|credential|cookie|password|secret|token)\s*[:=]\s*[^\s,;]+",
@@ -49,9 +46,33 @@ def _clip(value, limit=_AUDIT_TEXT_LIMIT):
     return text if len(text) <= limit else text[:limit] + "..."
 
 
+def _redact_private_key_blocks(text):
+    """Redact PEM private-key blocks with linear marker scanning, not regex."""
+    marker = "-----BEGIN "
+    output = []
+    cursor = 0
+    while True:
+        start = text.find(marker, cursor)
+        if start < 0:
+            output.append(text[cursor:])
+            return "".join(output)
+        line_end = text.find("\n", start)
+        line_end = len(text) if line_end < 0 else line_end
+        header = text[start:line_end]
+        if "PRIVATE KEY-----" not in header:
+            output.append(text[cursor:start + len(marker)])
+            cursor = start + len(marker)
+            continue
+        footer = header.replace("BEGIN", "END", 1)
+        footer_start = text.find(footer, line_end)
+        output.append(text[cursor:start])
+        output.append("<redacted-private-key>")
+        cursor = footer_start + len(footer) if footer_start >= 0 else len(text)
+
+
 def _sanitize_text(value):
     text = _clip(value)
-    text = _PRIVATE_KEY_BLOCK_RE.sub("<redacted-private-key>", text)
+    text = _redact_private_key_blocks(text)
     text = _AUTHORIZATION_HEADER_RE.sub("Authorization: <redacted>", text)
     text = _BEARER_RE.sub("Bearer <redacted>", text)
     text = _ASSIGNMENT_SECRET_RE.sub("<redacted>", text)

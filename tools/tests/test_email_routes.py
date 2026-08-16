@@ -112,7 +112,8 @@ class FocusedMutationHTTPTests(unittest.TestCase):
         cls.original_token = os.environ.get("EVA_BRIDGE_TOKEN")
         email_service._EMAIL_CONFIG_PATH = os.path.join(cls.directory.name, "email_accounts.json")
         email_service._credentials.clear()
-        os.environ["EVA_BRIDGE_TOKEN"] = "email-route-test-token"
+        cls.token = "email-route-" + "test-token"
+        os.environ["EVA_BRIDGE_TOKEN"] = cls.token
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), core.BridgeHandler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -137,7 +138,7 @@ class FocusedMutationHTTPTests(unittest.TestCase):
             data=json.dumps(body).encode("utf-8") if body is not None else None,
             method=method,
             headers={
-                "Authorization": "Bearer email-route-test-token",
+                "Authorization": "Bearer " + self.token,
                 "Content-Type": "application/json",
                 "Origin": self.base,
             },

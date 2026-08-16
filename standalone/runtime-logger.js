@@ -13,7 +13,6 @@ const SECRET_ASSIGNMENT_RE = new RegExp(
   'gi'
 );
 const AUTHORIZATION_HEADER_RE = /\bAuthorization\s*[:=]\s*[^\r\n]*/gi;
-const PRIVATE_KEY_BLOCK_RE = /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )?PRIVATE KEY-----/g;
 const BEARER_RE = /\bBearer\s+[^\s,;]+/gi;
 const PROVIDER_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})\b/g;
 const URL_SECRET_RE = /([?&](?:[A-Za-z0-9_.-]*(?:(?:api|private)[_-]?key|token|secret|password|credential|signature|sig)[A-Za-z0-9_.-]*|code|device[_-]?code|user[_-]?code)=)[^&#\s]+/gi;
@@ -41,6 +40,28 @@ const CONTENT_DIAGNOSTIC_RES = [
 
 const SENSITIVE_JSON_KEY_RE = new RegExp(SECRET_KEY_FRAGMENT, 'i');
 const PRIVATE_JSON_KEY_RE = new RegExp('^' + PRIVATE_FIELD_NAME + '$', 'i');
+
+function redactPrivateKeyBlocks(text) {
+  const marker = '-----BEGIN ';
+  let output = '';
+  let cursor = 0;
+  while (true) {
+    const start = text.indexOf(marker, cursor);
+    if (start < 0) return output + text.slice(cursor);
+    let lineEnd = text.indexOf('\n', start);
+    if (lineEnd < 0) lineEnd = text.length;
+    const header = text.slice(start, lineEnd);
+    if (!header.includes('PRIVATE KEY-----')) {
+      output += text.slice(cursor, start + marker.length);
+      cursor = start + marker.length;
+      continue;
+    }
+    const footer = header.replace('BEGIN', 'END');
+    const footerStart = text.indexOf(footer, lineEnd);
+    output += text.slice(cursor, start) + '<redacted-private-key>';
+    cursor = footerStart >= 0 ? footerStart + footer.length : text.length;
+  }
+}
 
 function sanitizeJsonValue(value, key, parentKey) {
   const field = String(key || '');
@@ -164,7 +185,7 @@ function redactStructuredJson(text) {
 
 function redactRuntimeText(value, limit) {
   let text = String(value == null ? '' : value);
-  text = text.replace(PRIVATE_KEY_BLOCK_RE, '<redacted-private-key>');
+  text = redactPrivateKeyBlocks(text);
   text = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
   text = redactStructuredJson(text);
   text = text.replace(BEARER_RE, 'Bearer <redacted>');
