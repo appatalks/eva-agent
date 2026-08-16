@@ -182,6 +182,19 @@ class FocusedMutationHTTPTests(unittest.TestCase):
         self.assertEqual(deleted["accounts"], [])
         self.assertEqual(deleted["allowlist"], ["approved@example.com"])
 
+    def test_identifierless_opaque_record_survives_http_upsert_and_delete(self):
+        opaque = {"opaque": {"keep": True}}
+        email_service.save_config({"accounts": [opaque], "allowlist": []})
+        account = {
+            "id": "editable", "backend": "imap_smtp", "address": "user@example.com",
+            "status": "connected",
+        }
+        self.assertEqual(self.call("POST", "/v1/email/account", {"account": account})[0], 200)
+        self.assertEqual(self.call("DELETE", "/v1/email/accounts/editable")[0], 200)
+        with open(email_service._EMAIL_CONFIG_PATH, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        self.assertEqual(raw["accounts"], [opaque])
+
 
 class BriefingMailSourceTests(unittest.TestCase):
     def test_unread_mail_becomes_a_ready_source(self):

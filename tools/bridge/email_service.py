@@ -129,12 +129,15 @@ def upsert_account(raw_account):
         document = _load_raw_config()
         existing_accounts = list(document.get("accounts", []))
         previous = next(
-            (existing for existing in existing_accounts if existing["id"] == account["id"]),
+            (existing for existing in existing_accounts if existing.get("id") == account["id"]),
             None,
         )
         prospective = list(existing_accounts)
         if previous:
-            index = next(i for i, existing in enumerate(prospective) if existing["id"] == account["id"])
+            index = next(
+                i for i, existing in enumerate(prospective)
+                if existing.get("id") == account["id"]
+            )
             prospective[index] = account
         else:
             prospective.append(account)
@@ -156,10 +159,12 @@ def delete_account(account_id):
     with _config_lock:
         document = _load_raw_config()
         existing = document.get("accounts", [])
-        if not any(account["id"] == account_id for account in existing):
+        if not any(account.get("id") == account_id for account in existing):
             raise EmailValidationError("Unknown email account")
         replacement = dict(document)
-        replacement["accounts"] = [account for account in existing if account["id"] != account_id]
+        replacement["accounts"] = [
+            account for account in existing if account.get("id") != account_id
+        ]
         if not save_config(replacement):
             raise EmailPersistenceError("Email settings could not be saved")
         clear_credential(account_id)
@@ -260,8 +265,12 @@ def _credential_binding(account):
 
 
 def _reconcile_credentials(previous_accounts, replacement_accounts):
-    previous = {account["id"]: account for account in previous_accounts}
-    replacement = {account["id"]: account for account in replacement_accounts}
+    previous = {
+        account["id"]: account for account in previous_accounts if account.get("id")
+    }
+    replacement = {
+        account["id"]: account for account in replacement_accounts if account.get("id")
+    }
     with _credential_lock:
         for account_id in list(_credentials):
             if account_id not in replacement or (

@@ -274,6 +274,18 @@ class ConfigTests(EmailServiceTestCase):
             raw = json.load(handle)
         self.assertIn(legacy, raw["accounts"])
 
+    def test_focused_mutations_preserve_identifierless_opaque_record(self):
+        opaque = {"opaque": {"keep": True}}
+        email_service.save_config({
+            "accounts": [opaque, account(id="editable")],
+            "allowlist": [],
+        })
+        email_service.upsert_account(account(id="editable", label="Updated"))
+        email_service.delete_account("editable")
+        with open(self.config_path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        self.assertEqual(raw["accounts"], [opaque])
+
 
 class CredentialTests(EmailServiceTestCase):
     def setUp(self):
