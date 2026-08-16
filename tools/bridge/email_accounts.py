@@ -35,6 +35,7 @@ that remotely; it reports the requirement so setup can surface it.
 import re
 
 from bridge import email_policy
+from bridge import mail_oauth
 
 BACKENDS = ("workiq", "gmail_oauth", "imap_smtp", "eva_direct")
 CAPABILITIES = ("read", "send", "delete")
@@ -48,13 +49,6 @@ MAX_HOST_CHARS = 253
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$")
 
-# Domains whose mail is reached through a hosted API rather than IMAP/SMTP.
-_OAUTH_DOMAINS = {
-    "gmail.com": "gmail_oauth",
-    "googlemail.com": "gmail_oauth",
-}
-_MICROSOFT_DOMAINS = {"outlook.com", "hotmail.com", "live.com", "msn.com"}
-
 _BACKEND_DEFAULT_CAPABILITIES = {
     "workiq": ("read", "send", "delete"),
     "gmail_oauth": ("read", "send", "delete"),
@@ -64,27 +58,32 @@ _BACKEND_DEFAULT_CAPABILITIES = {
 
 
 def suggest_backend(address):
-    """Guess the backend for an address so setup needs as little input as possible."""
+    """Guess the backend for an address so setup needs as little input as possible.
+
+    Gmail and personal Outlook are reached over IMAP/SMTP with XOAUTH2 rather
+    than a hosted API. `workiq` is never inferred: it serves a Microsoft 365
+    tenant, requires admin enablement, and must be chosen deliberately.
+    """
     canonical = email_policy.normalize_address(address)
     if not canonical:
         return ""
-    domain = canonical.rsplit("@", 1)[-1]
-    if domain in _OAUTH_DOMAINS:
-        return _OAUTH_DOMAINS[domain]
-    if domain in _MICROSOFT_DOMAINS:
-        return "workiq"
     return "imap_smtp"
 
 
 def suggest_imap_smtp_hosts(address):
-    """Return conventional host names for a custom domain, to be probed before use.
+    """Return connection settings for an address.
 
-    These are a starting guess in the style of client autoconfiguration. The
-    connection layer must verify them; an unreachable guess is not an error.
+    A known provider contributes its published hosts and XOAUTH2 requirement.
+    Any other domain gets conventional guesses in the style of client
+    autoconfiguration; the connection layer must verify them, and an unreachable
+    guess is not an error.
     """
     canonical = email_policy.normalize_address(address)
     if not canonical:
         return {}
+    provider = mail_oauth.provider_for_address(canonical)
+    if provider:
+        return dict(mail_oauth.account_settings_for(provider))
     domain = canonical.rsplit("@", 1)[-1]
     return {
         "imap_host": f"imap.{domain}",
@@ -171,13 +170,19 @@ def normalize_account(raw):
         smtp_host = _normalize_host(settings.get("smtp_host") or defaults["smtp_host"])
         if not imap_host or not smtp_host:
             return None, "IMAP and SMTP host names must be valid domain names"
+        mechanism = str(
+            settings.get("auth_mechanism") or defaults.get("auth_mechanism") or "password"
+        ).lower()
+        if mechanism not in ("password", "xoauth2"):
+            mechanism = "password"
         account["settings"] = {
             "imap_host": imap_host,
-            "imap_port": _normalize_port(settings.get("imap_port"), 993),
+            "imap_port": _normalize_port(settings.get("imap_port"), defaults.get("imap_port", 993)),
             "imap_tls": bool(settings.get("imap_tls", True)),
             "smtp_host": smtp_host,
-            "smtp_port": _normalize_port(settings.get("smtp_port"), 587),
+            "smtp_port": _normalize_port(settings.get("smtp_port"), defaults.get("smtp_port", 587)),
             "smtp_starttls": bool(settings.get("smtp_starttls", True)),
+            "auth_mechanism": mechanism,
         }
         if not account["settings"]["imap_tls"]:
             return None, "IMAP must use TLS"

@@ -30,21 +30,73 @@ def send(**overrides):
 
 
 class BackendSuggestionTests(unittest.TestCase):
-    def test_recognizes_hosted_providers(self):
-        self.assertEqual(accounts_module.suggest_backend("person@gmail.com"), "gmail_oauth")
-        self.assertEqual(accounts_module.suggest_backend("person@outlook.com"), "workiq")
+    def test_known_providers_use_the_implemented_adapter(self):
+        for address in ["person@gmail.com", "person@outlook.com", "person@custom.example"]:
+            self.assertEqual(accounts_module.suggest_backend(address), "imap_smtp", address)
 
-    def test_falls_back_to_imap_for_custom_domains(self):
-        self.assertEqual(accounts_module.suggest_backend("person@custom.example"), "imap_smtp")
+    def test_workiq_is_never_inferred_from_an_address(self):
+        for address in ["person@outlook.com", "person@hotmail.com", "person@company.example"]:
+            self.assertNotEqual(accounts_module.suggest_backend(address), "workiq", address)
 
     def test_invalid_address_suggests_nothing(self):
         self.assertEqual(accounts_module.suggest_backend("nonsense"), "")
 
-    def test_host_guess_follows_convention(self):
+    def test_gmail_gets_published_hosts_and_oauth(self):
+        hosts = accounts_module.suggest_imap_smtp_hosts("person@gmail.com")
+        self.assertEqual(hosts["imap_host"], "imap.gmail.com")
+        self.assertEqual(hosts["smtp_host"], "smtp.gmail.com")
+        self.assertEqual(hosts["auth_mechanism"], "xoauth2")
+
+    def test_outlook_gets_published_hosts_and_oauth(self):
+        hosts = accounts_module.suggest_imap_smtp_hosts("person@outlook.com")
+        self.assertEqual(hosts["imap_host"], "outlook.office365.com")
+        self.assertEqual(hosts["auth_mechanism"], "xoauth2")
+
+    def test_custom_domain_falls_back_to_convention(self):
         hosts = accounts_module.suggest_imap_smtp_hosts("person@custom.example")
         self.assertEqual(hosts["imap_host"], "imap.custom.example")
         self.assertEqual(hosts["smtp_host"], "smtp.custom.example")
         self.assertEqual(hosts["imap_port"], 993)
+
+
+class ProviderAccountTests(unittest.TestCase):
+    def test_gmail_account_is_configured_without_any_input(self):
+        record, error = accounts_module.normalize_account(
+            {"id": "personal", "address": "person@gmail.com", "status": "connected"}
+        )
+        self.assertEqual(error, "")
+        self.assertEqual(record["backend"], "imap_smtp")
+        self.assertEqual(record["settings"]["imap_host"], "imap.gmail.com")
+        self.assertEqual(record["settings"]["auth_mechanism"], "xoauth2")
+
+    def test_outlook_account_is_configured_without_any_input(self):
+        record, error = accounts_module.normalize_account(
+            {"id": "work", "address": "person@outlook.com", "status": "connected"}
+        )
+        self.assertEqual(error, "")
+        self.assertEqual(record["settings"]["imap_host"], "outlook.office365.com")
+        self.assertEqual(record["settings"]["auth_mechanism"], "xoauth2")
+
+    def test_custom_domain_defaults_to_password_auth(self):
+        record, _ = accounts_module.normalize_account(
+            {"id": "custom", "address": "me@custom.example", "status": "connected"}
+        )
+        self.assertEqual(record["settings"]["auth_mechanism"], "password")
+
+    def test_explicit_settings_override_provider_defaults(self):
+        record, _ = accounts_module.normalize_account({
+            "id": "personal", "address": "person@gmail.com", "status": "connected",
+            "settings": {"auth_mechanism": "password"},
+        })
+        self.assertEqual(record["settings"]["auth_mechanism"], "password")
+        self.assertEqual(record["settings"]["imap_host"], "imap.gmail.com")
+
+    def test_unknown_mechanism_falls_back_to_password(self):
+        record, _ = accounts_module.normalize_account({
+            "id": "custom", "address": "me@custom.example", "status": "connected",
+            "settings": {"auth_mechanism": "magic"},
+        })
+        self.assertEqual(record["settings"]["auth_mechanism"], "password")
 
 
 class NormalizeAccountTests(unittest.TestCase):
@@ -58,7 +110,7 @@ class NormalizeAccountTests(unittest.TestCase):
             {"id": "personal", "address": "person@gmail.com", "status": "connected"}
         )
         self.assertEqual(error, "")
-        self.assertEqual(record["backend"], "gmail_oauth")
+        self.assertEqual(record["backend"], "imap_smtp")
 
     def test_rejects_invalid_id_and_address(self):
         self.assertIn("id", accounts_module.normalize_account(account(id="bad id!"))[1])
@@ -126,7 +178,6 @@ class SelectionTests(unittest.TestCase):
             account(id="direct", backend="eva_direct", address="eva@home.example",
                     settings={"direct_consent": ["peer@company.example"]}),
         ])
-
     def test_read_accounts_exclude_send_only_identities(self):
         readable = [a["id"] for a in accounts_module.read_accounts(self.accounts)]
         self.assertEqual(readable, ["work", "personal"])
@@ -375,9 +426,10 @@ class SecretHygieneTests(unittest.TestCase):
             backend="imap_smtp", address="me@custom.example",
             password="hunter2", settings={"password": "hunter2", "imap_host": "imap.custom.example"},
         ))
-        serialized = repr(record)
-        self.assertNotIn("hunter2", serialized)
-        self.assertNotIn("password", serialized)
+        self.assertNotIn("hunter2", repr(record))
+        credential_keys = {"password", "secret", "token", "credential", "app_password"}
+        self.assertEqual(credential_keys & set(record), set())
+        self.assertEqual(credential_keys & set(record["settings"]), set())
 
 
 if __name__ == "__main__":
