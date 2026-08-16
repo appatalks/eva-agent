@@ -10,6 +10,10 @@ const EventEmitter = require('events');
 const { RuntimeLogger, redactRuntimeText } = require('../../standalone/runtime-logger');
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'eva-runtime-log-'));
+const privateKeyHeader = '-----BEGIN ' + 'PRIVATE KEY-----';
+const privateKeyFooter = '-----END ' + 'PRIVATE KEY-----';
+const privateKeyFixture = 'PRIVATE_KEY=' + privateKeyHeader + '\nMII-private-key-material\n' + privateKeyFooter;
+const githubPatFixture = 'github_pat_' + 'abcdefghijklmnopqrstuvwxyz';
 
 function read(file) {
   return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
@@ -27,7 +31,7 @@ try {
   logger.write('test', 'info', 'https://example.com/?token=secret-query');
   logger.write('test', 'info', 'PREFIX_TOKEN=prefixed-secret REFRESH_TOKEN=refresh-secret');
   logger.write('test', 'info', 'PRIVATE_KEY=private-key-material');
-  logger.write('test', 'info', 'PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMII-private-key-material\n-----END PRIVATE KEY-----');
+  logger.write('test', 'info', privateKeyFixture);
   logger.write('test', 'info', 'https://example.com/callback?access_token=oauth-access&refresh_token=oauth-refresh');
   logger.write('test', 'info', 'https://example.com/callback?code=oauth-authorization-code&device_code=device-secret');
   logger.write('test', 'info', 'Kusto cluster: https://private-cluster.kusto.windows.net/private-path');
@@ -122,12 +126,12 @@ try {
   assert.strictEqual(redactRuntimeText('Bearer abcdef', 500), 'Bearer <redacted>');
   assert.strictEqual(redactRuntimeText('Authorization: Basic abcdef', 500), 'Authorization: <redacted>');
   assert.strictEqual(redactRuntimeText('Authorization: Token abcdef', 500), 'Authorization: <redacted>');
-  assert(!redactRuntimeText('github_pat_abcdefghijklmnopqrstuvwxyz', 500).includes('github_pat_'));
+  assert(!redactRuntimeText(githubPatFixture, 500).includes('github_pat_'));
   assert(!redactRuntimeText('"credential":"private-value"', 500).includes('private-value'));
   assert(!redactRuntimeText('AZURE_ACCESS_TOKEN=private-value', 500).includes('private-value'));
   assert(!redactRuntimeText('PRIVATE_KEY=private-value', 500).includes('private-value'));
   assert(!redactRuntimeText(
-    'PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMII-private-value\n-----END PRIVATE KEY-----', 500
+    'PRIVATE_KEY=' + privateKeyHeader + '\nMII-private-value\n' + privateKeyFooter, 500
   ).includes('MII-private-value'));
   assert(!redactRuntimeText('https://x.test/?refresh_token=private-value', 500).includes('private-value'));
   assert(!redactRuntimeText('https://x.test/callback?code=private-value', 500).includes('private-value'));

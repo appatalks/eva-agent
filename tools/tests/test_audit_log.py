@@ -54,7 +54,10 @@ def main():
                 assert "opaque-" not in sanitized
                 assert "<redacted>" in sanitized
 
-            pem = "PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMII-private-value\n-----END PRIVATE KEY-----"
+            pem = (
+                "PRIVATE_KEY=-----BEGIN " + "PRIVATE KEY-----\n"
+                "MII-private-value\n-----END " + "PRIVATE KEY-----"
+            )
             sanitized_pem = audit._sanitize_text(pem)
             assert "MII-private-value" not in sanitized_pem
             assert "BEGIN PRIVATE KEY" not in sanitized_pem
