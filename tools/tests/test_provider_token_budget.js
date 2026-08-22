@@ -118,7 +118,6 @@ async function main() {
   await testGeminiMemoryLifecycle('abc', 'u'.repeat(2000));
   await testGeminiMemoryLifecycle('s'.repeat(40000), 'u'.repeat(2000));
   await testOpenAITurnSessionRetention();
-  await testGitHubModelsTurnSessionRetention();
   testAcpReflectionOwnership();
   console.log('provider token budget tests: PASS');
 }
@@ -221,85 +220,6 @@ async function testOpenAITurnSessionRetention() {
   assert.strictEqual(reflectionPayload.session_id, 'openai-session');
   assert.strictEqual(sessionCalls, 1);
   assert.match(openAiPayload.messages[0].content, /NATIVE EVA HARNESS/);
-}
-
-async function testGitHubModelsTurnSessionRetention() {
-  const storage = new Map();
-  const txtOutput = { innerHTML: '', innerText: '', scrollTop: 0, scrollHeight: 0 };
-  let contextUrl = '';
-  let reflectionPayload = null;
-  let sessionCalls = 0;
-  let resolveReflection;
-  const reflectionCaptured = new Promise((resolve) => { resolveReflection = resolve; });
-  const context = {
-    AbortSignal,
-    JSON,
-    Promise,
-    console,
-    URL,
-    encodeURIComponent,
-    txtOutput,
-    lastResponse: '',
-    masterOutput: '',
-    localStorage: {
-      getItem(key) { return storage.has(key) ? storage.get(key) : null; },
-      setItem(key, value) { storage.set(key, String(value)); },
-    },
-    document: {
-      getElementById(id) {
-        if (id === 'autoSpeak') return { checked: false };
-        return null;
-      },
-      addEventListener() {},
-    },
-    EvaPromptBudget: { compactMessages(messages) { return { messages }; } },
-    getAuthKey() { return 'github-token'; },
-    getModelTemperature() { return 0.7; },
-    getModelMaxTokens() { return 1024; },
-    getACPBridgeUrl() { return 'http://localhost:8888'; },
-    ensureActiveSessionId() {
-      sessionCalls += 1;
-      return sessionCalls === 1 ? 'github-session' : 'switched-session';
-    },
-    async renderEvaResponse() {},
-    reportCompletionTruncation() { return false; },
-    setStatus() {},
-    fetch(url, options) {
-      if (url.includes('/v1/memory/context')) {
-        contextUrl = url;
-        return Promise.resolve({ ok: true, json: async () => ({ context: '', cognition_enabled: false }) });
-      }
-      if (url.includes('models.github.ai')) {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ choices: [{ message: { content: 'github response' } }] }),
-        });
-      }
-      if (url.endsWith('/v1/memory/reflect')) {
-        reflectionPayload = JSON.parse(options.body);
-        resolveReflection();
-        return Promise.resolve({ ok: true, json: async () => ({ status: 'ok' }) });
-      }
-      return Promise.reject(new Error('unexpected URL: ' + url));
-    },
-  };
-  vm.runInNewContext(fs.readFileSync('core/js/providers/copilot.js', 'utf8'), context, {
-    filename: 'core/js/providers/copilot.js',
-  });
-
-  await context._copilotSendModelsAPI(
-    [{ role: 'system', content: 'Eva GitHub prompt' }, { role: 'user', content: 'github turn' }],
-    'copilot-gpt-4o',
-    'github turn',
-    txtOutput,
-    'copilotMessages',
-    null,
-  );
-  await reflectionCaptured;
-
-  assert.ok(contextUrl.includes('session_id=github-session'));
-  assert.strictEqual(reflectionPayload.session_id, 'github-session');
-  assert.strictEqual(sessionCalls, 1);
 }
 
 async function testGeminiMemoryLifecycle(configuredSystemPrompt, userPrompt) {

@@ -90,12 +90,11 @@ Apply high reasoning effort.
 - Keep changes small and targeted. Avoid drive-by refactors and metadata churn.
 
 ### Model Routing
-- Add new selector entries in `index.html` under the right provider `optgroup`.
-- Wire routing in `updateButton()` and `sendData()` in `core/js/options.js`.
-- Route OpenAI Chat Completions models to `trboSend()` unless a different API is required.
-- For OpenAI special cases, keep `o1*`, `o3-mini`, and `gpt-5*` payload rules intact.
-- Route `copilot-*` models through `copilotSend()`. Strip the prefix before GitHub Models API calls.
-- Route `copilot-acp` through the ACP bridge and preserve localhost fallback behavior.
+- Keep `aig` as the only top-level chat selector value; normal sends route through `aigSend()`.
+- Add or change responder models only under the AIG backend selector in `index.html`.
+- Let AIG's automatic policy choose OpenAI direct, Copilot ACP, or LM Studio based on availability and request needs.
+- Tool-required requests must use ACP or local MCP and fail closed if no tool-capable route is available.
+- GitHub PAT is for GitHub MCP and private repository imports only. Do not restore the retired GitHub Models API.
 
 ### ACP, AIG, MCP, and Kusto
 - Keep bridge endpoints OpenAI-compatible or documented.

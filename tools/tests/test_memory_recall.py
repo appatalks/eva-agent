@@ -63,6 +63,93 @@ class MemoryRecallTests(unittest.TestCase):
         design = [fact for fact in facts if fact["Entity"] == "Eva"]
         self.assertEqual(design, [])
 
+    def test_location_phrasings_are_explicit_user_facts(self):
+        for message in (
+            "I live in austin.", "I'm based in London.", "My location is Seattle.",
+            "I live in Austin, please remember that.", "I'm based in London and save that to memory.",
+            "My location is Seattle; store it.", "Please save my location as San Antonio.",
+            "Set my current location to Denver in memory.",
+        ):
+            locations = [fact for fact in _extract_explicit_user_facts(message) if fact["Relation"] == "user_location"]
+            self.assertEqual(len(locations), 1, message)
+            self.assertNotRegex(locations[0]["Value"], r"\b(?:remember|save|store|note)\b")
+
+    def test_explicit_location_is_persisted_as_traceable_atom(self):
+        _post_response_reflection_sqlite(
+            "I live in austin. Please remember my location.",
+            "Understood.",
+            "test-model",
+            "location-session",
+            "turn-location-atom",
+        )
+        atoms = state.sqlite_mem.query(
+            "SELECT Entity, Relation, Value, Trust, SourceRef FROM MemoryAtoms WHERE Relation = 'user_location'"
+        )
+        self.assertEqual(len(atoms), 1)
+        self.assertEqual(atoms[0]["Value"], "austin")
+        self.assertEqual(atoms[0]["Trust"], "user_confirmed")
+        evidence = state.sqlite_mem.query(
+            "SELECT SourceType FROM MemoryEvidence WHERE MemoryId = (SELECT MemoryId FROM MemoryAtoms WHERE Relation = 'user_location')"
+        )
+        self.assertEqual([row["SourceType"] for row in evidence], ["conversation_turn"])
+
+    def test_location_save_command_is_persisted_as_traceable_atom(self):
+        _post_response_reflection_sqlite(
+            "Please save my location as San Antonio.",
+            "Saved.",
+            "test-model",
+            "location-save-session",
+            "turn-location-save",
+        )
+        atoms = state.sqlite_mem.query(
+            "SELECT Entity, Relation, Value, Trust FROM MemoryAtoms WHERE Relation = 'user_location'"
+        )
+        self.assertEqual(atoms, [{
+            "Entity": "User", "Relation": "user_location", "Value": "San Antonio", "Trust": "user_confirmed"
+        }])
+
+    def test_weather_location_honors_atom_lifecycle_over_legacy_knowledge(self):
+        from bridge.memory import _get_sqlite_mem
+        from bridge.memory_model import MemoryModel
+        from bridge.cognition import _weather_user_profile_rows
+
+        memory = _get_sqlite_mem()
+        memory.ingest("Knowledge", [
+            "Timestamp", "Entity", "Relation", "Value", "Confidence", "Source", "Decay",
+        ], [{
+            "Timestamp": "2026-01-01T00:00:00Z", "Entity": "User", "Relation": "user_location",
+            "Value": "Oldtown", "Confidence": 0.9, "Source": "legacy", "Decay": 0.0,
+        }])
+        model = MemoryModel(memory)
+        atom = model.add_atom({
+            "entity": "User", "relation": "user_location", "value": "Newtown", "kind": "fact",
+            "trust": "user_confirmed", "scope": "user", "confidence": 1,
+        })
+        self.assertEqual(_weather_user_profile_rows()[0]["Value"], "Newtown")
+        replacement = model.supersede_atom(atom["MemoryId"], {"value": "Finaltown"})
+        self.assertEqual(_weather_user_profile_rows()[0]["Value"], "Finaltown")
+        self.assertTrue(model.delete_atom(replacement["MemoryId"]))
+        self.assertEqual(_weather_user_profile_rows(), [])
+
+    def test_user_knowledge_added_after_migration_is_backfilled(self):
+        from bridge.memory_model import MemoryModel
+        from bridge.memory import _get_sqlite_mem
+
+        memory = _get_sqlite_mem()
+        model = MemoryModel(memory)
+        self.assertEqual(model.migrate_legacy_knowledge(), 0)
+        memory.ingest("Knowledge", [
+            "Timestamp", "Entity", "Relation", "Value", "Confidence", "Source", "Decay",
+        ], [{
+            "Timestamp": "2026-01-01T00:00:00Z", "Entity": "User", "Relation": "user_location",
+            "Value": "Austin", "Confidence": 0.8, "Source": "historical", "Decay": 0.005,
+        }])
+        self.assertEqual(model.migrate_legacy_knowledge(), 1)
+        atoms = memory.query(
+            "SELECT Relation, Value, Trust FROM MemoryAtoms WHERE Relation = 'user_location'"
+        )
+        self.assertEqual(atoms, [{"Relation": "user_location", "Value": "Austin", "Trust": "unconfirmed"}])
+
     def test_original_inspiration_live_wording_is_not_automatic_identity(self):
         facts = _extract_explicit_user_facts(
             "If you'd like to preserve the original inspiration, it's based off "

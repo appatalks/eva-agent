@@ -20,7 +20,7 @@ module that loads before its dependency fails silently at runtime.
 | Shared private bridge transport | `core/js/runtime/bridge-client.js` | Settings, Skills, Workspaces, and Memory Inspector |
 | Prompt budget and request classification | `core/js/prompt-budget.js`, `request-routing.js` | all provider adapters |
 | OpenAI direct | `core/js/providers/openai.js` | model settings, prompt budget |
-| Copilot and GitHub Models | `core/js/providers/copilot.js` | bridge, model settings |
+| Copilot ACP | `core/js/providers/copilot.js` | bridge, MCP configuration, and ACP compatibility |
 | Eva AIG | `core/js/providers/aig.js` | bridge AIG lifecycle, cognition |
 | Gemini and LM Studio | `core/js/providers/gemini.js`, `core/js/providers/lm-studio.js` | prompt budget, local MCP |
 | Image generation | `core/js/providers/image-generation.js` | response renderer |

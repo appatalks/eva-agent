@@ -257,7 +257,18 @@ _EXPLICIT_EMPLOYMENT_RE = re.compile(
     re.IGNORECASE
 )
 _EXPLICIT_LOCATION_RE = re.compile(
-    r"\b[Ii] (?:live|am based|am located) (?:in|at|near)\s+([A-Z][a-zA-Z\s,]+?)(?:[.!?\n]|$)"
+    r"(?:\b(?:I\s+(?:live|am\s+based|am\s+located)|I['’]m\s+(?:based|located))\s+(?:in|at|near)\s+"
+    r"(?P<stated_location>[a-z][a-z\s,.'-]{1,120}?)|"
+    r"\bmy\s+location\s+is\s+(?P<declared_location>[a-z][a-z\s,.'-]{1,120}?))"
+    r"(?=\s*(?:[.!?;\n]|,?\s*(?:please\s+)?(?:remember|save|store|note)\b|and\s+(?:please\s+)?(?:remember|save|store|note)\b|$))",
+    re.IGNORECASE
+)
+_EXPLICIT_LOCATION_SAVE_RE = re.compile(
+    r"\b(?:please\s+)?(?:save|store|remember|note|set)\s+(?:that\s+)?my\s+"
+    r"(?:current\s+)?location\s+(?:as|is|to)\s+"
+    r"(?P<saved_location>[a-z][a-z\s,.'-]{1,120}?)"
+    r"(?=\s*(?:[.!?;\n]|(?:,?\s+)(?:to|in)\s+memory\b|$))",
+    re.IGNORECASE
 )
 _EXPLICIT_ROLE_RE = re.compile(
     r"\bi am (?:a|an)\s+([a-z][a-zA-Z\s]{3,80}?)(?:[.!?\n]|$)",
@@ -368,7 +379,9 @@ def _extract_explicit_user_facts(user_message):
     for match in _EXPLICIT_EMPLOYMENT_RE.finditer(user_message or ""):
         add_fact("user_employment", match.group(1), 0.8)
     for match in _EXPLICIT_LOCATION_RE.finditer(user_message or ""):
-        add_fact("user_location", match.group(1), 0.8)
+        add_fact("user_location", match.group("stated_location") or match.group("declared_location"), 0.8)
+    for match in _EXPLICIT_LOCATION_SAVE_RE.finditer(user_message or ""):
+        add_fact("user_location", match.group("saved_location"), 0.8)
     for match in _EXPLICIT_ROLE_RE.finditer(user_message or ""):
         captured = match.group(1).strip()
         first_token = captured.split()[0].lower() if captured else ""
@@ -618,22 +631,32 @@ def _active_skill_rows_for_decision():
 def _weather_user_profile_rows():
     """Return bounded User Profile rows used by approved weather location resolution."""
     if _resolve_memory_backend() == "sqlite":
+        from bridge.memory_model import MemoryModel
         mem = _get_sqlite_mem()
-        rows = []
         if mem.table_exists("MemoryAtoms"):
             try:
                 rows = MemoryModel(mem).prompt_view(None, _CORE_IDENTITY_CHARTER).get("user_atoms", [])
             except Exception:
                 rows = []
-        if not rows:
-            rows = mem.query(
-                "SELECT Relation, Value, Confidence FROM Knowledge WHERE Entity = 'User' COLLATE NOCASE "
-                "AND Confidence >= 0.5 ORDER BY Confidence DESC, Timestamp DESC LIMIT 30"
-            ) or []
+            return _latest_user_profile_rows(rows)
+        rows = mem.query(
+            "SELECT Relation, Value, Confidence FROM Knowledge WHERE Entity = 'User' COLLATE NOCASE "
+            "AND Confidence >= 0.5 ORDER BY Confidence DESC, Timestamp DESC LIMIT 30"
+        ) or []
         return _latest_user_profile_rows(rows)
     cluster, db = _get_kusto_config()
     if not cluster or not db:
         return []
+    structured_tables = ("MemoryAtoms", "MemoryEvidence", "MemoryMigrations")
+    if all(_get_table_columns(cluster, db, table) for table in structured_tables):
+        rows = _kusto_query_direct(
+            cluster, db,
+            "MemoryAtoms | summarize arg_max(UpdatedAt, *) by MemoryId "
+            "| where Entity =~ 'User' and Scope =~ 'user' and Status =~ 'active' "
+            "and Confidence >= 0.5 | where isnull(ExpiresAt) or ExpiresAt > now() "
+            "| project Relation, Value, Confidence | order by UpdatedAt desc | take 30",
+        ) or []
+        return _latest_user_profile_rows(rows)
     rows = _kusto_query_direct(
         cluster, db,
         "Knowledge | where Entity =~ 'User' and Confidence >= 0.5 "

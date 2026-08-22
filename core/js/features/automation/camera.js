@@ -41,11 +41,6 @@
     return 'http://localhost:8888';
   }
 
-  function openaiKey() {
-    if (typeof getAuthKey === 'function') return getAuthKey('OPENAI_API_KEY') || '';
-    return (global.OPENAI_API_KEY || '');
-  }
-
   function setChatStatus(type, text) {
     if (typeof setStatus === 'function') setStatus(type, text);
   }
@@ -343,8 +338,6 @@
       _popupModel('');
     }
     try {
-      var key = openaiKey();
-
       // Always capture a GENUINELY FRESH frame. The worker publishes a
       // frame_seq that increments per captured frame; wait until it advances
       // past the value seen when the look began so we never describe a stale or
@@ -371,7 +364,7 @@
       if (embedded) { _visionFrame(dataUrl); }
       else { _popupFrame(dataUrl); _popupBadge('looking'); }
 
-      var res = await _describe(dataUrl, question, key);
+      var res = await _describe(dataUrl, question);
       if (embedded) {
         // Prefix the backend so the model is visible even in the ambient panel.
         var tag = res.model ? ('[' + res.model + ']\n') : '';
@@ -412,114 +405,20 @@
     } catch (e) { return false; }
   }
 
-  // Describe the frame. Returns { text, model }. Routing by preference order:
-  //   localStorage 'cameraVisionProvider' = 'github' | 'openai' | 'copilot' | 'auto'
-  //   Default (auto/empty): GitHub-hosted model first (needs a GitHub PAT with
-  //   the Models permission), then OpenAI direct (needs an OpenAI key), then the
-  //   Copilot/Claude bridge. Each backend is a fallback for the previous one, so
-  //   a look still answers if the preferred backend is missing or fails.
-  async function _describe(dataUrl, question, key) {
+  // Describe the frame through the bridge-owned ACP vision path so model access
+  // and capability policy stay in one place.
+  async function _describe(dataUrl, question) {
     var prompt = (question && String(question).trim()) ||
       'Describe what you see in this webcam image in one or two natural sentences.';
-    var provider = '';
-    try { provider = (localStorage.getItem('cameraVisionProvider') || '').toLowerCase(); } catch (e) {}
-    var pat = _githubPat();
-
-    // Build the ordered backend list based on the preference.
-    var order;
-    if (provider === 'openai') order = ['openai', 'github', 'copilot'];
-    else if (provider === 'copilot' || provider === 'claude') order = ['copilot', 'github', 'openai'];
-    else order = ['github', 'openai', 'copilot']; // auto / default
-
-    var lastErr = null;
-    for (var i = 0; i < order.length; i++) {
-      try {
-        if (order[i] === 'github' && pat) {
-          var g = await _describeViaGitHubModels(dataUrl, prompt, pat);
-          if (g && g.text) return g;
-        } else if (order[i] === 'openai' && key) {
-          var r = await _describeViaOpenAI(dataUrl, prompt, key);
-          if (r) return { text: r, model: 'OpenAI gpt-4o (direct)' };
-        } else if (order[i] === 'copilot') {
-          var b = await _describeViaBridge(dataUrl, prompt);
-          if (b && b.text) return b;
-        }
-      } catch (e) { lastErr = e; /* try the next backend */ }
-    }
-    if (lastErr) throw lastErr;
-    throw new Error('No vision backend available (set a GitHub PAT with Models permission or an OpenAI key in Settings > Auth).');
-  }
-
-  function _githubPat() {
-    if (typeof getAuthKey === 'function') return getAuthKey('GITHUB_PAT') || '';
-    return (global.GITHUB_PAT || '');
+    var result = await _describeViaBridge(dataUrl, prompt);
+    if (result && result.text) return result;
+    throw new Error('No bridge vision backend is available.');
   }
 
   function _visionSystemPrompt() {
     return 'You are Eva looking through the user\'s webcam. Answer naturally and briefly, ' +
       'in the first person, as if you are seeing it now. Do not mention pixels, images, or that ' +
       'you were given a photo.';
-  }
-
-  // GitHub-hosted model via the GitHub Models API (OpenAI-compatible, PAT auth).
-  // Returns { text, model }. The catalog uses 'publisher/model' ids; default to
-  // openai/gpt-4o, overridable via localStorage 'cameraVisionGithubModel'.
-  async function _describeViaGitHubModels(dataUrl, prompt, pat) {
-    var model = '';
-    try { model = localStorage.getItem('cameraVisionGithubModel') || ''; } catch (e) {}
-    if (!model) model = 'openai/gpt-4o';
-    var resp = await fetch('https://models.github.ai/inference/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + pat, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: model,
-        max_tokens: 220,
-        temperature: 0.4,
-        messages: [
-          { role: 'system', content: _visionSystemPrompt() },
-          { role: 'user', content: [
-            { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: dataUrl } }
-          ] }
-        ]
-      }),
-      signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(60000) : undefined
-    });
-    if (!resp.ok) {
-      var t = await resp.text();
-      throw new Error('GitHub Models ' + resp.status + ': ' + t.slice(0, 160));
-    }
-    var data = await resp.json();
-    var text = (data.choices && data.choices[0] && data.choices[0].message &&
-                data.choices[0].message.content || '').trim();
-    if (!text) return null;
-    return { text: text, model: 'GitHub ' + model };
-  }
-
-  async function _describeViaOpenAI(dataUrl, prompt, key) {
-    var resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'gpt-4o',
-        max_tokens: 220,
-        temperature: 0.4,
-        messages: [
-          { role: 'system', content: _visionSystemPrompt() },
-          { role: 'user', content: [
-            { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: dataUrl } }
-          ] }
-        ]
-      })
-    });
-    if (!resp.ok) {
-      var t = await resp.text();
-      throw new Error('Vision model ' + resp.status + ': ' + t.slice(0, 160));
-    }
-    var data = await resp.json();
-    return (data.choices && data.choices[0] && data.choices[0].message &&
-            data.choices[0].message.content || '').trim();
   }
 
   // Ask the bridge to describe the frame with a Copilot/Claude vision model.
@@ -531,8 +430,7 @@
       var sys = 'You are Eva looking through the user\'s webcam. Answer naturally and briefly, ' +
         'in the first person, as if you are seeing it now. Do not mention pixels, images, or that ' +
         'you were given a photo. ';
-      var model = '';
-      try { model = localStorage.getItem('cameraVisionModel') || ''; } catch (e) {}
+      var model = ((document.getElementById('selAIGBackend') || {}).value || '').trim();
       var resp = await fetch(bridgeBase() + '/v1/vision/look', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

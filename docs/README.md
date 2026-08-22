@@ -25,7 +25,7 @@ ownership boundaries, and multi-phase plans.
 | [ai-development-guide.md](ai-development-guide.md) | Guide | Working rules, context boundaries, task bundles, ownership map, completion checklist |
 | [frontend-ownership.md](frontend-ownership.md) | Ownership map | Browser module ownership, collaborators, and focused contracts |
 | [testing-contracts.md](testing-contracts.md) | Contract | How to choose a validation, the curated CI set, and static-test policy |
-| [contracts/provider-routing.md](contracts/provider-routing.md) | Contract | Selector values, sender routes, and GitHub Models mapping parity |
+| [contracts/provider-routing.md](contracts/provider-routing.md) | Contract | AIG-only selector, backend policy, and tool-routing behavior |
 | [contracts/aig-request-lifecycle.md](contracts/aig-request-lifecycle.md) | Contract | Ownership split between the AIG handler, request normalization, and preflight planning |
 | [deprecation-inventory.md](deprecation-inventory.md) | Inventory | Compatibility paths and the evidence required before removal |
 | [eva-memory-intelligence-plan.md](eva-memory-intelligence-plan.md) | Plan | Memory trust boundary, layered memory model, and learning lifecycle |

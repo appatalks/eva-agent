@@ -18,24 +18,22 @@ This project is a simple web UI for interacting with OpenAI, Google Generative m
 - `config.json`: Local API keys (not committed).
 
 ## Model Routing
-- Add new models to the selector in `index.html` (use `<optgroup>` to group by provider).
-- Wire routing in `updateButton()` and `sendData()` in `core/js/options.js`.
-- If a model uses the OpenAI Chat Completions API, route to `trboSend()`.
-- If a model uses a different API, create a new send function in `core/js/*.js` and route accordingly.
- - `gpt-5-mini`: treated like other OpenAI chat models unless documentation calls for different parameters.
- - `latest` alias: allowed in the selector; treated as an OpenAI model value. If OpenAI updates how `latest` resolves (e.g., via Responses API), adjust `core/js/providers/openai.js` accordingly.
-- **GitHub Copilot models** (`copilot-*` prefix): route to `copilotSend()` in `core/js/providers/copilot.js`. Uses GitHub Models API (`models.inference.ai.azure.com`) with a GitHub PAT. The `copilot-` prefix is stripped before sending to the API.
-- **Copilot ACP** (`copilot-acp`): route to `copilotSend()` which detects ACP mode and proxies through `tools/acp_bridge.py` (local Python server bridging Copilot CLI's Agent Client Protocol). Uses whatever model the Copilot CLI is configured for (GPT-4o, Claude, Gemini, etc.). No PAT needed — auth is handled by `copilot auth login`.
+- Keep `aig` as the only top-level chat selector value; normal sends must call `aigSend()`.
+- Add or change selectable responder models only under the AIG backend selector in `index.html`.
+- AIG requests go through `tools/acp_bridge.py`, which chooses OpenAI direct, Copilot ACP, or LM Studio according to availability, request needs, and policy mode.
+- Automatic policy is the default. Tool-required requests must use ACP or local MCP and fail closed when no tool-capable route is available.
+- `gpt-5-mini` and `latest` may remain accepted internal compatibility values, but they are not top-level selector values.
+- **Copilot ACP** remains available for tool-capable model execution through `core/js/providers/copilot.js` and `tools/acp_bridge.py`. GitHub PAT authentication is for GitHub MCP and private repository imports only.
 
 ## Settings Panel
 - The settings panel is a tabbed modal with four tabs: General, Models, Auth, and Prompts.
 - **General**: Theme, TTS engine/voice, auto-speak.
-- **Models**: Model selector (grouped by provider with `<optgroup>`), temperature, max tokens, reasoning effort (o3-mini).
-- **Auth**: API key inputs stored in `localStorage` (override `config.json`). Keys: OpenAI, GitHub PAT, Google Gemini, Google Vision.
+- **Models**: AIG backend selector, automatic/pinned policy, temperature, max tokens, reasoning effort, and LM Studio settings.
+- **Auth**: API key inputs stored in `localStorage` (override `config.json`). Keys: OpenAI, GitHub PAT for MCP/imports, and Google Gemini compatibility.
 - **Prompts**: Personality presets and editable system/developer prompt textarea. `getSystemPrompt()` returns the textarea value.
 
-## OpenAI Models
-- Endpoint: `POST https://api.openai.com/v1/chat/completions` (XMLHttpRequest is currently used).
+## OpenAI AIG Backends
+- Endpoint: `POST https://api.openai.com/v1/chat/completions` when AIG policy selects a direct OpenAI responder.
 - Required headers: `Authorization: Bearer ${OPENAI_API_KEY}`, `Content-Type: application/json`.
 - Base payload: `{ model, messages, max_completion_tokens, temperature, frequency_penalty, presence_penalty, stop }`.
 - Special cases:
@@ -44,13 +42,13 @@ This project is a simple web UI for interacting with OpenAI, Google Generative m
   - `gpt-5*`: do not include `max_tokens` (use `max_completion_tokens` only); `top_p` is allowed; omit `temperature` and `stop`.
 
 ## Edge Cases
-- Image input: `options.js` pushes a text+image structured message for vision-capable models.
+- Image input: `aig.js` pushes a text+image structured message and the bridge uses the selected vision-capable responder.
 - Auto-speak checkbox triggers Polly TTS after responses.
 - Image placeholders `[Image of ...]` are detected by `renderEvaResponse()` and resolved via Wikimedia Commons search or DALL-E 3 generation.
 
 ## Testing Checklist
 - Verify send flow with and without images.
-- Test each model route from the selector.
+- Test normal AIG chat, automatic model selection, tool-required ACP/local-MCP routing, and pinned override behavior.
 - Confirm Errors 400/404/429/500 are surfaced in `txtOutput`.
 - Validate localStorage message persistence and clear/reset.
 
@@ -74,7 +72,7 @@ This project is a simple web UI for interacting with OpenAI, Google Generative m
 - Do not commit `.data` files from `core/external/` — they contain live external data fetched at runtime.
 - Do not commit audio files (`*.wav`, `*.mp3`), token caches (`.azure/`, `msal_token_cache.json`), or log files.
 - Do not introduce `console.log()` or `print()` statements that dump tokens, keys, or full request/response bodies containing auth headers.
-- Do not introduce external network calls except to configured providers (OpenAI, GitHub Models, Google, localhost endpoints).
+- Do not introduce external network calls except to configured providers (OpenAI, GitHub MCP, Google, localhost endpoints).
 - Before every commit, mentally audit: **does this diff contain any real key, token, URL, or user-specific data?** If unsure, do not commit.
 - When adding example config or documentation, always use obviously fake values: `sk-FAKE...`, `ghp_EXAMPLE...`, `https://example-cluster.region.kusto.windows.net`.
 - Treat `.env`, `.env.*`, and any file matching `*secret*`, `*credential*`, `*token*` as sensitive — never create or commit them.

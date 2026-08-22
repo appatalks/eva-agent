@@ -66,6 +66,8 @@ class AigRequestContractTests(unittest.TestCase):
         result = self.normalize({"user_message": "hello", "model": "openai:gpt-5"}, key="sk-FAKE")
         self.assertEqual(result["responder_provider"], "openai")
         self.assertEqual(result["model_for_response"], "gpt-5")
+        automatic = self.normalize({"user_message": "hello", "model": "openai:gpt-5", "model_policy_mode": "auto-balanced"})
+        self.assertEqual(automatic["model_policy_mode"], "auto-balanced")
 
     def test_rejects_invalid_reasoning_tokens_and_missing_user_message(self):
         with self.assertRaisesRegex(ValueError, "Unsupported acp_reasoning_effort"):

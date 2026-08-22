@@ -32,15 +32,14 @@ Apply high reasoning effort. This is the deepest analysis role in the loop.
 - Check `config.json`, `config.local.js`, `.env*`, `.azure/`, `msal_token_cache.json`, and files matching secret, credential, or token as sensitive.
 - Watch for request or response logging that could expose `Authorization` headers, API keys, prompts with secrets, MCP env vars, or full provider payloads.
 - Validate user-controlled content before rendering, storing, invoking tools, generating images, writing memory, or building KQL/HTTP requests.
-- Confirm browser-origin and bridge endpoints stay scoped to configured providers, GitHub Models, Google Gemini, OpenAI, localhost, or documented example hosts.
+- Confirm browser-origin and bridge endpoints stay scoped to configured providers, GitHub MCP, Google Gemini compatibility, OpenAI, localhost, or documented example hosts.
 
 ### Model Routing And Provider Contracts
-- New models must be added in `index.html` using provider `optgroup` entries, then routed in `updateButton()` and `sendData()` in `core/js/options.js`.
-- OpenAI Chat Completions models should route to `trboSend()` unless documentation requires a different API.
-- Preserve OpenAI special cases: `o1*` filters developer messages and uses `temperature = 1`; `o3-mini` includes `reasoning_effort` and omits temperature; `gpt-5*` uses `max_completion_tokens`, may use `top_p`, and omits `temperature` and `stop`.
-- `copilot-*` models route through `copilotSend()` and strip the prefix for GitHub Models API calls.
-- `copilot-acp` routes through the ACP bridge and must preserve localhost fallback behavior in `core/js/providers/copilot.js`.
-- Eva AIG changes must preserve `/v1/aig/chat`, memory injection, ACP fallback, and GitHub PAT injection behavior unless the request explicitly changes them.
+- `aig` is the only top-level chat selector value and normal sends must route through `aigSend()`.
+- Responder models are selectable only under the AIG backend selector; automatic policy chooses the appropriate provider/model from availability and request needs.
+- Tool-required requests must use ACP or local MCP and fail closed when no tool-capable route is available.
+- Copilot provider code is ACP-only. GitHub PAT is for GitHub MCP and private repository imports; the retired GitHub Models API must not return.
+- Eva AIG changes must preserve `/v1/aig/chat`, memory injection, automatic policy audit metadata, and provider-specific payload rules.
 
 ### Browser UI And State
 - Keep the UI minimal and fast. Do not add frameworks, bundlers, server dependencies, or large libraries without an explicit user request.

@@ -74,10 +74,6 @@ var aiMasterResponse = "";
 var masterOutput = "";
 var storageAssistant = "";
 var imgSrcGlobal; // Declare a global variable for img.src
-// Debug/CORS flags (from config.json)
-var DEBUG_CORS = false;
-var DEBUG_PROXY_URL = "";
-
 // Error Handling Variables
 var retryCount = 0;
 var maxRetries = 5;
@@ -90,7 +86,7 @@ function loadStandaloneAuth() {
   if (!window.evaStandalone || typeof window.evaStandalone.authLoad !== 'function') return Promise.resolve();
   return window.evaStandalone.authLoad().then(function(values) {
     if (!values || typeof values !== 'object') return;
-    ['OPENAI_API_KEY', 'GITHUB_PAT', 'GOOGLE_GL_KEY', 'GOOGLE_VISION_KEY'].forEach(function(key) {
+    ['OPENAI_API_KEY', 'GITHUB_PAT', 'GOOGLE_GL_KEY'].forEach(function(key) {
       if (!values[key]) return;
       localStorage.setItem('auth_' + key, values[key]);
       window[key] = values[key];
@@ -126,12 +122,8 @@ function applyConfig(config) {
   OPENAI_API_KEY = config.OPENAI_API_KEY;
   // Google Gemini key if provided
   GOOGLE_GL_KEY = config.GOOGLE_GL_KEY;
-  GOOGLE_VISION_KEY = config.GOOGLE_VISION_KEY;
   // GitHub Copilot PAT
   if (config.GITHUB_PAT) GITHUB_PAT = config.GITHUB_PAT;
-  // CORS debug
-  DEBUG_CORS = !!config.DEBUG_CORS;
-  DEBUG_PROXY_URL = config.DEBUG_PROXY_URL || "";
   AWS.config.region = config.AWS_REGION;
   AWS.config.credentials = new AWS.Credentials(config.AWS_ACCESS_KEY_ID, config.AWS_SECRET_ACCESS_KEY);
   // Apply any localStorage auth overrides
@@ -148,7 +140,7 @@ function getAuthKey(key) {
 }
 
 function loadAuthOverrides() {
-  var keys = ['OPENAI_API_KEY', 'GOOGLE_GL_KEY', 'GOOGLE_VISION_KEY', 'GITHUB_PAT'];
+  var keys = ['OPENAI_API_KEY', 'GOOGLE_GL_KEY', 'GITHUB_PAT'];
   keys.forEach(function(key) {
     var val = localStorage.getItem('auth_' + key);
     if (val) window[key] = val;
@@ -160,7 +152,6 @@ function saveAuthKeys() {
     'authOpenAI': 'OPENAI_API_KEY',
     'authGitHub': 'GITHUB_PAT',
     'authGemini': 'GOOGLE_GL_KEY',
-    'authGoogleVision': 'GOOGLE_VISION_KEY'
   };
   Object.keys(map).forEach(function(fieldId) {
     var el = document.getElementById(fieldId);
@@ -281,7 +272,6 @@ function populateAuthFields() {
     'authOpenAI': 'OPENAI_API_KEY',
     'authGitHub': 'GITHUB_PAT',
     'authGemini': 'GOOGLE_GL_KEY',
-    'authGoogleVision': 'GOOGLE_VISION_KEY'
   };
   Object.keys(map).forEach(function(fieldId) {
     var el = document.getElementById(fieldId);
@@ -1091,7 +1081,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   var aigPolicySel = document.getElementById('selAIGModelPolicy');
   if (aigPolicySel) {
-    var savedAigPolicy = localStorage.getItem('aigModelPolicyMode') || 'pinned';
+    var savedAigPolicy = localStorage.getItem('aigModelPolicyMode') || 'auto-balanced';
     if (Array.from(aigPolicySel.options).some(function (option) { return option.value === savedAigPolicy; })) {
       aigPolicySel.value = savedAigPolicy;
     }
@@ -1173,21 +1163,6 @@ document.addEventListener('DOMContentLoaded', () => {
     verboseDiagnosticsEl.addEventListener('change', function() {
       localStorage.setItem('verboseDiagnostics', verboseDiagnosticsEl.checked ? '1' : '0');
       syncAIGRuntimePrefs();
-    });
-  }
-
-  // Vision provider for camera "looks" (GitHub-hosted / OpenAI direct / Copilot).
-  // Persisted to the same localStorage key the camera module reads.
-  var cameraVisionProviderEl = document.getElementById('cameraVisionProvider');
-  if (cameraVisionProviderEl) {
-    var savedProvider = '';
-    try { savedProvider = localStorage.getItem('cameraVisionProvider') || ''; } catch (e) {}
-    if (savedProvider) {
-      var hasProv = Array.from(cameraVisionProviderEl.options).some(function (o) { return o.value === savedProvider; });
-      if (hasProv) cameraVisionProviderEl.value = savedProvider;
-    }
-    cameraVisionProviderEl.addEventListener('change', function () {
-      try { localStorage.setItem('cameraVisionProvider', cameraVisionProviderEl.value); } catch (e) {}
     });
   }
 
@@ -1720,18 +1695,8 @@ function _detectGenerationIntent() {
 
 function updateButton() {
   applyStandaloneSimplifications();
-  var selModel = document.getElementById("selModel");
   var btnSend = document.getElementById("btnSend");
-  var route = EvaModelRouting.routeFor(selModel.value);
-  if (route) {
-    btnSend.onclick = sendData;
-    return;
-  }
-  btnSend.onclick = function() {
-    clearText();
-    document.getElementById("txtOutput").innerHTML = "\n" + "Invalid Model";
-    console.error('Invalid Model');
-  };
+  if (btnSend) btnSend.onclick = sendData;
 }
 
 async function sendData() {
@@ -1818,30 +1783,11 @@ async function sendData() {
     hideEvaWelcome();
   applyStandaloneSimplifications();
 
-    // Logic required for initial message
-    var selModel = document.getElementById("selModel");
-
   // Detect if user wants image generation (for renderEvaResponse routing)
   _detectGenerationIntent();
 
-  var route = EvaModelRouting.routeFor(selModel.value);
   clearText();
-  if (route === 'aig') {
-    aigSend();
-  } else if (route === 'copilot') {
-    copilotSend();
-  } else if (route === 'openai') {
-    trboSend();
-  } else if (route === 'gemini') {
-    geminiSend();
-  } else if (route === 'lmstudio') {
-    lmsSend();
-  } else if (route === 'image') {
-    dalle3Send();
-  } else {
-    document.getElementById("txtOutput").innerHTML = "\n" + "Invalid Model";
-    console.error('Invalid Model');
-  }
+  await aigSend();
 }
 
 function evaAuditEvent(event, outcome, fields) {
@@ -2048,17 +1994,6 @@ const MODEL_CONTEXT_WINDOWS = {
   'o3-mini': 200000,
   'gpt-5-mini': 200000,
   'latest': 200000,
-  'copilot-gpt-4o': 128000,
-  'copilot-gpt-4o-mini': 128000,
-  'copilot-o3-mini': 200000,
-  'copilot-gpt-4.1': 1048576,
-  'copilot-gpt-5': 200000,
-  'copilot-gpt-5.6-sol': 1000000,
-  'copilot-gpt-5.6-terra': 200000,
-  'copilot-gpt-5.6-luna': 200000,
-  'copilot-o4-mini': 200000,
-  'copilot-deepseek-r1': 128000,
-  'copilot-llama-4-maverick': 1000000,
   'copilot-acp': 128000,
   'aig': 200000,
   'gemini': 1000000,
@@ -2070,7 +2005,7 @@ const MODEL_CONTEXT_WINDOWS = {
 var _netStats = { requests: 0, errors: 0, lastLatency: 0, lastStatus: '', lastProvider: '' };
 
 // Intercept fetch to track network stats
-var _apiHostnames = ['api.openai.com', 'models.inference.ai.azure.com', 'generativelanguage.googleapis.com'];
+var _apiHostnames = ['api.openai.com', 'generativelanguage.googleapis.com'];
 
 function _isAPICall(url) {
   if (typeof url !== 'string') return false;
@@ -2115,7 +2050,6 @@ function _detectProvider(url) {
   try {
     var parsed = new URL(url, window.location.origin);
     if (parsed.hostname === 'api.openai.com') return 'OpenAI';
-    if (parsed.hostname === 'models.inference.ai.azure.com') return 'GitHub Models';
     if (parsed.hostname === 'generativelanguage.googleapis.com') return 'Gemini';
     if (parsed.hostname === 'localhost' && parsed.port === '1234') return 'lm-studio';
     if (parsed.port === '8888') return 'ACP Bridge';
@@ -2253,7 +2187,7 @@ function updateSessionMonitor() {
 
   // Provider
   if (provEl) {
-    if (model.indexOf('copilot-') === 0) provEl.textContent = model === 'copilot-acp' ? 'Copilot ACP' : 'GitHub Models';
+    if (model.indexOf('copilot-') === 0) provEl.textContent = 'Copilot ACP';
     else if (model === 'gemini') provEl.textContent = 'Google Gemini';
     else if (model === 'lm-studio') provEl.textContent = 'lm-studio (local)';
     else if (model === 'dall-e-3') provEl.textContent = 'gpt-image-1';
@@ -2432,142 +2366,13 @@ function insertImage() {
     var reader = new FileReader();
     reader.onloadend = function() {
       var imageData = reader.result;
-
-      // Choose where to send Base64-encoded image
-      var selModel = document.getElementById("selModel");
-      var btnSend = document.getElementById("btnSend");
-      var sQuestion = txtMsg.innerHTML.replace(/<br>/g, "\n").trim(); // Get the question here
-
-      
-      // Send to VisionAPI
-      if (selModel.value == "o3-mini" || selModel.value == "gpt-4-turbo-preview") {
-          sendToVisionAPI(imageData);
-          btnSend.onclick = function() {
-              updateButton();
-              sendData();
-              clearSendText();
-          };
-      } else if (selModel.value == "gpt-4o" || selModel.value == "gpt-4o-mini" || selModel.value == "o1-mini") {
-          sendToNative(imageData, sQuestion);
-          btnSend.onclick = function() {
-              updateButton();
-              sendData();
-              clearSendText();
-          };
-      } 
+      window._evaPendingImageData = imageData;
+      updateButton();
     };
     reader.readAsDataURL(file);
     // Return the file object
     //return file;
   }
-
-  function sendToNative(imageData, sQuestion) {
-    var existingMessages = JSON.parse(localStorage.getItem("messages")) || [];
-    var newMessages = [
-      // { role: 'user', content: sQuestion },
-      // { role: 'user', content: { type: "image_url", image_url: { url: imageData } } }
-      { role: 'user', content: [ { type: "text", text: sQuestion },
-        { type: "image_url", image_url: { url: imageData } } ]
-      }
-    ];
-    existingMessages = existingMessages.concat(newMessages);
-    localStorage.setItem("messages", JSON.stringify(existingMessages));
-  }
-
-  function sendToVisionAPI(imageData) {
-    // Send the image data to Google's Vision API
-  var visionApiUrl = `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_KEY}`;
-
-    // Create the API request payload
-    var requestPayload = {
-      requests: [
-        {
-          image: {
-            content: imageData.split(",")[1] // Extract the Base64-encoded image data from the data URL
-          },
-          features: [
-            {
-              type: "LABEL_DETECTION",
-              maxResults: 3
-            },
-            {
-              type: "TEXT_DETECTION"
-            },
-            {
-              type: "OBJECT_LOCALIZATION",
-              maxResults: 3
-            },
-            {
-              type: "LANDMARK_DETECTION"
-            }
-          ]
-        }
-      ]
-    };
-
-    // Make the API request
-    fetch(visionApiUrl, {
-      method: "POST",
-      body: JSON.stringify(requestPayload)
-    })
-      .then(response => response.json())
-      .then(data => {
-        // Handle the API response here
-	interpretVisionResponse(data);
-        // console.log(data);
-      })
-      .catch(error => {
-        // Handle any errors that occurred during the API request
-        console.error("Error:", error);
-      });
-  }
-
-  function interpretVisionResponse(data) {
-    // Extract relevant information from the Vision API response
-    // and pass it to the model for interpretation
-    var labels = data.responses[0].labelAnnotations;
-    var textAnnotations = data.responses[0].textAnnotations;
-    var localizedObjects = data.responses[0].localizedObjectAnnotations;
-    var landmarkAnnotations = data.responses[0].landmarkAnnotations;
-
-    // Prepare the text message to be sent to the model
-    var message = "I see the following labels in the image:\n";
-    labels.forEach(label => {
-      message += "- " + label.description + "\n";
-    });
-    // Add text detection information to the message
-    if (textAnnotations && textAnnotations.length > 0) {
-      message += "\nText detected:\n";
-      textAnnotations.forEach(text => {
-        message += "- " + text.description + "\n";
-      });
-    }
-
-    // Add object detection information to the message
-    if (localizedObjects && localizedObjects.length > 0) {
-      message += "\nObjects detected:\n";
-      localizedObjects.forEach(object => {
-        message += "- " + object.name + "\n";
-      });
-    }
-
-    // Add landmark detection information to the message
-    if (landmarkAnnotations && landmarkAnnotations.length > 0) {
-      message += "\nLandmarks detected:\n";
-      landmarkAnnotations.forEach(landmark => {
-        message += "- " + landmark.description + "\n";
-      });
-    }
-	
-    // Create a hidden element to store the Vision API response
-    var hiddenElement = document.createElement("div");
-    hiddenElement.style.display = "none";
-    hiddenElement.textContent = message;
-
-    // Append the hidden element to the txtMsg element
-    txtMsg.appendChild(hiddenElement);
-
-}
 
   function handleFileSelect(event) {
     event.preventDefault();

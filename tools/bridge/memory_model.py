@@ -82,13 +82,18 @@ class MemoryModel:
         self.memory = memory
 
     def migrate_legacy_knowledge(self):
-        """Copy legacy Knowledge exactly once into unconfirmed attributed atoms."""
+        """Migrate legacy Knowledge and backfill later user facts idempotently."""
         if not self.memory.table_exists("MemoryMigrations"):
             return 0
-        if self.memory.query("SELECT MigrationId FROM MemoryMigrations WHERE MigrationId = ?", ("legacy-knowledge-atoms-v1",)):
-            return 0
-        rows = self.memory.query(
+        migrated = bool(self.memory.query(
+            "SELECT MigrationId FROM MemoryMigrations WHERE MigrationId = ?", ("legacy-knowledge-atoms-v1",)
+        ))
+        knowledge_query = (
             "SELECT rowid AS LegacyId, Timestamp, Entity, Relation, Value, Confidence, Source FROM Knowledge"
+            + (" WHERE Entity = 'User' COLLATE NOCASE" if migrated else "")
+        )
+        rows = self.memory.query(
+            knowledge_query
         ) or []
         now = _now()
 
@@ -101,6 +106,12 @@ class MemoryModel:
                     continue
                 entity = _clip(row.get("Entity"), 120)
                 relation = _clip(row.get("Relation"), 120)
+                value = _clip(row.get("Value"), 4000)
+                if migrated and conn.execute(
+                    "SELECT 1 FROM MemoryAtoms WHERE Entity = ? COLLATE NOCASE AND Relation = ? COLLATE NOCASE AND Value = ? LIMIT 1",
+                    (entity, relation, value),
+                ).fetchone():
+                    continue
                 kind = _legacy_kind(entity, relation)
                 if kind == "identity_claim":
                     continue
@@ -109,7 +120,7 @@ class MemoryModel:
                 memory_id = "legacy-atom-" + legacy_id
                 conn.execute(
                     "INSERT INTO MemoryAtoms (MemoryId, Entity, Relation, Value, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, 'unconfirmed', 'active', ?, '', ?, ?, ?, ?)",
-                    (memory_id, entity, relation, _clip(row.get("Value"), 4000), kind, scope, confidence, source_ref,
+                    (memory_id, entity, relation, value, kind, scope, confidence, source_ref,
                      _clip(row.get("Timestamp"), 40) or now, now),
                 )
                 conn.execute(
@@ -117,10 +128,11 @@ class MemoryModel:
                     (_identifier("evidence"), memory_id, source_ref, now),
                 )
                 inserted += 1
-            conn.execute(
-                "INSERT OR IGNORE INTO MemoryMigrations (MigrationId, AppliedAt, Details) VALUES ('legacy-knowledge-atoms-v1', ?, ?)",
-                (now, "Copied legacy Knowledge as unconfirmed attributed atoms"),
-            )
+            if not migrated:
+                conn.execute(
+                    "INSERT OR IGNORE INTO MemoryMigrations (MigrationId, AppliedAt, Details) VALUES ('legacy-knowledge-atoms-v1', ?, ?)",
+                    (now, "Copied legacy Knowledge as unconfirmed attributed atoms"),
+                )
             return inserted
 
         return self.memory.transaction(write)
@@ -287,12 +299,12 @@ class MemoryModel:
         return self.memory.transaction(write)
 
     def delete_atom(self, memory_id):
-        """Remove an atom from future recall without erasing its audit record."""
+        """Remove any non-deleted atom from future recall without erasing its audit record."""
         now = _now()
 
         def write(conn):
             row = conn.execute("SELECT Status FROM MemoryAtoms WHERE MemoryId = ?", (str(memory_id),)).fetchone()
-            if not row or row["Status"] in {"deleted", "superseded"}:
+            if not row or row["Status"] == "deleted":
                 return False
             conn.execute("UPDATE MemoryAtoms SET Status = 'deleted', UpdatedAt = ? WHERE MemoryId = ?", (now, str(memory_id)))
             conn.execute("UPDATE UserPersonaTraits SET Status = 'disabled', UpdatedAt = ? WHERE SourceMemoryIds LIKE ?", (now, "%" + str(memory_id) + "%"))
@@ -589,9 +601,8 @@ class KustoMemoryModel:
 
     def migrate_legacy_knowledge(self):
         marker = self._latest("MemoryMigrations", "MigrationId", "legacy-knowledge-atoms-v1", "AppliedAt")
-        if marker:
-            return 0
-        rows = self._read("Knowledge | project Timestamp, Entity, Relation, Value, Confidence, Source")
+        knowledge_query = "Knowledge | " + ("where Entity =~ 'User' | " if marker else "") + "project Timestamp, Entity, Relation, Value, Confidence, Source"
+        rows = self._read(knowledge_query)
         inserted = 0
         for row in rows:
             entity = _clip(row.get("Entity"), 120)
@@ -605,15 +616,24 @@ class KustoMemoryModel:
             existing = self._read("MemoryAtoms | where SourceRef == " + self._quote(source_ref) + " | take 1")
             if existing:
                 continue
+            if marker:
+                same_value = self._read(
+                    "MemoryAtoms | where Entity =~ " + self._quote(entity)
+                    + " and Relation =~ " + self._quote(relation)
+                    + " and Value == " + self._quote(_clip(row.get("Value"), 4000)) + " | take 1"
+                )
+                if same_value:
+                    continue
             self.add_atom({
                 "entity": entity, "relation": relation, "value": row.get("Value", ""), "kind": kind,
                 "trust": "unconfirmed", "scope": "user" if entity.lower() == "user" else "global",
                 "confidence": float(row.get("Confidence", 0.5) or 0.5), "source_ref": source_ref,
             }, [{"source_type": "legacy_knowledge", "source_ref": source_ref}])
             inserted += 1
-        self._write("MemoryMigrations", ["MigrationId", "AppliedAt", "Details"], {
-            "MigrationId": "legacy-knowledge-atoms-v1", "AppliedAt": _now(), "Details": "Copied legacy Knowledge as unconfirmed attributed atoms",
-        })
+        if not marker:
+            self._write("MemoryMigrations", ["MigrationId", "AppliedAt", "Details"], {
+                "MigrationId": "legacy-knowledge-atoms-v1", "AppliedAt": _now(), "Details": "Copied legacy Knowledge as unconfirmed attributed atoms",
+            })
         return inserted
 
     def ensure_scenario(self, scope, scope_id, title=""):
@@ -691,7 +711,7 @@ class KustoMemoryModel:
 
     def delete_atom(self, memory_id):
         current = self._latest("MemoryAtoms", "MemoryId", memory_id)
-        if not current or current.get("Status") in {"deleted", "superseded"}:
+        if not current or current.get("Status") == "deleted":
             return False
         current["Status"] = "deleted"
         current["UpdatedAt"] = _revision_now()

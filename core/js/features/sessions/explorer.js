@@ -1118,7 +1118,6 @@ async function planEvaTerminalTask(objective, submit, allowDecline) {
         max_completion_tokens: 512,
         lmstudio_base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
         lmstudio_model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
-        github_pat: typeof getAuthKey === 'function' ? getAuthKey('GITHUB_PAT') : '',
         openai_api_key: plannerOpenAIKey
         }),
         signal: AbortSignal.timeout(30000)

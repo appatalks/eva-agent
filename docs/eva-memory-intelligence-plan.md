@@ -72,7 +72,7 @@ Eva already has useful foundations:
 - Conversation capture, fact extraction, semantic and lexical recall,
   summaries, goals, reflections, and skills.
 - A protected-memory vault separated from ordinary recall and embeddings.
-- Provider adapters for AIG/ACP, OpenAI, GitHub Models, LM Studio, and Gemini.
+- Provider adapters for AIG/ACP, OpenAI, LM Studio, and Gemini.
 - Focused tests for recall, learning signals, skills, prompt budgeting, and
   provider behavior.
 
@@ -238,7 +238,7 @@ Create an architecture test matrix before behavior changes.
 - Document the current SQLite and Kusto schemas and migration constraints.
 - Add a provider lifecycle contract: `build context -> submit -> render ->
   reflect exactly once`.
-- Add prompt-view snapshots covering AIG/ACP, OpenAI, GitHub Models, LM Studio,
+- Add prompt-view snapshots covering AIG/ACP, OpenAI, LM Studio,
   and Gemini.
 
 Exit criteria:
@@ -343,7 +343,7 @@ Implemented initial slice:
   submits one reflection request after a successful final response.
 - ACP reflection is bridge-owned; the shared browser renderer explicitly skips
   its duplicate reflection request for ACP responses.
-- OpenAI, GitHub Models, and LM Studio context requests now carry their active
+- OpenAI and LM Studio context requests now carry their active
   session ID so session-scoped guidance remains isolated.
 - Direct provider reflection reuses the session ID captured at turn submission,
   preventing a session switch while a request is pending from misfiling memory.

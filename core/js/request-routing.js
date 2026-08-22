@@ -11,7 +11,7 @@
     if (/\b(weather|forecast|temperature|raining|snowing|humidity|wind speed)\b/.test(text)) {
       return 'weather-search';
     }
-    if (/\b(news|headlines?|breaking news|current events?|morning briefing|daily briefing|briefing)\b/.test(text) ||
+    if (/\b(news|headlines?|breaking news|current events?|morning (?:briefing|report|update)|daily (?:briefing|report|update)|briefing)\b/.test(text) ||
         /\blatest\b.*\b(update|report|story|stories|happening|developments?)\b/.test(text)) {
       return 'news-search';
     }

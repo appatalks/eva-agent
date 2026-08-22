@@ -1,19 +1,8 @@
 // copilot.js
-// GitHub Copilot integration — two modes:
-//   1. GitHub Models API (direct REST, requires PAT)
-//   2. ACP Bridge (local server bridging Copilot CLI's Agent Client Protocol)
-//
-// Mode is determined by the selected model:
-//   copilot-*     → GitHub Models API
-//   copilot-acp   → ACP Bridge (uses copilot CLI via tools/acp_bridge.py)
+// GitHub Copilot ACP integration — the local server bridges Copilot CLI's
+// Agent Client Protocol and owns model/tool access for direct ACP callers.
 
 // --- Helpers ---
-
-function getCopilotMode(modelValue) {
-  if (modelValue === 'copilot-acp') return 'acp';
-  if (modelValue.indexOf('copilot-') === 0) return 'models-api';
-  return 'models-api';
-}
 
 function isEvaStandalone() {
   return !!(typeof window !== 'undefined' && window.evaStandalone && window.evaStandalone.isStandalone);
@@ -108,20 +97,6 @@ async function copilotSend() {
     : null;
   var turnId = window._evaActiveAuditTurnId || (typeof evaCreateAuditTurnId === 'function' ? evaCreateAuditTurnId() : '');
 
-  var selModel = document.getElementById('selModel');
-  var mode = getCopilotMode(selModel.value);
-
-  // Auth check — GitHub Models API requires PAT; ACP bridge does not (copilot CLI handles auth)
-  if (mode === 'models-api') {
-    var githubToken = getAuthKey('GITHUB_PAT');
-    if (!githubToken) {
-      txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="error">Error:</span> GitHub PAT not configured. Go to Settings \u2192 Auth and add your GitHub Personal Access Token.</div>';
-      txtOutput.scrollTop = txtOutput.scrollHeight;
-      setStatus('error', 'GitHub PAT not configured');
-      return;
-    }
-  }
-
   // Display user message
   var safeUser = escapeHtml(sQuestion).replace(/\n/g, '<br>');
   txtOutput.innerHTML += '<div class="chat-bubble user-bubble"><span class="user">You:</span> ' + safeUser + '</div>';
@@ -129,7 +104,7 @@ async function copilotSend() {
   txtOutput.scrollTop = txtOutput.scrollHeight;
 
   // Build messages payload
-  var storageKey = (mode === 'acp') ? 'copilotACPMessages' : 'copilotMessages';
+  var storageKey = 'copilotACPMessages';
   if (!localStorage.getItem(storageKey)) {
     var sysPrompt = (typeof getSystemPrompt === 'function') ? getSystemPrompt() : '';
     var initMessages = [
@@ -162,133 +137,7 @@ async function copilotSend() {
   existingMessages = existingMessages.concat(newMessages);
   localStorage.setItem(storageKey, JSON.stringify(existingMessages));
 
-  // Route to the appropriate backend
-  if (mode === 'acp') {
-    await _copilotSendACP(existingMessages, sQuestion, txtOutput, storageKey, signalContext, turnId);
-  } else {
-    await _copilotSendModelsAPI(existingMessages, selModel.value, sQuestion, txtOutput, storageKey, signalContext, turnId);
-  }
-}
-
-// --- GitHub Models API mode ---
-
-async function _copilotSendModelsAPI(messages, modelValue, question, txtOutput, storageKey, signalContext, turnId) {
-  var githubToken = getAuthKey('GITHUB_PAT');
-  var model = modelValue.replace(/^copilot-/, '');
-  var requestMessages = EvaPromptBudget.compactMessages(messages, {
-    budget: 12000,
-    recentTurns: 6
-  }).messages;
-
-  // --- Cognition: Fetch memory context from bridge and inject into system message ---
-  var lastUserMsg = '';
-  for (var i = requestMessages.length - 1; i >= 0; i--) {
-    if (requestMessages[i].role === 'user') { lastUserMsg = requestMessages[i].content || ''; break; }
-  }
-  try {
-    var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
-    var contextSessionId = (typeof ensureActiveSessionId === 'function')
-      ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
-    var ctxResp = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/context?message=' + encodeURIComponent(lastUserMsg) + '&session_id=' + encodeURIComponent(contextSessionId), {
-      signal: AbortSignal.timeout(3000)
-    });
-    if (ctxResp.ok) {
-      var ctxData = await ctxResp.json();
-      if (ctxData.context && ctxData.cognition_enabled) {
-        // Prepend memory context to the first system message, or insert one
-        var injected = false;
-        for (var j = 0; j < requestMessages.length; j++) {
-          if (requestMessages[j].role === 'system' || requestMessages[j].role === 'developer') {
-            requestMessages[j].content = ctxData.context + '\n\n' + requestMessages[j].content;
-            injected = true;
-            break;
-          }
-        }
-        if (!injected) {
-          requestMessages.unshift({ role: 'system', content: ctxData.context });
-        }
-      }
-    }
-  } catch (e) {
-    // Bridge not available — continue without memory
-  }
-
-  var temp = (typeof getModelTemperature === 'function') ? getModelTemperature() : 0.7;
-  var maxTok = (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384;
-  var requestBudget = EvaPromptBudget.compactMessages(requestMessages, {
-    budget: 12000,
-    recentTurns: 6
-  });
-
-  // Map short model names to GitHub Models API publisher/model format
-  // See: https://github.com/marketplace/models/catalog
-  var _modelMap = {
-    'gpt-4o': 'openai/gpt-4o',
-    'gpt-4o-mini': 'openai/gpt-4o-mini',
-    'gpt-4.1': 'openai/gpt-4.1',
-    'gpt-5.6-sol': 'openai/gpt-5.6-sol',
-    'gpt-5.6-terra': 'openai/gpt-5.6-terra',
-    'gpt-5.6-luna': 'openai/gpt-5.6-luna',
-    'gpt-5': 'openai/gpt-5',
-    'gpt-5-mini': 'openai/gpt-5-mini',
-    'gpt-5-nano': 'openai/gpt-5-nano',
-    'gpt-5-chat': 'openai/gpt-5-chat',
-    'o3-mini': 'openai/o3-mini',
-    'o3': 'openai/o3',
-    'o4-mini': 'openai/o4-mini',
-    'deepseek-r1': 'deepseek/DeepSeek-R1',
-    'llama-4-maverick': 'meta/llama-4-maverick-17b-128e-instruct-fp8'
-  };
-  var apiModel = _modelMap[model] || ('openai/' + model);
-
-  var payload = {
-    model: apiModel,
-    messages: requestBudget.messages,
-    temperature: temp,
-    max_tokens: maxTok
-  };
-
-  // Reasoning models: add reasoning_effort, remove temperature
-  var reasoningModels = ['o3-mini', 'o4-mini', 'deepseek-r1', 'gpt-5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
-  if (reasoningModels.indexOf(model) >= 0) {
-    var re = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel(modelValue) : 'default';
-    if (re !== 'default') payload.reasoning_effort = re;
-    delete payload.temperature;
-  }
-
-  // GPT-5 family: use max_completion_tokens, remove temperature and stop
-  if (model === 'gpt-5' || (model && model.indexOf('gpt-5.') === 0)) {
-    delete payload.temperature;
-  }
-
-  setStatus('info', 'Sending to GitHub Models API (' + model + ')...');
-
-  try {
-    var url = 'https://models.github.ai/inference/chat/completions';
-    if (typeof DEBUG_CORS !== 'undefined' && DEBUG_CORS && typeof DEBUG_PROXY_URL !== 'undefined' && DEBUG_PROXY_URL) {
-      url = DEBUG_PROXY_URL + '/?target=' + encodeURIComponent(url);
-    }
-
-    var resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + githubToken,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!resp.ok) {
-      _copilotHandleHTTPError(resp, txtOutput);
-      return;
-    }
-
-    var data = await resp.json();
-    _copilotRenderResponse(data, txtOutput, model, question, signalContext, false, contextSessionId, turnId);
-
-  } catch (err) {
-    _copilotHandleFetchError(err, txtOutput);
-  }
+  await _copilotSendACP(existingMessages, sQuestion, txtOutput, storageKey, signalContext, turnId);
 }
 
 // --- ACP Bridge mode ---
@@ -313,7 +162,8 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
       model: 'copilot-acp',
       stream: true,
       session_id: (typeof ensureActiveSessionId === 'function')
-        ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')
+        ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : ''),
+      turn_id: turnId
     };
     if (acpModel) payload.acp_model = acpModel;
     payload.acp_auto_approve = true;
@@ -422,9 +272,9 @@ async function _copilotHandleHTTPError(resp, txtOutput) {
 function _copilotHandleFetchError(err, txtOutput) {
   console.error('Copilot error:', err);
   var errorMessage = err.message || String(err);
-  if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError') || errorMessage.includes('CORS')) {
+  if (errorMessage.includes('Failed to fetch') || errorMessage.includes('NetworkError')) {
     if (!errorMessage.includes('ACP bridge')) {
-      errorMessage += ' \u2014 This may be a CORS issue. Configure DEBUG_CORS and DEBUG_PROXY_URL in config.json, or use a CORS proxy.';
+      errorMessage += ' \u2014 Is the ACP bridge server running?';
     }
   }
   txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="error">Error:</span> ' + escapeHtml(errorMessage) + '</div>';

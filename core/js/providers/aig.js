@@ -5,6 +5,25 @@
 
 var _aigLmStudioHealth = { baseUrl: '', checkedAt: 0, available: false };
 
+async function waitForPreparedBriefing(bridgeUrl, initialStatus) {
+  var latest = initialStatus || {};
+  if (latest.status !== 'preparing') return latest;
+  var deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    await new Promise(function (resolve) { setTimeout(resolve, 2000); });
+    try {
+      var response = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/briefing/status', {
+        signal: AbortSignal.timeout(1500)
+      });
+      if (!response.ok) continue;
+      latest = await response.json();
+      if (latest.status !== 'preparing') return latest;
+      setStatus('info', 'Eva is still preparing the morning briefing...');
+    } catch (_) {}
+  }
+  return latest;
+}
+
 function aigLmStudioAvailable() {
   var baseUrl = (typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '').replace(/\/+$/, '');
   var now = Date.now();
@@ -23,6 +42,11 @@ function aigLmStudioAvailable() {
 async function aigSend() {
   var txtMsg = document.getElementById('txtMsg');
   var txtOutput = document.getElementById('txtOutput');
+  var pendingImageData = window._evaPendingImageData || '';
+  window._evaPendingImageData = '';
+  var imageMatch = pendingImageData.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,/);
+  var imageB64 = imageMatch ? pendingImageData.slice(imageMatch[0].length) : '';
+  var imageMime = imageMatch ? imageMatch[1] : 'image/jpeg';
 
   // Clean HTML artifacts from input
   txtMsg.innerHTML = txtMsg.innerHTML.replace(/<img\b[^>]*>/g, '');
@@ -61,7 +85,13 @@ async function aigSend() {
   if (lastResponse) {
     newMessages.push({ role: 'assistant', content: lastResponse.replace(/\n/g, ' ') });
   }
-  newMessages.push({ role: 'user', content: sQuestion });
+  newMessages.push(imageB64 ? {
+    role: 'user',
+    content: [
+      { type: 'text', text: sQuestion },
+      { type: 'image_url', image_url: { url: pendingImageData } }
+    ]
+  } : { role: 'user', content: sQuestion });
 
   // External data augmentation
   if (sQuestion.includes('weather') && typeof weatherContents !== 'undefined' && weatherContents) {
@@ -78,13 +108,21 @@ async function aigSend() {
   }
 
   var existingMessages = JSON.parse(localStorage.getItem(storageKey)) || [];
-  existingMessages = existingMessages.concat(newMessages);
+  var requestMessages = existingMessages.concat(newMessages);
+  var storedMessages = newMessages.map(function (message) {
+    if (!Array.isArray(message.content)) return message;
+    var text = message.content.filter(function (part) {
+      return part && part.type === 'text';
+    }).map(function (part) { return part.text || ''; }).join('\n').trim();
+    return { role: message.role, content: text || '[Image attachment]' };
+  });
+  existingMessages = existingMessages.concat(storedMessages);
   localStorage.setItem(storageKey, JSON.stringify(existingMessages));
 
   var workspaceMcpRequest = /\b(?:mcp|workspace\s+(?:module|server|tool)|work\s*iq)\b/i.test(sQuestion);
   if (workspaceMcpRequest && window.EvaWorkspaces && typeof EvaWorkspaces.mcpContext === 'function') {
     var workspaceMcpContext = EvaWorkspaces.mcpContext();
-    if (workspaceMcpContext) existingMessages.push({ role: 'system', content: workspaceMcpContext });
+    if (workspaceMcpContext) requestMessages.push({ role: 'system', content: workspaceMcpContext });
   }
 
   // Send to AIG orchestrator via bridge
@@ -99,7 +137,7 @@ async function aigSend() {
   var cogDecision = (typeof Cognition !== 'undefined' && Cognition.shouldRun)
                       ? Cognition.shouldRun(sQuestion)
                       : { active: false, reason: null };
-  var briefingRequest = /\b(?:morning|daily)\s+briefing\b/i.test(sQuestion);
+  var briefingRequest = /\b(?:morning|daily)\s+(?:briefing|report|update)\b/i.test(sQuestion);
   if (briefingRequest) {
     cogDecision = { active: false, reason: 'briefing-cache' };
     try {
@@ -107,6 +145,7 @@ async function aigSend() {
         signal: AbortSignal.timeout(1500)
       });
       var briefingStatus = briefingResponse.ok ? await briefingResponse.json() : {};
+      briefingStatus = await waitForPreparedBriefing(bridgeUrl, briefingStatus);
       if (briefingStatus.status === 'ready' || briefingStatus.status === 'preparing') {
         setStatus('info', briefingStatus.status === 'ready'
           ? 'Eva is using the prepared morning briefing...'
@@ -122,9 +161,11 @@ async function aigSend() {
     try {
       var cogResult = await Cognition.run({
         userMessage: sQuestion,
-        messages: existingMessages,
+        messages: requestMessages,
         sessionId: sessionId,
         turnId: turnId,
+        imageB64: imageB64,
+        imageMime: imageMime,
         forceEnable: cogDecision.reason === 'phrase',
         forcedReason: cogDecision.reason,
         reviewReason: cogDecision.reason
@@ -228,13 +269,14 @@ async function aigSend() {
                  ', reviewer=' + cogState.reviewerModel +
                  ', maxCycles=' + cogState.maxCycles + '.';
     }
+    requestMessages = requestMessages.concat([{ role: 'system', content: cogNote }]);
     existingMessages = existingMessages.concat([{ role: 'system', content: cogNote }]);
     localStorage.setItem(storageKey, JSON.stringify(existingMessages));
   }
 
   try {
     var url = bridgeUrl.replace(/\/+$/, '') + '/v1/aig/chat';
-    var aigPromptBudget = EvaPromptBudget.compactMessages(existingMessages, {
+    var aigPromptBudget = EvaPromptBudget.compactMessages(requestMessages, {
       budget: 12000,
       recentTurns: 6
     });
@@ -255,13 +297,14 @@ async function aigSend() {
         session_id: sessionId,
         turn_id: turnId,
         model: aigModel,
-        model_policy_mode: (typeof getAIGModelPolicyMode === 'function') ? getAIGModelPolicyMode() : 'pinned',
+        model_policy_mode: (typeof getAIGModelPolicyMode === 'function') ? getAIGModelPolicyMode() : 'auto-balanced',
         max_completion_tokens: (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384,
         acp_reasoning_effort: reasoningEffort === 'default' ? '' : reasoningEffort,
         lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
         lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
+        image_b64: imageB64,
+        image_mime: imageMime,
         lmstudio_available: aigLmStudioAvailable(),
-        github_pat: (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : '',
         openai_api_key: (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : '',
         acp_auto_approve: true,
         stream: true
@@ -315,7 +358,7 @@ async function aigSend() {
     } else if (/^(claude-|gemini-)/.test(responder) || acpTagRe.test(stripped) || responder === 'acp-default') {
       routeLabel = ' via ACP';
     } else if (/^(gpt-|o\d|deepseek-|llama-)/.test(responder)) {
-      routeLabel = ' via GitHub Models';
+      routeLabel = ' via AIG';
     }
     if (responder === 'unavailable' || responder === 'raw-acp-unavailable') {
       setStatus('error', 'Eva (AIG) responder unavailable (' + modelUsed + ')');

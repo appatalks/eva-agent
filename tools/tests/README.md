@@ -16,7 +16,7 @@ node tools/tests/test_frontend_script_order.js
 ```
 
 `test_model_catalog.js` verifies that every selectable model has an intentional
-sender route and that direct GitHub Models mappings remain aligned between the
+sender route and that AIG-only dispatch remains aligned between the
 browser adapter and AIG bridge route.
 
 `test_frontend_script_order.js` protects the ordered classic-script contracts

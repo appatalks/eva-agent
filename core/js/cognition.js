@@ -186,10 +186,6 @@
     return (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
   }
 
-  function authPat() {
-    return (typeof getAuthKey === 'function') ? getAuthKey('GITHUB_PAT') : '';
-  }
-
   function authOpenAI() {
     return (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : '';
   }
@@ -757,7 +753,8 @@
       acp_reasoning_effort: (typeof getReasoningEffortForModel === 'function' && getReasoningEffortForModel('aig') !== 'default') ? getReasoningEffortForModel('aig') : '',
       lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
       lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
-      github_pat: authPat(),
+      image_b64: String((extra && extra.image_b64) || ''),
+      image_mime: String((extra && extra.image_mime) || 'image/jpeg'),
       openai_api_key: authOpenAI(),
       internal: true
     };
@@ -889,6 +886,8 @@
     var sessionId = String(opts.sessionId || ((typeof ensureActiveSessionId === 'function')
       ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '')));
     var turnId = String(opts.turnId || '');
+    var imageB64 = String(opts.imageB64 || '');
+    var imageMime = String(opts.imageMime || 'image/jpeg');
     var trace = [];
     var _turnStart = Date.now();
     var _draftMs = 0, _reviewMs = 0, _reviseMs = 0;
@@ -954,7 +953,7 @@
     ].join('\n');
     var draft = await callAgent(
       'eva', cfg.evaModel, cfg.evaPrompt, convo, draftTask,
-      { inject_memory: true, recall_query: userMsg, retrieve_data: true }, sessionId, turnId
+      { inject_memory: true, recall_query: userMsg, retrieve_data: true, image_b64: imageB64, image_mime: imageMime }, sessionId, turnId
     );
 
     // Eva's silent self-review signal decides whether a second opinion runs.
@@ -1058,7 +1057,7 @@
       try {
         revised = await callAgent(
           'eva', cfg.evaModel, cfg.evaPrompt, convo, reviseTask,
-          { inject_memory: true, recall_query: userMsg }, sessionId, turnId
+          { inject_memory: true, recall_query: userMsg, image_b64: imageB64, image_mime: imageMime }, sessionId, turnId
         );
       } catch (reviseErr) {
         // Revise failed (timeout, network error). Fall back to the draft

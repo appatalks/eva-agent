@@ -644,7 +644,7 @@ def test_model_selector():
     values = re.findall(r'value="([^"]+)"', selector_html)
     report("model_max_tokens_default", 'id="txtMaxTokens" value="16384"' in html and 'max="128000"' in html)
 
-    required_models = ["gpt-4o", "copilot-acp", "aig", "gemini", "lm-studio", "dall-e-3"]
+    required_models = ["aig"]
     for model in required_models:
         report(f"model_in_selector:{model}", model in values,
                "missing" if model not in values else "")
@@ -657,6 +657,7 @@ def test_model_selector():
 
     aig_match = re.search(r'<select id="selAIGBackend"[^>]*>(.*?)</select>', html, re.DOTALL)
     aig_values = re.findall(r'value="([^"]+)"', aig_match.group(1)) if aig_match else []
+    report("aig_only_top_level_model", values == ["aig"])
     report("aig_backend_lmstudio_option", "lmstudio" in aig_values,
            "missing" if "lmstudio" not in aig_values else "")
     direct_openai_models = {"openai:gpt-5.6-luna", "openai:gpt-5.6-terra", "openai:gpt-5.6-sol", "openai:gpt-4.1-nano", "openai:gpt-5.2", "openai:gpt-5", "openai:gpt-5-mini", "openai:gpt-4.1", "openai:gpt-4o", "openai:o3", "openai:o3-mini"}
@@ -1043,7 +1044,8 @@ process.stdout.write(JSON.stringify(matrix.map(([text]) => sandbox.isAffirmative
     report("telemetry_profile_cache_aggregation", all(field in telemetry_py for field in ("pool_profiles", "kusto_metadata_cache", "cache_kinds")))
     aig_preflight = open("tools/bridge/aig_preflight.py").read()
     report("aig_general_bypasses_preflight", 'acp_route = "direct/general"' in aig_preflight and "needs_preflight(message_lower, request_type)" in aig_preflight and "def _needs_acp_preflight" in bridge_utils)
-    report("aig_github_models_responder_removed", 'github_pat = ""' in bridge_core and 'return "acp", requested' in bridge_core and "models.github.ai/inference/chat/completions" not in bridge_core)
+    report("aig_github_models_responder_removed", "models.github.ai" not in bridge_core and "_github_model_map" not in bridge_core and "github-models" not in bridge_core and "GitHub Models" not in bridge_core)
+    report("aig_model_policy_is_active", "_policy_decision = select_model_policy" in bridge_core and '"model_policy.selected"' in bridge_core and "selected_backend" in bridge_core)
     report("aig_preflight_attempt_telemetry", "preflight_attempted=_preflight_attempted" in bridge_core and "preflight_succeeded=_preflight_succeeded" in bridge_core)
     report("aig_lmstudio_latency_telemetry", bridge_core.count('"aig_turn"') >= 2 and 'model_used = "aig:lmstudio:" + lms_model' in bridge_core)
     preflight_intent_cases = {

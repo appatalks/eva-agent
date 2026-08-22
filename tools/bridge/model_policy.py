@@ -6,7 +6,7 @@ def _clean_backend(value, fallback):
     return backend or fallback
 
 
-def select_model_policy(mode, requested_backend, request_type, requires_tools, candidates, local_only=False):
+def select_model_policy(mode, requested_backend, request_type, requires_tools, candidates, local_only=False, deep_reasoning=False):
     """Return a stable recommendation without inspecting credentials or making calls.
 
     ``candidates`` contains only availability facts and approved model identifiers.
@@ -21,6 +21,7 @@ def select_model_policy(mode, requested_backend, request_type, requires_tools, c
     acp_available = bool(candidates.get("acp_available"))
     openai_available = bool(candidates.get("openai_available"))
     lmstudio_available = bool(candidates.get("lmstudio_available"))
+    openai_deep_model = _clean_backend(candidates.get("openai_deep_model"), "gpt-5.6-sol")
 
     if mode not in {"auto-balanced", "auto-fast"}:
         return {"provider": "pinned", "backend": requested, "reason": "pinned"}
@@ -38,7 +39,9 @@ def select_model_policy(mode, requested_backend, request_type, requires_tools, c
         if openai_available:
             return {"provider": "openai", "backend": "openai:" + openai_model, "reason": "fast-direct"}
     if openai_available:
-        return {"provider": "openai", "backend": "openai:" + openai_model, "reason": "balanced-direct"}
+        selected_model = openai_deep_model if deep_reasoning else openai_model
+        reason = "deep-reasoning" if deep_reasoning else "balanced-direct"
+        return {"provider": "openai", "backend": "openai:" + selected_model, "reason": reason}
     if acp_available:
         return {"provider": "acp", "backend": acp_model, "reason": "balanced-acp"}
     if lmstudio_available:
