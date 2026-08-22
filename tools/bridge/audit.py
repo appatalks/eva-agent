@@ -25,7 +25,7 @@ _audit_lock = threading.Lock()
 _RUNTIME_AUDIT_BASE_FIELDS = {
     "ts", "event", "outcome", "backend", "route", "status",
     "kind", "tool_kind", "decision",
-    "error_type", "permission_basis", "recipients", "provider", "model",
+    "error_type", "permission_basis", "recipients",
     "requested_backend", "selected_backend", "policy_mode", "reason",
     "requires_tools",
 }
