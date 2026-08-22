@@ -385,7 +385,7 @@ def test_local_speech_contract():
     report("live_translation_fast_route", "function _vvTranslateLiveTranscript" in voice_view and "'/v1/translate'" in voice_view and "_vvSpeakBrowser(translated" in voice_view and "_VV_LIVE_TRANSLATION_TIMEOUT_MS = 12000" in voice_view)
     aig_request = open("tools/bridge/aig_request.py").read()
     report("live_translation_dedicated_bridge", "def _translate(self):" in core_bridge and 'elif parsed_path == "/v1/translate":' in core_bridge and "translation_mode = bool(data.get(\"translation_mode\"))" in aig_request)
-    report("live_translation_lmstudio_isolation", "if translation_mode:" in core_bridge and "not translation_mode and any(kw in user_message.lower()" in core_bridge and "if not translation_mode:" in core_bridge)
+    report("live_translation_lmstudio_isolation", "if translation_mode:" in core_bridge and "not translation_mode and _camera_request" in core_bridge and "if not translation_mode:" in core_bridge)
     report("live_translation_persisted_target", "function getLiveTranslationTarget" in audio_settings and "function getLiveTranslationModel" in audio_settings and "function getResolvedLiveTranslationModel" in options and "live_translation_target" in audio_settings and "live_translation_model" in audio_settings and "function _vvSetLiveTranslation" in voice_view)
     report("voice_view_selected_mic_fallback", "Selected microphone needs an OpenAI key" in voice_view and "if (whisperKey)" in voice_view)
     report("voice_view_restores_listener_after_translation", "_vvStopListening();\n      _vvStartListening();" in voice_view)

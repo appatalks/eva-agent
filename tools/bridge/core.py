@@ -140,6 +140,19 @@ def _lmstudio_chat_messages(system_prompt, history, user_message, system_additio
     return [{"role": "system", "content": "\n\n".join(system_parts)}] + turns
 
 
+def _lmstudio_camera_request(user_message):
+    """Return true only for explicit requests to inspect the physical scene."""
+    text = str(user_message or "").lower()
+    return bool(re.search(
+        r"\b(?:camera|webcam)\b|"
+        r"\b(?:look|see)\s+(?:at|through)\b|"
+        r"\bwhat\s+(?:do\s+you|can\s+you)\s+see\b|"
+        r"\bwhat\s+am\s+i\s+(?:holding|showing)\b|"
+        r"\bshow\s+me\s+what\s+(?:i(?:'m|\s+am)|you)\s+(?:holding|showing|see)\b",
+        text,
+    ))
+
+
 def _missing_tool_result_message(local_mode):
     return (
         "This request needs live local tools, but LocalMCP returned no result."
@@ -5128,10 +5141,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # Inject a short capability reminder close to the user message so
             # local models (which struggle with long system prompts) still know
             # about the camera.  This is ephemeral and not persisted.
-            _camera_keywords = {'look', 'see', 'holding', 'camera', 'webcam', 'picture', 'photo', 'show me', 'what am i'}
+            _camera_request = _lmstudio_camera_request(user_message)
             _is_signal_request = bool(os.environ.get("EVA_BRIDGE_TOKEN")) and _is_affirmative_signal_request(user_message)
             # Skip camera reminder when the user is asking for a Signal message
-            if not translation_mode and any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request:
+            if not translation_mode and _camera_request and not _is_signal_request:
                 lms_system_additions.append(
                     "REMINDER: You have webcam access. To look through the camera, "
                     "emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]. "
@@ -5190,7 +5203,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # and the model didn't emit the marker, append it so the frontend
             # triggers the capture automatically.
             # Skip when the user is asking for a Signal message.
-            if not translation_mode and any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request and '[[EVA_LOOK]]' not in response_text:
+            if not translation_mode and _camera_request and not _is_signal_request and '[[EVA_LOOK]]' not in response_text:
                 # Extract a question from the user message for the vision model
                 _look_q = user_message.strip()
                 response_text = response_text.rstrip()
@@ -5203,7 +5216,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if not translation_mode and "[[EVA_SIGNAL]]" in response_text:
                 # Strip spurious [[EVA_LOOK]] if the user asked for messaging,
                 # not camera.  The model sometimes emits both by mistake.
-                if not any(kw in user_message.lower() for kw in _camera_keywords):
+                if not _camera_request:
                     response_text = _strip_marker_blocks(response_text, "EVA_LOOK")
 
             # Post-process: convert blob/download links to [[EVA_FILE]] markers.

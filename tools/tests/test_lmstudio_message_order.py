@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from bridge.core import _lmstudio_chat_messages
+from bridge.core import _lmstudio_camera_request, _lmstudio_chat_messages
 
 
 def main():
@@ -26,6 +26,9 @@ def main():
     assert messages[0]["content"] == "Eva runtime instructions\n\nBrowser prompt instructions\n\nRuntime state\n\nCamera reminder"
     assert messages[-1]["content"] == "Look at this"
     assert "base64" not in "\n".join(item["content"] for item in messages)
+    assert not _lmstudio_camera_request("Look up the news today")
+    assert _lmstudio_camera_request("Look at what I am holding")
+    assert _lmstudio_camera_request("What do you see through the webcam?")
     print("LM Studio message ordering tests: PASS")
 
 
