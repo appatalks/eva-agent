@@ -1730,7 +1730,6 @@ function _vvTranslateLiveTranscript(transcript) {
       model: getResolvedLiveTranslationModel() === 'aig' ? ((document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna') : getResolvedLiveTranslationModel(),
       lmstudio_base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
       lmstudio_model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
-      github_pat: typeof getAuthKey === 'function' ? getAuthKey('GITHUB_PAT') : '',
       openai_api_key: typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : ''
     }),
     signal: controller ? controller.signal : undefined

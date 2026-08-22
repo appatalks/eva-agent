@@ -22,7 +22,6 @@ _ARTIFACTS_DIR = os.path.join(
 )
 _TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MCP_MODERN_PROTOCOL_VERSION = "2026-07-28"
-_MCP_LEGACY_PROTOCOL_VERSION = "2024-11-05"
 _MCP_DISCOVERY_TIMEOUT_SECONDS = 3
 _MCP_TOOL_LIST_PAGE_MAX = 32
 _MCP_CLIENT_INFO = {"name": "eva-local-mcp", "version": "1.0.0"}
@@ -119,8 +118,8 @@ class MCPServer:
         self._reader = None
         self._generation = 0
         self.alive = False
-        self.protocol_era = "legacy"
-        self.protocol_version = _MCP_LEGACY_PROTOCOL_VERSION
+        self.protocol_era = "modern"
+        self.protocol_version = _MCP_MODERN_PROTOCOL_VERSION
         self.server_info = {}
         self.tool_cache_ttl_ms = 0
         self.tool_cache_scope = ""
@@ -183,61 +182,32 @@ class MCPServer:
         return {"text": json.dumps(result)}
 
     def _negotiate_protocol(self):
-        """Probe modern MCP first and preserve legacy servers through fallback."""
+        """Negotiate the supported modern MCP protocol."""
         discover = self._modern_discover()
+        if (
+            discover is None
+            and self.alive
+            and self.process
+            and self.process.poll() is None
+        ):
+            discover = self._modern_discover()
         if self._is_modern_discover_result(discover):
             supported = self._supported_versions(discover)
             if _MCP_MODERN_PROTOCOL_VERSION in supported:
                 self._select_modern_protocol(discover)
                 return
-            if _MCP_LEGACY_PROTOCOL_VERSION in supported:
-                self._initialize_legacy()
-                return
             self._raise_unsupported_protocol(supported)
 
         if self._is_unsupported_protocol_error(discover):
             supported = self._supported_versions(discover.get("error") or {})
-            if _MCP_LEGACY_PROTOCOL_VERSION in supported:
-                self._initialize_legacy()
-                return
             self._raise_unsupported_protocol(supported)
 
-        # An unrecognized response may be from an initialization-era server.
-        # Some legacy servers exit after receiving an unknown modern request, so
-        # their legacy handshake must begin in a fresh process.
-        if not self.alive or not self.process or self.process.poll() is not None:
-            self.stop()
-            self._spawn()
-        self._initialize_legacy()
+        raise RuntimeError(f"MCP server '{self.name}' did not complete modern discovery.")
 
     def _modern_discover(self):
         return self._send(
             self._modern_request("server/discover", {}), timeout=_MCP_DISCOVERY_TIMEOUT_SECONDS
         )
-
-    def _initialize_legacy(self):
-        init = self._send({
-            "jsonrpc": "2.0",
-            "id": self._next_id(),
-            "method": "initialize",
-            "params": {
-                "protocolVersion": _MCP_LEGACY_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": dict(_MCP_CLIENT_INFO),
-            },
-        }, timeout=15)
-        if self._is_unsupported_protocol_error(init):
-            supported = self._supported_versions((init or {}).get("error") or {})
-            if _MCP_MODERN_PROTOCOL_VERSION in supported:
-                retry = self._modern_discover()
-                if self._is_modern_discover_result(retry) and _MCP_MODERN_PROTOCOL_VERSION in self._supported_versions(retry):
-                    self._select_modern_protocol(retry)
-                    return
-            self._raise_unsupported_protocol(supported)
-        if not init or "error" in init:
-            raise RuntimeError(f"MCP server '{self.name}' did not complete legacy initialization.")
-        self.server_info = init.get("serverInfo") or {}
-        self._write({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     def _select_modern_protocol(self, discover):
         self.protocol_era = "modern"
@@ -286,14 +256,7 @@ class MCPServer:
         }
 
     def _send_request(self, method, params, timeout):
-        if self.protocol_era == "modern":
-            return self._send(self._modern_request(method, params), timeout=timeout)
-        return self._send({
-            "jsonrpc": "2.0",
-            "id": self._next_id(),
-            "method": method,
-            "params": params or {},
-        }, timeout=timeout)
+        return self._send(self._modern_request(method, params), timeout=timeout)
 
     def _discover_tools(self):
         tools = []
@@ -303,19 +266,11 @@ class MCPServer:
             params = {"cursor": cursor} if cursor else {}
             tools_resp = self._send_request("tools/list", params, timeout=10)
             if not tools_resp or "error" in tools_resp:
-                if self.protocol_era == "modern":
-                    raise RuntimeError(f"MCP server '{self.name}' rejected tools/list.")
-                return tools
+                raise RuntimeError(f"MCP server '{self.name}' rejected tools/list.")
             result = self._complete_result(tools_resp, "tools/list")
             if not isinstance(result, dict) or result.get("_mcp_error"):
-                if self.protocol_era == "modern":
-                    raise RuntimeError(f"MCP server '{self.name}' returned an invalid tools/list result.")
-                return tools
+                raise RuntimeError(f"MCP server '{self.name}' returned an invalid tools/list result.")
             page_tools = result.get("tools")
-            if self.protocol_era != "modern":
-                if isinstance(page_tools, list):
-                    tools.extend(page_tools)
-                return tools
             if not isinstance(page_tools, list) or any(not isinstance(tool, dict) for tool in page_tools):
                 raise RuntimeError(f"MCP server '{self.name}' returned an invalid tools/list page.")
             tools.extend(page_tools)
@@ -336,8 +291,6 @@ class MCPServer:
         if not response or "error" in response:
             return response
         result = response.get("result", response)
-        if self.protocol_era != "modern":
-            return result
         if not isinstance(result, dict):
             return {"_mcp_error": f"Modern MCP server returned an invalid {method} result."}
         if result.get("resultType") == "complete":

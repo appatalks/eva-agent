@@ -231,6 +231,113 @@ class OpenAIAIGEndToEndTests(unittest.TestCase):
         body = json.loads(raised.exception.read().decode("utf-8"))
         self.assertIn("OpenAI API key", body["error"]["message"])
 
+    def test_aig_automatic_policy_selects_available_responder(self):
+        _FakeOpenAIHandler.requests = []
+        status, response = _json_request(self.bridge_url + "/v1/aig/chat", {
+            "user_message": "Give me a concise status sentence.",
+            "messages": [{"role": "user", "content": "Give me a concise status sentence."}],
+            "model": "gpt-5.6-luna",
+            "model_policy_mode": "auto-balanced",
+            "openai_api_key": "sk-FAKE-OPENAI-E2E",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(response["model"], "aig:gpt-5.6-luna+openai-direct")
+        self.assertEqual(len(_FakeOpenAIHandler.requests), 1)
+
+    def test_aig_automatic_policy_requires_tools_for_live_data(self):
+        request = urllib.request.Request(
+            self.bridge_url + "/v1/aig/chat",
+            data=json.dumps({
+                "user_message": "Search the web for today's headlines.",
+                "messages": [{"role": "user", "content": "Search the web for today's headlines."}],
+                "model": "openai:gpt-5.6-luna",
+                "model_policy_mode": "auto-balanced",
+                "openai_api_key": "sk-FAKE-OPENAI-E2E",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(raised.exception.code, 503)
+        self.assertIn("tool-capable route", raised.exception.read().decode("utf-8"))
+
+    def test_aig_pinned_policy_still_fails_closed_for_live_data(self):
+        request = urllib.request.Request(
+            self.bridge_url + "/v1/aig/chat",
+            data=json.dumps({
+                "user_message": "Search the web for today's headlines.",
+                "messages": [{"role": "user", "content": "Search the web for today's headlines."}],
+                "model": "openai:gpt-5.6-luna",
+                "model_policy_mode": "pinned",
+                "openai_api_key": "sk-FAKE-OPENAI-E2E",
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=5)
+        self.assertEqual(raised.exception.code, 503)
+        self.assertIn("live tools", raised.exception.read().decode("utf-8"))
+
+    def test_aig_direct_openai_preserves_image_attachment(self):
+        _FakeOpenAIHandler.requests = []
+        image = "iVBORw0KGgo="
+        status, response = _json_request(self.bridge_url + "/v1/aig/chat", {
+            "user_message": "What is in this image?",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "What is in this image?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + image}},
+            ]}],
+            "model": "openai:gpt-5.6-luna",
+            "model_policy_mode": "pinned",
+            "image_b64": image,
+            "image_mime": "image/png",
+            "openai_api_key": "sk-FAKE-OPENAI-E2E",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(response["model"], "aig:gpt-5.6-luna+openai-direct")
+        sent_messages = _FakeOpenAIHandler.requests[0]["payload"]["messages"]
+        self.assertTrue(any(isinstance(message.get("content"), list) for message in sent_messages))
+
+    def test_aig_local_policy_fails_closed_without_mcp_tools(self):
+        status, mode = _json_request(self.bridge_url + "/v1/mode", {"mode": "local"})
+        self.assertEqual(status, 200)
+        self.assertEqual(mode["mode"], "local")
+        try:
+            request = urllib.request.Request(
+                self.bridge_url + "/v1/aig/chat",
+                data=json.dumps({
+                    "user_message": "Search the web for today's headlines.",
+                    "messages": [{"role": "user", "content": "Search the web for today's headlines."}],
+                    "model": "gpt-5.6-luna",
+                    "model_policy_mode": "auto-balanced",
+                    "openai_api_key": "sk-FAKE-OPENAI-E2E",
+                    "lmstudio_available": True,
+                    "internal": True,
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=5)
+            self.assertEqual(raised.exception.code, 503)
+            self.assertIn("LocalMCP", raised.exception.read().decode("utf-8"))
+        finally:
+            _json_request(self.bridge_url + "/v1/mode", {"mode": "cloud"})
+
+    def test_aig_automatic_policy_prefers_deep_model_for_analysis(self):
+        _FakeOpenAIHandler.requests = []
+        status, response = _json_request(self.bridge_url + "/v1/aig/chat", {
+            "user_message": "Analyze the security tradeoffs in this design.",
+            "messages": [{"role": "user", "content": "Analyze the security tradeoffs in this design."}],
+            "model": "gpt-5.6-luna",
+            "model_policy_mode": "auto-balanced",
+            "openai_api_key": "sk-FAKE-OPENAI-E2E",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(response["model"], "aig:gpt-5.6-sol+openai-direct")
+
     def test_terminal_planner_uses_one_tool_free_direct_response(self):
         _FakeOpenAIHandler.requests = []
         status, response = _json_request(self.bridge_url + "/v1/aig/chat", {

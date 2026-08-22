@@ -837,16 +837,6 @@
           Eva watches the webcam locally and wakes when she sees you. Frames stay on this machine unless you ask her to look.
         </div>
 
-        <label for="cameraVisionProvider">Vision model (when Eva looks):</label>
-        <select id="cameraVisionProvider">
-          <option value="github">GitHub-hosted gpt-4o (PAT)</option>
-          <option value="openai">OpenAI direct gpt-4o (key)</option>
-          <option value="copilot">Copilot / Claude (bridge)</option>
-        </select>
-        <div class="auth-note" id="cameraVisionNote" style="margin:4px 0 0;font-size:11px;opacity:0.75">
-          Which backend describes what Eva sees. The others are automatic fallbacks if the chosen one is unavailable.
-        </div>
-
         <hr style="margin:14px 0;border:none;border-top:1px solid rgba(127,127,127,0.25)">
 
         <label for="selDataMode">Data retrieval mode:</label>
@@ -889,42 +879,7 @@
       <div class="settings-panel" data-stab="models">
         <label for="selModel">Model:</label>
         <select id="selModel" onchange="updateButton(); onModelSettingsChange()">
-          <optgroup label="OpenAI">
-            <option value="gpt-4o" title="gpt-4o">gpt-4o</option>
-            <option value="gpt-4o-mini" title="gpt-4o-mini">gpt-4o-mini</option>
-            <option value="o1" title="o1">o1</option>
-            <option value="o1-preview" title="o1-preview">o1-preview</option>
-            <option value="o1-mini" title="o1-mini">o1-mini</option>
-            <option value="o3-mini" title="o3-mini">o3-mini</option>
-            <option value="latest" title="OpenAI latest model alias">latest</option>
-          </optgroup>
-          <optgroup label="GitHub Copilot">
-            <option value="copilot-gpt-4o" title="GitHub Models GPT-4o">Copilot GPT-4o</option>
-            <option value="copilot-gpt-4o-mini" title="GitHub Models GPT-4o Mini">Copilot GPT-4o Mini</option>
-            <option value="copilot-o3-mini" title="GitHub Models o3-mini">Copilot o3-mini</option>
-            <option value="copilot-gpt-5.6-sol" title="GitHub Models GPT-5.6 Sol — flagship, 1M context, reasoning">Copilot GPT-5.6 Sol</option>
-            <option value="copilot-gpt-5.6-terra" title="GitHub Models GPT-5.6 Terra — balanced, 200K context">Copilot GPT-5.6 Terra</option>
-            <option value="copilot-gpt-5.6-luna" title="GitHub Models GPT-5.6 Luna — efficient, 200K context">Copilot GPT-5.6 Luna</option>
-            <option value="copilot-gpt-5" title="GitHub Models GPT-5 — 200K context, 100K output, reasoning">Copilot GPT-5</option>
-            <option value="copilot-o4-mini" title="GitHub Models o4-mini — 200K context, reasoning">Copilot o4-mini</option>
-            <option value="copilot-deepseek-r1" title="GitHub Models DeepSeek-R1 — 128K context, reasoning">Copilot DeepSeek-R1</option>
-            <option value="copilot-llama-4-maverick" title="GitHub Models Llama 4 Maverick — 1M context, agents">Copilot Llama 4 Maverick</option>
-          </optgroup>
-          <optgroup label="Copilot ACP">
-            <option value="copilot-acp" title="Copilot via ACP Bridge — uses your Copilot license model">Copilot (ACP)</option>
-          </optgroup>
-          <optgroup label="AIG">
-            <option value="aig" title="Eva AIG — Intelligent orchestration across all available models">Eva (AIG)</option>
-          </optgroup>
-          <optgroup label="Google">
-            <option value="gemini" title="Deprecated compatibility provider">Gemini 2.0 Flash (deprecated)</option>
-          </optgroup>
-          <optgroup label="Local">
-            <option value="lm-studio" title="lm-studio">lm-studio</option>
-          </optgroup>
-          <optgroup label="Image Generation">
-            <option value="dall-e-3" title="Image Generation">Image (gpt-image-1)</option>
-          </optgroup>
+          <option value="aig" selected title="Eva AIG — automatic model and tool orchestration">Eva (AIG)</option>
         </select>
 
         <div id="modelOptions" class="model-options">
@@ -968,7 +923,7 @@
                 <option value="gpt-5.5">GPT-5.5</option>
                 <option value="gpt-5.3-codex">GPT-5.3 Codex</option>
               </optgroup>
-              <optgroup label="OpenAI API (direct)">
+              <optgroup label="OpenAI (via AIG)">
                 <option value="openai:gpt-5.6-luna">GPT-5.6 Luna - Fast value</option>
                 <option value="openai:gpt-5.6-terra">GPT-5.6 Terra - Balanced intelligence</option>
                 <option value="openai:gpt-5.6-sol">GPT-5.6 Sol - Premium reasoning</option>
@@ -1004,11 +959,11 @@
             </dl>
             <label for="selAIGModelPolicy" style="margin-top:8px">Response policy:</label>
             <select id="selAIGModelPolicy">
-              <option value="pinned" selected>Pinned selected backend</option>
-              <option value="auto-balanced">Auto Balanced (shadow evaluation)</option>
-              <option value="auto-fast">Auto Fast (shadow evaluation)</option>
+              <option value="auto-balanced" selected>Automatic (balanced)</option>
+              <option value="auto-fast">Automatic (fast)</option>
+              <option value="pinned">Use preferred backend exactly</option>
             </select>
-            <p class="auth-note" style="margin-top:4px">Auto policies currently record a recommendation for response-time and reliability evaluation. Eva continues using the selected backend until automatic switching is explicitly enabled after validation.</p>
+            <p class="auth-note" style="margin-top:4px">Eva chooses the responder and tool route for each request. The backend selection is a preference; pin it only when you need a specific model.</p>
           </div>
           <div class="model-opt" id="opt-lmstudio-config">
             <label for="aigLmStudioBaseUrl">LM Studio base URL:</label>
@@ -1081,7 +1036,7 @@
         </div>
 
         <div class="auth-field">
-          <label for="authGitHub">GitHub PAT (Models and private repository imports):</label>
+          <label for="authGitHub">GitHub PAT (MCP and private repository imports):</label>
           <div class="auth-input-wrap">
             <input type="password" id="authGitHub" placeholder="ghp_... or github_pat_..." autocomplete="off">
             <button type="button" class="auth-toggle" onclick="toggleAuthVis(this)" aria-label="Show/hide key">Show</button>
@@ -1108,14 +1063,6 @@
           <label for="authGemini">Google Gemini Key (deprecated):</label>
           <div class="auth-input-wrap">
             <input type="password" id="authGemini" placeholder="AI..." autocomplete="off">
-            <button type="button" class="auth-toggle" onclick="toggleAuthVis(this)" aria-label="Show/hide key">Show</button>
-          </div>
-        </div>
-
-        <div class="auth-field">
-          <label for="authGoogleVision">Google Vision Key:</label>
-          <div class="auth-input-wrap">
-            <input type="password" id="authGoogleVision" placeholder="AI..." autocomplete="off">
             <button type="button" class="auth-toggle" onclick="toggleAuthVis(this)" aria-label="Show/hide key">Show</button>
           </div>
         </div>

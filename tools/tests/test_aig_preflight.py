@@ -45,6 +45,8 @@ class AigPreflightTests(unittest.TestCase):
         self.assertEqual(self.plan("question", acp_available=False)["acp_route"], "acp-unavailable")
         forced = self.plan("weather", "weather-search", internal=True, force_retrieve=True)
         self.assertTrue(forced["needs_acp_tools"])
+        internal_live = self.plan("Search the web", "web-search", internal=True)
+        self.assertTrue(internal_live["needs_acp_tools"])
 
     def test_greeting_meta_and_general_skip_routes(self):
         self.assertEqual(self.plan("Hello!")["acp_route"], "greeting/trivial")
@@ -65,6 +67,9 @@ class AigPreflightTests(unittest.TestCase):
         self.assertTrue(result["briefing_request"])
         self.assertFalse(result["needs_acp_tools"])
         self.assertEqual(result["acp_route"], "direct/general")
+        report = self.plan("Please give me my morning report", "news-search")
+        self.assertTrue(report["briefing_request"])
+        self.assertFalse(report["needs_acp_tools"])
 
 
 if __name__ == "__main__":

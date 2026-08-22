@@ -93,7 +93,7 @@ function onModelSettingsChange() {
   var model = sel.value;
   var reOpt = document.getElementById('opt-reasoningEffort');
   if (reOpt) {
-    var reasoningModels = ['o3-mini', 'copilot-o3-mini', 'copilot-o4-mini', 'copilot-deepseek-r1', 'copilot-gpt-5', 'copilot-gpt-5.6-sol', 'copilot-gpt-5.6-terra', 'copilot-gpt-5.6-luna', 'copilot-acp'];
+      var reasoningModels = ['o3-mini', 'copilot-acp'];
     var aigBackend = (document.getElementById('selAIGBackend') || {}).value || '';
     var cognitionEnabled = !!(document.getElementById('cogEnabled') || {}).checked;
     var cognitionModels = ['cogEvaModel', 'cogReviewerModel'].map(function (id) {
@@ -126,7 +126,7 @@ function onModelSettingsChange() {
   }
   var tempOpt = document.getElementById('opt-temperature');
   if (tempOpt) {
-    var hideTemp = ['o3-mini', 'copilot-o3-mini', 'copilot-o4-mini', 'copilot-deepseek-r1', 'copilot-gpt-5', 'copilot-gpt-5.6-sol', 'copilot-gpt-5.6-terra', 'copilot-gpt-5.6-luna', 'gpt-5-mini', 'latest', 'copilot-acp', 'aig'].indexOf(model) >= 0;
+      var hideTemp = ['o3-mini', 'gpt-5-mini', 'latest', 'copilot-acp', 'aig'].indexOf(model) >= 0;
     tempOpt.style.display = hideTemp ? 'none' : 'block';
   }
   var aigOpt = document.getElementById('opt-aigBackend');
@@ -149,8 +149,8 @@ function getACPModel() {
 
 function getAIGModelPolicyMode() {
   var el = document.getElementById('selAIGModelPolicy');
-  var value = el ? el.value : 'pinned';
-  return ['pinned', 'auto-balanced', 'auto-fast'].indexOf(value) >= 0 ? value : 'pinned';
+    var value = el ? el.value : 'auto-balanced';
+    return ['pinned', 'auto-balanced', 'auto-fast'].indexOf(value) >= 0 ? value : 'auto-balanced';
 }
 
 var __originalModelOptions = null;
@@ -211,7 +211,7 @@ function updateModelOptionsForTheme(theme) {
   if (!sel) return;
   if (theme === 'lcars') {
     __modelBeforeLCARS = sel.value;
-    var allowed = new Set(['gpt-5-mini', 'o3-mini', 'dall-e-3', 'gemini', 'lm-studio', 'copilot-gpt-4o', 'copilot-gpt-4o-mini', 'copilot-o3-mini', 'copilot-gpt-4.1', 'copilot-gpt-5', 'copilot-o4-mini', 'copilot-deepseek-r1', 'copilot-llama-4-maverick', 'copilot-acp', 'aig']);
+    var allowed = new Set(['aig']);
     var filtered = [];
     (__originalModelOptions || []).forEach(function(item) {
       if (item.type === 'optgroup') {

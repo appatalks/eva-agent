@@ -68,10 +68,10 @@ files and are normalized before Eva uses them.
 
 | Provider | Models |
 |---|---|
-| Eva (AIG) | Orchestration over direct OpenAI API, GitHub Models, ACP, and LM Studio |
+| Eva (AIG) | Automatic orchestration over OpenAI API, Copilot ACP, LM Studio, and MCP tools |
 | OpenAI | GPT-4o, GPT-4o Mini, o1, o1-preview, o1-mini, o3-mini, latest |
-| GitHub Copilot (PAT) | GPT-4o, GPT-4o Mini, o3-mini, GPT-5.6 Sol/Terra/Luna, GPT-5, o4-mini, DeepSeek-R1, Llama 4 Maverick |
 | GitHub Copilot (ACP) | Claude, GPT-5.x, GPT-4.1 via Copilot CLI |
+| GitHub MCP | Repository, issue, pull request, workflow, and code operations through ACP/local MCP |
 | Google Gemini | Gemini 2.0 Flash (Thinking Exp), deprecated compatibility route |
 | LM Studio | Any local OpenAI-compatible model (fully offline) |
 | gpt-image-1 | Image generation |
@@ -215,7 +215,8 @@ total timing, chunk count, route, and model labels without prompt or response te
 1. Browser calls `Cognition.run()` which drives the draft/review/revise pipeline
 2. Each agent call goes to `POST /v1/aig/chat` on the bridge
 3. Bridge runs Step 1 (memory), Step 2 (data retrieval), Step 3 (persona), Step 4 (LLM call)
-4. LLM call routes to GitHub Models API (PAT), ACP (Copilot CLI), or LM Studio based on model
+4. AIG selects an available responder: OpenAI API, ACP (Copilot CLI), or LM Studio
+  Tool-required requests fail closed when the required ACP/local MCP route is unavailable.
 5. Step 5: background reflection thread logs conversation, extracts entities, computes emotion
 
 **Image handling:**
@@ -274,7 +275,7 @@ core/
                            - File capability documentation in system prompt
                            - Post-response reflection via bridge
     providers/copilot.js   GitHub Copilot integration (copilotSend)
-                           - Dual mode: GitHub Models API (PAT) + ACP Bridge
+                           - ACP Bridge and MCP configuration
                            - MCP configuration (applyMCPConfig, refreshMCPStatus)
     providers/aig.js       Eva AIG orchestration (aigSend)
                            - Routes through bridge /v1/aig/chat
@@ -419,9 +420,8 @@ standalone/
 | Key | Used by | Get it from |
 |---|---|---|
 | `OPENAI_API_KEY` | Direct OpenAI Eva backends, OpenAI models, image generation, TTS/transcription, embeddings | [platform.openai.com](https://platform.openai.com/api-keys) |
-| `GITHUB_PAT` | Copilot Models API, GitHub MCP, and private workspace imports | [github.com/settings/tokens](https://github.com/settings/tokens) (needs "Models" permission; private imports also need repository Contents: Read access. Fine-grained tokens must include the repository; classic tokens need `repo`. Alternatively, Workspaces can launch native `gh auth login --web` device-code authorization; that credential stays in GitHub CLI storage.) |
+| `GITHUB_PAT` | GitHub MCP and private workspace imports | [github.com/settings/tokens](https://github.com/settings/tokens) (private imports need repository Contents: Read access. Fine-grained tokens must include the repository; classic tokens need `repo`. Alternatively, Workspaces can launch native `gh auth login --web` device-code authorization; that credential stays in GitHub CLI storage.) |
 | `GOOGLE_GL_KEY` | Google Gemini | [aistudio.google.com](https://aistudio.google.com/apikey) |
-| `GOOGLE_VISION_KEY` | Google Vision (image analysis) | [console.cloud.google.com](https://console.cloud.google.com/apis/credentials) |
 | AWS credentials | Amazon Polly TTS | [AWS IAM Console](https://console.aws.amazon.com/iam/) |
 | None | LM Studio (local mode) | Free, runs locally |
 
@@ -820,8 +820,8 @@ search plus type, lifecycle status, scope, recency, and confidence filters. Sele
 record opens its audit view with the full atom fields, source evidence, scenario
 memberships, derived persona traits, correction ancestry, and a plain-language note
 explaining whether and how Eva can use it for recall. Saving changes creates a successor
-atom and supersedes the prior record; removal only excludes the active record from future
-recall, so the audit trail remains available for inspection.
+atom and supersedes the prior record; removal marks any non-deleted record as deleted for
+future recall, so the audit trail remains available for inspection.
 
 **Fresh start:** The Memory Inspector's **Start fresh** command requires an explicit
 typed confirmation. It first creates a timestamped local database backup, then clears
@@ -937,7 +937,7 @@ Browser -> POST /v1/aig/chat -> ACP Bridge
   |   +-- Base system prompt + memory context + [Data Retrieved]
   |
   +-- Step 4: Generate response
-  |   +-- Route: GitHub Models API (PAT) | ACP (Copilot CLI) | LM Studio
+  |   +-- Route: OpenAI API (direct) | ACP (Copilot CLI) | LM Studio
   |
   +-- Step 5: Background reflection (async thread)
       +-- Log to Conversations table
@@ -1802,7 +1802,7 @@ request or a structured action inside the deterministically matched Skill.
 
 The sidebar profile picker keeps sessions, prompts, model choices, voice preferences, and other browser-local settings separate per user. API credentials, MCP configuration, and the selected memory backend remain shared installation settings. Sessions open fresh on launch and support persistent custom titles. Saved skills can be edited and reimported through the existing skill ID, preserving database history.
 
-Reasoning-capable models expose **Model default**, **None**, **Minimal**, **Low**, **Medium**, **High**, **Extra high**, and **Maximum**. The selection is saved locally and passed to OpenAI, GitHub Models, or Copilot CLI ACP when supported. Higher levels can increase response time and premium usage.
+Reasoning-capable models expose **Model default**, **None**, **Minimal**, **Low**, **Medium**, **High**, **Extra high**, and **Maximum**. The selection is saved locally and passed to the selected AIG responder when supported. Higher levels can increase response time and premium usage.
 
 ## Deployment
 

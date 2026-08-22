@@ -32,6 +32,8 @@ def main():
     assert decision(candidates={"openai_available": False})["reason"] == "balanced-acp"
     assert decision(candidates={"openai_available": False, "acp_available": False})["reason"] == "balanced-local"
     assert decision(candidates={"openai_available": False, "acp_available": False, "lmstudio_available": False})["reason"] == "no-auto-candidate"
+    assert decision(candidates={"openai_available": False, "acp_available": False, "lmstudio_available": False})["provider"] == "pinned"
+    assert decision(deep_reasoning=True)["backend"] == "openai:gpt-5.6-sol"
     print("model policy tests: PASS")
 
 

@@ -26,8 +26,11 @@ def normalize_aig_request(
     conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
     requested_backend = data.get("model", "gpt-5.6-luna")
     responder_provider, model_for_response = parse_backend(requested_backend)
+    model_policy_mode = str(data.get("model_policy_mode") or "pinned").strip().lower()
+    if model_policy_mode not in {"pinned", "auto-balanced", "auto-fast"}:
+        model_policy_mode = "pinned"
 
-    if responder_provider == "openai" and not openai_api_key:
+    if responder_provider == "openai" and not openai_api_key and model_policy_mode == "pinned":
         raise ValueError("An OpenAI API key is required for the selected Eva backend.")
 
     max_completion_tokens = completion_token_limit(data.get("max_completion_tokens"))
@@ -58,6 +61,7 @@ def normalize_aig_request(
         "no_tools": no_tools,
         "conversation_id": conversation_id,
         "requested_backend": requested_backend,
+        "model_policy_mode": model_policy_mode,
         "responder_provider": responder_provider,
         "model_for_response": model_for_response,
         "max_completion_tokens": max_completion_tokens,

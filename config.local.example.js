@@ -5,9 +5,6 @@ window.__LOCAL_CONFIG__ = {
   AWS_ACCESS_KEY_ID: "",
   AWS_SECRET_ACCESS_KEY: "",
   GOOGLE_GL_KEY: "",
-  GOOGLE_VISION_KEY: "",
   OPENAI_API_KEY: "",
-  GITHUB_PAT: "",
-  DEBUG_CORS: false,
-  DEBUG_PROXY_URL: "http://localhost:8787"
+  GITHUB_PAT: ""
 };

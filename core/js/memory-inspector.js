@@ -206,8 +206,13 @@
     setInputValue('memoryAtomSourceRef', 'maintainer-correction:' + recordValue(atom, 'MemoryId'));
     setInputValue('memoryAtomValue', recordValue(atom, 'Value'));
     var active = recordValue(atom, 'Status') === 'active';
-    Array.prototype.forEach.call(form.elements, function (element) { element.disabled = !active; });
-    if (stateLabel) stateLabel.textContent = active ? '' : 'This record is ' + formatValue(atom.Status) + ' and remains available only for review.';
+    var deleted = recordValue(atom, 'Status') === 'deleted';
+    Array.prototype.forEach.call(form.elements, function (element) {
+      element.disabled = !active && element.id !== 'memoryAtomDetailRemove';
+    });
+    if (stateLabel) stateLabel.textContent = active ? '' : 'This record is ' + formatValue(atom.Status) + '. Correction fields are locked, but it can still be removed from recall history.';
+    var removeButton = document.getElementById('memoryAtomDetailRemove');
+    if (removeButton) removeButton.disabled = deleted;
   }
 
   async function openAtom(atom) {
@@ -262,7 +267,7 @@
 
   async function deleteAtom() {
     var atom = state.detail && state.detail.atom;
-    if (!atom || recordValue(atom, 'Status') !== 'active') return;
+    if (!atom || recordValue(atom, 'Status') === 'deleted') return;
     var memoryId = recordValue(atom, 'MemoryId');
     var button = document.getElementById('memoryAtomDetailRemove');
     if (state.pendingDeleteId !== memoryId) {

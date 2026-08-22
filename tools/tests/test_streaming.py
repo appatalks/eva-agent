@@ -1167,6 +1167,7 @@ class StreamingContractTests(unittest.TestCase):
                     request = json.dumps({
                         "messages": [{"role": "user", "content": "Draft the ACP release plan"}],
                         "session_id": "acp-session",
+                        "turn_id": "turn-streaming-reflect",
                         "stream": stream_requested,
                     }).encode("utf-8")
                     handler.headers = {"Content-Length": str(len(request))}
@@ -1183,7 +1184,7 @@ class StreamingContractTests(unittest.TestCase):
                         handler._chat_completions()
 
                     reflect.assert_called_once_with(
-                        "Draft the ACP release plan", "ACP response", "copilot-acp", "acp-session"
+                        "Draft the ACP release plan", "ACP response", "copilot-acp", "acp-session", "turn-streaming-reflect"
                     )
                     if stream_requested:
                         events = [json.loads(line) for line in handler.wfile.getvalue().decode().splitlines()]

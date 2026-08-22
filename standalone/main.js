@@ -44,7 +44,7 @@ const BRIDGE_READY_TIMEOUT_MS = 60000;
 const LOCAL_VOICES_READY_TIMEOUT_MS = 10000;
 const BRIDGE_PORT_RETRY_LIMIT = 2;
 const ADDRESS_IN_USE_PATTERN = /Address already in use|EADDRINUSE/i;
-const AUTH_STORE_KEYS = ['OPENAI_API_KEY', 'GITHUB_PAT', 'GOOGLE_GL_KEY', 'GOOGLE_VISION_KEY'];
+const AUTH_STORE_KEYS = ['OPENAI_API_KEY', 'GITHUB_PAT', 'GOOGLE_GL_KEY'];
 
 function workspaceTerminalEnabled() {
   return process.env.EVA_WORKSPACE_TERMINAL_V1 === '1' || process.argv.includes('--eva-workspace-terminal-v1');

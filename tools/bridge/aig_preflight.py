@@ -8,7 +8,7 @@ _GREETING_RE = re.compile(
 _META_RE = re.compile(
     r"^(how are you|how do you feel|what is your name|who are you|what can you do|tell me about yourself)\b"
 )
-_BRIEFING_RE = re.compile(r"\b(?:morning|daily)\s+briefing\b")
+_BRIEFING_RE = re.compile(r"\b(?:morning|daily)\s+(?:briefing|report|update)\b")
 
 
 def plan_aig_preflight(
@@ -30,11 +30,16 @@ def plan_aig_preflight(
     words = message_stripped.split()
     skip_acp = False
     acp_route = "default"
+    briefing_request = bool(_BRIEFING_RE.search(message_lower))
+    tool_request = request_type in {
+        "news-search", "weather-search", "financial-data", "web-search",
+        "github-data", "kusto-query", "kusto-operator",
+    } and not briefing_request
 
     if fast_route:
         skip_acp = True
         acp_route = "fast/" + fast_route
-    elif internal and not force_retrieve:
+    elif internal and not force_retrieve and not tool_request:
         skip_acp = True
         acp_route = "internal-cognition"
     elif not acp_available and not local_mode:
@@ -47,7 +52,6 @@ def plan_aig_preflight(
         skip_acp = True
         acp_route = "meta-question"
 
-    briefing_request = bool(_BRIEFING_RE.search(message_lower))
     needs_tools = not briefing_request and not skip_acp and needs_preflight(message_lower, request_type)
     tool_profile = select_tool_profile(
         message, request_type, fast_route=fast_route, no_tools=no_tools

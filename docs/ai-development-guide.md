@@ -135,7 +135,7 @@ Documentation is part of the slice, not a follow-up. Use this mapping:
 | --- | --- |
 | A `core/js/` module is added, moved, split, or renamed | `docs/frontend-ownership.md` and the ownership map above |
 | A bridge module, Electron IPC channel, or `tools/skills/` ability is added | The ownership map above |
-| A selector value, sender route, or GitHub Models mapping changes | `docs/contracts/provider-routing.md` |
+| AIG selector, backend policy, or sender route changes | `docs/contracts/provider-routing.md` |
 | AIG normalization, preflight, or handler ownership changes | `docs/contracts/aig-request-lifecycle.md` |
 | A test is added to or removed from the CI job | `docs/testing-contracts.md` |
 | A compatibility path gains callers or a migration | `docs/deprecation-inventory.md` |

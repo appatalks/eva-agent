@@ -368,27 +368,26 @@ class SqliteMCPServer:
             msg_id = msg.get("id")
             params = msg.get("params", {})
 
-            if method == "initialize":
+            if method == "server/discover":
                 self._respond(msg_id, {
-                    "protocolVersion": "2024-11-05",
+                    "resultType": "complete",
+                    "supportedVersions": ["2026-07-28"],
                     "capabilities": {"tools": {}},
-                    "serverInfo": {
+                    "_meta": {"io.modelcontextprotocol/serverInfo": {
                         "name": "sqlite-mcp-server",
                         "version": "1.0.0",
-                    },
+                    }},
                 })
 
-            elif method == "notifications/initialized":
-                pass  # no response needed
-
             elif method == "tools/list":
-                self._respond(msg_id, {"tools": self.TOOLS})
+                self._respond(msg_id, {"resultType": "complete", "tools": self.TOOLS})
 
             elif method == "tools/call":
                 tool_name = params.get("name", "")
                 tool_args = params.get("arguments", {})
                 result_text = self.handle_tool(tool_name, tool_args)
                 self._respond(msg_id, {
+                    "resultType": "complete",
                     "content": [{"type": "text", "text": result_text}],
                 })
 

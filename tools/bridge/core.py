@@ -4526,7 +4526,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "acp_reasoning_effort": "",
             "lmstudio_base_url": data.get("lmstudio_base_url", ""),
             "lmstudio_model": data.get("lmstudio_model", ""),
-            "github_pat": data.get("github_pat", ""),
             "openai_api_key": data.get("openai_api_key", ""),
         })
 
@@ -4567,12 +4566,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
         no_tools = request["no_tools"]
         conversation_id = request["conversation_id"]
         requested_backend = request["requested_backend"]
+        _policy_mode = request["model_policy_mode"]
         responder_provider = request["responder_provider"]
         model_for_response = request["model_for_response"]
         max_completion_tokens = request["max_completion_tokens"]
         reasoning_effort = request["reasoning_effort"]
         acp_auto_approve = request["acp_auto_approve"]
         stream_requested = request["stream_requested"]
+        image_b64 = str(data.get("image_b64") or "")
+        image_mime = str(data.get("image_mime") or "image/jpeg").lower()
+        if image_b64 and (
+            len(image_b64) > 12 * 1024 * 1024
+            or not re.fullmatch(r"image/(?:jpeg|png|webp|gif)", image_mime)
+        ):
+            self._json_response(400, {"error": {"message": "Unsupported or oversized image attachment."}})
+            return
         _set_openai_key_from(data)  # cache key for semantic recall (incl. background threads)
         _mark_user_activity()
         _turn_t0 = time.perf_counter()
@@ -4596,12 +4604,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _prompt_fields = _prompt_budget_fields(data.get("prompt_budget"))
         stream_state = self._new_stream_state("aig", requested_backend) if stream_requested else None
 
+        selected_backend = requested_backend
+        _policy_decision = {}
+
         def _audit_turn_failed(provider, error_type, status_code=None):
             audit_event(
                 "turn.response", turn_id, "failed",
                 model=model_for_response,
                 provider=provider,
                 request_type=_request_type,
+            requested_backend=requested_backend,
+            selected_backend=selected_backend,
+            policy_mode=_policy_mode,
+            policy_reason=_policy_decision.get("reason", ""),
                 error_type=error_type,
                 status_code=status_code,
                 total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
@@ -4669,22 +4684,65 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _briefing_preparing = _briefing_state == "preparing"
         _briefing_unavailable = briefing_unavailable_sources(_briefing_status) if _briefing_request else []
         _briefing_context = briefing_prompt_context(allow_partial=_briefing_request) if _briefing_request else ""
-        _policy_mode = str(data.get("model_policy_mode") or "pinned").strip().lower()
-        if _policy_mode not in {"pinned", "auto-balanced", "auto-fast"}:
-            _policy_mode = "pinned"
-        _policy_evaluation_mode = _policy_mode if _policy_mode != "pinned" else "auto-balanced"
+        _tool_required_request = bool(
+            not _briefing_request
+            and not _fast_route
+            and not _passive_recall
+            and _request_type in {
+                "news-search", "weather-search", "financial-data", "web-search",
+                "github-data", "kusto-query", "kusto-operator",
+            }
+            and not (_request_type == "weather-search" and not _weather_location.get("location"))
+        )
+        _deep_reasoning_request = bool(re.search(
+            r"\b(?:analy[sz]e|architecture|security|audit|strategy|compare|comparison|evaluate|trade[- ]?offs?|"
+            r"reason about|design|consequential|complex)\b", _routing_message, re.IGNORECASE
+        ))
         _policy_candidates = {
             "acp_available": bool(_st.acp_client and _st.acp_client.alive),
-            "acp_model": _st.acp_client.model if _st.acp_client else "",
+            "acp_model": (_st.acp_client.model if _st.acp_client else "") or model_for_response,
             "openai_available": bool(openai_api_key),
-            "openai_model": "gpt-5.6-luna",
+            "openai_model": model_for_response if responder_provider == "openai" else "gpt-5.6-luna",
+            "openai_deep_model": "gpt-5.6-sol",
             "lmstudio_available": data.get("lmstudio_available") is True,
             "lmstudio_model": str(data.get("lmstudio_model") or "local")[:80],
         }
-        _policy_shadow = select_model_policy(
-            _policy_evaluation_mode, requested_backend, _request_type, needs_acp_tools, _policy_candidates,
+        _policy_decision = select_model_policy(
+            _policy_mode, requested_backend, _request_type,
+            needs_acp_tools or _tool_required_request, _policy_candidates,
             local_only=_st.local_mode,
+            deep_reasoning=_deep_reasoning_request,
         )
+        selected_backend = str(_policy_decision.get("backend") or requested_backend)
+        if _policy_mode != "pinned" and _policy_decision.get("provider") != "pinned":
+            responder_provider, model_for_response = _parse_aig_backend(selected_backend)
+        def _audit_policy_selection():
+            audit_event(
+                "turn.accepted", turn_id, "started",
+                request_type=_request_type,
+                requested_backend=requested_backend,
+                selected_backend=selected_backend,
+                policy_mode=_policy_mode,
+                user_chars=len(user_message),
+                internal=internal,
+            )
+            audit_event(
+                "model_policy.selected", turn_id, "selected",
+                policy_mode=_policy_mode,
+                provider=_policy_decision.get("provider"),
+                backend=_policy_decision.get("backend"),
+                reason=_policy_decision.get("reason"),
+                requires_tools=needs_acp_tools or _tool_required_request,
+            )
+        _audit_policy_selection()
+        if _policy_mode != "pinned" and _policy_decision.get("reason") == "tool-route-unavailable":
+            _audit_turn_failed("model-policy", "no-tool-capable-route", 503)
+            self._json_response(503, {"error": {"message": "This request needs live tools, but no tool-capable route is available."}})
+            return
+        if _policy_mode != "pinned" and _policy_decision.get("reason") == "no-auto-candidate":
+            _audit_turn_failed("model-policy", "no-available-responder", 503)
+            self._json_response(503, {"error": {"message": "Automatic model selection found no available responder."}})
+            return
         _verbose_debug_emit(
             "route",
             request_type=_request_type,
@@ -4702,22 +4760,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             selection_reason=_skill_decision.get("selection_reason", ""),
             selected_tool=_skill_decision.get("selected_tool", ""),
             fallback_reason=_skill_decision.get("fallback_reason", ""),
-        )
-        audit_event(
-            "turn.accepted", turn_id, "started",
-            request_type=_request_type,
-            requested_backend=requested_backend,
-            policy_mode=_policy_mode,
-            user_chars=len(user_message),
-            internal=internal,
-        )
-        audit_event(
-            "model_policy.shadow", turn_id, "recommended",
-            policy_mode=_policy_evaluation_mode,
-            provider=_policy_shadow.get("provider"),
-            backend=_policy_shadow.get("backend"),
-            reason=_policy_shadow.get("reason"),
-            requires_tools=needs_acp_tools,
         )
         if _briefing_request:
             audit_event("briefing.cache", turn_id, "used", prepared_chars=len(_briefing_context))
@@ -4752,11 +4794,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 _weather_location.get("location", ""),
                 _skill_decision.get("selected_tool", ""),
             )
-        if needs_acp_tools:
+        if needs_acp_tools or (_st.local_mode and _tool_required_request):
             _preflight_t0 = time.perf_counter()
             print(f"[AIG] Step 2: Using {'local MCP' if _st.local_mode else 'ACP'} ({_request_type})...")
             if _st.local_mode:
                 acp_data, acp_model_used = self._retrieve_local_data(_retrieval_message)
+                if _tool_required_request and not acp_data:
+                    _audit_turn_failed("local-mcp", "no-tool-result", 503)
+                    self._json_response(503, {"error": {"message": "This request needs live local tools, but LocalMCP returned no result."}})
+                    return
                 _preflight_succeeded = bool(acp_data)
                 needs_acp_tools = False
             # Ensure ACP is alive before attempting tool calls.
@@ -4829,7 +4875,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if _preflight_attempted:
             _preflight_ms = round((time.perf_counter() - _preflight_t0) * 1000.0, 1)
 
-        # Step 3: Build the final prompt for Eva's persona model (PAT)
+        if _tool_required_request and not acp_data:
+            _audit_turn_failed("local-mcp" if _st.local_mode else "acp", "no-tool-result", 503)
+            message = "This request needs live tools, but no tool result was returned."
+            if stream_state and stream_state["started"]:
+                self._stream_error(stream_state, message, 503)
+            else:
+                self._json_response(503, {"error": {"message": message}})
+            return
+
+        # Step 3: Build the final prompt for Eva's responder model
         eva_system = (
             "You are Eva, a personal AI assistant with persistent memory.\n\n"
             "IDENTITY:\n"
@@ -5128,7 +5183,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
             if response_text and _st.cognition_enabled and not internal:
                 threading.Thread(target=_post_response_reflection,
-                                 args=(user_message, response_text, model_used, conversation_id),
+                                 args=(user_message, response_text, model_used, conversation_id, turn_id),
                                  daemon=True).start()
 
             response = {
@@ -5179,60 +5234,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             )
             return
 
-        # Step 4: Pick the best responder. Non-explicit OpenAI selections use
-        # Copilot ACP directly. GitHub Models is intentionally not a responder.
-        github_pat = ""
-
-        # Fallback: read Copilot CLI's OAuth token (works with GitHub Models API — OpenAI models only)
-        _using_oauth_token = False
-        if responder_provider == "auto" and not github_pat:
-            try:
-                oauth_path = os.path.expanduser("~/.config/github-copilot/oauth.json")
-                if os.path.isfile(oauth_path):
-                    with open(oauth_path) as _f:
-                        _oauth = json.load(_f)
-                    entries = _oauth.get("https://github.com/login/oauth", [])
-                    if entries and isinstance(entries, list) and entries[0].get("accessToken"):
-                        github_pat = entries[0]["accessToken"]
-                        _using_oauth_token = True
-                        print("[AIG] Using Copilot CLI OAuth token for GitHub Models API")
-            except Exception as _e:
-                print(f"[AIG] Could not read Copilot OAuth: {_e}")
-
-        # Models available on GitHub Models API (PAT).
-        # Models absent from this map must route through ACP.
-        # See: https://github.com/marketplace/models/catalog
-        # Retained legacy model aliases are routed through ACP, not a direct provider endpoint.
-        # Model names use publisher/model format.
-        _github_model_map = {
-            "gpt-4.1": "openai/gpt-4.1",
-            "gpt-4o": "openai/gpt-4o",
-            "gpt-4o-mini": "openai/gpt-4o-mini",
-            "gpt-5.6-sol": "openai/gpt-5.6-sol",
-            "gpt-5.6-terra": "openai/gpt-5.6-terra",
-            "gpt-5.6-luna": "openai/gpt-5.6-luna",
-            "gpt-5": "openai/gpt-5",
-            "gpt-5-mini": "openai/gpt-5-mini",
-            "gpt-5-nano": "openai/gpt-5-nano",
-            "gpt-5-chat": "openai/gpt-5-chat",
-            "o3-mini": "openai/o3-mini",
-            "o3": "openai/o3",
-            "o4-mini": "openai/o4-mini",
-            "deepseek-r1": "deepseek/DeepSeek-R1",
-            "llama-4-maverick": "meta/llama-4-maverick-17b-128e-instruct-fp8",
-        }
-        # Any selector model not listed in _github_model_map routes
-        # through ACP. This covers Claude, Gemini, and unmapped GPT
-        # variants (e.g. gpt-5.5, gpt-5.3-codex) that Copilot CLI serves.
-
-        api_model = _github_model_map.get(model_for_response, model_for_response)
         acp_response_model = model_for_response if responder_provider == "acp" else ""
         if model_for_response == "acp":
             acp_response_model = ""
-        elif responder_provider != "acp" and model_for_response not in _github_model_map:
-            acp_response_model = model_for_response
-
-        print(f"[AIG] Model requested: {model_for_response}, API model: {api_model}, PAT present: {bool(github_pat)} ({len(github_pat)} chars)")
+        print(f"[AIG] Selected responder: {model_for_response} ({responder_provider})")
         response_text = ""
         model_used = "aig"
         response_finish_reason = "stop"
@@ -5243,23 +5248,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
             active_raw_model = acp_model_used or (_st.acp_client.model if _st.acp_client else "copilot-acp")
             response_text = acp_data
             model_used = f"aig:{active_raw_model}+raw-acp"
-            github_pat = ""
             print("[AIG] Raw-output mode: returning ACP tool output directly")
         elif row_recall_requested and acp_data:
             active_data_model = acp_model_used or (_st.acp_client.model if _st.acp_client else "copilot-acp")
             response_text = acp_data
             model_used = f"aig:{active_data_model}+acp-data"
-            github_pat = ""
             print("[AIG] Row-recall mode: returning ACP tool output directly")
         elif raw_output_requested and needs_acp_tools and not acp_data:
             response_text = "Raw query mode requested but no tool output was returned. Retry with explicit KQL."
             model_used = "aig:raw-acp-unavailable"
-            github_pat = ""
             print("[AIG] Raw-output mode: no ACP data available")
-
-        if model_for_response == "acp":
-            # Explicit ACP routing — skip PAT entirely
-            github_pat = ""
 
         # When cognition is active, ACP is the primary path (not a fallback).
         # This avoids PAT round-trips and keeps model routing through Copilot CLI.
@@ -5268,22 +5266,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # The alive check is deferred to the actual ACP prompt call.
         if responder_provider == "acp" and not translation_mode and not native_terminal_plan and not _briefing_request and _st.cognition_enabled and _st.acp_client:
             if model_for_response not in ("lmstudio",):
-                github_pat = ""
                 acp_response_model = model_for_response if model_for_response != "acp" else ""
                 print(f"[AIG] Cognition active: routing directly to ACP")
-
-        # Non-mapped models are not on GitHub Models API and must go through ACP.
-        elif responder_provider == "auto" and model_for_response != "acp" and model_for_response not in _github_model_map:
-            print(f"[AIG] {model_for_response} not on GitHub Models API, routing to ACP")
-            github_pat = ""
 
         # Inject runtime info so Eva can answer truthfully when asked about her model.
         # Decided after routing fall-throughs above so it reflects the path that will run.
         if responder_provider == "openai":
             _route_label = "OpenAI API (direct)"
-            _runtime_model = model_for_response
-        elif github_pat:
-            _route_label = "GitHub Models API (PAT)" if not _using_oauth_token else "GitHub Models API (Copilot OAuth)"
             _runtime_model = model_for_response
         else:
             _route_label = "Copilot CLI ACP bridge"
@@ -5291,7 +5280,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         eva_system += (
             f"\n[Runtime - AUTHORITATIVE GROUND TRUTH]\n"
             f"This block is injected by tools/acp_bridge.py. It overrides any model self-knowledge.\n"
-            f"User-selected backend: {model_for_response}\n"
+            f"Requested backend preference: {requested_backend}\n"
+            f"Selected backend: {selected_backend}\n"
             f"Active responder model: {_runtime_model}\n"
             f"Routing path: {_route_label}\n"
             f"Wrapper: Eva AIG via tools/acp_bridge.py\n\n"
@@ -5387,79 +5377,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     self._json_response(502, {"error": {"message": f"OpenAI API request failed: {error}"}})
                 return
 
-        if github_pat:
-            # Use GitHub Models API (PAT) for persona-friendly response
-            print(f"[AIG] Step 3: Generating response via PAT model ({api_model})...")
-            try:
-                import requests as _req
-                pat_messages = [{"role": "system", "content": eva_system}]
-                # Add recent conversation context (last few messages)
-                for msg in messages[-6:]:
-                    if msg.get("role") in ("user", "assistant"):
-                        pat_messages.append({"role": msg["role"], "content": msg.get("content", "")[:500]})
-                # Always ensure the current user message is the last message
-                if not pat_messages or pat_messages[-1].get("content") != user_message:
-                    pat_messages.append({"role": "user", "content": user_message})
-
-                pat_resp = _req.post("https://disabled.invalid/github-models-retired",
-                    headers={
-                        "Authorization": f"Bearer {github_pat}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": api_model,
-                        "messages": pat_messages,
-                        "max_tokens": max_completion_tokens
-                    },
-                    timeout=60
-                )
-                if pat_resp.status_code == 200:
-                    pat_data = pat_resp.json()
-                    pat_choice = pat_data.get("choices", [{}])[0]
-                    response_text = pat_choice.get("message", {}).get("content", "")
-                    response_finish_reason = pat_choice.get("finish_reason") or "stop"
-                    model_used = f"aig:{model_for_response}"
-                    if acp_model_used:
-                        model_used += f"+{acp_model_used}"
-
-                    # If PAT produces a planning/deferral narrative despite ACP data,
-                    # prefer the already-retrieved tool output to avoid hallucinated recall text.
-                    if acp_data and needs_acp_tools:
-                        pat_lower = (response_text or "").lower()
-                        deferral_markers = [
-                            "if you'd like",
-                            "i can run this query",
-                            "i can run the query",
-                            "once results are available",
-                            "i will execute",
-                            "please confirm",
-                            "preloaded data",
-                            "no explicit",
-                        ]
-                        if any(m in pat_lower for m in deferral_markers):
-                            active_data_model = acp_model_used or (_st.acp_client.model if _st.acp_client else "copilot-acp")
-                            response_text = acp_data
-                            model_used = f"aig:{active_data_model}+acp-data"
-                            print("[AIG] PAT response deferred despite ACP data; returning ACP data directly")
-
-                    print(f"[AIG] PAT response: {len(response_text)} chars")
-                else:
-                    err_body = pat_resp.text[:500] if pat_resp.text else "(empty)"
-                    print(f"[AIG] PAT model failed ({pat_resp.status_code}): {err_body}")
-                    if native_terminal_plan:
-                        _audit_turn_failed("github-models", "http", pat_resp.status_code)
-                        self._json_response(502, {"error": {"message": "Terminal planner model request failed."}})
-                        return
-                    print(f"[AIG] Falling back to ACP")
-                    github_pat = ""  # trigger ACP fallback
-            except Exception as e:
-                if native_terminal_plan:
-                    _audit_turn_failed("github-models", type(e).__name__, 502)
-                    self._json_response(502, {"error": {"message": "Terminal planner model request failed."}})
-                    return
-                print(f"[AIG] PAT error: {e}, falling back to ACP")
-                github_pat = ""
-
         if not response_text and responder_provider != "openai":
             if native_terminal_plan:
                 _audit_turn_failed("terminal-planner", "direct-provider-unavailable", 503)
@@ -5473,8 +5390,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 history_lines = []
                 for msg in messages[-6:]:
                     if msg.get("role") in ("user", "assistant"):
+                        content = msg.get("content", "")
+                        if isinstance(content, list):
+                            content = "\n".join(
+                                str(part.get("text", "")) for part in content
+                                if isinstance(part, dict) and part.get("type") == "text"
+                            )
                         role_label = "User" if msg["role"] == "user" else "Eva"
-                        history_lines.append(f"{role_label}: {msg.get('content', '')[:500]}")
+                        history_lines.append(f"{role_label}: {str(content)[:500]}")
                 if history_lines:
                     full_prompt = eva_system + "\n\n[Conversation]\n" + "\n\n".join(history_lines)
                     # Append current message if not already the last in history
@@ -5495,13 +5418,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         return
                     else:
                         on_chunk = (lambda chunk: self._stream_chunk(stream_state, chunk)) if stream_state else None
-                        acp_result = response_client.prompt(
-                            full_prompt, timeout=120,
-                            conversation_id=_passive_recall_session_key(conversation_id)
-                            if _passive_recall else conversation_id,
-                            on_chunk=on_chunk,
-                            permission_mode=_acp_permission_mode,
-                        )
+                        if image_b64 and hasattr(response_client, "prompt_with_image"):
+                            acp_result = response_client.prompt_with_image(
+                                full_prompt, image_b64, mime=image_mime, timeout=120,
+                                conversation_id=_passive_recall_session_key(conversation_id)
+                                if _passive_recall else conversation_id,
+                                on_chunk=on_chunk,
+                                permission_mode=_acp_permission_mode,
+                            )
+                        else:
+                            acp_result = response_client.prompt(
+                                full_prompt, timeout=120,
+                                conversation_id=_passive_recall_session_key(conversation_id)
+                                if _passive_recall else conversation_id,
+                                on_chunk=on_chunk,
+                                permission_mode=_acp_permission_mode,
+                            )
                         if acp_result.get("error"):
                             _audit_turn_failed("acp", "prompt", 502)
                             message = "ACP response failed: " + str(acp_result.get("error"))[:300]
@@ -5529,7 +5461,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             model_used += f"+{acp_model_used}"
             else:
                 _audit_turn_failed("acp", "unavailable", 503)
-                message = "The AIG system needs either a GitHub PAT or a running ACP bridge to generate responses."
+                message = "The AIG system needs a running ACP bridge or an available OpenAI API key to generate responses."
                 if stream_state and stream_state["started"]:
                     self._stream_error(stream_state, message, 503)
                 else:
@@ -5539,7 +5471,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Step 5: Post-response reflection (background)
         if response_text and _st.cognition_enabled and not internal:
             threading.Thread(target=_post_response_reflection,
-                           args=(user_message, response_text, model_used, conversation_id),
+                           args=(user_message, response_text, model_used, conversation_id, turn_id),
                            daemon=True).start()
 
         # Return OpenAI-compatible response
@@ -6250,6 +6182,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _set_openai_key_from(data)  # cache key for semantic recall
         requested_model = data.get("acp_model", "") or ""
         conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
+        turn_id = str(data.get("turn_id") or uuid.uuid4())[:120]
         raw_reasoning_effort = data.get("acp_reasoning_effort", "")
         if not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort not in ACP_REASONING_EFFORTS | {""}:
             self._json_response(400, {"error": {"message": "Unsupported acp_reasoning_effort"}})
@@ -6303,6 +6236,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if memory_context:
             prompt_text = memory_context + prompt_text
             print(f"[Cognition] Injected {len(memory_context)} chars of memory context")
+        if re.search(r"\b(?:morning|daily)\s+(?:briefing|report|update)\b", last_user_msg, re.IGNORECASE):
+            briefing_state = briefing_status()
+            briefing_context = briefing_prompt_context(allow_partial=True)
+            prompt_text += (
+                "\n\n[Morning Briefing Request - AUTHORITATIVE]\n"
+                "Answer the user's request now from the prepared entries below. Do not promise to prepare a later response.\n"
+                + ("[Prepared Entries]\n" + briefing_context + "\n" if briefing_context else "")
+                + ("Preparation is still running; clearly label any missing live sections and answer from available entries.\n"
+                   if briefing_state.get("status") == "preparing" else "")
+                + ("Preparation did not complete; state which live sections are unavailable and do not call this complete.\n"
+                   if briefing_state.get("status") in {"partial", "failed"} else "")
+            )
         if direct_passive_recall:
             prompt_text = (
                 "[Passive Memory Recall - AUTHORITATIVE]\n"
@@ -6385,7 +6330,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         model_label = f"copilot-acp:{requested_model}" if requested_model else "copilot-acp"
         if last_user_msg and response_text:
             threading.Thread(target=_post_response_reflection,
-                           args=(last_user_msg, response_text, model_label, conversation_id),
+                           args=(last_user_msg, response_text, model_label, conversation_id, turn_id),
                            daemon=True).start()
 
     # ------------------------------------------------------------------
