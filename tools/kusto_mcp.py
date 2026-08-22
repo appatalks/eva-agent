@@ -739,32 +739,26 @@ class KustoMCPServer:
         rid = msg.get("id")
         params = msg.get("params", {})
 
-        # Initialize
-        if method == "initialize":
+        if method == "server/discover":
             return {
                 "jsonrpc": "2.0",
                 "id": rid,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "resultType": "complete",
+                    "supportedVersions": ["2026-07-28"],
                     "capabilities": {"tools": {}},
-                    "serverInfo": {
-                        "name": "kusto-mcp-server",
-                        "version": "1.0.0"
-                    }
+                    "_meta": {"io.modelcontextprotocol/serverInfo": {
+                        "name": "kusto-mcp-server", "version": "1.0.0"
+                    }},
                 }
             }
-
-        # Initialized notification (no response needed)
-        if method == "notifications/initialized":
-            self._log("MCP initialized")
-            return None
 
         # List tools
         if method == "tools/list":
             return {
                 "jsonrpc": "2.0",
                 "id": rid,
-                "result": {"tools": self.TOOLS}
+                "result": {"resultType": "complete", "tools": self.TOOLS}
             }
 
         # Call tool
@@ -779,6 +773,7 @@ class KustoMCPServer:
                 "jsonrpc": "2.0",
                 "id": rid,
                 "result": {
+                    "resultType": "complete",
                     "content": [{"type": "text", "text": result_text}]
                 }
             }

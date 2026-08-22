@@ -46,6 +46,12 @@ assert.doesNotMatch(camera, /models\.github\.ai|GitHub Models API|_describeViaGi
   'camera provider must not contain the deprecated model API');
 assert.doesNotMatch(bridge, /models\.github\.ai|_github_model_map|github-models/,
   'bridge must not contain the deprecated model responder');
+assert.match(aig, /var storedMessages = newMessages\.map/, 'attachments must be reduced before persistent history storage');
+assert.ok(aig.indexOf("if (!sQuestion.trim())") < aig.indexOf("window._evaPendingImageData = '';"),
+  'an empty send must preserve the pending attachment');
+assert.match(bridge, /part\.get\("type"\) == "text"/, 'ACP history must include only text content blocks');
+assert.match(camera, /if \(\/\^\(\?:openai:\|lmstudio\$\|acp\$\)\//,
+  'non-ACP AIG backends must use the ACP vision default');
 assert.match(aig, /var storedMessages = newMessages\.map/,
   'image attachments must be kept out of persistent AIG history');
 assert.match(aig, /image_b64: imageB64/,

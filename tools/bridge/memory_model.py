@@ -601,7 +601,9 @@ class KustoMemoryModel:
 
     def migrate_legacy_knowledge(self):
         marker = self._latest("MemoryMigrations", "MigrationId", "legacy-knowledge-atoms-v1", "AppliedAt")
-        knowledge_query = "Knowledge | " + ("where Entity =~ 'User' | " if marker else "") + "project Timestamp, Entity, Relation, Value, Confidence, Source"
+        if marker:
+            return 0
+        knowledge_query = "Knowledge | project Timestamp, Entity, Relation, Value, Confidence, Source"
         rows = self._read(knowledge_query)
         inserted = 0
         for row in rows:
@@ -616,14 +618,6 @@ class KustoMemoryModel:
             existing = self._read("MemoryAtoms | where SourceRef == " + self._quote(source_ref) + " | take 1")
             if existing:
                 continue
-            if marker:
-                same_value = self._read(
-                    "MemoryAtoms | where Entity =~ " + self._quote(entity)
-                    + " and Relation =~ " + self._quote(relation)
-                    + " and Value == " + self._quote(_clip(row.get("Value"), 4000)) + " | take 1"
-                )
-                if same_value:
-                    continue
             self.add_atom({
                 "entity": entity, "relation": relation, "value": row.get("Value", ""), "kind": kind,
                 "trust": "unconfirmed", "scope": "user" if entity.lower() == "user" else "global",

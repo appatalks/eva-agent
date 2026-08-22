@@ -431,6 +431,7 @@
         'in the first person, as if you are seeing it now. Do not mention pixels, images, or that ' +
         'you were given a photo. ';
       var model = ((document.getElementById('selAIGBackend') || {}).value || '').trim();
+      if (/^(?:openai:|lmstudio$|acp$)/.test(model)) model = '';
       var resp = await fetch(bridgeBase() + '/v1/vision/look', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

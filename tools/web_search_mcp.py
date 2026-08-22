@@ -311,7 +311,7 @@ def _respond_error(rid, code, message):
 
 
 def _tool_result(text):
-    return {"content": [{"type": "text", "text": text}]}
+    return {"resultType": "complete", "content": [{"type": "text", "text": text}]}
 
 
 def handle_request(msg):
@@ -319,19 +319,17 @@ def handle_request(msg):
     method = msg.get("method", "")
     params = msg.get("params", {})
 
-    if method == "initialize":
+    if method == "server/discover":
         _respond(rid, {
-            "protocolVersion": "2024-11-05",
+            "resultType": "complete",
+            "supportedVersions": ["2026-07-28"],
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "eva-web-search", "version": "1.0.0"},
+            "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "eva-web-search", "version": "1.0.0"}},
         })
         return
 
-    if method == "notifications/initialized":
-        return  # no response needed for notifications
-
     if method == "tools/list":
-        _respond(rid, {"tools": TOOLS})
+        _respond(rid, {"resultType": "complete", "tools": TOOLS})
         return
 
     if method == "tools/call":

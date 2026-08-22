@@ -150,6 +150,20 @@ class MemoryRecallTests(unittest.TestCase):
         )
         self.assertEqual(atoms, [{"Relation": "user_location", "Value": "Austin", "Trust": "unconfirmed"}])
 
+    def test_kusto_legacy_migration_stops_after_marker(self):
+        from bridge.memory_model import KustoMemoryModel
+
+        queries = []
+
+        def query(_cluster, _database, statement):
+            queries.append(statement)
+            return [{"MigrationId": "legacy-knowledge-atoms-v1"}]
+
+        model = KustoMemoryModel("https://example.com", "Eva", query, lambda *_args: True)
+        self.assertEqual(model.migrate_legacy_knowledge(), 0)
+        self.assertEqual(len(queries), 1)
+        self.assertNotIn("Knowledge", queries[0])
+
     def test_original_inspiration_live_wording_is_not_automatic_identity(self):
         facts = _extract_explicit_user_facts(
             "If you'd like to preserve the original inspiration, it's based off "

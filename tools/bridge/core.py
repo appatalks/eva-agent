@@ -4604,12 +4604,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _prompt_fields = _prompt_budget_fields(data.get("prompt_budget"))
         stream_state = self._new_stream_state("aig", requested_backend) if stream_requested else None
 
+        selected_backend = requested_backend
+        _policy_decision = {}
+
         def _audit_turn_failed(provider, error_type, status_code=None):
             audit_event(
                 "turn.response", turn_id, "failed",
                 model=model_for_response,
                 provider=provider,
                 request_type=_request_type,
+            requested_backend=requested_backend,
+            selected_backend=selected_backend,
+            policy_mode=_policy_mode,
+            policy_reason=_policy_decision.get("reason", ""),
                 error_type=error_type,
                 status_code=status_code,
                 total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
@@ -4707,12 +4714,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
             deep_reasoning=_deep_reasoning_request,
         )
         selected_backend = str(_policy_decision.get("backend") or requested_backend)
+        if _policy_mode != "pinned" and _policy_decision.get("provider") != "pinned":
+            responder_provider, model_for_response = _parse_aig_backend(selected_backend)
+        def _audit_policy_selection():
+            audit_event(
+                "turn.accepted", turn_id, "started",
+                request_type=_request_type,
+                requested_backend=requested_backend,
+                selected_backend=selected_backend,
+                policy_mode=_policy_mode,
+                user_chars=len(user_message),
+                internal=internal,
+            )
+            audit_event(
+                "model_policy.selected", turn_id, "selected",
+                policy_mode=_policy_mode,
+                provider=_policy_decision.get("provider"),
+                backend=_policy_decision.get("backend"),
+                reason=_policy_decision.get("reason"),
+                requires_tools=needs_acp_tools or _tool_required_request,
+            )
+        _audit_policy_selection()
         if _policy_mode != "pinned" and _policy_decision.get("reason") == "tool-route-unavailable":
             _audit_turn_failed("model-policy", "no-tool-capable-route", 503)
             self._json_response(503, {"error": {"message": "This request needs live tools, but no tool-capable route is available."}})
             return
-        if _policy_mode != "pinned" and _policy_decision.get("provider") != "pinned":
-            responder_provider, model_for_response = _parse_aig_backend(selected_backend)
         if _policy_mode != "pinned" and _policy_decision.get("reason") == "no-auto-candidate":
             _audit_turn_failed("model-policy", "no-available-responder", 503)
             self._json_response(503, {"error": {"message": "Automatic model selection found no available responder."}})
@@ -4734,23 +4760,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             selection_reason=_skill_decision.get("selection_reason", ""),
             selected_tool=_skill_decision.get("selected_tool", ""),
             fallback_reason=_skill_decision.get("fallback_reason", ""),
-        )
-        audit_event(
-            "turn.accepted", turn_id, "started",
-            request_type=_request_type,
-            requested_backend=requested_backend,
-            selected_backend=selected_backend,
-            policy_mode=_policy_mode,
-            user_chars=len(user_message),
-            internal=internal,
-        )
-        audit_event(
-            "model_policy.selected", turn_id, "selected",
-            policy_mode=_policy_mode,
-            provider=_policy_decision.get("provider"),
-            backend=_policy_decision.get("backend"),
-            reason=_policy_decision.get("reason"),
-            requires_tools=needs_acp_tools or _tool_required_request,
         )
         if _briefing_request:
             audit_event("briefing.cache", turn_id, "used", prepared_chars=len(_briefing_context))
@@ -5381,8 +5390,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 history_lines = []
                 for msg in messages[-6:]:
                     if msg.get("role") in ("user", "assistant"):
+                        content = msg.get("content", "")
+                        if isinstance(content, list):
+                            content = "\n".join(
+                                str(part.get("text", "")) for part in content
+                                if isinstance(part, dict) and part.get("type") == "text"
+                            )
                         role_label = "User" if msg["role"] == "user" else "Eva"
-                        history_lines.append(f"{role_label}: {msg.get('content', '')[:500]}")
+                        history_lines.append(f"{role_label}: {str(content)[:500]}")
                 if history_lines:
                     full_prompt = eva_system + "\n\n[Conversation]\n" + "\n\n".join(history_lines)
                     # Append current message if not already the last in history

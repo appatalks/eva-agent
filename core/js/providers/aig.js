@@ -43,7 +43,6 @@ async function aigSend() {
   var txtMsg = document.getElementById('txtMsg');
   var txtOutput = document.getElementById('txtOutput');
   var pendingImageData = window._evaPendingImageData || '';
-  window._evaPendingImageData = '';
   var imageMatch = pendingImageData.match(/^data:(image\/(?:jpeg|png|webp|gif));base64,/);
   var imageB64 = imageMatch ? pendingImageData.slice(imageMatch[0].length) : '';
   var imageMime = imageMatch ? imageMatch[1] : 'image/jpeg';
@@ -58,6 +57,7 @@ async function aigSend() {
     txtMsg.focus();
     return;
   }
+  window._evaPendingImageData = '';
   var signalContext = (typeof captureSignalDeliveryContext === 'function')
     ? captureSignalDeliveryContext(sQuestion)
     : null;
