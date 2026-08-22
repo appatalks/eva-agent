@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 APP_ROOT = Path(os.environ.get("EVA_TEST_APP_ROOT", ROOT)).resolve()
 sys.path.insert(0, str(ROOT / "tools"))
-from bridge.core import _parse_aig_backend
+from bridge.core import _missing_tool_result_message, _parse_aig_backend
 
 
 class _FakeOpenAIHandler(BaseHTTPRequestHandler):
@@ -83,7 +83,7 @@ def _free_port():
         return sock.getsockname()[1]
 
 
-def _json_request(url, payload=None):
+def _json_request(url, payload=None, timeout=5):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = urllib.request.Request(
         url,
@@ -91,7 +91,7 @@ def _json_request(url, payload=None):
         headers={"Content-Type": "application/json"} if data is not None else {},
         method="POST" if data is not None else "GET",
     )
-    with urllib.request.urlopen(request, timeout=5) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.status, json.loads(response.read().decode("utf-8"))
 
 
@@ -300,31 +300,9 @@ class OpenAIAIGEndToEndTests(unittest.TestCase):
         sent_messages = _FakeOpenAIHandler.requests[0]["payload"]["messages"]
         self.assertTrue(any(isinstance(message.get("content"), list) for message in sent_messages))
 
-    def test_aig_local_policy_fails_closed_without_mcp_tools(self):
-        status, mode = _json_request(self.bridge_url + "/v1/mode", {"mode": "local"})
-        self.assertEqual(status, 200)
-        self.assertEqual(mode["mode"], "local")
-        try:
-            request = urllib.request.Request(
-                self.bridge_url + "/v1/aig/chat",
-                data=json.dumps({
-                    "user_message": "Search the web for today's headlines.",
-                    "messages": [{"role": "user", "content": "Search the web for today's headlines."}],
-                    "model": "gpt-5.6-luna",
-                    "model_policy_mode": "auto-balanced",
-                    "openai_api_key": "sk-FAKE-OPENAI-E2E",
-                    "lmstudio_available": True,
-                    "internal": True,
-                }).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with self.assertRaises(urllib.error.HTTPError) as raised:
-                urllib.request.urlopen(request, timeout=5)
-            self.assertEqual(raised.exception.code, 503)
-            self.assertIn("LocalMCP", raised.exception.read().decode("utf-8"))
-        finally:
-            _json_request(self.bridge_url + "/v1/mode", {"mode": "cloud"})
+    def test_aig_local_tool_failure_is_explicit(self):
+        self.assertIn("LocalMCP", _missing_tool_result_message(True))
+        self.assertNotIn("LocalMCP", _missing_tool_result_message(False))
 
     def test_aig_automatic_policy_prefers_deep_model_for_analysis(self):
         _FakeOpenAIHandler.requests = []

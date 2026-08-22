@@ -106,6 +106,47 @@ def _completion_token_limit(value, default=16384):
     return parsed
 
 
+def _lmstudio_message_text(content):
+    """Return text-only content for strict local chat templates."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(part.get("text", "")) for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return str(content or "")
+
+
+def _lmstudio_chat_messages(system_prompt, history, user_message, system_additions=None):
+    """Build Qwen-compatible messages with exactly one leading system turn."""
+    system_parts = [str(system_prompt or "")]
+    turns = []
+    for message in history or []:
+        role = str(message.get("role") or "").lower()
+        content = _lmstudio_message_text(message.get("content", "")).strip()
+        if not content:
+            continue
+        if role in {"system", "developer"}:
+            system_parts.append(content)
+        elif role in {"user", "assistant"}:
+            turns.append({"role": role, "content": content})
+    for addition in system_additions or []:
+        text = str(addition or "").strip()
+        if text:
+            system_parts.append(text)
+    if not turns or turns[-1]["role"] != "user" or turns[-1]["content"] != str(user_message or ""):
+        turns.append({"role": "user", "content": str(user_message or "")})
+    return [{"role": "system", "content": "\n\n".join(system_parts)}] + turns
+
+
+def _missing_tool_result_message(local_mode):
+    return (
+        "This request needs live local tools, but LocalMCP returned no result."
+        if local_mode else "This request needs live tools, but no tool result was returned."
+    )
+
+
 def _openai_chat_payload(model, messages, reasoning_effort="", max_completion_tokens=16384):
     payload = {
         "model": model,
@@ -4801,7 +4842,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 acp_data, acp_model_used = self._retrieve_local_data(_retrieval_message)
                 if _tool_required_request and not acp_data:
                     _audit_turn_failed("local-mcp", "no-tool-result", 503)
-                    self._json_response(503, {"error": {"message": "This request needs live local tools, but LocalMCP returned no result."}})
+                    self._json_response(503, {"error": {"message": _missing_tool_result_message(True)}})
                     return
                 _preflight_succeeded = bool(acp_data)
                 needs_acp_tools = False
@@ -4877,7 +4918,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         if _tool_required_request and not acp_data:
             _audit_turn_failed("local-mcp" if _st.local_mode else "acp", "no-tool-result", 503)
-            message = "This request needs live tools, but no tool result was returned."
+            message = _missing_tool_result_message(_st.local_mode)
             if stream_state and stream_state["started"]:
                 self._stream_error(stream_state, message, 503)
             else:
@@ -5083,12 +5124,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._json_response(502, {"error": {"message": model_error}})
                 return
 
-            eva_system_full = eva_system
-
-            lms_messages = [{"role": "system", "content": eva_system_full}]
-            for msg in messages[-6:]:
-                if msg.get("role") and msg.get("content"):
-                    lms_messages.append({"role": msg["role"], "content": msg["content"]})
+            lms_system_additions = []
             # Inject a short capability reminder close to the user message so
             # local models (which struggle with long system prompts) still know
             # about the camera.  This is ephemeral and not persisted.
@@ -5096,14 +5132,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             _is_signal_request = bool(os.environ.get("EVA_BRIDGE_TOKEN")) and _is_affirmative_signal_request(user_message)
             # Skip camera reminder when the user is asking for a Signal message
             if not translation_mode and any(kw in user_message.lower() for kw in _camera_keywords) and not _is_signal_request:
-                lms_messages.append({"role": "system", "content": (
+                lms_system_additions.append(
                     "REMINDER: You have webcam access. To look through the camera, "
                     "emit [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]. "
                     "Do NOT say you cannot see or access the camera."
-                )})
+                )
             # Signal messaging reminder for local models
             if _is_signal_request and not translation_mode:
-                lms_messages.append({"role": "system", "content": (
+                lms_system_additions.append(
                     "CRITICAL INSTRUCTION: You have Signal messaging capability. "
                     "When the user asks you to send a message, text, or notification, "
                     "respond ONLY with the marker. Example:\n"
@@ -5112,8 +5148,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "Do not claim the message was sent; the application reports the real result.\n\n"
                     "Do NOT say you cannot send messages. Do NOT explain limitations. "
                     "Do NOT offer alternatives. Just emit the marker."
-                )})
-            lms_messages.append({"role": "user", "content": user_message})
+                )
+            lms_messages = _lmstudio_chat_messages(
+                eva_system, messages[-6:], user_message, lms_system_additions
+            )
 
             try:
                 import requests as _req

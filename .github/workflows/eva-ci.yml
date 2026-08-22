@@ -233,6 +233,7 @@ jobs:
           python3 tools/tests/test_mcp_official_python.py
           EVA_OFFICIAL_MCP_TYPESCRIPT_ROOT=/tmp/eva-mcp-typescript-v2 python3 tools/tests/test_mcp_official_typescript.py
           python3 tools/tests/test_openai_aig.py
+          python3 tools/tests/test_lmstudio_message_order.py
           python3 tools/tests/test_pr_diff_secret_scan.py
           python3 tools/tests/test_audit_log.py
           python3 tools/tests/test_acp_sessions.py
