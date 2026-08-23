@@ -69,19 +69,25 @@ class MemoryRecallTests(unittest.TestCase):
             "I live in Austin, please remember that.", "I'm based in London and save that to memory.",
             "My location is Seattle; store it.", "Please save my location as San Antonio.",
             "Set my current location to Denver in memory.",
+            "Im in San Antionio, Tx, please save that to your durable memory.",
         ):
             locations = [fact for fact in _extract_explicit_user_facts(message) if fact["Relation"] == "user_location"]
             self.assertEqual(len(locations), 1, message)
             self.assertNotRegex(locations[0]["Value"], r"\b(?:remember|save|store|note)\b")
 
+    def test_location_parser_rejects_repeated_separator_input(self):
+        facts = _extract_explicit_user_facts("I live in " + "/" * 10000 + " Austin.")
+        self.assertFalse(any(fact["Relation"] == "user_location" for fact in facts))
+
     def test_explicit_location_is_persisted_as_traceable_atom(self):
-        _post_response_reflection_sqlite(
+        persisted = _post_response_reflection_sqlite(
             "I live in austin. Please remember my location.",
             "Understood.",
             "test-model",
             "location-session",
             "turn-location-atom",
         )
+        self.assertTrue(persisted)
         atoms = state.sqlite_mem.query(
             "SELECT Entity, Relation, Value, Trust, SourceRef FROM MemoryAtoms WHERE Relation = 'user_location'"
         )

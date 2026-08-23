@@ -1,5 +1,8 @@
 """Non-blocking startup preparation for Eva's morning briefing."""
 
+import concurrent.futures
+import json
+import os
 import threading
 import time
 
@@ -95,20 +98,90 @@ def _mail_source():
     return "No unread mail.", "ready"
 
 
+def _briefing_weather_location():
+    from bridge.cognition import _weather_user_profile_rows
+    from bridge.skills import resolve_weather_location
+    decision = resolve_weather_location(
+        "",
+        user_profile=_weather_user_profile_rows(),
+        approved_approximate_location=str(
+            os.environ.get("EVA_APPROVED_APPROXIMATE_LOCATION", "") or ""
+        )[:120],
+    )
+    return str(decision.get("location") or "")[:120]
+
+
+def _format_search_receipt(text):
+    text = str(text or "").strip()
+    try:
+        results = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return text
+    if not isinstance(results, list):
+        return text
+    lines = []
+    for item in results[:6]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("info") or "Result").strip()[:240]
+        metadata = " - ".join(
+            value for value in (
+                str(item.get("source") or "").strip()[:80],
+                str(item.get("date") or "").strip()[:80],
+            ) if value
+        )
+        snippet = str(item.get("snippet") or item.get("body") or "").strip()[:500]
+        url = str(item.get("url") or "").strip()[:500]
+        lines.append("- " + title + ((" (" + metadata + ")") if metadata else ""))
+        if snippet:
+            lines.append("  " + snippet)
+        if url.startswith(("https://", "http://")):
+            lines.append("  " + url)
+    return "\n".join(lines).strip() or text
+
+
+def _search_receipt_has_results(text):
+    text = str(text or "").strip()
+    try:
+        results = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        lowered = text.lower()
+        return bool(text) and not lowered.startswith("error:") and "temporarily unavailable" not in lowered
+    return isinstance(results, list) and any(
+        isinstance(item, dict)
+        and bool(str(item.get("title") or "").strip())
+        and bool(str(item.get("url") or item.get("snippet") or "").strip())
+        for item in results
+    )
+
+
 def _live_source(name, prompt, timeout):
     if _st.local_mode:
         manager = _st.local_mcp_manager
         if not manager or not manager.alive:
             return "Local live-data tools are unavailable.", "failed"
         if name == "weather":
-            return "No configured location is available for a local weather briefing.", "failed"
-        tool_name = "web_search_news" if name == "news" else "web_search"
-        query = "top news headlines today" if name == "news" else "major market update today"
-        result = manager.call_tool(tool_name, {"query": query, "max_results": 6}, timeout=timeout)
+            location = _briefing_weather_location()
+            if not location:
+                return (
+                    "I have not learned your weather location yet. Tell me 'I live in <city or region>' "
+                    "and I will remember it for future briefings.",
+                    "failed",
+                )
+            tool_name = "weather_current"
+            arguments = {"location": location}
+        elif name == "news":
+            tool_name = "web_search_news"
+            arguments = {"query": "top national and world news headlines today", "max_results": 6}
+        else:
+            tool_name = "web_search_news"
+            arguments = {"query": "S&P 500 Dow Nasdaq US stock market today", "max_results": 6}
+        result = manager.call_tool(tool_name, arguments, timeout=timeout)
         text = str((result or {}).get("text") or "").strip()
-        if text:
-            return text, "ready"
-        return str((result or {}).get("error") or "Local live-data retrieval returned no result."), "failed"
+        if text and _search_receipt_has_results(text):
+            return _format_search_receipt(text), "ready"
+        detail = _format_search_receipt(text) if text else str((result or {}).get("error") or "")
+        return detail or "Local live-data retrieval returned no result.", "failed"
     from bridge.background import _bg_agent_prompt
     context = {"backend": "sqlite", "cluster": None, "database": None}
     text, error = _bg_agent_prompt(prompt, context, timeout=timeout)
@@ -148,13 +221,30 @@ def _prepare_worker():
         _set_source("mail", mail_status, mail_text)
         live_sources = (
             ("news", "Provide a concise current morning news briefing with sources. Do not invent facts.", 60),
-            ("weather", "Provide the current weather and short forecast for the configured user location, if available. Do not invent a location or facts.", 45),
+            ("weather", "Provide the current weather and short forecast for the learned user location, if available. Do not invent a location or facts.", 45),
             ("markets", "Provide a concise current market snapshot for configured watched symbols, if available. Do not invent prices.", 60),
         )
         if _wait_for_live_tools():
-            for name, prompt, timeout in live_sources:
-                text, status = _live_source(name, prompt, timeout)
-                _set_source(name, status, text)
+            if _st.local_mode:
+                for name, prompt, timeout in live_sources:
+                    try:
+                        text, status = _live_source(name, prompt, timeout)
+                    except Exception as error:
+                        text, status = "Live source failed: " + type(error).__name__, "failed"
+                    _set_source(name, status, text)
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(live_sources)) as executor:
+                    futures = {
+                        executor.submit(_live_source, name, prompt, timeout): name
+                        for name, prompt, timeout in live_sources
+                    }
+                    for future in concurrent.futures.as_completed(futures):
+                        name = futures[future]
+                        try:
+                            text, status = future.result()
+                        except Exception as error:
+                            text, status = "Live source failed: " + type(error).__name__, "failed"
+                        _set_source(name, status, text)
         else:
             for name, _, _ in live_sources:
                 _set_source(name, "failed", "Live data tools were not ready before preparation timed out.")
@@ -168,7 +258,7 @@ def _prepare_worker():
             state["completed_at"] = _cfg.to_utc_iso(_cfg.utc_now())
             state["summary"] = "Morning briefing prepared." if state["status"] == "ready" else "Morning briefing prepared with unavailable required sources."
             outcome = state["status"]
-        audit_event("briefing.prepare", correlation_id, outcome, source_count=len(live_sources) + 1)
+        audit_event("briefing.prepare", correlation_id, outcome, source_count=len(live_sources) + 2)
     except Exception as error:
         with _briefing_lock:
             _st.startup_briefing["status"] = "failed"
@@ -184,8 +274,13 @@ def start_startup_briefing():
     with _briefing_lock:
         if _st.startup_briefing_thread and _st.startup_briefing_thread.is_alive():
             return False
+        _st.startup_briefing = _new_state()
+        _st.startup_briefing["status"] = "preparing"
+        _st.startup_briefing["started_at"] = _cfg.to_utc_iso(_cfg.utc_now())
         _st.startup_briefing_thread = threading.Thread(
-            target=_prepare_worker, name="eva-startup-briefing", daemon=True
+            target=_prepare_worker,
+            name="eva-startup-briefing",
+            daemon=True,
         )
         _st.startup_briefing_thread.start()
     return True

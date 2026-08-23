@@ -45,6 +45,16 @@ The GitHub PAT is retained only for GitHub MCP configuration and private
 repository imports. The deprecated GitHub-hosted model endpoint, browser
 client, model map, and top-level model values are removed.
 
+## Capability Awareness
+
+The bridge-owned runtime capability registry is the authoritative responder view
+for native harness actions, active local MCP tools, ACP availability, memory,
+and action confirmation requirements. It is exposed through the private
+`/v1/runtime/capabilities` endpoint and appended to every tool-enabled AIG
+responder prompt. Provider prompts may contain persona guidance, but they must
+not independently claim a capability that the current registry marks
+unavailable.
+
 Specialized image generation and camera vision remain application capabilities,
 but their conversational orchestration is owned by AIG or the bridge rather
 than by a standalone model selector route.

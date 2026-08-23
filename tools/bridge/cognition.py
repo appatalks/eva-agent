@@ -256,20 +256,6 @@ _EXPLICIT_EMPLOYMENT_RE = re.compile(
     r"\bi (?:work|am working) (?:as|at|for)\s+([^.!?\n]{2,120})",
     re.IGNORECASE
 )
-_EXPLICIT_LOCATION_RE = re.compile(
-    r"(?:\b(?:I\s+(?:live|am\s+based|am\s+located)|I['’]m\s+(?:based|located))\s+(?:in|at|near)\s+"
-    r"(?P<stated_location>[a-z][a-z\s,.'-]{1,120}?)|"
-    r"\bmy\s+location\s+is\s+(?P<declared_location>[a-z][a-z\s,.'-]{1,120}?))"
-    r"(?=\s*(?:[.!?;\n]|,?\s*(?:please\s+)?(?:remember|save|store|note)\b|and\s+(?:please\s+)?(?:remember|save|store|note)\b|$))",
-    re.IGNORECASE
-)
-_EXPLICIT_LOCATION_SAVE_RE = re.compile(
-    r"\b(?:please\s+)?(?:save|store|remember|note|set)\s+(?:that\s+)?my\s+"
-    r"(?:current\s+)?location\s+(?:as|is|to)\s+"
-    r"(?P<saved_location>[a-z][a-z\s,.'-]{1,120}?)"
-    r"(?=\s*(?:[.!?;\n]|(?:,?\s+)(?:to|in)\s+memory\b|$))",
-    re.IGNORECASE
-)
 _EXPLICIT_ROLE_RE = re.compile(
     r"\bi am (?:a|an)\s+([a-z][a-zA-Z\s]{3,80}?)(?:[.!?\n]|$)",
     re.IGNORECASE
@@ -325,6 +311,51 @@ def _normalize_explicit_children(raw_value):
     return ", ".join(children)
 
 
+def _explicit_location_values(user_message):
+    """Extract supported explicit locations with bounded linear parsing."""
+    text = str(user_message or "")
+    lowered = text.lower()
+
+    def value_after(offset):
+        tail = text[offset:offset + 200]
+        tail_lower = tail.lower()
+        stops = [position for marker in (
+            ".", "!", "?", ";", "\n", ", please ", " and please ",
+            " remember", " save", " store", " note", " to memory", " in memory",
+        ) if (position := tail_lower.find(marker)) >= 0]
+        value = tail[:min(stops) if stops else len(tail)].strip(" ,")
+        if not value or not value[0].isalpha():
+            return ""
+        if not all(character.isalpha() or character in " ,.'-" for character in value):
+            return ""
+        return value
+
+    values = []
+    for prefix in (
+        "i live in ", "i am based in ", "i am located in ", "i am in ",
+        "i'm in ", "i'm based in ", "i'm located in ", "im in ",
+        "im based in ", "im located in ", "my location is ",
+    ):
+        position = lowered.find(prefix)
+        if position >= 0:
+            values.append(value_after(position + len(prefix)))
+
+    for marker in ("my current location", "my location"):
+        position = lowered.find(marker)
+        if position < 0:
+            continue
+        preceding = lowered[max(0, position - 80):position]
+        if not any(action in preceding for action in ("save", "store", "remember", "note", "set")):
+            continue
+        offset = position + len(marker)
+        for connector in (" as ", " is ", " to "):
+            if lowered.startswith(connector, offset):
+                offset += len(connector)
+                values.append(value_after(offset))
+                break
+    return values
+
+
 
 def _extract_explicit_user_facts(user_message):
     """Extract direct user-stated facts before generic entity candidates."""
@@ -378,10 +409,8 @@ def _extract_explicit_user_facts(user_message):
         add_fact(f"user_favorite_{relation_suffix}", match.group(2), 0.65)
     for match in _EXPLICIT_EMPLOYMENT_RE.finditer(user_message or ""):
         add_fact("user_employment", match.group(1), 0.8)
-    for match in _EXPLICIT_LOCATION_RE.finditer(user_message or ""):
-        add_fact("user_location", match.group("stated_location") or match.group("declared_location"), 0.8)
-    for match in _EXPLICIT_LOCATION_SAVE_RE.finditer(user_message or ""):
-        add_fact("user_location", match.group("saved_location"), 0.8)
+    for location in _explicit_location_values(user_message):
+        add_fact("user_location", location, 0.8)
     for match in _EXPLICIT_ROLE_RE.finditer(user_message or ""):
         captured = match.group(1).strip()
         first_token = captured.split()[0].lower() if captured else ""
@@ -526,7 +555,7 @@ def _maybe_promote_candidate(entity):
     """Promote candidate entities after repeated persisted or launch-local mentions."""
     key = (entity or "").strip().lower()
     if not key:
-        return None
+        return True
 
     session_count = _st.cognition_candidate_counts.get(key, 0)
     prior_mentions, prior_max_conf = _load_candidate_history(entity)
@@ -1094,7 +1123,7 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
         ))
         for entity in persisted_candidates or []:
             _track_candidate_observation(entity)
-        return None
+        return persisted_candidates is not None
     finally:
         mem.close()
 
@@ -1465,61 +1494,34 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
     _time_str = _now_utc.strftime("%H:%M UTC")
     context_parts.append(
         f"[Current Date & Time] {_today_str} — {_time_str}\n\n"
-        "[Skills]\n"
-        "Active capabilities (the system handles routing automatically):\n"
-        "• data-retrieval: Live stock quotes, financial data, company info\n"
-        "• weather-news: Real-time weather, news, market summaries, space weather\n"
-        "• web-search: Search the web and retrieve current information\n"
-        "• browser-control: [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<url>\"}[[/EVA_BROWSER]]\n"
-        "• desktop-control: [[EVA_DESKTOP]]{\"goal\":\"<task>\"}[[/EVA_DESKTOP]]\n"
-        "• camera-vision: [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]\n"
-        "• signal-message: [[EVA_SIGNAL]]{\"message\":\"<text>\"}[[/EVA_SIGNAL]]\n"
-        "• image-generation: [Image of <description>] on its own line (up to 3 per response)\n"
-        "• file-creation: Write the file, then [[EVA_FILE]] <filename.ext>\n"
-        f"{persistent_memory_capability}"
-        "    Knowledge, Conversations, EmotionState, MemorySummaries, Reflections,\n"
-        "    Goals, SelfState, HeuristicsIndex, EmotionBaseline, BackgroundProposals\n"
-        f"{kusto_query_capability}"
-        "• cron-scheduling: Recurring tasks (briefings, checks, reminders). Settings > Cron\n"
+        "[Capability Guidance]\n"
+        "The bridge appends [Runtime Capabilities - AUTHORITATIVE] for this turn. "
+        "Use only capabilities marked available there; do not infer availability from this context.\n"
+        "Native Eva actions and verified active Skills take precedence over browser or desktop automation.\n"
         "\n"
         "[Rules]\n"
-        "- Act first, explain second. Emit the marker — don't list steps for the user.\n"
-        "- Write ONE short sentence before a marker announcing what you're about to do.\n"
+        "- Act first only when the authoritative runtime capability and its confirmation policy allow it.\n"
         "- Only confirm an action after it actually ran and returned.\n"
         "- Never fabricate headlines, prices, weather, or events not in [Data Retrieved].\n"
-        "- Screenshot vs camera: [[EVA_DESKTOP]] sees the monitor; [[EVA_LOOK]] sees the physical world.\n"
         "- For purchases or irreversible actions, stop at the final step and ask to confirm.\n"
-        "- When asked your model: check [Runtime] and answer from there only.\n"
         "- If [Data Retrieved] is present, use it as your authoritative source.\n"
         "- If no data was retrieved for a live question, say so honestly — don't guess.\n"
         "\n"
         "[Workflow: Browser & Desktop]\n"
-        "When asked to open a site, play a playlist, or do a task in an app:\n"
-        "1. ACT immediately — emit [[EVA_BROWSER]] or [[EVA_DESKTOP]]\n"
-        "2. Do NOT say you cannot open websites or apps\n"
-        "3. Do NOT list manual steps — do the task yourself\n"
+        "Use browser or desktop automation only for an explicit interactive request when no native action or verified Skill applies.\n"
+        "A verified playlist Skill opens its authorized URL through the native harness, not browser automation.\n"
         "\n"
         "[Workflow: Memory]\n"
         "When asked what you know/remember:\n"
         "1. Check [Memory] and [User Profile] facts in this context\n"
-        "2. For deeper queries, use kusto-query on the Knowledge or Conversations table\n"
-        "3. Be specific — cite what you actually remember, not generic statements\n"
-        "\n"
-        "[Workflow: Capturing Knowledge]\n"
-        "When the user shares a durable fact or asks you to remember something:\n"
-        "1. Persist it via kusto_ingest_inline, table=\"Knowledge\", columns: "
-        "Timestamp, Entity, Relation, Value, Confidence=0.85, Source=\"learned\", Decay=0.01.\n"
-        "2. Entity=\"User\" for user facts; proper-noun subject otherwise.\n"
-        "3. One row per distinct fact. Do NOT save chit-chat or one-off questions.\n"
-        "4. Briefly confirm what you stored.\n"
+        "2. Be specific — cite what you actually remember, not generic statements.\n"
+        "3. The bridge captures explicit durable user facts; do not issue a direct memory write unless the runtime registry provides an approved action.\n"
         "\n"
         "[Workflow: Adaptive Execution]\n"
         "When asked to do something you are unsure about:\n"
         "1. Check if a relevant [Active Skill] was loaded — follow its instructions\n"
-        "2. If no skill matched, attempt with your available tools\n"
-        "3. If the first attempt fails, self-correct: try an alternative before giving up\n"
-        "4. NEVER say 'I cannot do that' without first genuinely trying\n"
-        "5. After succeeding at something new, the system auto-learns it as a skill\n"
+        "2. If no skill matched, use only available runtime capabilities and their approved fallback.\n"
+        "3. If a receipt fails, explain the failure rather than substituting an unrelated capability.\n"
     )
 
     # Inject live MCP server status so Eva knows what's connected
@@ -1866,9 +1868,9 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
     """Background: log conversation and trigger reflection after response."""
     # global statement removed — writes go to _st.*
     if not _st.cognition_enabled:
-        return
+        return False
     if _st.protected_memory_model_release:
-        return
+        return False
 
     # Route to SQLite-specific implementation when that backend is active
     if _resolve_memory_backend() == "sqlite":
@@ -1876,7 +1878,7 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
 
     cluster, db = _get_kusto_config()
     if not cluster or not db:
-        return
+        return False
 
     import datetime, uuid
     now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2136,6 +2138,7 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
 
     if memory_model is not None and turn_id:
         memory_model.complete_turn(turn_id)
+    return True
 
 
 def _post_response_reflection(user_message, assistant_response, model_name, conversation_id=None, turn_id=None):

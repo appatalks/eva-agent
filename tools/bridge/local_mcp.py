@@ -55,7 +55,7 @@ _MCP_ENV_KEYS = {
         "KUSTO_DATABASE_LOCKED",
     },
     "computer-use-linux": set(),
-    "eva-web-search": set(),
+    "eva-web-search": {"EVA_STOCK_QUOTE_URL", "EVA_TICKER_SH_PATH"},
 }
 
 

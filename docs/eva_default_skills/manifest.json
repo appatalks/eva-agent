@@ -18,7 +18,7 @@
       "description": "Deliver a personalized morning briefing with weather, news, and schedule.",
       "category": "Information & Research",
       "trigger_examples": ["Give me my morning briefing", "What should I know today?", "Catch me up on the morning"],
-      "instructions": "1. Check [User Profile] for user_location. If found, use it.\n2. If no location is stored, use web search to look up the user's approximate location via IP geolocation.\n3. Use [Data Retrieved] for weather forecast and current conditions at that location.\n4. Use [Data Retrieved] for top news headlines.\n5. Combine into a concise briefing: weather summary, top 3-5 headlines, and any known schedule items.\n6. Do NOT take screenshots to gather information. Do NOT ask for a location if it is in memory.\n7. Present naturally in first person as Eva.",
+      "instructions": "1. Check [User Profile] for user_location. If found, use it.\n2. If no location is stored, state that Eva has not learned it yet and ask the user to share their city or region for future briefings.\n3. Use [Data Retrieved] for weather forecast and current conditions at that location.\n4. Use [Data Retrieved] for top news headlines.\n5. Combine into a concise briefing: weather summary, personal day context, top 3-5 headlines, and a compact market section.\n6. Do NOT take screenshots or infer a location from unstructured conversation.\n7. Present naturally in first person as Eva.",
       "preferred_tools": ["web-search", "weather-news", "data-retrieval"],
       "allowed_fallbacks": ["Use the location named in the request", "State which briefing data is unavailable instead of inventing it"],
       "prerequisites": ["User profile may contain user_location", "Data retrieval pipeline is available"],

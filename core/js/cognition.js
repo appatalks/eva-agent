@@ -891,6 +891,10 @@
     var trace = [];
     var _turnStart = Date.now();
     var _draftMs = 0, _reviewMs = 0, _reviseMs = 0;
+    function reportStatus(text) {
+      status(text);
+      if (typeof opts.onStatus === 'function') opts.onStatus(text);
+    }
     var capDesc = describeCapabilities();
     var isSignalRequest = (typeof canAuthorizeSignalDelivery === 'function') && canAuthorizeSignalDelivery(userMsg);
     var isAgentLaunchRequest = _agentLaunchIntent(userMsg);
@@ -925,7 +929,7 @@
     ].join('\n');
 
     // Stage 1: Eva plans and drafts the user-facing answer
-    status('Eva drafting [eva: ' + cfg.evaModel + ']...');
+    reportStatus('Eva drafting [eva: ' + cfg.evaModel + ']...');
     var draftTask = [
       'User message:',
       userMsg,
@@ -988,13 +992,13 @@
     if (!doReview) {
       var skipWhy = cfg.maxCycles < 1 ? 'disabled'
                   : (sentinel.want === false ? 'eva-opt-out' : 'fast-path');
-      status('Eva answering directly [no review: ' + skipWhy + ']...');
+      reportStatus('Eva answering directly [no review: ' + skipWhy + ']...');
     }
 
     // Stage 2+: reviewer loop, bounded by cfg.maxCycles, gated by doReview
     for (var cycle = 1; doReview && cycle <= cfg.maxCycles; cycle++) {
       cyclesUsed = cycle;
-      status('Eva reviewing [reviewer: ' + cfg.reviewerModel + '] cycle ' + cycle + '/' + cfg.maxCycles + '...');
+      reportStatus('Eva reviewing [reviewer: ' + cfg.reviewerModel + '] cycle ' + cycle + '/' + cfg.maxCycles + '...');
       var reviewTask = [
         'User message:',
         userMsg,
@@ -1033,7 +1037,7 @@
       if (verdict === 'APPROVE' || verdict === 'BLOCKED') break;
 
       // Eva revises against reviewer feedback
-      status('Eva revising [eva: ' + cfg.evaModel + '] cycle ' + cycle + '...');
+      reportStatus('Eva revising [eva: ' + cfg.evaModel + '] cycle ' + cycle + '...');
       var reviseTask = [
         'User message:',
         userMsg,

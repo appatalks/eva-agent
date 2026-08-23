@@ -5,18 +5,170 @@
 
 var _aigLmStudioHealth = { baseUrl: '', checkedAt: 0, available: false };
 
-async function waitForPreparedBriefing(bridgeUrl, initialStatus) {
+function isExplicitLocationMemoryRequest(text) {
+  var value = String(text || '');
+  return /\b(?:save|remember|store|note)\b[\s\S]{0,100}\b(?:durable\s+)?memory\b/i.test(value) &&
+    /\b(?:i\s+(?:live|am\s+(?:in|based|located))|i['’]?m\s+(?:in|based|located)|my\s+location\s+is)\b/i.test(value);
+}
+
+async function saveExplicitLocationMemory(bridgeUrl, userMessage, sessionId, turnId) {
+  var response = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/remember-location', {
+    method: 'POST',
+    headers: (typeof getBridgeCapabilityHeaders === 'function') ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_message: userMessage, session_id: sessionId, turn_id: turnId }),
+    signal: AbortSignal.timeout(5000)
+  });
+  if (!response.ok) {
+    var body = await response.json().catch(function () { return {}; });
+    throw new Error((body.error && body.error.message) || ('HTTP ' + response.status));
+  }
+  return response.json();
+}
+
+function briefingItems(summary, limit) {
+  var items = [];
+  var current = null;
+  String(summary || '').split('\n').forEach(function (line) {
+    var heading = line.match(/^\s*-\s+(.+?)\s*$/);
+    if (heading) {
+      if (current) items.push(current);
+      current = { title: heading[1], detail: '' };
+      return;
+    }
+    if (!current || !line.trim() || /^\s*https?:\/\//i.test(line)) return;
+    if (!current.detail) current.detail = line.trim();
+  });
+  if (current) items.push(current);
+  return items.slice(0, limit || 5);
+}
+
+function formatBriefingSection(summary, limit) {
+  var items = briefingItems(summary, limit);
+  if (!items.length) return String(summary || '').trim();
+  return items.map(function (item) {
+    return '- **' + item.title + '**' + (item.detail ? '\n  ' + item.detail : '');
+  }).join('\n');
+}
+
+function requestedStockSymbol(text) {
+  var value = String(text || '');
+  var dollar = value.match(/\$([A-Za-z]{1,10})\b/);
+  if (dollar) return dollar[1].toUpperCase();
+  var afterSubject = value.match(/\b(?:stock|ticker|symbol)\s+(?:price\s+)?(?:of\s+|for\s+)?([A-Za-z]{1,10})\b/i);
+  if (afterSubject) return afterSubject[1].toUpperCase();
+  var beforeSubject = value.match(/\b([A-Z]{1,10})\b[^.!?]{0,80}\b(?:stock|share|ticker|quote|price)\b/);
+  if (beforeSubject) return beforeSubject[1].toUpperCase();
+  return '';
+}
+
+function formatBriefingQuote(quote, requestedSymbol) {
+  quote = quote || {};
+  var symbol = String(quote.symbol || requestedSymbol || 'Requested ticker').toUpperCase();
+  if (!quote || typeof quote.price !== 'number') {
+    return '### Requested quote\n\n_Verified current price for ' + symbol + ' is unavailable from the configured local quote source._';
+  }
+  var currency = String(quote.currency || '').trim();
+  var exchange = String(quote.exchange || '').trim();
+  var lines = ['### Requested quote', '- **' + symbol + (exchange ? ' · ' + exchange : '') + '**: ' + (currency ? currency + ' ' : '') + quote.price];
+  if (typeof quote.change === 'number' && typeof quote.change_percent === 'number') {
+    var sign = quote.change > 0 ? '+' : '';
+    lines.push('- Session move: ' + sign + quote.change + ' (' + sign + quote.change_percent + '%)');
+    lines.push('- Analysis: The verified receipt shows a ' + (quote.change > 0 ? 'move above' : quote.change < 0 ? 'move below' : 'move in line with') + ' the previous close. It does not include enough historical or fundamental data for a broader assessment.');
+  } else {
+    lines.push('- Analysis: The verified receipt does not include a prior-close comparison or broader historical data.');
+  }
+  return lines.join('\n');
+}
+
+async function fetchBriefingQuote(bridgeUrl, userMessage, sessionId) {
+  var symbol = requestedStockSymbol(userMessage);
+  if (!symbol) return { content: '', available: false };
+  try {
+    var url = bridgeUrl.replace(/\/+$/, '') + '/v1/data/retrieve?message=' + encodeURIComponent(userMessage) + '&session_id=' + encodeURIComponent(sessionId || '');
+    var response = await fetch(url, {
+      headers: (typeof getBridgeCapabilityHeaders === 'function') ? getBridgeCapabilityHeaders() : {},
+      signal: AbortSignal.timeout(25000)
+    });
+    var body = await response.json().catch(function () { return {}; });
+    var receipt = {};
+    try { receipt = JSON.parse(String(body.data || '')); } catch (_) {}
+    var quote = receipt.stock_quote || {};
+    return { content: formatBriefingQuote(quote, symbol), available: typeof quote.price === 'number' };
+  } catch (_) {
+    return { content: formatBriefingQuote({}, symbol), available: false };
+  }
+}
+
+function formatPreparedBriefing(status, preparing, requestedQuote) {
+  status = status || {};
+  var sources = status.sources || {};
+  var lines = ['## Morning briefing'];
+  var rendered = 0;
+  var weather = sources.weather || {};
+  var weatherSummary = String(weather.summary || '').trim();
+  if (weather.status === 'ready' && weatherSummary) {
+    lines.push('### Weather', formatBriefingSection(weatherSummary, 1));
+    rendered += 1;
+  } else if (!preparing && weatherSummary) {
+    lines.push('### Weather', '_' + weatherSummary + '_');
+    rendered += 1;
+  }
+
+  var mail = sources.mail || {};
+  var memory = sources.memory || {};
+  var dayContext = [mail, memory].map(function (source) {
+    return source.status === 'ready' || source.status === 'partial' ? String(source.summary || '').trim() : '';
+  }).filter(Boolean).join('\n');
+  if (dayContext) {
+    lines.push('### Your day', dayContext);
+    rendered += 1;
+  }
+
+  var news = sources.news || {};
+  if (news.status === 'ready' && news.summary) {
+    lines.push('### Headlines', formatBriefingSection(news.summary, 5));
+    rendered += 1;
+  } else if (!preparing && news.summary) {
+    lines.push('### Headlines', '_Unavailable: ' + String(news.summary).trim() + '_');
+    rendered += 1;
+  }
+
+  var markets = sources.markets || {};
+  if (markets.status === 'ready' && markets.summary) {
+    lines.push('### Markets', formatBriefingSection(markets.summary, 3));
+    rendered += 1;
+  } else if (!preparing && markets.summary) {
+    lines.push('### Markets', '_Unavailable: ' + String(markets.summary).trim() + '_');
+    rendered += 1;
+  }
+  if (requestedQuote) {
+    lines.push(requestedQuote);
+    rendered += 1;
+  }
+  if (preparing) lines.push('_Gathering the remaining live sections..._');
+  if (!rendered && !preparing) lines.push('Live briefing data is unavailable right now.');
+  return lines.join('\n\n');
+}
+
+function updatePreparedBriefingPreview(preview, status, txtOutput) {
+  if (!preview || !preview.body) return;
+  preview.body.innerHTML = renderMarkdown(formatPreparedBriefing(status, true));
+  txtOutput.scrollTop = txtOutput.scrollHeight;
+}
+
+async function waitForPreparedBriefing(bridgeUrl, initialStatus, onProgress) {
   var latest = initialStatus || {};
   if (latest.status !== 'preparing') return latest;
-  var deadline = Date.now() + 180000;
+  var deadline = Date.now() + 90000;
   while (Date.now() < deadline) {
-    await new Promise(function (resolve) { setTimeout(resolve, 2000); });
+    await new Promise(function (resolve) { setTimeout(resolve, 750); });
     try {
       var response = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/briefing/status', {
-        signal: AbortSignal.timeout(1500)
+        signal: AbortSignal.timeout(1200)
       });
       if (!response.ok) continue;
       latest = await response.json();
+      if (typeof onProgress === 'function') onProgress(latest);
       if (latest.status !== 'preparing') return latest;
       setStatus('info', 'Eva is still preparing the morning briefing...');
     } catch (_) {}
@@ -129,6 +281,33 @@ async function aigSend() {
   var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
   if (typeof watchACPPermissions === 'function') watchACPPermissions(190000);
 
+  if (isExplicitLocationMemoryRequest(sQuestion)) {
+    try {
+      await saveExplicitLocationMemory(bridgeUrl, sQuestion, sessionId, turnId);
+      var savedLocationReply = "I've saved your location to my durable memory for future briefings.";
+      await renderEvaResponse(savedLocationReply, txtOutput, {
+        nativeRequest: sQuestion,
+        turnId: turnId
+      });
+      existingMessages.push({ role: 'assistant', content: savedLocationReply });
+      localStorage.setItem(storageKey, JSON.stringify(existingMessages));
+      lastResponse = savedLocationReply;
+      masterOutput += txtOutput.innerText + '\n';
+      localStorage.setItem('masterOutput', masterOutput);
+      if (typeof evaAuditEvent === 'function') {
+        evaAuditEvent('native_action', 'completed', {
+          correlation_id: turnId,
+          action: 'remember_location',
+          label: 'Durable Memory'
+        });
+      }
+      setStatus('info', 'Eva saved your location to durable memory.');
+      return;
+    } catch (memoryError) {
+      setStatus('warn', 'Eva could not save the location directly; continuing with the normal response.');
+    }
+  }
+
   setStatus('info', 'Eva (AIG) processing...');
   // Optional cognitive layer (eva / reviewer).
   // Runs when the Settings toggle is on OR the user message contains an
@@ -137,22 +316,85 @@ async function aigSend() {
   var cogDecision = (typeof Cognition !== 'undefined' && Cognition.shouldRun)
                       ? Cognition.shouldRun(sQuestion)
                       : { active: false, reason: null };
+  var requestedQuoteSymbol = requestedStockSymbol(sQuestion);
+  var isDirectQuoteRequest = !!requestedQuoteSymbol
+    && /\b(?:stock|share|ticker|quote|price)\b/i.test(sQuestion)
+    && !/\b(?:analy[sz]e|forecast|strategy|compare|valuation|fundamental|thesis)\b/i.test(sQuestion);
+  if (isDirectQuoteRequest && cogDecision.reason !== 'phrase') {
+    cogDecision = { active: false, reason: 'direct-quote' };
+  }
   var briefingRequest = /\b(?:morning|daily)\s+(?:briefing|report|update)\b/i.test(sQuestion);
   if (briefingRequest) {
     cogDecision = { active: false, reason: 'briefing-cache' };
+    var briefingPreview = null;
     try {
-      var briefingResponse = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/briefing/status', {
+      var briefingResponse = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/briefing/refresh', {
+        method: 'POST',
+        headers: (typeof getBridgeCapabilityHeaders === 'function') ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(1500)
       });
+      if (!briefingResponse.ok) throw new Error('Briefing status unavailable');
       var briefingStatus = briefingResponse.ok ? await briefingResponse.json() : {};
-      briefingStatus = await waitForPreparedBriefing(bridgeUrl, briefingStatus);
-      if (briefingStatus.status === 'ready' || briefingStatus.status === 'preparing') {
-        setStatus('info', briefingStatus.status === 'ready'
-          ? 'Eva is using the prepared morning briefing...'
-          : 'Eva is preparing the morning briefing...');
+      if (briefingStatus.status === 'preparing') {
+        briefingPreview = document.createElement('div');
+        briefingPreview.className = 'chat-bubble eva-bubble eva-briefing-preview';
+        briefingPreview.innerHTML = '<span class="eva">Eva:</span> <div class="md"></div>';
+        txtOutput.appendChild(briefingPreview);
+        updatePreparedBriefingPreview({ body: briefingPreview.querySelector('.md') }, briefingStatus, txtOutput);
+        setStatus('info', 'Eva is preparing the morning briefing...');
       }
+      briefingStatus = await waitForPreparedBriefing(bridgeUrl, briefingStatus, function (latest) {
+        if (briefingPreview) {
+          updatePreparedBriefingPreview({ body: briefingPreview.querySelector('.md') }, latest, txtOutput);
+        }
+      });
+      if (briefingPreview && briefingPreview.parentNode) briefingPreview.parentNode.removeChild(briefingPreview);
+      var requestedQuote = await fetchBriefingQuote(bridgeUrl, sQuestion, sessionId);
+      var briefingContent = formatPreparedBriefing(briefingStatus, briefingStatus.status === 'preparing', requestedQuote.content);
+      await renderEvaResponse(briefingContent, txtOutput, {
+        nativeRequest: sQuestion,
+        turnId: turnId
+      });
+      existingMessages.push({ role: 'assistant', content: briefingContent });
+      localStorage.setItem(storageKey, JSON.stringify(existingMessages));
+      lastResponse = briefingContent;
+      masterOutput += txtOutput.innerText + '\n';
+      localStorage.setItem('masterOutput', masterOutput);
+      setStatus('info', 'Eva morning briefing - prepared live sources');
+      var briefingAutoSpeak = document.getElementById('autoSpeak');
+      if (briefingAutoSpeak && briefingAutoSpeak.checked) speakText();
+      return;
     } catch (_) {}
   }
+  if (isDirectQuoteRequest) {
+    var quotePreview = createEvaStreamingBubble(txtOutput);
+    updateEvaStreamingStatus(quotePreview, {
+      phase: 'thinking',
+      text: 'Eva is retrieving live data...'
+    }, txtOutput);
+    var directQuote = await fetchBriefingQuote(bridgeUrl, sQuestion, sessionId);
+    removeEvaStreamingBubble(quotePreview);
+    await renderEvaResponse(directQuote.content, txtOutput, {
+      nativeRequest: sQuestion,
+      turnId: turnId
+    });
+    existingMessages.push({ role: 'assistant', content: directQuote.content });
+    localStorage.setItem(storageKey, JSON.stringify(existingMessages));
+    lastResponse = directQuote.content;
+    masterOutput += txtOutput.innerText + '\n';
+    localStorage.setItem('masterOutput', masterOutput);
+    setStatus(directQuote.available ? 'info' : 'warn', directQuote.available
+      ? 'Eva verified the current ' + requestedQuoteSymbol + ' quote.'
+      : 'Eva could not verify the current ' + requestedQuoteSymbol + ' quote.');
+    var directQuoteAutoSpeak = document.getElementById('autoSpeak');
+    if (directQuoteAutoSpeak && directQuoteAutoSpeak.checked) speakText();
+    return;
+  }
+  var provisional = createEvaStreamingBubble(txtOutput);
+  updateEvaStreamingStatus(provisional, {
+    phase: 'thinking',
+    text: 'Eva is preparing context...'
+  }, txtOutput);
   if (cogDecision.active) {
     if (cogDecision.reason === 'phrase') {
       setStatus('info', 'Eva cognition force-enabled by phrase trigger...');
@@ -168,7 +410,14 @@ async function aigSend() {
         imageMime: imageMime,
         forceEnable: cogDecision.reason === 'phrase',
         forcedReason: cogDecision.reason,
-        reviewReason: cogDecision.reason
+        reviewReason: cogDecision.reason,
+        onStatus: function (text) {
+          if (!provisional) return;
+          updateEvaStreamingStatus(provisional, {
+            phase: 'thinking',
+            text: text
+          }, txtOutput);
+        }
       });
       var cogContent = (cogResult && cogResult.content) ? cogResult.content : '';
       // Execute any [[EVA_ACTION]] blocks Eva emitted, then render.
@@ -190,6 +439,8 @@ async function aigSend() {
         deferredSignal = !!launchResult.deferredSignal;
       }
       cognitionFinalizing = true;
+      removeEvaStreamingBubble(provisional);
+      provisional = null;
       await renderEvaResponse(cogContent, txtOutput, {
         signalAuthorized: !deferredSignal && !!(signalContext && signalContext.authorized),
         signalMessage: deferredSignal ? '' : (signalContext ? signalContext.message : ''),
@@ -286,7 +537,13 @@ async function aigSend() {
     var aigModel = (document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna';
     var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel('aig') : 'default';
 
-    var provisional = null;
+    if (!provisional) {
+      provisional = createEvaStreamingBubble(txtOutput);
+      updateEvaStreamingStatus(provisional, {
+        phase: 'thinking',
+        text: 'Eva is preparing context...'
+      }, txtOutput);
+    }
     var resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -312,6 +569,7 @@ async function aigSend() {
     });
 
     if (!resp.ok) {
+      removeEvaStreamingBubble(provisional);
       var errText = await resp.text();
       var errMsg = 'AIG Error ' + resp.status + ': ' + errText;
       txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="error">' + escapeHtml(errMsg) + '</span></div>';
@@ -323,9 +581,17 @@ async function aigSend() {
     var data = await readEvaStreamingResponse(resp, function (chunk) {
       if (!provisional) provisional = createEvaStreamingBubble(txtOutput);
       appendEvaStreamingChunk(provisional, chunk, txtOutput);
+    }, function (event) {
+      if (!provisional) provisional = createEvaStreamingBubble(txtOutput);
+      updateEvaStreamingStatus(provisional, event, txtOutput);
+    }, function (reasoning) {
+      if (!provisional) provisional = createEvaStreamingBubble(txtOutput);
+      appendEvaStreamingReasoning(provisional, reasoning, txtOutput);
     });
     removeEvaStreamingBubble(provisional);
     var content = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+    var responseMessage = (data.choices && data.choices[0] && data.choices[0].message) || {};
+    var reasoningContent = responseMessage.reasoning_content || '';
     var modelUsed = data.model || 'aig';
 
     // Render response
@@ -335,7 +601,8 @@ async function aigSend() {
       signalRequest: sQuestion,
       nativeRequest: sQuestion,
       turnId: turnId,
-      signalContext: signalContext
+      signalContext: signalContext,
+      reasoningContent: reasoningContent
     });
 
     if (content) {

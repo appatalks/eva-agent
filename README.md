@@ -37,9 +37,15 @@ eva
 
 Eva is also added to your system application menu.
 
-Current standalone release: `Eva Standalone-5.6.2.AppImage`.
+Current standalone release: `Eva Standalone-5.6.3.AppImage`.
 
 On first launch, choose **Eva (AIG)** in the model menu for the integrated experience. Eva works with local SQLite memory by default; the Memory view lets you inspect record provenance, associations, history, and corrections before records are changed or removed from recall. Provider keys, Copilot, and other optional capabilities are configured in Settings.
+
+LM Studio responses show a live thinking state during long local generations. When a model returns a separate reasoning layer, Eva keeps it available in a collapsed **Thinking** section above the final answer.
+
+Morning briefing requests refresh bounded news, location-aware weather, market, mail, and memory sources. Ready sections appear while the remaining live tools finish, without a second model summarization pass. Weather uses the location Eva has learned from explicit conversation and stored in the structured user profile.
+
+Current stock quote requests use a verified local receipt when available: a configured loopback provider first, then the local `ticker.sh` Yahoo Finance tool, before the bounded Google Finance fallback. Eva reports unavailable quotes instead of asking a model to infer a current price.
 
 For a source build, platform-specific packaging, Local Voices, providers, memory, MCP, or workspace setup, use the [technical documentation](README-2.md).
 

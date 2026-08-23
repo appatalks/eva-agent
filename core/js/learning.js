@@ -72,8 +72,8 @@
     wrapper.setAttribute('role', 'group');
     wrapper.setAttribute('aria-label', 'Response feedback');
     var labels = [
-      { status: 'helpful', symbol: '+', label: 'Helpful' },
-      { status: 'unhelpful', symbol: '-', label: 'Unhelpful' },
+      { status: 'helpful', symbol: '\u2191', label: 'Helpful' },
+      { status: 'unhelpful', symbol: '\u2193', label: 'Unhelpful' },
       { status: 'misunderstood', symbol: '?', label: 'Misunderstood' }
     ];
     labels.forEach(function (item) {
@@ -84,7 +84,7 @@
       button.setAttribute('aria-label', item.label);
       button.setAttribute('aria-pressed', 'false');
       button.title = item.label;
-      button.textContent = item.symbol + ' ' + item.label;
+      button.textContent = item.symbol;
       button.addEventListener('click', function () {
         var index = feedbackIndex();
         var prior = index[responseKey];
