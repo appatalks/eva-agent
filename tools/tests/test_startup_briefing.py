@@ -9,12 +9,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from bridge import briefing, state
 
 
+def first_live_source(name, _prompt, _timeout):
+  return {
+    "news": ("News", "ready"),
+    "weather": ("No location", "failed"),
+    "markets": ("Markets", "ready"),
+  }[name]
+
+
 def main():
+
     state.startup_briefing = briefing._new_state()
     state.startup_briefing_thread = None
     with (patch.object(briefing, "_memory_source", return_value=("Local context", "ready")),
           patch.object(briefing, "_wait_for_live_tools", return_value=True),
-          patch.object(briefing, "_live_source", side_effect=[("News", "ready"), ("No location", "failed"), ("Markets", "ready")]),
+      patch.object(briefing, "_live_source", side_effect=first_live_source),
           patch.object(briefing, "audit_event")):
         briefing._prepare_worker()
     result = briefing.briefing_status()
@@ -26,6 +35,21 @@ def main():
     assert "Markets: Markets" in briefing.briefing_prompt_context()
     assert "Weather: unavailable" in briefing.briefing_prompt_context()
     assert briefing.briefing_unavailable_sources(result) == []
+
+    local_calls = []
+    previous_mode = state.local_mode
+    state.local_mode = True
+    state.startup_briefing = briefing._new_state()
+    try:
+      with (patch.object(briefing, "_memory_source", return_value=("Local context", "ready")),
+            patch.object(briefing, "_mail_source", return_value=("No unread mail.", "ready")),
+            patch.object(briefing, "_wait_for_live_tools", return_value=True),
+            patch.object(briefing, "_live_source", side_effect=lambda name, prompt, timeout: (local_calls.append(name) or (name.title(), "ready"))),
+            patch.object(briefing, "audit_event")):
+        briefing._prepare_worker()
+    finally:
+      state.local_mode = previous_mode
+    assert local_calls == ["news", "weather", "markets"]
 
     state.startup_briefing = briefing._new_state()
     state.startup_briefing.update({
@@ -87,9 +111,22 @@ def main():
       text, status = briefing._live_source("news", "Current facts", 12)
       assert text == "Local facts"
       assert status == "ready"
-      assert manager.calls == [("web_search_news", {"query": "top news headlines today", "max_results": 6}, 12)]
-      _, weather_status = briefing._live_source("weather", "Current weather", 12)
-      assert weather_status == "failed"
+      with patch.object(briefing, "_briefing_weather_location", return_value="Example City"):
+        weather_text, weather_status = briefing._live_source("weather", "Current weather", 12)
+      assert weather_text == "Local facts"
+      assert weather_status == "ready"
+      market_text, market_status = briefing._live_source("markets", "Current markets", 12)
+      assert market_text == "Local facts"
+      assert market_status == "ready"
+      assert manager.calls == [
+        ("web_search_news", {"query": "top national and world news headlines today", "max_results": 6}, 12),
+        ("weather_current", {"location": "Example City"}, 12),
+        ("web_search_news", {"query": "S&P 500 Dow Nasdaq US stock market today", "max_results": 6}, 12),
+      ]
+      with patch.object(briefing, "_briefing_weather_location", return_value=""):
+        missing_text, missing_status = briefing._live_source("weather", "Current weather", 12)
+      assert missing_status == "failed"
+      assert "not learned your weather location" in missing_text
     finally:
       state.local_mode = previous_mode
       state.local_mcp_manager = previous_manager

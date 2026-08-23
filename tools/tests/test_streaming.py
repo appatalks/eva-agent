@@ -17,7 +17,7 @@ if TOOLS_DIR not in sys.path:
 
 from bridge.acp_client import ACPClient, _workspace_autonomy_block_reason, _workspace_execute_category
 from bridge import state
-from bridge.core import BridgeHandler, _scope_subagent_task_to_workspace
+from bridge.core import BridgeHandler, _lmstudio_stream_deltas, _scope_subagent_task_to_workspace
 from bridge.utils import _verify_workspace_github_delivery, _workspace_github_delivery_url
 from bridge.telemetry import _telemetry_summarize
 
@@ -97,6 +97,24 @@ def make_handler(wfile):
 
 
 class StreamingContractTests(unittest.TestCase):
+    def test_lmstudio_sse_separates_reasoning_and_answer_deltas(self):
+        class Response:
+            def iter_lines(self, decode_unicode=True):
+                assert decode_unicode
+                return iter([
+                    'data: {"choices":[{"delta":{"reasoning_content":"consider "}}]}',
+                    'data: {"choices":[{"delta":{"reasoning_content":"sources"}}]}',
+                    'data: {"choices":[{"delta":{"content":"Final answer"},"finish_reason":"stop"}]}',
+                    'data: [DONE]',
+                ])
+
+        deltas = list(_lmstudio_stream_deltas(Response()))
+        self.assertEqual(deltas, [
+            ("", "consider ", ""),
+            ("", "sources", ""),
+            ("Final answer", "", "stop"),
+        ])
+
     def test_workspace_gh_classification_checks_only_file_arguments(self):
         cwd = os.path.join(os.sep, "workspace")
         self.assertEqual(_workspace_execute_category({
@@ -1302,7 +1320,10 @@ class StreamingContractTests(unittest.TestCase):
         parser = source[start:end]
         script = parser + r'''
 const encoder = new TextEncoder();
-const wire = JSON.stringify({type: "chunk", text: "hello "}) + "\n" +
+const wire = JSON.stringify({type: "status", phase: "thinking", text: "Eva is preparing context..."}) + "\n" +
+    JSON.stringify({type: "reasoning", text: "consider "}) + "\n" +
+    JSON.stringify({type: "reasoning", text: "sources"}) + "\n" +
+    JSON.stringify({type: "chunk", text: "hello "}) + "\n" +
   JSON.stringify({type: "chunk", text: "[[EVA_LOOK]]"}) + "\n" +
   JSON.stringify({type: "done", response: {choices: [{message: {content: "hello [[EVA_LOOK]]"}}]}}) + "\n";
 const bytes = encoder.encode(wire);
@@ -1318,9 +1339,13 @@ const response = {
   }})}
 };
 const chunks = [];
-readEvaStreamingResponse(response, text => chunks.push(text)).then(data => {
+const reasoning = [];
+const statuses = [];
+readEvaStreamingResponse(response, text => chunks.push(text), event => statuses.push(event), text => reasoning.push(text)).then(data => {
   if (chunks.join("") !== "hello [[EVA_LOOK]]") process.exit(1);
   if (data.choices[0].message.content !== "hello [[EVA_LOOK]]") process.exit(2);
+    if (statuses.length !== 1 || statuses[0].text !== "Eva is preparing context...") process.exit(4);
+    if (reasoning.join("") !== "consider sources") process.exit(5);
 }).catch(() => process.exit(3));
 '''
         completed = subprocess.run(["node", "-"], input=script, text=True, capture_output=True)
@@ -1338,6 +1363,35 @@ readEvaStreamingResponse(response, text => chunks.push(text)).then(data => {
             copilot = copilot_file.read()
         self.assertIn("removeEvaStreamingBubble(provisional);\n    var content", aig)
         self.assertIn("removeEvaStreamingBubble(provisional);\n    await _copilotRenderResponse", copilot)
+
+    def test_aig_renders_preparing_status_before_dispatch(self):
+        with open(os.path.join(REPO_DIR, "core/js/providers/aig.js"), encoding="utf-8") as aig_file:
+            aig = aig_file.read()
+        bubble = aig.index("var provisional = createEvaStreamingBubble(txtOutput);")
+        preparing = aig.index("text: 'Eva is preparing context...'", bubble)
+        cognition = aig.index("if (cogDecision.active)", preparing)
+        dispatch = aig.index("var resp = await fetch(url, {", preparing)
+        self.assertLess(bubble, preparing)
+        self.assertLess(preparing, cognition)
+        self.assertLess(preparing, dispatch)
+        self.assertIn("if (!resp.ok) {\n      removeEvaStreamingBubble(provisional);", aig)
+        self.assertIn("cognitionFinalizing = true;\n      removeEvaStreamingBubble(provisional);", aig)
+        self.assertIn("onStatus: function (text)", aig)
+        self.assertIn("var isDirectQuoteRequest = !!requestedQuoteSymbol", aig)
+        self.assertIn("cogDecision = { active: false, reason: 'direct-quote' };", aig)
+        with open(os.path.join(REPO_DIR, "core", "js", "cognition.js"), encoding="utf-8") as cognition_file:
+            cognition = cognition_file.read()
+        self.assertIn("function reportStatus(text)", cognition)
+        self.assertIn("opts.onStatus(text)", cognition)
+
+    def test_aig_stream_starts_before_context_and_tool_preflight(self):
+        with open(os.path.join(REPO_DIR, "tools", "bridge", "core.py"), encoding="utf-8") as source_file:
+            source = source_file.read()
+        stream_start = source.index('"text": "Eva is preparing context..."')
+        memory_assembly = source.index("# Step 1: Build memory context.", stream_start)
+        tool_preflight = source.index('"text": "Eva is retrieving live data..."', memory_assembly)
+        self.assertLess(stream_start, memory_assembly)
+        self.assertLess(memory_assembly, tool_preflight)
 
 
 if __name__ == "__main__":

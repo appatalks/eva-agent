@@ -741,6 +741,24 @@ class LocalMCPManager:
     _tool_map: dict[tool_name -> server_name]  # routes calls
 ```
 
+### Runtime Capability Registry
+
+The bridge owns a provider-invariant capability registry at
+`GET /v1/runtime/capabilities`. It combines the allowlisted native Eva harness
+actions, governed active Skills, live local MCP tool discovery, ACP
+availability, memory backend, and confirmation requirements into one
+secret-free readiness view. Active Skills are represented as `verified-skill`
+capabilities and require an evidence-backed receipt before Eva can report them
+as complete.
+
+Every tool-enabled AIG responder receives the same bounded
+`[Runtime Capabilities - AUTHORITATIVE]` prompt view. A capability being listed
+does not bypass its confirmation or permission gate. When a required capability
+is unavailable, Eva must report that receipt rather than substitute browser,
+desktop, or model inference. The registry contract checks that native action IDs
+match the browser harness manifest and that live MCP tools appear in both the
+structured endpoint and responder prompt view.
+
 ### Tool-Calling Agent Loop
 
 `local_agent_query()` implements an iterative tool-calling agent using LM Studio:
@@ -760,8 +778,28 @@ class LocalMCPManager:
 | `web_search` | query, max_results (8) | DuckDuckGo HTML scraping + Google fallback |
 | `web_search_news` | query, max_results (8) | DDG with news-biased queries |
 | `web_fetch` | url, max_length (6000) | Extract readable text from URL |
+| `weather_current` | location | Current Google weather card or location-specific forecast reports |
+| `stock_quote` | query | Exact ticker/exchange quote receipt; prefers an optional loopback quote provider, then local `ticker.sh`, then validates Google Finance data |
 
 **Search cascade:** DuckDuckGo HTML -> DuckDuckGo Lite -> Google HTML scraping. User-Agent spoofs Chrome 131.
+
+**Local quote providers:** `stock_quote` accepts an optional
+`EVA_STOCK_QUOTE_URL` only when it is an `http://localhost`,
+`http://127.0.0.1`, or `http://[::1]` endpoint configured for the allowlisted
+`eva-web-search` MCP server. It requests `symbol` and `exchange` query
+parameters and requires a JSON receipt with the exact symbol, exchange, numeric
+price, currency, source, and optional change, percentage change, name, or
+observation timestamp.
+
+When no loopback provider returns a receipt, Eva runs the executable at
+`~/.local/share/eva/ticker.sh/ticker.sh`, or the allowlisted
+`EVA_TICKER_SH_PATH` override. The invocation is fixed to one validated ticker
+with `NO_COLOR=1`; it never forwards ticker.sh alert, rationale, or filing
+flags, because those modes can invoke cloud services. Eva accepts only the
+single expected symbol/price/change/percentage output record and identifies its
+provenance as `ticker.sh (Yahoo Finance)`. Non-loopback endpoints, ambiguous
+tickers, malformed receipts, and unavailable sources fail closed; Eva never
+asks a local model to infer a current price from a generic web page.
 
 ### Auto-Configuration
 

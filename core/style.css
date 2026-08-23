@@ -580,10 +580,19 @@ body.eva-standalone #settingsMenu {
     body.theme-lcars .settings-subhead { color: #eef5ff; }
     .learning-signal-list { display: grid; gap: 4px; max-height: 180px; overflow-y: auto; margin-top: 6px; }
     .learning-signal-row { padding: 6px 8px; border-left: 2px solid #8aa4b8; font-size: 11px; color: #59636b; overflow-wrap: anywhere; }
-    .eva-feedback { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
-    .eva-feedback-button { border: 1px solid rgba(127,127,127,.35); background: transparent; color: inherit; border-radius: 4px; padding: 3px 7px; cursor: pointer; font-size: 11px; }
-    .eva-feedback-button:hover, .eva-feedback-button:focus-visible { border-color: #5b8def; outline: 2px solid rgba(91,141,239,.25); outline-offset: 1px; }
+    .eva-feedback { display: flex; gap: 2px; margin-top: 8px; opacity: .52; transition: opacity .15s ease; }
+    .chat-bubble:hover .eva-feedback, .eva-feedback:focus-within { opacity: 1; }
+    .eva-feedback-button { display: inline-grid; place-items: center; width: 24px; height: 24px; border: 0; background: transparent; color: inherit; border-radius: 4px; padding: 0; cursor: pointer; font: 600 13px/1 sans-serif; }
+    .eva-feedback-button:hover, .eva-feedback-button:focus-visible { background: rgba(91,141,239,.12); outline: 2px solid rgba(91,141,239,.25); outline-offset: 0; }
     .eva-feedback-button.selected { background: rgba(91,141,239,.16); border-color: #5b8def; }
+    .eva-streaming-thinking .eva-streaming-text { opacity: .72; }
+    .eva-streaming-thinking .eva-streaming-text::after { content: ''; display: inline-block; width: 5px; height: 5px; margin-left: 7px; border-radius: 50%; background: currentColor; vertical-align: 2px; animation: eva-thinking-pulse 1.15s ease-in-out infinite; }
+    .eva-reasoning { margin: 0 0 10px; padding: 7px 9px; border-left: 2px solid rgba(91,141,239,.55); background: rgba(127,127,127,.07); color: inherit; font-size: 12px; }
+    .eva-reasoning summary { cursor: pointer; font-weight: 600; opacity: .72; }
+    .eva-reasoning-content { margin-top: 7px; opacity: .8; white-space: normal; }
+    .eva-reasoning-content > :first-child { margin-top: 0; }
+    .eva-reasoning-content > :last-child { margin-bottom: 0; }
+    @keyframes eva-thinking-pulse { 0%, 100% { opacity: .25; transform: scale(.72); } 50% { opacity: 1; transform: scale(1); } }
     body.theme-lcars .learning-signal-row { color: #d0defa; border-color: var(--ld-arctic-ice); }
     body.theme-lcars .background-row { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.15); }
     body.theme-lcars .background-title { color: #eef5ff; }

@@ -69,6 +69,7 @@ class MemoryRecallTests(unittest.TestCase):
             "I live in Austin, please remember that.", "I'm based in London and save that to memory.",
             "My location is Seattle; store it.", "Please save my location as San Antonio.",
             "Set my current location to Denver in memory.",
+            "Im in San Antionio, Tx, please save that to your durable memory.",
         ):
             locations = [fact for fact in _extract_explicit_user_facts(message) if fact["Relation"] == "user_location"]
             self.assertEqual(len(locations), 1, message)

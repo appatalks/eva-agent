@@ -53,6 +53,7 @@ from bridge import state as _st
 from bridge.aig_request import normalize_aig_request
 from bridge.aig_preflight import plan_aig_preflight
 from bridge.http_routes import match_patch_route
+from bridge.capabilities import runtime_capabilities, runtime_capability_prompt_view
 from protected_memory import (
     ProtectedMemoryError,
     ProtectedVault,
@@ -63,6 +64,8 @@ from protected_memory import (
 
 ACP_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 _AIG_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_LMSTUDIO_CONNECT_TIMEOUT_SECONDS = 10
+_LMSTUDIO_READ_TIMEOUT_SECONDS = 900
 
 
 def _parse_aig_backend(value):
@@ -116,6 +119,89 @@ def _lmstudio_message_text(content):
             if isinstance(part, dict) and part.get("type") == "text"
         )
     return str(content or "")
+
+
+def _lmstudio_response_parts(message):
+    """Separate local-model reasoning from its user-facing answer."""
+    message = message if isinstance(message, dict) else {}
+    content = str(message.get("content") or "")
+    reasoning_parts = []
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        value = message.get(key)
+        if isinstance(value, str) and value.strip():
+            reasoning_parts.append(value.strip())
+    details = message.get("reasoning_details")
+    if isinstance(details, list):
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            value = detail.get("text") or detail.get("content")
+            if isinstance(value, str) and value.strip():
+                reasoning_parts.append(value.strip())
+
+    content_lower = content.lower()
+    visible_parts = []
+    cursor = 0
+    while cursor < len(content):
+        start = content_lower.find("<think>", cursor)
+        if start < 0:
+            visible_parts.append(content[cursor:])
+            break
+        visible_parts.append(content[cursor:start])
+        body_start = start + len("<think>")
+        end = content_lower.find("</think>", body_start)
+        if end < 0:
+            visible_parts.append(content[start:])
+            break
+        thought = content[body_start:end].strip()
+        if thought:
+            reasoning_parts.append(thought)
+        cursor = end + len("</think>")
+    content = "".join(visible_parts)
+    reasoning = "\n\n".join(dict.fromkeys(reasoning_parts)).strip()
+    return content.strip(), reasoning
+
+
+def _lmstudio_stream_deltas(response):
+    """Yield content and reasoning deltas from an OpenAI-compatible SSE stream."""
+    for raw_line in response.iter_lines(decode_unicode=True):
+        line = str(raw_line or "").strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        choice = (event.get("choices") or [{}])[0]
+        delta = choice.get("delta") or {}
+        content = delta.get("content") or ""
+        if isinstance(content, list):
+            content = "".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+        reasoning = ""
+        for key in ("reasoning_content", "reasoning", "thinking"):
+            value = delta.get(key)
+            if isinstance(value, str):
+                reasoning += value
+        yield str(content or ""), reasoning, choice.get("finish_reason") or ""
+
+
+def _prepared_briefing_response(context, preparing=False, unavailable=None):
+    """Return a truthful direct briefing when a local model tries to defer it."""
+    context = str(context or "").strip()
+    unavailable = [str(name) for name in (unavailable or []) if name]
+    parts = ["Here is the briefing information available now."]
+    if context:
+        parts.append(context)
+    else:
+        parts.append("No prepared live briefing data is available right now.")
+    if preparing:
+        parts.append("Live news, weather, or market preparation is still finishing in the background.")
+    elif unavailable:
+        parts.append("Unavailable live sections: " + ", ".join(unavailable) + ".")
+    return "\n\n".join(parts)
 
 
 def _lmstudio_chat_messages(system_prompt, history, user_message, system_additions=None):
@@ -1174,6 +1260,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             state["first_chunk_at"] = time.perf_counter()
         self._stream_event(state, {"type": "chunk", "text": text})
 
+    def _stream_reasoning(self, state, text):
+        if text:
+            self._stream_event(state, {"type": "reasoning", "text": text})
+
     def _stream_finish(self, state, response):
         if state["finished"]:
             return
@@ -1315,6 +1405,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._models()
         elif parsed_path == "/v1/memory/backend":
             self._memory_backend_get()
+        elif parsed_path == "/v1/runtime/capabilities":
+            self._runtime_capabilities()
         elif parsed_path == "/v1/mcp":
             self._mcp_status()
         elif parsed_path == "/v1/mcp/config":
@@ -1422,6 +1514,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._mcp_configure()
         elif parsed_path == "/v1/memory/reflect":
             self._memory_reflect()
+        elif parsed_path == "/v1/memory/remember-location":
+            self._memory_remember_location()
         elif parsed_path == "/v1/memory/start-fresh":
             self._memory_start_fresh()
         elif parsed_path == "/v1/memory/atoms":
@@ -1446,6 +1540,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._protected_memory_write("artifact")
         elif parsed_path == "/v1/aig/chat":
             self._aig_chat()
+        elif parsed_path == "/v1/briefing/refresh":
+            self._briefing_refresh()
         elif parsed_path == "/v1/translate":
             self._translate()
         elif parsed_path == "/v1/telemetry":
@@ -3302,6 +3398,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
         """Expose cache state only; prepared source content stays out of prompts."""
         self._json_response(200, briefing_status())
 
+    def _runtime_capabilities(self):
+        """Return bridge-owned runtime capability readiness without secrets."""
+        self._json_response(200, runtime_capabilities())
+
+    def _briefing_refresh(self):
+        """Start a fresh bounded source pass for an explicit briefing request."""
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            content_length = 0
+        if content_length > 0:
+            self.rfile.read(min(content_length, 16 * 1024))
+        started = start_startup_briefing()
+        self._json_response(202 if started else 200, briefing_status())
+
     # ------------------------------------------------------------------
     # Doctor — structured readiness report for all Eva subsystems
     # ------------------------------------------------------------------
@@ -4657,6 +4768,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         )
         _prompt_fields = _prompt_budget_fields(data.get("prompt_budget"))
         stream_state = self._new_stream_state("aig", requested_backend) if stream_requested else None
+        if stream_state:
+            self._stream_event(stream_state, {
+                "type": "status",
+                "phase": "thinking",
+                "text": "Eva is preparing context...",
+            })
 
         selected_backend = requested_backend
         _policy_decision = {}
@@ -4791,11 +4908,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _audit_policy_selection()
         if _policy_mode != "pinned" and _policy_decision.get("reason") == "tool-route-unavailable":
             _audit_turn_failed("model-policy", "no-tool-capable-route", 503)
-            self._json_response(503, {"error": {"message": "This request needs live tools, but no tool-capable route is available."}})
+            message = "This request needs live tools, but no tool-capable route is available."
+            if stream_state:
+                self._stream_error(stream_state, message, 503)
+            else:
+                self._json_response(503, {"error": {"message": message}})
             return
         if _policy_mode != "pinned" and _policy_decision.get("reason") == "no-auto-candidate":
             _audit_turn_failed("model-policy", "no-available-responder", 503)
-            self._json_response(503, {"error": {"message": "Automatic model selection found no available responder."}})
+            message = "Automatic model selection found no available responder."
+            if stream_state:
+                self._stream_error(stream_state, message, 503)
+            else:
+                self._json_response(503, {"error": {"message": message}})
             return
         _verbose_debug_emit(
             "route",
@@ -4851,11 +4976,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if needs_acp_tools or (_st.local_mode and _tool_required_request):
             _preflight_t0 = time.perf_counter()
             print(f"[AIG] Step 2: Using {'local MCP' if _st.local_mode else 'ACP'} ({_request_type})...")
+            if stream_state:
+                self._stream_event(stream_state, {
+                    "type": "status",
+                    "phase": "thinking",
+                    "text": "Eva is retrieving live data...",
+                })
             if _st.local_mode:
                 acp_data, acp_model_used = self._retrieve_local_data(_retrieval_message)
                 if _tool_required_request and not acp_data:
                     _audit_turn_failed("local-mcp", "no-tool-result", 503)
-                    self._json_response(503, {"error": {"message": _missing_tool_result_message(True)}})
+                    message = _missing_tool_result_message(True)
+                    if stream_state:
+                        self._stream_error(stream_state, message, 503)
+                    else:
+                        self._json_response(503, {"error": {"message": message}})
                     return
                 _preflight_succeeded = bool(acp_data)
                 needs_acp_tools = False
@@ -5118,6 +5253,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "Answer directly from [Data Retrieved].\n"
             )
 
+        if not no_tools:
+            eva_system += "\n" + runtime_capability_prompt_view() + "\n"
+
         _responder_t0 = time.perf_counter()
         if model_for_response == "lmstudio":
             lms_base = (data.get("lmstudio_base_url") or "").strip()
@@ -5162,41 +5300,98 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "Do NOT say you cannot send messages. Do NOT explain limitations. "
                     "Do NOT offer alternatives. Just emit the marker."
                 )
+            if _briefing_request and not translation_mode:
+                lms_system_additions.append(
+                    "CRITICAL BRIEFING INSTRUCTION: Answer the morning briefing now from "
+                    "[Prepared Morning Briefing]. Do not promise a later search and do not emit "
+                    "[[EVA_BROWSER]] or [[EVA_DESKTOP]]. If some sections are still preparing or "
+                    "unavailable, present the available sections and name the limitation."
+                )
             lms_messages = _lmstudio_chat_messages(
                 eva_system, messages[-6:], user_message, lms_system_additions
             )
 
             try:
                 import requests as _req
+                if stream_state:
+                    self._stream_event(stream_state, {
+                        "type": "status",
+                        "phase": "thinking",
+                        "text": "Eva is thinking...",
+                    })
+                lms_payload = {
+                    "model": lms_model,
+                    "messages": lms_messages,
+                    "temperature": 0.7,
+                    "max_tokens": max_completion_tokens,
+                }
+                if stream_state:
+                    lms_payload["stream"] = True
                 lms_resp = _req.post(
                     lms_base + "/chat/completions",
-                    json={
-                        "model": lms_model,
-                        "messages": lms_messages,
-                        "temperature": 0.7,
-                        "max_tokens": max_completion_tokens,
-                    },
-                    timeout=180,
+                    json=lms_payload,
+                    stream=bool(stream_state),
+                    timeout=(_LMSTUDIO_CONNECT_TIMEOUT_SECONDS, _LMSTUDIO_READ_TIMEOUT_SECONDS),
                 )
                 if lms_resp.status_code == 200:
-                    lms_body = lms_resp.json()
-                    lms_choice = (lms_body.get("choices") or [{}])[0]
-                    response_text = lms_choice.get("message", {}).get("content", "")
-                    lms_finish_reason = lms_choice.get("finish_reason") or "stop"
+                    if stream_state:
+                        streamed_content = []
+                        streamed_reasoning = []
+                        lms_finish_reason = "stop"
+                        for content_delta, reasoning_delta, finish_reason in _lmstudio_stream_deltas(lms_resp):
+                            if reasoning_delta:
+                                streamed_reasoning.append(reasoning_delta)
+                                self._stream_reasoning(stream_state, reasoning_delta)
+                            if content_delta:
+                                streamed_content.append(content_delta)
+                                self._stream_chunk(stream_state, content_delta)
+                            if finish_reason:
+                                lms_finish_reason = finish_reason
+                        response_text, lms_reasoning = _lmstudio_response_parts({
+                            "content": "".join(streamed_content),
+                            "reasoning_content": "".join(streamed_reasoning),
+                        })
+                    else:
+                        lms_body = lms_resp.json()
+                        lms_choice = (lms_body.get("choices") or [{}])[0]
+                        response_text, lms_reasoning = _lmstudio_response_parts(lms_choice.get("message"))
+                        lms_finish_reason = lms_choice.get("finish_reason") or "stop"
                     model_used = "aig:lmstudio:" + lms_model
                 else:
                     print(f"[AIG] LM Studio HTTP error: {lms_resp.status_code}")
                     _audit_turn_failed("lmstudio", "http", lms_resp.status_code)
-                    self._json_response(502, {"error": {"message": f"LM Studio returned HTTP {lms_resp.status_code}"}})
+                    if stream_state and stream_state["started"]:
+                        self._stream_error(stream_state, f"LM Studio returned HTTP {lms_resp.status_code}", 502)
+                    else:
+                        self._json_response(502, {"error": {"message": f"LM Studio returned HTTP {lms_resp.status_code}"}})
                     return
             except Exception as _lms_err:
                 print(f"[AIG] LM Studio request failed: {_lms_err}")
                 _audit_turn_failed("lmstudio", type(_lms_err).__name__, 504)
-                self._json_response(504, {"error": {"message": f"LM Studio request failed: {_lms_err}"}})
+                if stream_state and stream_state["started"]:
+                    self._stream_error(stream_state, f"LM Studio request failed: {_lms_err}", 504)
+                else:
+                    self._json_response(504, {"error": {"message": f"LM Studio request failed: {_lms_err}"}})
                 return
 
-            print(f"[AIG] LM Studio response: {len(response_text)} chars from {lms_model}")
-            # Log the first 500 chars of the response for debugging
+            print(
+                f"[AIG] LM Studio response: content_chars={len(response_text)} "
+                f"reasoning_chars={len(lms_reasoning)} finish_reason={lms_finish_reason} "
+                f"model={lms_model}"
+            )
+
+            if _briefing_request and (
+                not response_text
+                or "[[EVA_BROWSER]]" in response_text
+                or "[[EVA_DESKTOP]]" in response_text
+            ):
+                response_text = _prepared_briefing_response(
+                    _briefing_context,
+                    preparing=_briefing_preparing,
+                    unavailable=_briefing_unavailable,
+                )
+            elif not response_text and lms_reasoning:
+                response_text = "The local model completed its thinking but did not produce a final answer."
 
             # Camera fallback: local models often ignore the [[EVA_LOOK]]
             # instruction.  If the user clearly asked about the camera/webcam
@@ -5244,7 +5439,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "model": model_used,
                 "choices": [{
                     "index": 0,
-                    "message": {"role": "assistant", "content": response_text},
+                    "message": {
+                        "role": "assistant",
+                        "content": response_text,
+                        **({"reasoning_content": lms_reasoning} if lms_reasoning else {}),
+                    },
                     "finish_reason": lms_finish_reason
                 }],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -5273,6 +5472,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 fast_route=_fast_route or "",
                 escalation=_escalation,
                 **_prompt_fields,
+                reasoning_chars=len(lms_reasoning or ""),
                 response_chars=len(response_text or ""),
                 total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
             )
@@ -5737,6 +5937,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not _st.local_mcp_manager or not _st.local_mcp_manager.alive:
             print("[DataRetrieve] Local mode: no MCP servers running")
             return "", ""
+        if _classify_request_type(str(user_message or "").lower()) == "financial-data":
+            quote_result = _st.local_mcp_manager.call_tool(
+                "stock_quote", {"query": str(user_message or "")}, timeout=20
+            )
+            quote_text = str((quote_result or {}).get("text") or "")
+            try:
+                quote = json.loads(quote_text)
+            except json.JSONDecodeError:
+                quote = {}
+            if isinstance(quote, dict) and isinstance(quote.get("price"), (int, float)):
+                print("[DataRetrieve] Local stock quote returned verified receipt")
+                return json.dumps({"stock_quote": quote}, separators=(",", ":")), "local-stock-quote"
+            if isinstance(quote, dict) and quote.get("error") == "quote_unavailable":
+                print("[DataRetrieve] Local stock quote is unavailable")
+                return "", "local-stock-quote"
         try:
             from bridge.local_mcp import local_agent_query
         except ImportError as e:
@@ -5973,6 +6188,44 @@ class BridgeHandler(BaseHTTPRequestHandler):
                              daemon=True).start()
 
         self._json_response(200, {"status": "ok"})
+
+    def _memory_remember_location(self):
+        """Persist exactly one explicit user location without a model round trip."""
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object."}})
+            return
+        user_message = data.get("user_message", "")
+        session_id = str(data.get("session_id") or "").strip()[:120]
+        turn_id = str(data.get("turn_id") or "").strip()[:120]
+        if not isinstance(user_message, str) or len(user_message) > 500:
+            self._json_response(400, {"error": {"message": "Location statement is invalid."}})
+            return
+        if turn_id and not re.fullmatch(r"turn-[A-Za-z0-9-]{8,115}", turn_id):
+            self._json_response(400, {"error": {"message": "turn_id is invalid"}})
+            return
+        facts = [
+            fact for fact in _extract_explicit_user_facts(user_message)
+            if fact.get("Entity") == "User" and fact.get("Relation") == "user_location"
+        ]
+        if len(facts) != 1:
+            self._json_response(400, {"error": {"message": "State one explicit location to save."}})
+            return
+        if _st.protected_memory_model_release:
+            self._json_response(423, {"error": {"message": "Memory updates are locked."}})
+            return
+        _mark_user_activity()
+        _post_response_reflection(
+            user_message,
+            "I've saved your location for future briefings.",
+            "eva-memory-fast-path",
+            session_id,
+            turn_id or None,
+        )
+        self._json_response(201, {"status": "saved", "relation": "user_location"})
 
     def _kusto_seed(self):
         """Apply the Eva Kusto schema seed file to a configured database."""

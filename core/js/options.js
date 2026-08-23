@@ -20,8 +20,41 @@ function createEvaStreamingBubble(txtOutput) {
 
 function appendEvaStreamingChunk(provisional, chunk, txtOutput) {
   if (!provisional || !chunk) return;
+  if (provisional.phase) {
+    provisional.phase = '';
+    provisional.value = '';
+    provisional.bubble.classList.remove('eva-streaming-thinking');
+  }
   provisional.value += String(chunk);
   provisional.text.textContent = provisional.value;
+  txtOutput.scrollTop = txtOutput.scrollHeight;
+}
+
+function updateEvaStreamingStatus(provisional, event, txtOutput) {
+  if (!provisional || !event) return;
+  provisional.phase = String(event.phase || 'working');
+  provisional.bubble.classList.toggle('eva-streaming-thinking', provisional.phase === 'thinking');
+  provisional.text.textContent = String(event.text || 'Eva is working...');
+  txtOutput.scrollTop = txtOutput.scrollHeight;
+}
+
+function appendEvaStreamingReasoning(provisional, chunk, txtOutput) {
+  if (!provisional || !chunk) return;
+  if (!provisional.reasoning) {
+    var details = document.createElement('details');
+    details.className = 'eva-reasoning eva-streaming-reasoning';
+    details.open = true;
+    var summary = document.createElement('summary');
+    summary.textContent = 'Thinking';
+    var body = document.createElement('div');
+    body.className = 'eva-reasoning-content';
+    details.appendChild(summary);
+    details.appendChild(body);
+    provisional.bubble.appendChild(details);
+    provisional.reasoning = { body: body, value: '' };
+  }
+  provisional.reasoning.value += String(chunk);
+  provisional.reasoning.body.textContent = provisional.reasoning.value;
   txtOutput.scrollTop = txtOutput.scrollHeight;
 }
 
@@ -31,7 +64,7 @@ function removeEvaStreamingBubble(provisional) {
   }
 }
 
-async function readEvaStreamingResponse(response, onChunk) {
+async function readEvaStreamingResponse(response, onChunk, onStatus, onReasoning) {
   var contentType = (response.headers.get('Content-Type') || '').toLowerCase();
   if (contentType.indexOf('application/x-ndjson') < 0 || !response.body || !response.body.getReader) {
     return response.json();
@@ -46,6 +79,10 @@ async function readEvaStreamingResponse(response, onChunk) {
     var event = JSON.parse(line);
     if (event.type === 'chunk') {
       if (typeof event.text === 'string') onChunk(event.text);
+    } else if (event.type === 'reasoning') {
+      if (typeof onReasoning === 'function') onReasoning(event.text || '');
+    } else if (event.type === 'status') {
+      if (typeof onStatus === 'function') onStatus(event);
     } else if (event.type === 'done') {
       finalResponse = event.response || null;
     } else if (event.type === 'error') {
@@ -1724,7 +1761,9 @@ async function sendData() {
     if (typeof captureProtectedMemoryFromChat === 'function' && await captureProtectedMemoryFromChat(protectedRawText)) {
       return;
     }
-    if (window.EvaHarness && typeof EvaHarness.resolveNavigationRequest === 'function') {
+    var protectedNeedsDataRetrieval = window.EvaRequestRouting && typeof EvaRequestRouting.needsDataRetrieval === 'function' &&
+      EvaRequestRouting.needsDataRetrieval(protectedRawText);
+    if (!protectedNeedsDataRetrieval && window.EvaHarness && typeof EvaHarness.resolveNavigationRequest === 'function') {
       var nativeRoute = EvaHarness.resolveNavigationRequest(protectedRawText, { directUser: true });
       if (nativeRoute) {
         evaAuditEvent('direct_route', 'started', {
@@ -3062,6 +3101,7 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
 
   var text = content.trim();
   renderOptions = renderOptions || {};
+  var reasoningText = String(renderOptions.reasoningContent || '').trim();
   var artifactNames = [];
   var surfacedAssets = [];
   var feedbackKey = renderOptions.feedbackId || ('response_' + Array.from(text).reduce(function (hash, character) {
@@ -3437,6 +3477,19 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
 
   var feedbackBubbles = txtOutput.querySelectorAll('.chat-bubble.eva-bubble');
   var feedbackBubble = feedbackBubbles.length ? feedbackBubbles[feedbackBubbles.length - 1] : null;
+  if (feedbackBubble && reasoningText) {
+    var reasoningDetails = document.createElement('details');
+    reasoningDetails.className = 'eva-reasoning';
+    var reasoningSummary = document.createElement('summary');
+    reasoningSummary.textContent = 'Thinking';
+    var reasoningBody = document.createElement('div');
+    reasoningBody.className = 'eva-reasoning-content';
+    reasoningBody.innerHTML = (typeof renderMarkdown === 'function') ? renderMarkdown(reasoningText) : escapeHtml(reasoningText);
+    reasoningDetails.appendChild(reasoningSummary);
+    reasoningDetails.appendChild(reasoningBody);
+    var responseBody = feedbackBubble.querySelector('.md');
+    if (responseBody) responseBody.insertBefore(reasoningDetails, responseBody.firstChild);
+  }
   if (feedbackBubble && typeof EvaLearning !== 'undefined' && EvaLearning) EvaLearning.attachFeedback(feedbackBubble, feedbackKey);
 
   appendArtifactLinks();
