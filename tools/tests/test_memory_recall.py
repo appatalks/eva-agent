@@ -75,6 +75,10 @@ class MemoryRecallTests(unittest.TestCase):
             self.assertEqual(len(locations), 1, message)
             self.assertNotRegex(locations[0]["Value"], r"\b(?:remember|save|store|note)\b")
 
+    def test_location_parser_rejects_repeated_separator_input(self):
+        facts = _extract_explicit_user_facts("I live in " + "/" * 10000 + " Austin.")
+        self.assertFalse(any(fact["Relation"] == "user_location" for fact in facts))
+
     def test_explicit_location_is_persisted_as_traceable_atom(self):
         persisted = _post_response_reflection_sqlite(
             "I live in austin. Please remember my location.",

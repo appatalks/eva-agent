@@ -256,20 +256,6 @@ _EXPLICIT_EMPLOYMENT_RE = re.compile(
     r"\bi (?:work|am working) (?:as|at|for)\s+([^.!?\n]{2,120})",
     re.IGNORECASE
 )
-_EXPLICIT_LOCATION_RE = re.compile(
-    r"(?:\b(?:I\s+(?:live|am\s+based|am\s+located|am\s+in)|I['’]?m\s+(?:in|based|located))\s+(?:in|at|near)?\s*"
-    r"(?P<stated_location>[a-z][a-z\s,.'-]{1,120}?)|"
-    r"\bmy\s+location\s+is\s+(?P<declared_location>[a-z][a-z\s,.'-]{1,120}?))"
-    r"(?=\s*(?:[.!?;\n]|,?\s*(?:please\s+)?(?:remember|save|store|note)\b|and\s+(?:please\s+)?(?:remember|save|store|note)\b|$))",
-    re.IGNORECASE
-)
-_EXPLICIT_LOCATION_SAVE_RE = re.compile(
-    r"\b(?:please\s+)?(?:save|store|remember|note|set)\s+(?:that\s+)?my\s+"
-    r"(?:current\s+)?location\s+(?:as|is|to)\s+"
-    r"(?P<saved_location>[a-z][a-z\s,.'-]{1,120}?)"
-    r"(?=\s*(?:[.!?;\n]|(?:,?\s+)(?:to|in)\s+memory\b|$))",
-    re.IGNORECASE
-)
 _EXPLICIT_ROLE_RE = re.compile(
     r"\bi am (?:a|an)\s+([a-z][a-zA-Z\s]{3,80}?)(?:[.!?\n]|$)",
     re.IGNORECASE
@@ -325,6 +311,51 @@ def _normalize_explicit_children(raw_value):
     return ", ".join(children)
 
 
+def _explicit_location_values(user_message):
+    """Extract supported explicit locations with bounded linear parsing."""
+    text = str(user_message or "")
+    lowered = text.lower()
+
+    def value_after(offset):
+        tail = text[offset:offset + 200]
+        tail_lower = tail.lower()
+        stops = [position for marker in (
+            ".", "!", "?", ";", "\n", ", please ", " and please ",
+            " remember", " save", " store", " note", " to memory", " in memory",
+        ) if (position := tail_lower.find(marker)) >= 0]
+        value = tail[:min(stops) if stops else len(tail)].strip(" ,")
+        if not value or not value[0].isalpha():
+            return ""
+        if not all(character.isalpha() or character in " ,.'-" for character in value):
+            return ""
+        return value
+
+    values = []
+    for prefix in (
+        "i live in ", "i am based in ", "i am located in ", "i am in ",
+        "i'm in ", "i'm based in ", "i'm located in ", "im in ",
+        "im based in ", "im located in ", "my location is ",
+    ):
+        position = lowered.find(prefix)
+        if position >= 0:
+            values.append(value_after(position + len(prefix)))
+
+    for marker in ("my current location", "my location"):
+        position = lowered.find(marker)
+        if position < 0:
+            continue
+        preceding = lowered[max(0, position - 80):position]
+        if not any(action in preceding for action in ("save", "store", "remember", "note", "set")):
+            continue
+        offset = position + len(marker)
+        for connector in (" as ", " is ", " to "):
+            if lowered.startswith(connector, offset):
+                offset += len(connector)
+                values.append(value_after(offset))
+                break
+    return values
+
+
 
 def _extract_explicit_user_facts(user_message):
     """Extract direct user-stated facts before generic entity candidates."""
@@ -378,10 +409,8 @@ def _extract_explicit_user_facts(user_message):
         add_fact(f"user_favorite_{relation_suffix}", match.group(2), 0.65)
     for match in _EXPLICIT_EMPLOYMENT_RE.finditer(user_message or ""):
         add_fact("user_employment", match.group(1), 0.8)
-    for match in _EXPLICIT_LOCATION_RE.finditer(user_message or ""):
-        add_fact("user_location", match.group("stated_location") or match.group("declared_location"), 0.8)
-    for match in _EXPLICIT_LOCATION_SAVE_RE.finditer(user_message or ""):
-        add_fact("user_location", match.group("saved_location"), 0.8)
+    for location in _explicit_location_values(user_message):
+        add_fact("user_location", location, 0.8)
     for match in _EXPLICIT_ROLE_RE.finditer(user_message or ""):
         captured = match.group(1).strip()
         first_token = captured.split()[0].lower() if captured else ""
