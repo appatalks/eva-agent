@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -195,17 +196,25 @@ def _stock_request(query):
                if candidate.group(1).upper() not in _STOCK_STOPWORDS]
     if not matches:
         return "", ()
-    match = next((candidate for candidate in matches
-                  if candidate.group(0).lstrip().startswith("$") or candidate.group(2)), None)
-    if match is None:
-        contextual = _STOCK_CONTEXT_RE.search(text)
-        if contextual:
-            contextual_symbol = contextual.group(1).upper()
-            match = next((candidate for candidate in matches
-                          if candidate.group(1).upper() == contextual_symbol
-                          and candidate.start() >= contextual.start()), None)
-    if match is None:
-        match = matches[0]
+    explicit = [candidate for candidate in matches
+                if candidate.group(0).lstrip().startswith("$") or candidate.group(2)]
+    if len(explicit) > 1:
+        return "", ()
+    if explicit:
+        match = explicit[0]
+    else:
+        finance_keyword = re.compile(r"\b(?:stock|share|ticker|quote|price)\b", re.IGNORECASE)
+        contextual = [candidate for candidate in matches
+                      if candidate.group(1).isupper()
+                      and finance_keyword.search(text[candidate.end():candidate.end() + 80])]
+        contextual.extend(
+            candidate for candidate in matches
+            if _STOCK_CONTEXT_RE.search(text[max(0, candidate.start() - 80):candidate.end()])
+        )
+        symbols = {candidate.group(1).upper() for candidate in contextual}
+        if len(symbols) != 1:
+            return "", ()
+        match = next(candidate for candidate in contextual if candidate.group(1).upper() in symbols)
     symbol = match.group(1).upper()
     has_explicit_symbol = match.group(0).lstrip().startswith("$") or bool(match.group(2))
     has_quote_context = bool(re.search(r"\b(?:stock|share|ticker|quote|price|market)\b", text, re.IGNORECASE))
@@ -266,6 +275,7 @@ def _local_stock_quote(symbol, exchange):
         "price": price,
         "source": str(receipt.get("source") or "Local quote service")[:80],
         "source_url": endpoint,
+        "retrieved_at": _quote_retrieved_at(),
     }
     for key in ("change", "change_percent", "observed_at"):
         value = receipt.get(key)
@@ -274,6 +284,10 @@ def _local_stock_quote(symbol, exchange):
         elif key == "observed_at" and isinstance(value, str):
             result[key] = value[:80]
     return result
+
+
+def _quote_retrieved_at():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _ticker_sh_path():
@@ -287,7 +301,7 @@ def _ticker_sh_path():
     return candidate
 
 
-def _ticker_sh_stock_quote(symbol, exchange):
+def _ticker_sh_stock_quote(symbol):
     """Run the fixed local ticker.sh quote path and validate its plain-text receipt."""
     executable = _ticker_sh_path()
     if not executable:
@@ -331,13 +345,13 @@ def _ticker_sh_stock_quote(symbol, exchange):
         return None
     return {
         "symbol": symbol,
-        "exchange": exchange,
         "currency": "USD",
         "price": price,
         "change": change,
         "change_percent": change_percent,
         "source": "ticker.sh (Yahoo Finance)",
         "source_url": "https://finance.yahoo.com/quote/" + symbol,
+        "retrieved_at": _quote_retrieved_at(),
     }
 
 
@@ -429,9 +443,11 @@ def google_stock_quote(query):
         local_quote = _local_stock_quote(symbol, exchange)
         if local_quote is not None:
             return local_quote
-        ticker_quote = _ticker_sh_stock_quote(symbol, exchange)
+    if len(exchanges) > 1:
+        ticker_quote = _ticker_sh_stock_quote(symbol)
         if ticker_quote is not None:
             return ticker_quote
+    for exchange in exchanges:
         url = "https://www.google.com/finance/quote/" + symbol + ":" + exchange + "?hl=en&gl=us"
         status, page = _http_get(url, timeout=12)
         if status != 200:
@@ -449,6 +465,7 @@ def google_stock_quote(query):
             "change_percent": record["change_percent"],
             "source": "Google Finance",
             "source_url": url,
+            "retrieved_at": _quote_retrieved_at(),
         }
     return {"error": "quote_unavailable", "symbol": symbol}
 

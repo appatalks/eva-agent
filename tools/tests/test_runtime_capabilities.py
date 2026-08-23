@@ -31,7 +31,9 @@ def main():
     state.acp_client = None
     try:
         with patch("bridge.cognition._active_skill_rows_for_decision", return_value=[{
-            "SkillId": "skill-playlist", "Name": "Play my YouTube playlist"
+            "SkillId": "skill-playlist", "Name": "Play my YouTube playlist",
+            "Config": '{"validation":{"status":"passed"},"approved_url":"https://example.com/playlist"}',
+            "Instructions": "Open the approved URL after explicit confirmation."
         }]):
             view = capabilities.runtime_capabilities()
         ids = {item["id"] for item in view["capabilities"]}
@@ -42,9 +44,16 @@ def main():
         skill = next(item for item in view["capabilities"] if item["id"] == "skill:skill-playlist")
         assert skill["executor"] == "verified-skill"
         assert skill["validation"] == "receipt-required"
+        assert skill["status"] == "available"
         assert next(item for item in view["capabilities"] if item["id"] == "acp-tools")["status"] == "unavailable"
         prompt = capabilities.runtime_capability_prompt_view()
         assert "mcp:fixture_tool via local-mcp:fixture" in prompt
+
+        with patch("bridge.cognition._active_skill_rows_for_decision", return_value=[{
+            "SkillId": "skill-unready", "Name": "Unvalidated Skill", "Instructions": "Use the configured URL."
+        }]):
+            unready = capabilities.runtime_capabilities()
+        assert next(item for item in unready["capabilities"] if item["id"] == "skill:skill-unready")["status"] == "needs-validation"
 
         captured = {}
         handler = BridgeHandler.__new__(BridgeHandler)

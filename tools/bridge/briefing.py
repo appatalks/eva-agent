@@ -238,7 +238,8 @@ def _prepare_worker():
                         executor.submit(_live_source, name, prompt, timeout): name
                         for name, prompt, timeout in live_sources
                     }
-                    for future, name in futures.items():
+                    for future in concurrent.futures.as_completed(futures):
+                        name = futures[future]
                         try:
                             text, status = future.result()
                         except Exception as error:

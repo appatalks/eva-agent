@@ -59,15 +59,17 @@ async function checkRequestedQuoteSection() {
 	require('vm').runInContext(source, sandbox);
 	const request = 'Hi Eva, can you give me a morning briefing for today, and include the last price and analysis of the stock PLG';
 	const verified = await sandbox.fetchBriefingQuote('http://localhost:8888', request, 'session');
-	assert.match(verified, /PLG/);
-	assert.match(verified, /Session move/);
-	const briefing = sandbox.formatPreparedBriefing({ sources: {} }, false, verified);
+	assert.strictEqual(verified.available, true);
+	assert.match(verified.content, /PLG/);
+	assert.match(verified.content, /Session move/);
+	const briefing = sandbox.formatPreparedBriefing({ sources: {} }, false, verified.content);
 	assert.match(briefing, /Requested quote/);
 	assert.match(briefing, /PLG/);
 	sandbox.fetch = async () => ({ json: async () => ({ data: '' }) });
 	const unavailable = await sandbox.fetchBriefingQuote('http://localhost:8888', request, 'session');
-	assert.match(unavailable, /PLG/);
-	assert.match(unavailable, /unavailable/);
+	assert.strictEqual(unavailable.available, false);
+	assert.match(unavailable.content, /PLG/);
+	assert.match(unavailable.content, /unavailable/);
 	const directRequest = 'What is the latest stock price of PYPL?';
 	assert.strictEqual(sandbox.requestedStockSymbol(directRequest), 'PYPL');
 }

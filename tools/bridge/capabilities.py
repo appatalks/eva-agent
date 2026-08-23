@@ -1,5 +1,6 @@
 """Bridge-owned runtime capability registry for Eva responder awareness."""
 
+import json
 import os
 
 from bridge import state as _st
@@ -97,12 +98,33 @@ def runtime_capabilities():
         name = str(skill.get("Name") or skill.get("name") or "Active Skill").strip()[:120]
         if not skill_id:
             continue
+        config = skill.get("Config") or skill.get("config") or {}
+        if isinstance(config, str):
+            try:
+                config = json.loads(config)
+            except json.JSONDecodeError:
+                config = {}
+        if not isinstance(config, dict):
+            config = {}
+        validation = config.get("validation") or config.get("Validation") or {}
+        validation_status = validation.get("status") if isinstance(validation, dict) else validation
+        prerequisites = config.get("prerequisites") or config.get("dependencies") or []
+        requires_url = "url" in (str(skill.get("Instructions") or "") + str(config)).lower()
+        has_approved_url = bool(config.get("approved_url") or config.get("external_url") or config.get("url"))
+        is_ready = (
+            str(validation_status or "").lower() in {"passed", "ready", "valid"}
+            and not prerequisites
+            and (not requires_url or has_approved_url)
+        )
         capabilities.append({
             "id": "skill:" + skill_id,
             "executor": "verified-skill",
-            "status": "available",
+            "status": "available" if is_ready else "needs-validation",
             "confirmation": "direct-user",
-            "description": name + ". Execution requires an evidence-backed receipt.",
+            "description": name + (
+                ". Execution requires an evidence-backed receipt."
+                if is_ready else ". Requires dependency and validation readiness before execution."
+            ),
             "validation": "receipt-required",
         })
     return {"version": 2, "capabilities": capabilities, "native_actions": sorted(NATIVE_HARNESS_ACTIONS)}

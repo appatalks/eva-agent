@@ -17,7 +17,7 @@ if TOOLS_DIR not in sys.path:
 
 from bridge.acp_client import ACPClient, _workspace_autonomy_block_reason, _workspace_execute_category
 from bridge import state
-from bridge.core import BridgeHandler, _lmstudio_stream_deltas, _scope_subagent_task_to_workspace
+from bridge.core import BridgeHandler, _lmstudio_response_parts, _lmstudio_stream_deltas, _scope_subagent_task_to_workspace
 from bridge.utils import _verify_workspace_github_delivery, _workspace_github_delivery_url
 from bridge.telemetry import _telemetry_summarize
 
@@ -97,6 +97,13 @@ def make_handler(wfile):
 
 
 class StreamingContractTests(unittest.TestCase):
+    def test_unclosed_think_tag_is_reasoning_not_visible_content(self):
+        content, reasoning = _lmstudio_response_parts({
+            "content": "Visible answer<think>private partial reasoning"
+        })
+        self.assertEqual(content, "Visible answer")
+        self.assertEqual(reasoning, "private partial reasoning")
+
     def test_lmstudio_sse_separates_reasoning_and_answer_deltas(self):
         class Response:
             def iter_lines(self, decode_unicode=True):

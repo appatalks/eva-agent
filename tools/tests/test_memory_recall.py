@@ -76,13 +76,14 @@ class MemoryRecallTests(unittest.TestCase):
             self.assertNotRegex(locations[0]["Value"], r"\b(?:remember|save|store|note)\b")
 
     def test_explicit_location_is_persisted_as_traceable_atom(self):
-        _post_response_reflection_sqlite(
+        persisted = _post_response_reflection_sqlite(
             "I live in austin. Please remember my location.",
             "Understood.",
             "test-model",
             "location-session",
             "turn-location-atom",
         )
+        self.assertTrue(persisted)
         atoms = state.sqlite_mem.query(
             "SELECT Entity, Relation, Value, Trust, SourceRef FROM MemoryAtoms WHERE Relation = 'user_location'"
         )

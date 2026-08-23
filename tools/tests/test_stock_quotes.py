@@ -53,6 +53,10 @@ def main():
         "PLG", ("NYSEAMERICAN", "NASDAQ", "NYSE", "OTCMKTS")
     )
     assert web._stock_request("PLG:AMEX") == ("PLG", ("NYSEAMERICAN",))
+    assert web._stock_request("Can you give me PLG stock price?") == (
+        "PLG", ("NYSEAMERICAN", "NASDAQ", "NYSE", "OTCMKTS")
+    )
+    assert web._stock_request("Compare PLG and NKE stock price") == ("", ())
     assert web._stock_request(
         "Hi Eva, please give me a morning briefing and let me know the last stock price of PLG"
     ) == ("PLG", ("NYSEAMERICAN", "NASDAQ", "NYSE", "OTCMKTS"))
@@ -63,19 +67,20 @@ def main():
           patch.object(web.subprocess, "run", return_value=web.subprocess.CompletedProcess(
               ["/opt/eva/ticker.sh", "PLG"], 0, ticker_output, "")) as ticker_run,
           patch.object(web, "_http_get", side_effect=AssertionError("ticker.sh should satisfy the quote"))):
-        quote = web.google_stock_quote("PLG:AMEX")
+        quote = web.google_stock_quote("What is PLG stock price?")
     assert quote["symbol"] == "PLG"
-    assert quote["exchange"] == "NYSEAMERICAN"
+    assert "exchange" not in quote
     assert quote["price"] == 1.64
     assert quote["change"] == 0.12
     assert quote["change_percent"] == 7.89
     assert quote["source"] == "ticker.sh (Yahoo Finance)"
+    assert quote["retrieved_at"].endswith("Z")
     assert ticker_run.call_args.args[0] == ["/opt/eva/ticker.sh", "PLG"]
 
     with (patch.object(web, "_ticker_sh_path", return_value="/opt/eva/ticker.sh"),
           patch.object(web.subprocess, "run", return_value=web.subprocess.CompletedProcess(
               ["/opt/eva/ticker.sh", "PLG"], 0, "PLG 1.64 incomplete\n", ""))):
-        assert web._ticker_sh_stock_quote("PLG", "NYSEAMERICAN") is None
+        assert web._ticker_sh_stock_quote("PLG") is None
 
     with (patch.object(web, "_ticker_sh_stock_quote", return_value=None),
           patch.object(web, "_http_get", return_value=(200, FIXTURE_PAGE))):
@@ -84,6 +89,11 @@ def main():
     assert quote["exchange"] == "NYSEAMERICAN"
     assert quote["price"] == 1.64
     assert quote["source"] == "Google Finance"
+    assert quote["retrieved_at"].endswith("Z")
+
+    with (patch.object(web, "_ticker_sh_stock_quote", side_effect=AssertionError("qualified ticker must skip ticker.sh")),
+          patch.object(web, "_http_get", return_value=(200, FIXTURE_PAGE))):
+        assert web.google_stock_quote("PLG:AMEX")["exchange"] == "NYSEAMERICAN"
 
     local_receipt = {
         "symbol": "PLG", "exchange": "NYSEAMERICAN", "price": 1.64,
@@ -94,6 +104,7 @@ def main():
           patch.object(web, "_http_get", return_value=(200, json.dumps(local_receipt)))):
         quote = web.google_stock_quote("PLG:AMEX")
     assert quote["source"] == "Fixture quote"
+    assert quote["retrieved_at"].endswith("Z")
     with patch.dict(os.environ, {"EVA_STOCK_QUOTE_URL": "https://example.com/quote"}, clear=False):
         assert web._local_stock_quote_url() == ""
 
@@ -130,6 +141,15 @@ def main():
     assert model == "local-stock-quote"
     assert json.loads(receipt)["stock_quote"]["symbol"] == "PLG"
     assert manager.calls == [("stock_quote", {"query": "What is PLG stock price?"}, 20)]
+
+    invalid_manager = QuoteManager(json.dumps({
+        "symbol": "PLG", "currency": "USD", "price": True, "source": "Fixture", "retrieved_at": "2026-08-23T00:00:00Z"
+    }))
+    state.local_mcp_manager = invalid_manager
+    try:
+        assert core.BridgeHandler._retrieve_local_data("What is PLG stock price?") == ("", "local-stock-quote")
+    finally:
+        state.local_mcp_manager = original_manager
 
     unavailable_manager = QuoteManager(json.dumps(unavailable))
     state.local_mcp_manager = unavailable_manager

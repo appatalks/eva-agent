@@ -526,7 +526,7 @@ def _maybe_promote_candidate(entity):
     """Promote candidate entities after repeated persisted or launch-local mentions."""
     key = (entity or "").strip().lower()
     if not key:
-        return None
+        return True
 
     session_count = _st.cognition_candidate_counts.get(key, 0)
     prior_mentions, prior_max_conf = _load_candidate_history(entity)
@@ -1094,7 +1094,7 @@ def _post_response_reflection_sqlite(user_message, assistant_response, model_nam
         ))
         for entity in persisted_candidates or []:
             _track_candidate_observation(entity)
-        return None
+        return persisted_candidates is not None
     finally:
         mem.close()
 
@@ -1839,9 +1839,9 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
     """Background: log conversation and trigger reflection after response."""
     # global statement removed — writes go to _st.*
     if not _st.cognition_enabled:
-        return
+        return False
     if _st.protected_memory_model_release:
-        return
+        return False
 
     # Route to SQLite-specific implementation when that backend is active
     if _resolve_memory_backend() == "sqlite":
@@ -1849,7 +1849,7 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
 
     cluster, db = _get_kusto_config()
     if not cluster or not db:
-        return
+        return False
 
     import datetime, uuid
     now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2109,6 +2109,7 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
 
     if memory_model is not None and turn_id:
         memory_model.complete_turn(turn_id)
+    return True
 
 
 def _post_response_reflection(user_message, assistant_response, model_name, conversation_id=None, turn_id=None):

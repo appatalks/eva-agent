@@ -33,6 +33,7 @@ import datetime
 import hashlib
 import hmac
 import json
+import math
 import os
 import platform
 import re
@@ -151,7 +152,9 @@ def _lmstudio_response_parts(message):
         body_start = start + len("<think>")
         end = content_lower.find("</think>", body_start)
         if end < 0:
-            visible_parts.append(content[start:])
+            thought = content[body_start:].strip()
+            if thought:
+                reasoning_parts.append(thought)
             break
         thought = content[body_start:end].strip()
         if thought:
@@ -5946,11 +5949,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 quote = json.loads(quote_text)
             except json.JSONDecodeError:
                 quote = {}
-            if isinstance(quote, dict) and isinstance(quote.get("price"), (int, float)):
+            price = quote.get("price") if isinstance(quote, dict) else None
+            retrieved_at = str(quote.get("retrieved_at") or "") if isinstance(quote, dict) else ""
+            valid_quote = (
+                isinstance(quote, dict)
+                and isinstance(price, (int, float)) and not isinstance(price, bool)
+                and math.isfinite(price) and price > 0
+                and bool(re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", str(quote.get("symbol") or "")))
+                and bool(str(quote.get("currency") or "").strip())
+                and bool(str(quote.get("source") or "").strip())
+                and bool(re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z", retrieved_at))
+            )
+            if valid_quote:
                 print("[DataRetrieve] Local stock quote returned verified receipt")
                 return json.dumps({"stock_quote": quote}, separators=(",", ":")), "local-stock-quote"
-            if isinstance(quote, dict) and quote.get("error") == "quote_unavailable":
-                print("[DataRetrieve] Local stock quote is unavailable")
+            if isinstance(quote, dict):
+                print("[DataRetrieve] Local stock quote is unavailable or invalid")
                 return "", "local-stock-quote"
         try:
             from bridge.local_mcp import local_agent_query
@@ -6218,13 +6232,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(423, {"error": {"message": "Memory updates are locked."}})
             return
         _mark_user_activity()
-        _post_response_reflection(
+        persisted = _post_response_reflection(
             user_message,
             "I've saved your location for future briefings.",
             "eva-memory-fast-path",
             session_id,
             turn_id or None,
         )
+        if persisted is not True:
+            self._json_response(503, {"error": {"message": "Location could not be committed to durable memory."}})
+            return
         self._json_response(201, {"status": "saved", "relation": "user_location"})
 
     def _kusto_seed(self):

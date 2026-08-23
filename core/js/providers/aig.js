@@ -82,7 +82,7 @@ function formatBriefingQuote(quote, requestedSymbol) {
 
 async function fetchBriefingQuote(bridgeUrl, userMessage, sessionId) {
   var symbol = requestedStockSymbol(userMessage);
-  if (!symbol) return '';
+  if (!symbol) return { content: '', available: false };
   try {
     var url = bridgeUrl.replace(/\/+$/, '') + '/v1/data/retrieve?message=' + encodeURIComponent(userMessage) + '&session_id=' + encodeURIComponent(sessionId || '');
     var response = await fetch(url, {
@@ -92,9 +92,10 @@ async function fetchBriefingQuote(bridgeUrl, userMessage, sessionId) {
     var body = await response.json().catch(function () { return {}; });
     var receipt = {};
     try { receipt = JSON.parse(String(body.data || '')); } catch (_) {}
-    return formatBriefingQuote(receipt.stock_quote || {}, symbol);
+    var quote = receipt.stock_quote || {};
+    return { content: formatBriefingQuote(quote, symbol), available: typeof quote.price === 'number' };
   } catch (_) {
-    return formatBriefingQuote({}, symbol);
+    return { content: formatBriefingQuote({}, symbol), available: false };
   }
 }
 
@@ -349,7 +350,7 @@ async function aigSend() {
       });
       if (briefingPreview && briefingPreview.parentNode) briefingPreview.parentNode.removeChild(briefingPreview);
       var requestedQuote = await fetchBriefingQuote(bridgeUrl, sQuestion, sessionId);
-      var briefingContent = formatPreparedBriefing(briefingStatus, briefingStatus.status === 'preparing', requestedQuote);
+      var briefingContent = formatPreparedBriefing(briefingStatus, briefingStatus.status === 'preparing', requestedQuote.content);
       await renderEvaResponse(briefingContent, txtOutput, {
         nativeRequest: sQuestion,
         turnId: turnId
@@ -373,16 +374,18 @@ async function aigSend() {
     }, txtOutput);
     var directQuote = await fetchBriefingQuote(bridgeUrl, sQuestion, sessionId);
     removeEvaStreamingBubble(quotePreview);
-    await renderEvaResponse(directQuote, txtOutput, {
+    await renderEvaResponse(directQuote.content, txtOutput, {
       nativeRequest: sQuestion,
       turnId: turnId
     });
-    existingMessages.push({ role: 'assistant', content: directQuote });
+    existingMessages.push({ role: 'assistant', content: directQuote.content });
     localStorage.setItem(storageKey, JSON.stringify(existingMessages));
-    lastResponse = directQuote;
+    lastResponse = directQuote.content;
     masterOutput += txtOutput.innerText + '\n';
     localStorage.setItem('masterOutput', masterOutput);
-    setStatus('info', 'Eva verified the current ' + requestedQuoteSymbol + ' quote.');
+    setStatus(directQuote.available ? 'info' : 'warn', directQuote.available
+      ? 'Eva verified the current ' + requestedQuoteSymbol + ' quote.'
+      : 'Eva could not verify the current ' + requestedQuoteSymbol + ' quote.');
     var directQuoteAutoSpeak = document.getElementById('autoSpeak');
     if (directQuoteAutoSpeak && directQuoteAutoSpeak.checked) speakText();
     return;
