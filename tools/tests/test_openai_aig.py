@@ -413,8 +413,9 @@ class OpenAIAIGEndToEndTests(unittest.TestCase):
             "stream": True,
         })
 
-        self.assertEqual([event["type"] for event in events], ["chunk", "chunk", "chunk", "done"])
-        self.assertEqual("".join(event["text"] for event in events[:-1]), events[-1]["response"]["choices"][0]["message"]["content"])
+        self.assertEqual([event["type"] for event in events], ["status", "chunk", "chunk", "chunk", "done"])
+        self.assertEqual(events[0]["text"], "Eva is preparing context...")
+        self.assertEqual("".join(event["text"] for event in events[1:-1]), events[-1]["response"]["choices"][0]["message"]["content"])
         self.assertEqual(events[-1]["response"]["model"], "aig:gpt-5+openai-direct")
         self.assertTrue(_FakeOpenAIHandler.requests[0]["payload"]["stream"])
 
@@ -453,7 +454,8 @@ class OpenAIAIGEndToEndTests(unittest.TestCase):
             "stream": True,
         })
 
-        self.assertEqual([event["type"] for event in events], ["chunk", "error"])
+        self.assertEqual([event["type"] for event in events], ["status", "chunk", "error"])
+        self.assertEqual(events[0]["text"], "Eva is preparing context...")
         self.assertEqual(events[-1]["status"], 502)
         self.assertIn("synthetic stream failure", events[-1]["message"])
         audit_path = Path(self.temp_dir.name) / "audit.jsonl"
