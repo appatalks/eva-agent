@@ -5940,7 +5940,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not _st.local_mcp_manager or not _st.local_mcp_manager.alive:
             print("[DataRetrieve] Local mode: no MCP servers running")
             return "", ""
-        if _classify_request_type(str(user_message or "").lower()) == "financial-data":
+        request_type = _classify_request_type(str(user_message or "").lower())
+        if request_type == "news-search":
+            news_result = _st.local_mcp_manager.call_tool(
+                "web_search_news", {"query": str(user_message or ""), "max_results": 8}, timeout=30
+            )
+            news_text = str((news_result or {}).get("text") or "")
+            try:
+                news_items = json.loads(news_text)
+            except json.JSONDecodeError:
+                news_items = []
+            if isinstance(news_items, list) and news_items:
+                print("[DataRetrieve] Local news search returned MCP receipt")
+                return news_text, "local-web-search"
+            print("[DataRetrieve] Local news search is unavailable or invalid")
+            return "", "local-web-search"
+        if request_type == "financial-data":
             quote_result = _st.local_mcp_manager.call_tool(
                 "stock_quote", {"query": str(user_message or "")}, timeout=20
             )

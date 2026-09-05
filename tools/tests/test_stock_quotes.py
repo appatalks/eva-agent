@@ -158,6 +158,21 @@ def main():
     finally:
         state.local_mcp_manager = original_manager
     assert (receipt, model) == ("", "local-stock-quote")
+
+    news_receipt = [{
+        "title": "Fixture headline", "url": "https://example.com/news", "source": "Fixture News",
+    }]
+    news_manager = QuoteManager(json.dumps(news_receipt))
+    state.local_mcp_manager = news_manager
+    try:
+        receipt, model = core.BridgeHandler._retrieve_local_data("What is the latest news?")
+    finally:
+        state.local_mcp_manager = original_manager
+    assert model == "local-web-search"
+    assert json.loads(receipt) == news_receipt
+    assert news_manager.calls == [(
+        "web_search_news", {"query": "What is the latest news?", "max_results": 8}, 30
+    )]
     print("stock quote tests: PASS")
 
 
