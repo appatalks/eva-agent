@@ -582,7 +582,7 @@ def _classify_request_type(msg_lower):
         return "web-search"
 
     github_operation = re.search(
-        r'\b(?:search|find|list|check|review|show|get|open|create|update|close|comment|manage|run|query|'
+        r'\b(?:search|find|list|check|review|show|get|open|create|submit|publish|post|update|close|comment|manage|run|query|'
         r'merge|delete|push|compare|monitor|trigger)\b', m
     )
     github_subject = re.search(r'\b(?:github|github\.com)\b', m)
@@ -683,7 +683,7 @@ def _needs_acp_preflight(msg_lower, request_type):
         leading_word in {"what", "how", "why", "explain", "describe"}
         or question_start.startswith("tell me about")
     )
-    operation = r"(?:search|find|list|check|review|open|create|update|close|comment|manage|run|trigger|configure|connect|deploy|query|enable|disable|start|stop|merge|delete|push|scale|restart|apply|get|describe)"
+    operation = r"(?:search|find|list|check|review|open|create|submit|publish|post|update|close|comment|manage|run|trigger|configure|connect|deploy|query|enable|disable|start|stop|merge|delete|push|scale|restart|apply|get|describe)"
     github_operation = bool(re.search(rf"\bgithub\b[^.!?]{{0,100}}\b{operation}\b|\b{operation}\b[^.!?]{{0,100}}\bgithub\b", message))
     platform_operation = bool(
         re.search(r"\b(?:azure|mcp|kubernetes|kubectl|kusto)\b", message) and
@@ -719,7 +719,7 @@ def _select_acp_tool_profile(message, request_type=None, fast_route="", no_tools
     ):
         return "kusto"
     if re.search(r"\bgithub\b", text) and re.search(
-        r"\b(?:search|find|list|check|review|open|create|update|close|comment|manage|run|query|get|describe|issue|pull request|repository|repo)\b",
+        r"\b(?:search|find|list|check|review|open|create|submit|publish|post|update|close|comment|manage|run|query|get|describe|issue|pull request|repository|repo)\b",
         text,
     ):
         return "github"

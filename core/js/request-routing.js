@@ -22,7 +22,7 @@
     if (/\b(count|summarize|filter by|group by|join|distinct|top \d|take \d)\b/.test(text)) {
       return 'kusto-operator';
     }
-    var githubOperation = /\b(?:search|find|list|check|review|show|get|open|create|update|close|comment|manage|run|query|merge|delete|push|compare|monitor|trigger)\b/.test(text);
+    var githubOperation = /\b(?:search|find|list|check|review|show|get|open|create|submit|publish|post|update|close|comment|manage|run|query|merge|delete|push|compare|monitor|trigger)\b/.test(text);
     var githubSubject = /\b(?:github|github\.com)\b/.test(text);
     var githubExplanation = /^\s*(?:what|how|why|explain|describe)\b/.test(text) || /^\s*tell me about\b/.test(text);
     if (githubSubject && githubOperation && !githubExplanation) {
@@ -41,7 +41,7 @@
       return true;
     }
     var explanatory = /^\s*(?:what|how|why|explain|describe|tell\s+me\s+about)\b/.test(text);
-    var operation = '(?:search|find|list|check|review|open|create|update|close|comment|manage|run|trigger|configure|connect|deploy|query|enable|disable|start|stop|merge|delete|push|scale|restart|apply|get|describe)';
+    var operation = '(?:search|find|list|check|review|open|create|submit|publish|post|update|close|comment|manage|run|trigger|configure|connect|deploy|query|enable|disable|start|stop|merge|delete|push|scale|restart|apply|get|describe)';
     var github = new RegExp('\\bgithub\\b[^.!?]{0,100}\\b' + operation + '\\b|\\b' + operation + '\\b[^.!?]{0,100}\\bgithub\\b').test(text);
     var platform = /\b(?:azure|mcp|kubernetes|kubectl|kusto)\b/.test(text) && new RegExp('\\b' + operation + '\\b').test(text);
     var artifact = /\b(?:create|generate|make|export|download)\b[^.!?]{0,100}\b(?:pdf|csv|json|markdown|md|txt|file|report|document|spreadsheet|invoice)\b|\bwrite\s+(?:a\s+|an\s+|the\s+)?(?:pdf|csv|json|markdown|md|txt|file|report|document|spreadsheet|invoice)\b|\bsave\s+(?:this|that|it)\s+as\s+(?:a\s+|an\s+)?(?:pdf|csv|json|markdown|md|txt|file|report|spreadsheet)\b/.test(text);

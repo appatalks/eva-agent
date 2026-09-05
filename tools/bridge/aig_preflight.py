@@ -71,3 +71,11 @@ def plan_aig_preflight(
         "tool_profile": tool_profile,
         "escalation": escalation,
     }
+
+
+def should_fallback_local_tool_to_acp(local_mode, tool_required, local_result, responder_provider, acp_available):
+    """Use ACP when automatic/pinned ACP routing outlives unavailable local tool-calling."""
+    return bool(
+        local_mode and tool_required and not local_result
+        and responder_provider == "acp" and acp_available
+    )

@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current release:** Eva 5.6.6. This document describes the matching browser UI,
+> **Current release:** Eva 5.6.7. This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -19,7 +19,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.6.6.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.6.7.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
@@ -408,7 +408,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.6.6)
+  package.json             Electron + electron-builder config (v5.6.7)
 ```
 
 ## Dependencies
@@ -504,6 +504,15 @@ only when the request needs general tool access. Profile-specific warm processes
 are isolated in the same bounded pool, so a web-search request does not inherit
 GitHub, Kusto, or computer-use tools. MCP fingerprints hash only non-secret
 configuration shape; credential values are excluded from pool keys and telemetry.
+
+GitHub mutations use the `github` profile and never fall back to browser, desktop,
+camera, or terminal markers. When local retrieval mode is active but LM Studio cannot
+drive the local MCP tools, an ACP-selected request falls back to the authenticated
+GitHub-profile ACP client. Explicit continuation phrases retain the most recent pending
+GitHub mutation intent; status questions such as “Did you do it?” never rerun the
+mutation and answer only from the immediately preceding verified receipt. Issue creation
+is complete only when the tool result includes its canonical
+`https://github.com/owner/repository/issues/number` URL.
 
 ```python
   acp_pool: dict[profiled_model_key -> ACPClient]  # model + profile + config
@@ -1917,7 +1926,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.6.6.AppImage'
+./dist/'Eva Standalone-5.6.7.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace

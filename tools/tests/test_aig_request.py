@@ -8,7 +8,15 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from bridge.aig_request import normalize_aig_request
+from bridge.aig_request import (
+    github_continuation_routing_message,
+    github_issue_creation_request,
+    github_mutation_request,
+    normalize_aig_request,
+    verified_action_status_reply,
+    verified_github_issue_url,
+)
+from bridge.utils import _classify_request_type
 
 
 def parse_backend(value):
@@ -82,6 +90,51 @@ class AigRequestContractTests(unittest.TestCase):
         self.assertFalse(self.normalize({"user_message": "fix the alerts"})["acp_auto_approve"])
         with self.assertRaisesRegex(ValueError, "acp_auto_approve"):
             self.normalize({"user_message": "fix the alerts", "acp_auto_approve": "true"})
+
+    def test_github_mutation_continuation_restores_original_intent(self):
+        original = (
+            "Audit the Eva harness and submit a sanitized issue to "
+            "https://github.com/example/eva-agent/issues."
+        )
+        messages = [
+            {"role": "user", "content": original},
+            {"role": "assistant", "content": "I will audit it first."},
+            {"role": "user", "content": "Sounds good, please proceed"},
+        ]
+        routed = github_continuation_routing_message(
+            messages, "Sounds good, please proceed", _classify_request_type
+        )
+        self.assertIn(original, routed)
+        self.assertTrue(github_mutation_request(routed))
+        self.assertEqual(_classify_request_type(routed.lower()), "github-data")
+        self.assertEqual(
+            github_continuation_routing_message(messages, "Did you do it?", _classify_request_type),
+            "Did you do it?",
+        )
+
+    def test_action_status_uses_only_immediately_preceding_receipt(self):
+        created = verified_action_status_reply([
+            {"role": "assistant", "content": "Created https://github.com/example/eva-agent/issues/42"},
+            {"role": "user", "content": "Did you do it?"},
+        ], "Did you do it?")
+        self.assertEqual(created, "Yes. The GitHub issue was created: https://github.com/example/eva-agent/issues/42")
+        missing = verified_action_status_reply([
+            {"role": "assistant", "content": "The issue has not been created; no execution receipt was returned."},
+            {"role": "user", "content": "did you do it?"},
+        ], "did you do it?")
+        self.assertEqual(missing, "No. I do not have a verified completion receipt for that action.")
+        self.assertEqual(verified_action_status_reply([], "What did you find?"), "")
+
+    def test_issue_creation_requires_canonical_url_receipt(self):
+        request = "Submit an issue to https://github.com/example/eva-agent/issues."
+        self.assertTrue(github_issue_creation_request(request))
+        self.assertTrue(github_mutation_request(request))
+        self.assertEqual(
+            verified_github_issue_url("Created https://github.com/example/eva-agent/issues/42"),
+            "https://github.com/example/eva-agent/issues/42",
+        )
+        self.assertEqual(verified_github_issue_url("The issue was probably created."), "")
+        self.assertFalse(github_issue_creation_request("List GitHub issues for example/eva-agent."))
 
 
 if __name__ == "__main__":

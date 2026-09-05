@@ -8,7 +8,7 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from bridge.aig_preflight import plan_aig_preflight
+from bridge.aig_preflight import plan_aig_preflight, should_fallback_local_tool_to_acp
 
 
 def needs_preflight(message, request_type):
@@ -70,6 +70,12 @@ class AigPreflightTests(unittest.TestCase):
         report = self.plan("Please give me my morning report", "news-search")
         self.assertTrue(report["briefing_request"])
         self.assertFalse(report["needs_acp_tools"])
+
+    def test_local_tool_failure_falls_back_only_to_selected_acp_route(self):
+        self.assertTrue(should_fallback_local_tool_to_acp(True, True, "", "acp", True))
+        self.assertFalse(should_fallback_local_tool_to_acp(True, True, "", "lmstudio", True))
+        self.assertFalse(should_fallback_local_tool_to_acp(True, True, "", "acp", False))
+        self.assertFalse(should_fallback_local_tool_to_acp(True, True, "receipt", "acp", True))
 
 
 if __name__ == "__main__":

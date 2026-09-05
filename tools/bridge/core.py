@@ -51,8 +51,15 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 # Aliased with underscore prefix so existing code keeps working as-is.
 from bridge import config as _cfg
 from bridge import state as _st
-from bridge.aig_request import normalize_aig_request
-from bridge.aig_preflight import plan_aig_preflight
+from bridge.aig_request import (
+    github_continuation_routing_message,
+    github_issue_creation_request,
+    github_mutation_request,
+    normalize_aig_request,
+    verified_action_status_reply,
+    verified_github_issue_url,
+)
+from bridge.aig_preflight import plan_aig_preflight, should_fallback_local_tool_to_acp
 from bridge.http_routes import match_patch_route
 from bridge.capabilities import runtime_capabilities, runtime_capability_prompt_view
 from protected_memory import (
@@ -4795,6 +4802,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         import re as _re
         _routing_message = _effective_routing_message(user_message, internal, recall_query)
+        if not internal:
+            _routing_message = github_continuation_routing_message(
+                messages, _routing_message, _classify_request_type
+            )
+        _verified_status_reply = verified_action_status_reply(messages, user_message) if not internal else ""
         msg_lower = _routing_message.lower()
         _request_type = _classify_request_type(msg_lower)
         _fast_route = _classify_fast_route(_routing_message)
@@ -4816,6 +4828,34 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "phase": "thinking",
                 "text": "Eva is preparing context...",
             })
+
+        if _verified_status_reply:
+            response = {
+                "id": f"aig-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": "aig:verified-action-status",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": _verified_status_reply},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            }
+            if stream_state:
+                self._stream_chunk(stream_state, _verified_status_reply)
+                stream_state["route"] = "verified-action-status"
+                stream_state["model"] = response["model"]
+                self._stream_finish(stream_state, response)
+            else:
+                self._json_response(200, response)
+            audit_event(
+                "turn.response", turn_id, "completed",
+                model=response["model"], request_type="action-status",
+                response_chars=len(_verified_status_reply),
+                total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
+            )
+            return
 
         selected_backend = requested_backend
         _policy_decision = {}
@@ -5026,7 +5066,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 })
             if _st.local_mode:
                 acp_data, acp_model_used = self._retrieve_local_data(_retrieval_message)
-                if _tool_required_request and not acp_data:
+                if should_fallback_local_tool_to_acp(
+                    _st.local_mode, _tool_required_request, acp_data,
+                    responder_provider, bool(_st.acp_client and _st.acp_client.alive),
+                ):
+                    needs_acp_tools = True
+                    print(f"[AIG] Local tool-calling unavailable; falling back to ACP profile {_tool_profile}")
+                elif _tool_required_request and not acp_data:
                     _audit_turn_failed("local-mcp", "no-tool-result", 503)
                     message = _missing_tool_result_message(True)
                     if stream_state:
@@ -5034,8 +5080,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     else:
                         self._json_response(503, {"error": {"message": message}})
                     return
-                _preflight_succeeded = bool(acp_data)
-                needs_acp_tools = False
+                else:
+                    _preflight_succeeded = bool(acp_data)
+                    needs_acp_tools = False
             # Ensure ACP is alive before attempting tool calls.
             # The CLI may have died between requests (idle timeout, crash).
             if needs_acp_tools and (not _st.acp_client or not _st.acp_client.alive):
@@ -5078,6 +5125,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "MCP or gh is unavailable, say so plainly without opening a browser.\n\n"
                     f"{_retrieval_message}"
                 )
+                if github_issue_creation_request(_routing_message):
+                    acp_prompt += (
+                        "\n\nCompletion contract: create the issue only after the user-approved request is clear. "
+                        "A successful final result must include the canonical https://github.com/owner/repository/issues/number URL. "
+                        "If no canonical issue URL is returned, report that creation is unverified."
+                    )
             else:
                 # General request — let ACP use whatever tools it deems appropriate
                 acp_prompt = (
@@ -5113,6 +5166,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._stream_error(stream_state, message, 503)
             else:
                 self._json_response(503, {"error": {"message": message}})
+            return
+        if github_issue_creation_request(_routing_message) and acp_data and not verified_github_issue_url(acp_data):
+            _audit_turn_failed("github", "missing-issue-receipt", 502)
+            message = "GitHub did not return a canonical issue URL, so issue creation is unverified."
+            if stream_state and stream_state["started"]:
+                self._stream_error(stream_state, message, 502)
+            else:
+                self._json_response(502, {"error": {"message": message}})
             return
 
         # Step 3: Build the final prompt for Eva's responder model
@@ -5547,6 +5608,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             response_text = acp_data
             model_used = f"aig:{active_data_model}+acp-data"
             print("[AIG] Row-recall mode: returning ACP tool output directly")
+        elif _request_type == "github-data" and github_mutation_request(_routing_message) and acp_data:
+            active_action_model = acp_model_used or (_st.acp_client.model if _st.acp_client else "copilot-acp")
+            response_text = acp_data
+            model_used = f"aig:{active_action_model}+github-receipt"
+            print("[AIG] GitHub mutation: returning verified tool receipt directly")
         elif raw_output_requested and needs_acp_tools and not acp_data:
             response_text = "Raw query mode requested but no tool output was returned. Retry with explicit KQL."
             model_used = "aig:raw-acp-unavailable"

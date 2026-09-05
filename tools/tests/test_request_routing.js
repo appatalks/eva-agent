@@ -15,6 +15,7 @@ assert.strictEqual(routing.needsDataRetrieval('What is the current weather?'), t
 assert.strictEqual(routing.needsDataRetrieval('Search the web for the latest NASA news.'), true);
 assert.strictEqual(routing.needsDataRetrieval('Search GitHub for the parser.'), true);
 assert.strictEqual(routing.classifyRequestType('List open GitHub issues for owner/repository.'), 'github-data');
+assert.strictEqual(routing.classifyRequestType('Submit an issue to https://github.com/example/eva-agent/issues.'), 'github-data');
 assert.strictEqual(routing.isGitHubOperation('Review GitHub pull requests for owner/repository.'), true);
 assert.strictEqual(routing.isGitHubOperation('Explain GitHub merge conflicts.'), false);
 assert.strictEqual(routing.needsDataRetrieval('Create a PDF report.'), true);
