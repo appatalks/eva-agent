@@ -172,7 +172,7 @@ var EvaHarness = (function() {
     var remediationAction = /\b(?:resolve|fix|remediate|address|update)\b/i.test(request);
     var issueDelivery = /\b(?:create|open|submit|publish|post)\b[\s\S]{0,80}\bissues?\b|\bissues?\b[\s\S]{0,80}\b(?:create|open|submit|publish|post)\b/i.test(request);
     var repositoryAudit = /\b(?:audit|review|inspect|check|validate|assess|find|capabilit(?:y|ies)|gaps?)\b/i.test(request);
-    if (githubRepository && ((securityRequest && remediationAction) || (issueDelivery && repositoryAudit))) {
+    if (githubRepository && ((securityRequest && remediationAction) || issueDelivery)) {
       return {
         action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Remediation',
         repositoryName: githubRepository[1], objective: request.replace(/[.!?]+$/g, '').trim()
@@ -321,6 +321,13 @@ var EvaHarness = (function() {
         runId: lastRemediation.runId
       };
     }
+    if (directUser) {
+      var explicitRemediation = repositoryRemediationRoute(rawPhrase);
+      if (explicitRemediation) {
+        persistRemediationContext(explicitRemediation);
+        return explicitRemediation;
+      }
+    }
     var workspaceDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:current\s+)?workspaces?\b|\bworkspaces?\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
     if (workspaceDescription) return { action: 'describe_workspaces', target: 'workspaces', label: 'Workspaces' };
     var assetsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:assets?|artifacts?|generated files?|workspace files?)\b|\b(?:assets?|artifacts?|generated files?|workspace files?)\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
@@ -393,11 +400,6 @@ var EvaHarness = (function() {
       return { action: 'list_github_repositories', target: 'workspaces', label: 'GitHub Repositories' };
     }
     if (directUser) {
-      var explicitRemediation = repositoryRemediationRoute(rawPhrase);
-      if (explicitRemediation) {
-        persistRemediationContext(explicitRemediation);
-        return explicitRemediation;
-      }
       var pullRequestFollowUp = /\b(?:create|open|raise|submit|publish)\b[\s\S]{0,32}\b(?:pull\s+request|pr)\b|\b(?:create|open|raise|submit|publish)\s+(?:it|that|the)\b[\s\S]{0,16}\bpr\b/i.test(rawPhrase);
       if (pullRequestFollowUp) {
         var pullRequestRemediation = lastRemediation || recentRemediationContext();

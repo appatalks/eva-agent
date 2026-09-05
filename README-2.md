@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current release:** Eva 5.6.8. This document describes the matching browser UI,
+> **Current release:** Eva 5.6.9. This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -19,7 +19,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.6.8.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.6.9.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
@@ -408,7 +408,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.6.8)
+  package.json             Electron + electron-builder config (v5.6.9)
 ```
 
 ## Dependencies
@@ -520,6 +520,9 @@ run immediately, exposes it in Workspaces and Agent Operations, continues autono
 and posts a completion notification. The persisted remediation context includes the run
 ID, so continuation and status questions survive later turns and application restarts;
 status responses are read from the actual workspace run and its verified GitHub receipt.
+The Workspace Monitor stays silent during startup and idle heartbeat polling; it speaks
+or posts into chat only for real run transitions, approval requests, completion, or
+failure.
 
 ```python
   acp_pool: dict[profiled_model_key -> ACPClient]  # model + profile + config
@@ -1933,7 +1936,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.6.8.AppImage'
+./dist/'Eva Standalone-5.6.9.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace

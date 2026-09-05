@@ -530,6 +530,11 @@ async function main() {
   assert.strictEqual(auditIssueRoute.repositoryName, fixtureRepository);
   const auditIssueResult = await harness.execute(auditIssueRoute, { source: 'voice', userRequest: auditIssueRequest });
   assert.strictEqual(auditIssueResult.ok, true);
+  const directIssueRequest = 'Submit an issue to ' + fixtureRepositoryUrl + '/issues describing your current feelings.';
+  const directIssueRoute = harness.resolveNavigationRequest(directIssueRequest, { directUser: true });
+  assert.strictEqual(directIssueRoute.action, 'run_repository_remediation');
+  assert.strictEqual(directIssueRoute.repositoryName, fixtureRepository);
+  assert.strictEqual((await harness.execute(directIssueRoute, { source: 'voice', userRequest: directIssueRequest })).ok, true);
   const issueFollowUp = harness.resolveNavigationRequest('I made some updates, please go ahead and submit the issue.', { directUser: true });
   assert.strictEqual(issueFollowUp.action, 'describe_repository_remediation');
   assert.strictEqual(issueFollowUp.runId, '12345678-1234-4123-8123-123456789abc');
@@ -539,6 +544,12 @@ async function main() {
   assert.strictEqual(remediationStatusResult.ok, true);
   assert.strictEqual(remediationStatusResult.data.outcome, 'running');
   assert.strictEqual(remediationStatusRunId, '12345678-1234-4123-8123-123456789abc');
+  const evaAgentIssueRoute = harness.resolveNavigationRequest(
+    'Eva, submit an issue to https://github.com/appatalks/eva-agent/issues describing your current feelings.',
+    { directUser: true }
+  );
+  assert.strictEqual(evaAgentIssueRoute.action, 'run_repository_remediation');
+  assert.strictEqual(evaAgentIssueRoute.repositoryName, 'appatalks/eva-agent');
   const dependabotUrlRequest = 'Eva please review the Dependabot alerts at: ' + fixtureRepositoryUrl + '/security/dependabot and then please address them in a Pull request';
   const normalizedDependabotUrlRequest = dependabotUrlRequest.replace(/^Eva\s+/i, '');
   const dependabotUrlRoute = harness.resolveNavigationRequest(dependabotUrlRequest, { directUser: true });

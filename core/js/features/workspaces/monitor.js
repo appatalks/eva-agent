@@ -651,18 +651,6 @@ var EvaWorkspaces = (function() {
     return state.runs.filter(function(run) { return run.status === 'active'; });
   }
 
-  function monitorSummary() {
-    var ready = activeRuns();
-    if (!ready.length) return 'Eva monitor: no ready coding workspaces.';
-    var run = ready.find(function(item) { return item.id === state.selectedRunId; }) || ready[0];
-    var changes = Number(run.checkout && run.checkout.dirtyFileCount || 0);
-    var agentStatus = run.agent && run.agent.status || 'starting';
-    return 'Eva monitor: ' + ready.length + ' coding workspace' + (ready.length === 1 ? '' : 's') + '. ' +
-      (run.project ? run.project.name + ' agent is ' + agentStatus : 'The selected agent is ' + agentStatus) +
-      (changes ? ' with ' + changes + ' changed file' + (changes === 1 ? '.' : 's.') : ' and a clean worktree.') +
-      (agentStatus === 'done' ? ' Review the result when ready.' : ' Eva is monitoring progress.');
-  }
-
   function addMonitorActivity(message, kind, allowVoice, forceVoice, run) {
     run = run || state.runs.find(function(item) { return item.id === state.selectedRunId; });
     var entry = {
@@ -1430,11 +1418,6 @@ var EvaWorkspaces = (function() {
       narrateRunChanges(state.runs);
       if (changed) {
         state.monitorSignature = signature;
-        addMonitorActivity(monitorSummary(), 'change', true);
-      } else if (activeRuns().length && Date.now() - state.lastPeriodicNoteAt >= 300000) {
-        state.lastPeriodicNoteAt = Date.now();
-        addMonitorActivity(monitorSummary(), 'heartbeat', true);
-        shouldRender = true;
       }
       if (state.workbenchOpen && shouldRender) renderWorkbench();
       var quickPanel = panel();

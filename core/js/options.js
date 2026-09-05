@@ -1765,7 +1765,14 @@ async function sendData() {
       EvaRequestRouting.needsDataRetrieval(protectedRawText);
     var nativeRoute = window.EvaHarness && typeof EvaHarness.resolveNavigationRequest === 'function'
       ? EvaHarness.resolveNavigationRequest(protectedRawText, { directUser: true }) : null;
-    if ((!protectedNeedsDataRetrieval || (nativeRoute && nativeRoute.action === 'describe_memory_titles')) && nativeRoute) {
+    var nativeRetrievalActions = [
+      'describe_memory_titles', 'list_github_repositories', 'continue_github_repositories',
+      'authorize_github', 'import_github', 'import_github_selection', 'describe_github_pull_request',
+      'merge_github_pull_request', 'delete_github_pull_request_branch',
+      'run_repository_remediation', 'describe_repository_remediation'
+    ];
+    var nativeRouteOwnsRetrieval = nativeRoute && nativeRetrievalActions.indexOf(nativeRoute.action) >= 0;
+    if ((!protectedNeedsDataRetrieval || nativeRouteOwnsRetrieval) && nativeRoute) {
         evaAuditEvent('direct_route', 'started', {
           correlation_id: auditTurnId,
           action: nativeRoute.action || 'navigate',
