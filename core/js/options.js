@@ -1763,9 +1763,9 @@ async function sendData() {
     }
     var protectedNeedsDataRetrieval = window.EvaRequestRouting && typeof EvaRequestRouting.needsDataRetrieval === 'function' &&
       EvaRequestRouting.needsDataRetrieval(protectedRawText);
-    if (!protectedNeedsDataRetrieval && window.EvaHarness && typeof EvaHarness.resolveNavigationRequest === 'function') {
-      var nativeRoute = EvaHarness.resolveNavigationRequest(protectedRawText, { directUser: true });
-      if (nativeRoute) {
+    var nativeRoute = window.EvaHarness && typeof EvaHarness.resolveNavigationRequest === 'function'
+      ? EvaHarness.resolveNavigationRequest(protectedRawText, { directUser: true }) : null;
+    if ((!protectedNeedsDataRetrieval || (nativeRoute && nativeRoute.action === 'describe_memory_titles')) && nativeRoute) {
         evaAuditEvent('direct_route', 'started', {
           correlation_id: auditTurnId,
           action: nativeRoute.action || 'navigate',
@@ -1805,7 +1805,6 @@ async function sendData() {
           ];
           if (spokenNativeActions.indexOf(nativeRoute.action) !== -1 && nativeResult.ok && typeof speakText === 'function') speakText(nativeResult.message);
           return;
-        }
       }
     }
     if (window.EvaRequestRouting && typeof EvaRequestRouting.isGitHubOperation === 'function' &&

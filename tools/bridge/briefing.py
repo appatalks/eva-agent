@@ -5,13 +5,16 @@ import json
 import os
 import threading
 import time
+from datetime import timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 from bridge import config as _cfg
 from bridge import state as _st
 from bridge.audit import audit_event
 
 _briefing_lock = threading.RLock()
-_LIVE_TOOL_READY_TIMEOUT_SECONDS = 20
+_LIVE_TOOL_READY_TIMEOUT_SECONDS = 10
+_LIVE_SEARCH_MAX_AGE = timedelta(hours=36)
 
 
 def _new_state():
@@ -26,14 +29,20 @@ def _new_state():
 
 def briefing_status():
     with _briefing_lock:
-        return dict(_st.startup_briefing)
+        state = _st.startup_briefing
+        snapshot = dict(state)
+        snapshot["sources"] = {
+            name: dict(source) for name, source in (state.get("sources") or {}).items()
+            if isinstance(source, dict)
+        }
+        return snapshot
 
 
 def briefing_unavailable_sources(status=None):
     """Name required live sources that cannot support a complete briefing."""
     state = status if isinstance(status, dict) else briefing_status()
     sources = state.get("sources") or {}
-    return [name for name in ("news", "markets") if (sources.get(name) or {}).get("status") != "ready"]
+    return [name for name in ("weather", "news", "markets") if (sources.get(name) or {}).get("status") != "ready"]
 
 
 def briefing_prompt_context(allow_partial=False):
@@ -111,12 +120,66 @@ def _briefing_weather_location():
     return str(decision.get("location") or "")[:120]
 
 
-def _format_search_receipt(text):
+def _fresh_search_results(text, now=None):
+    """Return dated search results retrieved recently enough for a live briefing."""
     text = str(text or "").strip()
     try:
         results = json.loads(text)
     except (TypeError, ValueError, json.JSONDecodeError):
-        return text
+        return []
+    if not isinstance(results, list):
+        return []
+    current = now or _cfg.utc_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    oldest = current - _LIVE_SEARCH_MAX_AGE
+    fresh = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        try:
+            published = parsedate_to_datetime(str(item.get("date") or "").strip())
+        except (TypeError, ValueError, IndexError):
+            continue
+        if published.tzinfo is None:
+            published = published.replace(tzinfo=timezone.utc)
+        if oldest <= published.astimezone(timezone.utc) <= current:
+            fresh.append(item)
+    return fresh
+
+
+def _current_weather_results(text):
+    """Return only structured current-condition receipts from the weather tool."""
+    try:
+        results = json.loads(str(text or "").strip())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(results, list):
+        return []
+    trusted = [
+        item for item in results
+        if isinstance(item, dict)
+        and str(item.get("source") or "").strip() in {
+            "Google Weather", "AccuWeather", "The Weather Channel",
+            "The Weather Network", "National Weather Service",
+        }
+        and str(item.get("kind") or "") in {"current", "forecast"}
+        and str(item.get("snippet") or "").strip()
+        and str(item.get("retrieved_at") or "").strip()
+    ]
+    kinds = {str(item.get("kind") or "") for item in trusted}
+    return trusted if kinds == {"current", "forecast"} else []
+
+
+def _format_search_receipt(text, results=None):
+    text = str(text or "").strip()
+    if results is None:
+        try:
+            results = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return text
     if not isinstance(results, list):
         return text
     lines = []
@@ -140,14 +203,8 @@ def _format_search_receipt(text):
     return "\n".join(lines).strip() or text
 
 
-def _search_receipt_has_results(text):
-    text = str(text or "").strip()
-    try:
-        results = json.loads(text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        lowered = text.lower()
-        return bool(text) and not lowered.startswith("error:") and "temporarily unavailable" not in lowered
-    return isinstance(results, list) and any(
+def _search_receipt_has_results(results):
+    return any(
         isinstance(item, dict)
         and bool(str(item.get("title") or "").strip())
         and bool(str(item.get("url") or item.get("snippet") or "").strip())
@@ -172,16 +229,29 @@ def _live_source(name, prompt, timeout):
             arguments = {"location": location}
         elif name == "news":
             tool_name = "web_search_news"
-            arguments = {"query": "top national and world news headlines today", "max_results": 6}
+            arguments = {"query": "United States world news when:1d", "max_results": 6}
         else:
             tool_name = "web_search_news"
             arguments = {"query": "S&P 500 Dow Nasdaq US stock market today", "max_results": 6}
         result = manager.call_tool(tool_name, arguments, timeout=timeout)
         text = str((result or {}).get("text") or "").strip()
-        if text and _search_receipt_has_results(text):
-            return _format_search_receipt(text), "ready"
+        if name == "weather":
+            weather_results = _current_weather_results(text)
+            if weather_results:
+                return _format_search_receipt(text, weather_results), "ready"
+            return "Current weather conditions were not returned.", "failed"
+        fresh_results = _fresh_search_results(text)
+        if _search_receipt_has_results(fresh_results):
+            return _format_search_receipt(text, fresh_results), "ready"
+        try:
+            receipt = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            receipt = None
+        if isinstance(receipt, list):
+            label = "headlines" if name == "news" else "market items"
+            return "No timely current " + label + " were returned.", "failed"
         detail = _format_search_receipt(text) if text else str((result or {}).get("error") or "")
-        return detail or "Local live-data retrieval returned no result.", "failed"
+        return detail or "Local live-data retrieval returned no timely result.", "failed"
     from bridge.background import _bg_agent_prompt
     context = {"backend": "sqlite", "cluster": None, "database": None}
     text, error = _bg_agent_prompt(prompt, context, timeout=timeout)
@@ -220,9 +290,9 @@ def _prepare_worker():
         mail_text, mail_status = _mail_source()
         _set_source("mail", mail_status, mail_text)
         live_sources = (
-            ("news", "Provide a concise current morning news briefing with sources. Do not invent facts.", 60),
-            ("weather", "Provide the current weather and short forecast for the learned user location, if available. Do not invent a location or facts.", 45),
-            ("markets", "Provide a concise current market snapshot for configured watched symbols, if available. Do not invent prices.", 60),
+            ("news", "Provide a concise current morning news briefing with sources. Do not invent facts.", 30),
+            ("weather", "Provide the current weather and short forecast for the learned user location, if available. Do not invent a location or facts.", 25),
+            ("markets", "Provide concise recent U.S. market news for the most recently completed trading session, with sources. Do not invent prices.", 30),
         )
         if _wait_for_live_tools():
             if _st.local_mode:
@@ -251,7 +321,7 @@ def _prepare_worker():
 
         with _briefing_lock:
             state = _st.startup_briefing
-            required_sources = ("news", "markets")
+            required_sources = ("weather", "news", "markets")
             state["status"] = "ready" if all(
                 (state["sources"].get(name) or {}).get("status") == "ready" for name in required_sources
             ) else "partial"
@@ -266,7 +336,8 @@ def _prepare_worker():
             _st.startup_briefing["summary"] = "Morning briefing preparation failed."
         audit_event("briefing.prepare", correlation_id, "failed", error_type=type(error).__name__)
     finally:
-        _st.startup_briefing_thread = None
+        with _briefing_lock:
+            _st.startup_briefing_thread = None
 
 
 def start_startup_briefing():

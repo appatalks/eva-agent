@@ -22,11 +22,31 @@ _ARTIFACTS_DIR = os.path.join(
 )
 _TOOLS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MCP_MODERN_PROTOCOL_VERSION = "2026-07-28"
+_MCP_LEGACY_PROTOCOL_VERSION = "2025-06-18"
 _MCP_DISCOVERY_TIMEOUT_SECONDS = 3
 _MCP_TOOL_LIST_PAGE_MAX = 32
 _MCP_CLIENT_INFO = {"name": "eva-local-mcp", "version": "1.0.0"}
 # Eva consumes tools; it does not yet offer elicitation, subscriptions, or extensions.
 _MCP_CLIENT_CAPABILITIES = {}
+_GITHUB_REMOTE_MCP_ENDPOINT = "https://api.githubcopilot.com/mcp/"
+
+
+def _docker_daemon_available():
+    """Return whether Docker can launch the GitHub MCP container."""
+    try:
+        completed = subprocess.run(
+            ["docker", "info"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("MCP server 'github-mcp-server': command not found: docker")
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
 
 
 def _resolve_lmstudio_model(base_url, requested_model="", timeout=3):
@@ -66,10 +86,7 @@ def _mcp_launch_spec(name):
     if name == "azure-mcp-server":
         return "npx", ["-y", "@azure/mcp@3.0.0-beta.31", "server", "start"]
     if name == "github-mcp-server":
-        return "docker", [
-            "run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
-            "ghcr.io/github/github-mcp-server",
-        ]
+        return "remote", []
     if name == "kusto-mcp-server":
         return sys.executable, [os.path.join(_TOOLS_DIR, "kusto_mcp.py")]
     if name == "computer-use-linux":
@@ -138,6 +155,8 @@ class MCPServer:
 
     def _spawn(self):
         """Start a fresh server process and its stdio readers."""
+        if self.name == "github-mcp-server" and not _docker_daemon_available():
+            raise RuntimeError("MCP server 'github-mcp-server': Docker daemon unavailable")
         cmd = [self.command] + self.args
         process_env = _safe_child_environment({"EVA_ARTIFACTS_DIR": _ARTIFACTS_DIR})
         process_env.update(_safe_child_environment(self.env))
@@ -182,7 +201,7 @@ class MCPServer:
         return {"text": json.dumps(result)}
 
     def _negotiate_protocol(self):
-        """Negotiate the supported modern MCP protocol."""
+        """Prefer modern discovery, with a fallback for standard MCP servers."""
         discover = self._modern_discover()
         if (
             discover is None
@@ -202,6 +221,13 @@ class MCPServer:
             supported = self._supported_versions(discover.get("error") or {})
             self._raise_unsupported_protocol(supported)
 
+        if self._can_fallback_to_legacy(discover):
+            # Standard servers may exit after rejecting the extension discovery request.
+            self.stop()
+            self._spawn()
+            self._select_legacy_protocol()
+            return
+
         raise RuntimeError(f"MCP server '{self.name}' did not complete modern discovery.")
 
     def _modern_discover(self):
@@ -215,6 +241,26 @@ class MCPServer:
         metadata = discover.get("_meta") if isinstance(discover, dict) else None
         server_info = metadata.get("io.modelcontextprotocol/serverInfo") if isinstance(metadata, dict) else None
         self.server_info = server_info if isinstance(server_info, dict) else {}
+
+    def _select_legacy_protocol(self):
+        response = self._send({
+            "jsonrpc": "2.0",
+            "id": self._next_id(),
+            "method": "initialize",
+            "params": {
+                "protocolVersion": _MCP_LEGACY_PROTOCOL_VERSION,
+                "clientInfo": dict(_MCP_CLIENT_INFO),
+                "capabilities": dict(_MCP_CLIENT_CAPABILITIES),
+            },
+        }, timeout=_MCP_DISCOVERY_TIMEOUT_SECONDS)
+        if not isinstance(response, dict) or "error" in response:
+            raise RuntimeError(f"MCP server '{self.name}' did not complete legacy initialization.")
+        if response.get("protocolVersion") != _MCP_LEGACY_PROTOCOL_VERSION or not isinstance(response.get("capabilities"), dict):
+            raise RuntimeError(f"MCP server '{self.name}' returned an incompatible legacy protocol.")
+        self.protocol_era = "legacy"
+        self.protocol_version = _MCP_LEGACY_PROTOCOL_VERSION
+        self.server_info = response.get("serverInfo") if isinstance(response.get("serverInfo"), dict) else {}
+        self._write({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
 
     def _raise_unsupported_protocol(self, supported):
         detail = ", ".join(str(version) for version in supported) or "no compatible versions"
@@ -241,6 +287,14 @@ class MCPServer:
             return False
         return result["error"].get("code") == -32022
 
+    @staticmethod
+    def _can_fallback_to_legacy(result):
+        return result is None or (
+            isinstance(result, dict)
+            and isinstance(result.get("error"), dict)
+            and result["error"].get("code") == -32601
+        )
+
     def _modern_request(self, method, params):
         request_params = dict(params or {})
         request_params["_meta"] = {
@@ -256,6 +310,13 @@ class MCPServer:
         }
 
     def _send_request(self, method, params, timeout):
+        if self.protocol_era == "legacy":
+            return self._send({
+                "jsonrpc": "2.0",
+                "id": self._next_id(),
+                "method": method,
+                "params": dict(params or {}),
+            }, timeout=timeout)
         return self._send(self._modern_request(method, params), timeout=timeout)
 
     def _discover_tools(self):
@@ -292,7 +353,9 @@ class MCPServer:
             return response
         result = response.get("result", response)
         if not isinstance(result, dict):
-            return {"_mcp_error": f"Modern MCP server returned an invalid {method} result."}
+            return {"_mcp_error": f"MCP server returned an invalid {method} result."}
+        if self.protocol_era == "legacy":
+            return result
         if result.get("resultType") == "complete":
             return result
         if result.get("resultType") == "input_required":
@@ -386,6 +449,47 @@ class MCPServer:
             pass
 
 
+class RemoteGitHubMCPServer:
+    """GitHub's maintained hosted MCP service, authenticated with Eva's PAT."""
+
+    def __init__(self, env):
+        self.name = "github-mcp-server"
+        self.env = env or {}
+        self.client = None
+        self.tools = []
+        self.alive = False
+
+    def start(self):
+        token = str(self.env.get("GITHUB_PERSONAL_ACCESS_TOKEN") or "").strip()
+        if not token:
+            raise RuntimeError("GitHub MCP credentials are not configured")
+        from bridge.remote_mcp import RemoteMCPClient
+        self.client = RemoteMCPClient(
+            _GITHUB_REMOTE_MCP_ENDPOINT,
+            lambda: token,
+            experimental_enabled=True,
+        )
+        self.tools = self.client.list_tools()
+        self.alive = True
+        print(f"[LocalMCP] {self.name}: {len(self.tools)} tools discovered (remote)")
+
+    def call_tool(self, tool_name, arguments, timeout=60):
+        del timeout
+        if not self.client or not self.alive:
+            return {"error": "GitHub MCP server is unavailable"}
+        try:
+            from bridge.remote_mcp import tool_result_text
+            return {"text": tool_result_text(self.client.call_tool(tool_name, arguments))}
+        except Exception as error:
+            return {"error": "GitHub MCP tool failed: " + type(error).__name__}
+
+    def stop(self):
+        self.alive = False
+        if self.client:
+            self.client.close()
+        self.client = None
+
+
 # ---------------------------------------------------------------------------
 # Local MCP Manager — spawns/manages multiple MCP servers
 # ---------------------------------------------------------------------------
@@ -397,6 +501,19 @@ class LocalMCPManager:
         self.servers = {}         # name -> MCPServer
         self._tool_map = {}       # tool_name -> server_name
         self.start_failures = {}  # name -> content-free reason
+
+    @staticmethod
+    def _start_failure_reason(error):
+        detail = str(error).lower()
+        if "command not found" in detail:
+            return "command_not_found"
+        if "credentials are not configured" in detail:
+            return "credentials_unresolved"
+        if "requires authorization" in detail:
+            return "credentials_invalid"
+        if "modern discovery" in detail or "modern protocol" in detail:
+            return "protocol_incompatible"
+        return "start_failed"
 
     def start_servers(self, mcp_config):
         """Start MCP servers from config dict (same format as mcp.json mcpServers)."""
@@ -410,7 +527,7 @@ class LocalMCPManager:
                 print(f"[LocalMCP] Skipping {name}: credentials are not resolved yet")
                 continue
             try:
-                srv = MCPServer(name, cmd, args, env)
+                srv = RemoteGitHubMCPServer(env) if name == "github-mcp-server" else MCPServer(name, cmd, args, env)
                 srv.start()
                 self.servers[name] = srv
                 for tool in srv.tools:
@@ -418,7 +535,7 @@ class LocalMCPManager:
                     if tname:
                         self._tool_map[tname] = name
             except Exception as e:
-                self.start_failures[name] = "command_not_found" if "command not found" in str(e).lower() else "start_failed"
+                self.start_failures[name] = self._start_failure_reason(e)
                 print(f"[LocalMCP] Failed to start {name}: {e}")
 
     def list_tools(self):

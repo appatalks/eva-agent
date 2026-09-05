@@ -324,6 +324,31 @@ function forgetMissingMCPSelections(config, unavailable) {
   return retained;
 }
 
+function describeUnavailableMCPServers(unavailable) {
+  return Object.keys(unavailable || {}).map(function(name) {
+    var reason = unavailable[name];
+    if (reason === 'credentials_unresolved') {
+      return name + ': configure a GitHub PAT in Settings > Auth';
+    }
+    if (reason === 'credentials_invalid') {
+      return name + ': GitHub rejected the PAT; reconnect it in Settings > Auth';
+    }
+    if (reason === 'command_not_found') {
+      return name + ': required command is not installed';
+    }
+    if (reason === 'protocol_incompatible') {
+      return name + ': installed version uses an incompatible MCP protocol; update it';
+    }
+    if (name === 'github-mcp-server' && reason === 'start_failed') {
+      return name + ': GitHub-hosted MCP could not start; check the GitHub PAT in Settings > Auth';
+    }
+    if (name === 'computer-use-linux' && reason === 'start_failed') {
+      return name + ': could not start; run computer-use-linux doctor';
+    }
+    return name + ': could not start';
+  }).join('; ');
+}
+
 // Re-apply the saved MCP config to a freshly started bridge.
 // The bridge is a new process on every launch with no MCP servers configured,
 // so without this the user would have to re-Configure Kusto/Azure/GitHub MCP
@@ -399,7 +424,7 @@ async function _applySavedMCPConfig(githubPat) {
         var data = await resp.json();
         saved = forgetMissingMCPSelections(saved, data.unavailable_servers);
         var unavailable = Object.keys(data.unavailable_servers || {});
-        setStatus(unavailable.length ? 'error' : 'info', 'MCP restored: ' + ((data.active_servers || []).join(', ') || 'none') + (unavailable.length ? '. Unavailable: ' + unavailable.join(', ') : ''));
+        setStatus(unavailable.length ? 'error' : 'info', 'MCP restored: ' + ((data.active_servers || []).join(', ') || 'none') + (unavailable.length ? '. Unavailable: ' + describeUnavailableMCPServers(data.unavailable_servers) : ''));
         if (typeof refreshMCPStatus === 'function') refreshMCPStatus();
         return;
       }
@@ -434,8 +459,8 @@ async function applyMCPConfig() {
   var githubCheck = document.getElementById('mcpGitHub');
   if (githubCheck && githubCheck.checked) {
     mcpServers['github-mcp-server'] = {
-      command: 'docker',
-      args: ['run', '-i', '--rm', '-e', 'GITHUB_PERSONAL_ACCESS_TOKEN', 'ghcr.io/github/github-mcp-server'],
+      command: 'remote',
+      args: [],
       env: { _useGitHubPAT: true }  // flag — bridge resolves PAT server-side
     };
   }
@@ -485,7 +510,7 @@ async function applyMCPConfig() {
     if (resp.ok) {
       mcpServers = forgetMissingMCPSelections(mcpServers, data.unavailable_servers);
       var unavailable = Object.keys(data.unavailable_servers || {});
-      setStatus(unavailable.length ? 'error' : 'info', 'MCP configured: ' + ((data.active_servers || []).join(', ') || 'none') + (unavailable.length ? '. Unavailable: ' + unavailable.join(', ') : ''));
+      setStatus(unavailable.length ? 'error' : 'info', 'MCP configured: ' + ((data.active_servers || []).join(', ') || 'none') + (unavailable.length ? '. Unavailable: ' + describeUnavailableMCPServers(data.unavailable_servers) : ''));
       refreshMCPStatus();
       return { ok: true, data: data, bridgeUrl: bridgeUrl, mcpServers: mcpServers };
     } else {
@@ -674,7 +699,7 @@ async function refreshMCPStatus() {
       } else {
         statusEl.innerHTML = '<em>No MCP servers active</em>';
       }
-      if (unavailable.length) statusEl.innerHTML += '<div><strong>Unavailable:</strong> ' + unavailable.map(escapeHtml).join(', ') + '</div>';
+      if (unavailable.length) statusEl.innerHTML += '<div><strong>Unavailable:</strong> ' + escapeHtml(describeUnavailableMCPServers(unavailableState)) + '</div>';
       var presetStates = {
         mcpAzure: 'azure-mcp-server',
         mcpGitHub: 'github-mcp-server',

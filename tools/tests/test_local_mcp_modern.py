@@ -41,8 +41,8 @@ for raw_line in sys.stdin:
         if method == "server/discover":
             reply(error={"code": -32601, "message": "Method not found"})
         elif method == "initialize":
-            assert params.get("protocolVersion") == "2024-11-05"
-            reply({"serverInfo": {"name": "legacy-fixture"}, "capabilities": {"tools": {}}})
+            assert params.get("protocolVersion") == "2025-06-18"
+            reply({"protocolVersion": "2025-06-18", "serverInfo": {"name": "legacy-fixture"}, "capabilities": {"tools": {}}})
         elif method == "tools/list":
             reply({"tools": [{"name": "legacy_echo", "inputSchema": {"type": "object"}}]})
         elif method == "tools/call":
@@ -136,7 +136,7 @@ def assert_start_failure(mode, error_fragment):
 
 
 def main():
-    assert_start_failure("legacy", "did not complete modern discovery")
+    test_server("legacy", "legacy", "legacy_echo", "legacy:ok")
     test_server("modern", "modern", "modern_echo", "modern:ok")
     malformed_path = fixture_path()
     malformed_server = MCPServer("fixture-malformed-cache", sys.executable, [str(malformed_path), "modern-malformed-cache"])
@@ -174,6 +174,21 @@ def main():
         transient_manager.start_servers({"computer-use-linux": {}})
     assert transient_manager.start_failures == {"computer-use-linux": "start_failed"}
     assert "private detail" not in str(transient_manager.start_failures)
+    incompatible_manager = LocalMCPManager()
+    with patch.object(MCPServer, "start", side_effect=RuntimeError("did not complete modern discovery")):
+        incompatible_manager.start_servers({"computer-use-linux": {}})
+    assert incompatible_manager.start_failures == {"computer-use-linux": "protocol_incompatible"}
+    github_manager = LocalMCPManager()
+    remote_client = SimpleNamespace(
+        list_tools=lambda: [{"name": "get_me", "inputSchema": {"type": "object"}}],
+        call_tool=lambda name, arguments: {"content": [{"type": "text", "text": name + ": ready"}]},
+        close=lambda: None,
+    )
+    with patch("bridge.remote_mcp.RemoteMCPClient", return_value=remote_client):
+        github_manager.start_servers({"github-mcp-server": {"env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "test-token"}}})
+    assert list(github_manager.servers) == ["github-mcp-server"]
+    assert github_manager.call_tool("get_me", {}) == {"text": "get_me: ready"}
+    github_manager.stop_all()
     stderr_server = MCPServer("stderr-fixture", sys.executable)
     stderr_process = SimpleNamespace(stderr=io.BytesIO(
         b'Error: expect initialized request, but received method: "server/discover"\n'

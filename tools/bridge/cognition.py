@@ -224,8 +224,20 @@ _EXPLICIT_NAME_RE = re.compile(
 # Users typing "my kids are happy" with a lowercase "happy" are not captured;
 # users typing "my kids are June and Iris" are. That trade is intentional.
 _EXPLICIT_CHILDREN_RE = re.compile(
-    r"\b[Mm]y (?:kid|kids|child|children|son|sons|daughter|daughters)(?:'s| are| is| name(?:s)? (?:are|is))?\s+"
+    r"\b[Mm]y (?:kid|kids|child|children|son|sons|daughter|daughters|daughterse)(?:'s| are| is| name(?:s)? (?:are|is))?\s+"
     r"([A-Z][a-zA-Z]+(?:[\s,]+(?:and\s+)?[A-Z][a-zA-Z]+)*)"
+)
+_EXPLICIT_HAVE_CHILDREN_RE = re.compile(
+    r"\b[Ii] have\s+([A-Z][a-zA-Z]+(?:[\s,]+(?:and\s+)?[A-Z][a-zA-Z]+)*)\s+as\s+my\s+"
+    r"(?:kid|kids|child|children|son|sons|daughter|daughters|daughterse)\b"
+)
+_EXPLICIT_RANKED_CHILD_RE = re.compile(
+    r"\b([A-Z][a-zA-Z]+)\s+is\s+my\s+(?:first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))(?:[-\s]?born)\s+(?:son|daughter|child)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_SPELLING_CORRECTION_RE = re.compile(
+    r"\b([A-Za-z][A-Za-z0-9_-]{1,48})\s+is\s+(?:correctly\s+)?spelled\s+([A-Za-z][A-Za-z0-9_-]{1,48})\b",
+    re.IGNORECASE,
 )
 _EXPLICIT_MOTTO_RE = re.compile(
     r"\bmy (motto|mantra|creed|philosophy|saying|life motto)(?:\s+is)?[:\s]+[\"“']?([^\"”'\n]{5,200})[\"”']?",
@@ -241,7 +253,7 @@ _EXPLICIT_PET_RE = re.compile(
     r"\b[Mm]y (dog|cat|pet|bird|rabbit|hamster|fish|horse)(?:'s name)?(?:\s+is)?\s+([A-Z][a-zA-Z]+)"
 )
 _EXPLICIT_PREFERENCE_RE = re.compile(
-    r"\bi (?:love|enjoy|prefer|like)\b\s+([a-z][a-zA-Z\s,]{3,80}?)(?:[.!?\n]|$)",
+    r"\bi (?:love|enjoy|prefer|like)\b\s+([a-z][a-zA-Z\s,]{3,80}?)(?:[.;!?\n]|$)",
     re.IGNORECASE
 )
 _EXPLICIT_INTEREST_RE = re.compile(
@@ -386,6 +398,12 @@ def _extract_explicit_user_facts(user_message):
         add_fact("user_name", match.group(1).strip(), 0.95)
     for match in _EXPLICIT_CHILDREN_RE.finditer(user_message or ""):
         add_fact("user_children", _normalize_explicit_children(match.group(1)), 0.85)
+    for match in _EXPLICIT_HAVE_CHILDREN_RE.finditer(user_message or ""):
+        add_fact("user_children", _normalize_explicit_children(match.group(1)), 0.95)
+    for match in _EXPLICIT_RANKED_CHILD_RE.finditer(user_message or ""):
+        add_fact("user_children", match.group(1), 0.95)
+    for match in _EXPLICIT_SPELLING_CORRECTION_RE.finditer(user_message or ""):
+        add_fact("correct_spelling", match.group(2), 0.95, entity=match.group(1))
     for match in _EXPLICIT_MOTTO_RE.finditer(user_message or ""):
         add_fact("user_motto", match.group(2), 0.85)
     for match in _EXPLICIT_PARTNER_RE.finditer(user_message or ""):
@@ -421,23 +439,119 @@ def _extract_explicit_user_facts(user_message):
     return facts
 
 
+def _persist_explicit_user_facts(user_message, conversation_id=None, turn_id=None, facts=None):
+    """Synchronously commit explicit facts without reflecting an unfinished turn."""
+    if not _st.cognition_enabled or _st.protected_memory_model_release:
+        return False
+    explicit_facts = list(facts if facts is not None else _extract_explicit_user_facts(user_message))
+    if not explicit_facts:
+        return True
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    session_id = str(conversation_id or uuid.uuid4())[:120]
+    source_ref = "conversation:" + session_id + ":" + str(turn_id or now)
+
+    if _resolve_memory_backend() == "sqlite":
+        from bridge.memory_model import MemoryModel
+        mem = _get_sqlite_mem()
+        try:
+            def persist():
+                existing = {
+                    (str(row.get("Entity", "")), str(row.get("Relation", "")), str(row.get("Value", "")))
+                    for row in mem.query(
+                        "SELECT Entity, Relation, Value FROM MemoryAtoms WHERE SourceRef = ?",
+                        (source_ref,),
+                    )
+                }
+                memory_model = MemoryModel(mem)
+                for fact in explicit_facts:
+                    key = (str(fact["Entity"]), str(fact["Relation"]), str(fact["Value"]))
+                    if key in existing:
+                        continue
+                    memory_model.add_atom({
+                        "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
+                        "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
+                        "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
+                    }, [{"source_type": "conversation_turn", "source_ref": source_ref}])
+                return True
+            return bool(mem.atomic(persist))
+        finally:
+            mem.close()
+
+    cluster, db = _get_kusto_config()
+    if not cluster or not db or not _get_table_columns(cluster, db, "MemoryAtoms"):
+        return False
+    memory_model = KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct)
+    existing = {
+        (str(row.get("Entity", "")), str(row.get("Relation", "")), str(row.get("Value", "")))
+        for row in (_kusto_query_direct(
+            cluster, db,
+            "MemoryAtoms | summarize arg_max(UpdatedAt, *) by MemoryId | where SourceRef == "
+            + KustoMemoryModel._quote(source_ref) + " | project Entity, Relation, Value",
+        ) or [])
+    }
+    for fact in explicit_facts:
+        key = (str(fact["Entity"]), str(fact["Relation"]), str(fact["Value"]))
+        if key in existing:
+            continue
+        memory_model.add_atom({
+            "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
+            "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
+            "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
+        }, [{"source_type": "conversation_turn", "source_ref": source_ref}])
+    return True
+
+
+def _corrected_entity_names(mem=None, cluster=None, db=None):
+    """Return identifiers governed by active user-confirmed spelling corrections."""
+    if mem is not None and hasattr(mem, "query"):
+        rows = mem.query(
+            "SELECT Entity, Value FROM MemoryAtoms WHERE Relation = 'correct_spelling' COLLATE NOCASE "
+            "AND Status = 'active' AND Trust IN ('user_confirmed', 'operator_approved')"
+        )
+    elif cluster and db and _get_table_columns(cluster, db, "MemoryAtoms"):
+        rows = _kusto_query_direct(
+            cluster,
+            db,
+            "MemoryAtoms | summarize arg_max(UpdatedAt, *) by MemoryId "
+            "| where Relation =~ 'correct_spelling' and Status =~ 'active' "
+            "and Trust in~ ('user_confirmed', 'operator_approved') | project Entity, Value",
+        )
+    else:
+        rows = []
+    names = set()
+    for row in rows or []:
+        for key in ("Entity", "Value"):
+            value = str(row.get(key) or "").strip().casefold()
+            if value:
+                names.add(value)
+    return names
+
+
 
 def _explicit_user_fact_covers_candidate(classified_relation, entity, explicit_user_facts):
     relation_map = {
         "user_location": {"user_location"},
         "user_affiliation": {"user_employment"},
     }
-    matching_relations = relation_map.get(classified_relation)
-    if not matching_relations:
-        return False
+    matching_relations = relation_map.get(classified_relation, set())
 
     entity_lc = (entity or "").strip().lower()
     if not entity_lc:
         return False
     for fact in explicit_user_facts:
-        if fact.get("Relation") not in matching_relations:
-            continue
+        fact_entity_lc = str(fact.get("Entity", "")).strip().lower()
         value_lc = str(fact.get("Value", "")).strip().lower()
+        if fact_entity_lc != "user" and fact_entity_lc == entity_lc:
+            return True
+        if fact.get("Relation") == "user_children":
+            children = [child.strip().lower() for child in re.split(r"\s*(?:,|\band\b)\s*", value_lc) if child.strip()]
+            if entity_lc in children:
+                return True
+        if fact.get("Relation") not in matching_relations:
+            if value_lc == entity_lc:
+                return True
+            continue
         if value_lc and (entity_lc in value_lc or value_lc in entity_lc):
             return True
     return False
@@ -872,6 +986,11 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
         "AND (Relation IS NULL OR (Relation != 'mentioned' AND Relation != 'candidate_mentioned')) "
         "ORDER BY Confidence DESC LIMIT 15"
     )
+    corrected_names = _corrected_entity_names(mem=mem)
+    core_knowledge = [
+        row for row in core_knowledge
+        if str(row.get("Entity") or "").strip().casefold() not in corrected_names
+    ]
     if core_knowledge:
         knowledge_empty = False
         mem_lines = [f"{k.get('Entity','?')} - {k.get('Relation','?')}: {k.get('Value','?')}"
@@ -1173,7 +1292,17 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
                 raise RuntimeError("explicit fact persistence failed")
             print(f"[Cognition/SQLite] Explicit user facts: {len(rows)}")
         source_ref = "conversation:" + session_id + ":" + str(turn_id or now)
+        existing_atoms = {
+            (str(row.get("Entity", "")), str(row.get("Relation", "")), str(row.get("Value", "")))
+            for row in mem.query(
+                "SELECT Entity, Relation, Value FROM MemoryAtoms WHERE SourceRef = ?",
+                (source_ref,),
+            )
+        }
         for fact in explicit_user_facts:
+            key = (str(fact["Entity"]), str(fact["Relation"]), str(fact["Value"]))
+            if key in existing_atoms:
+                continue
             memory_model.add_atom({
                 "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
                 "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
@@ -1182,6 +1311,14 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
 
     # 3. Candidate entities
     candidate_entities, rejected_entities = _extract_entity_candidates(user_message)
+    corrected_names = _corrected_entity_names(mem=mem)
+    candidate_entities = [
+        entity for entity in candidate_entities
+        if entity.strip().casefold() not in corrected_names
+        if not _explicit_user_fact_covers_candidate(
+            _classify_entity_candidate(entity, user_message)[0], entity, explicit_user_facts
+        )
+    ]
     persisted_candidate_entities = []
     if candidate_entities:
         know_columns = ["Timestamp", "Entity", "Relation", "Value", "Confidence", "Source", "Decay"]
@@ -1189,7 +1326,7 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
         for entity in candidate_entities[:3]:
             relation, confidence, value = _classify_entity_candidate(entity, user_message)
             if _explicit_user_fact_covers_candidate(relation, entity, explicit_user_facts):
-                relation, confidence, value = "candidate_mentioned", 0.2, "candidate extracted from conversation"
+                continue
             promotion = None
             if relation == "candidate_mentioned":
                 promotion = _maybe_promote_candidate(entity)
@@ -1567,6 +1704,11 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
         "| order by Confidence desc | take 15"
     )
     core_knowledge = _cached_metadata_rows("core", cluster, db, core_query)
+    corrected_names = _corrected_entity_names(cluster=cluster, db=db)
+    core_knowledge = [
+        row for row in core_knowledge or []
+        if str(row.get("Entity") or "").strip().casefold() not in corrected_names
+    ]
     if core_knowledge:
         knowledge_empty = False
         mem_lines = [f"{k.get('Entity','?')} - {k.get('Relation','?')}: {k.get('Value','?')}"
@@ -1972,7 +2114,7 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
                     "MemoryAtoms | summarize arg_max(UpdatedAt, *) by MemoryId | where SourceRef == "
                     + quote(source_ref) + " | project Entity, Relation, Value",
                 ) or [])
-            } if is_retry else set()
+            }
             for fact in explicit_user_facts:
                 key = (str(fact["Entity"]), str(fact["Relation"]), str(fact["Value"]))
                 if key in existing_atoms:
@@ -1987,6 +2129,14 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
     # 3. Extract candidate knowledge with validation/classification
     import re
     candidate_entities, rejected_entities = _extract_entity_candidates(user_message)
+    corrected_names = _corrected_entity_names(cluster=cluster, db=db)
+    candidate_entities = [
+        entity for entity in candidate_entities
+        if entity.strip().casefold() not in corrected_names
+        if not _explicit_user_fact_covers_candidate(
+            _classify_entity_candidate(entity, user_message)[0], entity, explicit_user_facts
+        )
+    ]
     if rejected_entities:
         rejected_preview = ", ".join(f"{name} ({reason})" for name, reason in rejected_entities[:5])
         print(f"[Cognition] Rejected entity candidates: {rejected_preview}")
@@ -1999,7 +2149,7 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
         for entity in candidate_entities[:3]:
             relation, confidence, value = _classify_entity_candidate(entity, user_message)
             if _explicit_user_fact_covers_candidate(relation, entity, explicit_user_facts):
-                relation, confidence, value = "candidate_mentioned", 0.2, "candidate extracted from conversation"
+                continue
             promotion = None
             if relation == "candidate_mentioned":
                 promotion = _maybe_promote_candidate(entity)

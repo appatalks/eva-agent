@@ -18,14 +18,14 @@
       "description": "Deliver a personalized morning briefing with weather, news, and schedule.",
       "category": "Information & Research",
       "trigger_examples": ["Give me my morning briefing", "What should I know today?", "Catch me up on the morning"],
-      "instructions": "1. Check [User Profile] for user_location. If found, use it.\n2. If no location is stored, state that Eva has not learned it yet and ask the user to share their city or region for future briefings.\n3. Use [Data Retrieved] for weather forecast and current conditions at that location.\n4. Use [Data Retrieved] for top news headlines.\n5. Combine into a concise briefing: weather summary, personal day context, top 3-5 headlines, and a compact market section.\n6. Do NOT take screenshots or infer a location from unstructured conversation.\n7. Present naturally in first person as Eva.",
+      "instructions": "1. Check [User Profile] for user_location. If found, use it.\n2. If no location is stored, state that Eva has not learned it yet and ask the user to share their city or region for future briefings.\n3. Require a verified weather receipt containing both current conditions and today's forecast for that location. A briefing without both is partial, never complete.\n4. Use [Data Retrieved] for current top news headlines.\n5. Combine into a concise briefing: weather summary, personal day context, top 3-5 headlines, and compact market news for the most recently completed U.S. trading session.\n6. Do NOT take screenshots or infer a location from unstructured conversation.\n7. Present naturally in first person as Eva.",
       "preferred_tools": ["web-search", "weather-news", "data-retrieval"],
       "allowed_fallbacks": ["Use the location named in the request", "State which briefing data is unavailable instead of inventing it"],
       "prerequisites": ["User profile may contain user_location", "Data retrieval pipeline is available"],
       "configurable_defaults": {"headline_count": 5, "include_schedule": true},
       "source": "Eva default catalog",
       "license": "MIT",
-      "version": "1.0.0"
+      "version": "1.1.0"
     },
     {
       "id": "skill-web-lookup",
@@ -48,14 +48,14 @@
       "description": "Provide current weather and forecast for a location.",
       "category": "Information & Research",
       "trigger_examples": ["What's the weather?", "Will it rain today?", "Give me the forecast for this weekend"],
-      "instructions": "1. Determine location: check [User Profile] for user_location, or use the location specified in the request.\n2. Weather data is in [Data Retrieved]. Use it as the authoritative source.\n3. Present current conditions, temperature, and a forecast summary.\n4. Do NOT take screenshots. Do NOT fabricate weather data.",
+      "instructions": "1. Determine location: check [User Profile] for user_location, or use the location specified in the request.\n2. Use a structured weather receipt from the dedicated weather tool as the authoritative source. For U.S. city/state locations, prefer the National Weather Service and validate that the returned page identifies the requested city.\n3. Require both a current-conditions record and a forecast record, each with source and retrieval time.\n4. Present current condition, temperature, today's high, tonight's low, and concise precipitation or hazard details when returned.\n5. Do NOT take screenshots. Do NOT fabricate weather data or accept an unrelated search result as weather.",
       "preferred_tools": ["weather-news", "data-retrieval"],
       "allowed_fallbacks": ["Use web search for the resolved location when a dedicated weather tool is unavailable", "Ask for a location when none is available", "Report only the fields returned by the weather source"],
       "prerequisites": ["A location is known or can be requested", "Weather data retrieval is available"],
       "configurable_defaults": {"default_location": "", "forecast_days": 3, "temperature_unit": "source default"},
       "source": "Eva default catalog",
       "license": "MIT",
-      "version": "1.0.0"
+      "version": "1.1.0"
     },
     {
       "id": "skill-news",

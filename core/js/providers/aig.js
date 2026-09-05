@@ -5,24 +5,33 @@
 
 var _aigLmStudioHealth = { baseUrl: '', checkedAt: 0, available: false };
 
-function isExplicitLocationMemoryRequest(text) {
-  var value = String(text || '');
-  return /\b(?:save|remember|store|note)\b[\s\S]{0,100}\b(?:durable\s+)?memory\b/i.test(value) &&
-    /\b(?:i\s+(?:live|am\s+(?:in|based|located))|i['’]?m\s+(?:in|based|located)|my\s+location\s+is)\b/i.test(value);
+function readAigQuestionInput(element) {
+  return String(element && (element.innerText || element.textContent) || '').replace(/\u00a0/g, ' ');
 }
 
-async function saveExplicitLocationMemory(bridgeUrl, userMessage, sessionId, turnId) {
-  var response = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/remember-location', {
+async function saveExplicitFactsMemory(bridgeUrl, userMessage, sessionId, turnId) {
+  var response = await fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/memory/remember-facts', {
     method: 'POST',
     headers: (typeof getBridgeCapabilityHeaders === 'function') ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' },
     body: JSON.stringify({ user_message: userMessage, session_id: sessionId, turn_id: turnId }),
     signal: AbortSignal.timeout(5000)
   });
-  if (!response.ok) {
-    var body = await response.json().catch(function () { return {}; });
-    throw new Error((body.error && body.error.message) || ('HTTP ' + response.status));
-  }
-  return response.json();
+  var body = await response.json().catch(function () { return {}; });
+  if (!response.ok) throw new Error((body.error && body.error.message) || ('HTTP ' + response.status));
+  return body;
+}
+
+function committedFactSummary(facts) {
+  var summaries = (facts || []).map(function(fact) {
+    var relation = String(fact && fact.relation || '');
+    var value = String(fact && fact.value || '').trim();
+    if (relation === 'correct_spelling') return 'corrected spelling: ' + value;
+    if (relation === 'user_children') return 'family: ' + value;
+    if (relation === 'user_partner_name') return 'partner: ' + value;
+    if (relation === 'user_name') return 'name: ' + value;
+    return relation.replace(/^user_/, '').replace(/_/g, ' ') + ': ' + value;
+  }).filter(Boolean);
+  return summaries.length ? summaries.join('; ') : 'your explicit facts';
 }
 
 function briefingItems(summary, limit) {
@@ -103,15 +112,15 @@ function formatPreparedBriefing(status, preparing, requestedQuote) {
   status = status || {};
   var sources = status.sources || {};
   var lines = ['## Morning briefing'];
+  var unavailable = [];
   var rendered = 0;
   var weather = sources.weather || {};
   var weatherSummary = String(weather.summary || '').trim();
   if (weather.status === 'ready' && weatherSummary) {
-    lines.push('### Weather', formatBriefingSection(weatherSummary, 1));
+    lines.push('### Weather', formatBriefingSection(weatherSummary, 2));
     rendered += 1;
   } else if (!preparing && weatherSummary) {
-    lines.push('### Weather', '_' + weatherSummary + '_');
-    rendered += 1;
+    unavailable.push('weather');
   }
 
   var mail = sources.mail || {};
@@ -129,23 +138,22 @@ function formatPreparedBriefing(status, preparing, requestedQuote) {
     lines.push('### Headlines', formatBriefingSection(news.summary, 5));
     rendered += 1;
   } else if (!preparing && news.summary) {
-    lines.push('### Headlines', '_Unavailable: ' + String(news.summary).trim() + '_');
-    rendered += 1;
+    unavailable.push('headlines');
   }
 
   var markets = sources.markets || {};
   if (markets.status === 'ready' && markets.summary) {
-    lines.push('### Markets', formatBriefingSection(markets.summary, 3));
+    lines.push('### Market news', '_Latest eligible coverage may describe the most recently completed U.S. trading session._\n\n' + formatBriefingSection(markets.summary, 3));
     rendered += 1;
   } else if (!preparing && markets.summary) {
-    lines.push('### Markets', '_Unavailable: ' + String(markets.summary).trim() + '_');
-    rendered += 1;
+    unavailable.push('market news');
   }
   if (requestedQuote) {
     lines.push(requestedQuote);
     rendered += 1;
   }
   if (preparing) lines.push('_Gathering the remaining live sections..._');
+  if (unavailable.length) lines.push('_Live sources unavailable: ' + unavailable.join(', ') + '._');
   if (!rendered && !preparing) lines.push('Live briefing data is unavailable right now.');
   return lines.join('\n\n');
 }
@@ -159,7 +167,7 @@ function updatePreparedBriefingPreview(preview, status, txtOutput) {
 async function waitForPreparedBriefing(bridgeUrl, initialStatus, onProgress) {
   var latest = initialStatus || {};
   if (latest.status !== 'preparing') return latest;
-  var deadline = Date.now() + 90000;
+  var deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     await new Promise(function (resolve) { setTimeout(resolve, 750); });
     try {
@@ -199,11 +207,7 @@ async function aigSend() {
   var imageB64 = imageMatch ? pendingImageData.slice(imageMatch[0].length) : '';
   var imageMime = imageMatch ? imageMatch[1] : 'image/jpeg';
 
-  // Clean HTML artifacts from input
-  txtMsg.innerHTML = txtMsg.innerHTML.replace(/<img\b[^>]*>/g, '');
-
-  var sQuestion = txtMsg.innerHTML.replace(/<br>/g, '\n')
-    .replace(/<div[^>]*>|<\/div>|&nbsp;|<span[^>]*>|<\/span>/gi, '');
+  var sQuestion = readAigQuestionInput(txtMsg);
   if (!sQuestion.trim()) {
     alert('Type in your question!');
     txtMsg.focus();
@@ -216,6 +220,7 @@ async function aigSend() {
   var sessionId = (typeof ensureActiveSessionId === 'function')
     ? ensureActiveSessionId() : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
   var turnId = window._evaActiveAuditTurnId || ((typeof EvaRequestRouting !== 'undefined' && EvaRequestRouting.createTurnId) ? EvaRequestRouting.createTurnId() : '');
+  var briefingRequest = /\b(?:morning|daily)\s+(?:briefing|report|update)\b/i.test(sQuestion);
 
   // Display user message
   var safeUser = escapeHtml(sQuestion).replace(/\n/g, '<br>');
@@ -281,31 +286,29 @@ async function aigSend() {
   var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
   if (typeof watchACPPermissions === 'function') watchACPPermissions(190000);
 
-  if (isExplicitLocationMemoryRequest(sQuestion)) {
-    try {
-      await saveExplicitLocationMemory(bridgeUrl, sQuestion, sessionId, turnId);
-      var savedLocationReply = "I've saved your location to my durable memory for future briefings.";
-      await renderEvaResponse(savedLocationReply, txtOutput, {
-        nativeRequest: sQuestion,
-        turnId: turnId
+  var savedFacts;
+  try {
+    savedFacts = await saveExplicitFactsMemory(bridgeUrl, sQuestion, sessionId, turnId);
+  } catch (memoryError) {
+    requestMessages.push({
+      role: 'system',
+      content: 'Durable-memory preflight was unavailable for this turn. Do not claim that any new fact was saved.'
+    });
+    setStatus('warn', 'Eva could not save explicit facts to durable memory.');
+  }
+  if (savedFacts && savedFacts.status === 'saved') {
+    var savedFactsReceipt = 'Durable-memory commit succeeded for this turn: '
+      + committedFactSummary(savedFacts.facts)
+      + '. Briefly acknowledge the saved facts, then answer any other request in the user message. Do not claim that any other facts were saved.';
+    requestMessages.push({ role: 'system', content: savedFactsReceipt });
+    if (typeof evaAuditEvent === 'function') {
+      evaAuditEvent('native_action', 'completed', {
+        correlation_id: turnId,
+        action: 'remember_facts',
+        label: 'Durable Memory'
       });
-      existingMessages.push({ role: 'assistant', content: savedLocationReply });
-      localStorage.setItem(storageKey, JSON.stringify(existingMessages));
-      lastResponse = savedLocationReply;
-      masterOutput += txtOutput.innerText + '\n';
-      localStorage.setItem('masterOutput', masterOutput);
-      if (typeof evaAuditEvent === 'function') {
-        evaAuditEvent('native_action', 'completed', {
-          correlation_id: turnId,
-          action: 'remember_location',
-          label: 'Durable Memory'
-        });
-      }
-      setStatus('info', 'Eva saved your location to durable memory.');
-      return;
-    } catch (memoryError) {
-      setStatus('warn', 'Eva could not save the location directly; continuing with the normal response.');
     }
+    setStatus('info', 'Eva saved explicit facts to durable memory.');
   }
 
   setStatus('info', 'Eva (AIG) processing...');
@@ -323,7 +326,6 @@ async function aigSend() {
   if (isDirectQuoteRequest && cogDecision.reason !== 'phrase') {
     cogDecision = { active: false, reason: 'direct-quote' };
   }
-  var briefingRequest = /\b(?:morning|daily)\s+(?:briefing|report|update)\b/i.test(sQuestion);
   if (briefingRequest) {
     cogDecision = { active: false, reason: 'briefing-cache' };
     var briefingPreview = null;
@@ -364,7 +366,21 @@ async function aigSend() {
       var briefingAutoSpeak = document.getElementById('autoSpeak');
       if (briefingAutoSpeak && briefingAutoSpeak.checked) speakText();
       return;
-    } catch (_) {}
+    } catch (briefingError) {
+      if (briefingPreview && briefingPreview.parentNode) briefingPreview.parentNode.removeChild(briefingPreview);
+      var briefingErrorContent = '## Morning briefing\n\nLive briefing data is unavailable right now. Please try again shortly.';
+      await renderEvaResponse(briefingErrorContent, txtOutput, {
+        nativeRequest: sQuestion,
+        turnId: turnId
+      });
+      existingMessages.push({ role: 'assistant', content: briefingErrorContent });
+      localStorage.setItem(storageKey, JSON.stringify(existingMessages));
+      lastResponse = briefingErrorContent;
+      masterOutput += txtOutput.innerText + '\n';
+      localStorage.setItem('masterOutput', masterOutput);
+      setStatus('warn', 'Eva could not retrieve the live morning briefing.');
+      return;
+    }
   }
   if (isDirectQuoteRequest) {
     var quotePreview = createEvaStreamingBubble(txtOutput);

@@ -45,6 +45,7 @@ let pullRequestViewRequest = null;
 let branchDeleteRequest = null;
 let boundedSkillRequest = null;
 let emailSendRequest = null;
+let memoryInspectorCalls = 0;
 const fixtureRepository = 'fixture-owner/fixture-repository';
 const fixtureShortName = 'fixture-repository';
 const fixtureRepositoryUrl = 'https://github.com/fixture-owner/fixture-repository';
@@ -197,6 +198,18 @@ const sandbox = {
   getBridgeCapabilityHeaders() { return { 'Content-Type': 'application/json', 'Authorization': 'Bearer test' }; },
   fetch(url, options) {
     boundedSkillRequest = { url: url, options: options };
+    if (url === 'http://localhost:8888/v1/memory/inspector') {
+      memoryInspectorCalls += 1;
+      return Promise.resolve({
+        ok: true,
+        json() { return Promise.resolve({
+          atoms: [{ Entity: 'User', Relation: 'user_children', Value: 'Nova, Rowan', Status: 'active' }],
+          traits: [{ Trait: 'preferred_name', Value: 'NewHandle', Status: 'approved' }],
+          identity_claims: [{ ClaimType: 'identity_name', ClaimValue: 'NewHandle' }],
+          growth_proposals: [{ Category: 'family', Status: 'pending' }]
+        }); }
+      });
+    }
     return Promise.resolve({
       ok: true,
       json() { return Promise.resolve({ ok: true, skill: 'pdf', operation: 'create', output: { root: 'artifacts', path: 'test.pdf' }, validation: { status: 'valid' }, warnings: [], error: null }); }
@@ -258,6 +271,18 @@ async function main() {
   assert.strictEqual(assetsRoute.action, 'describe_assets');
   const assetsResult = await harness.execute(assetsRoute, { source: 'voice', userRequest: 'List my generated assets.' });
   assert.strictEqual(assetsResult.ok, true);
+  const memoryExportRequest = 'Give me a tree structured output of an export of all memory you do have available - just titles';
+  const memoryExportRoute = harness.resolveNavigationRequest(memoryExportRequest, { directUser: true });
+  assert.strictEqual(memoryExportRoute.action, 'describe_memory_titles');
+  const memoryExportResult = await harness.execute(memoryExportRoute, { source: 'voice', userRequest: memoryExportRequest });
+  assert.strictEqual(memoryExportResult.ok, true);
+  assert.strictEqual(memoryInspectorCalls, 1);
+  assert.match(memoryExportResult.message, /^Memory titles/m);
+  assert.match(memoryExportResult.message, /├─ Atoms/);
+  assert.match(memoryExportResult.message, /User > user_children/);
+  assert.match(memoryExportResult.message, /Persona traits/);
+  assert.match(memoryExportResult.message, /preferred_name/);
+  assert.doesNotMatch(memoryExportResult.message, /Nova|Rowan|NewHandle/);
   assert.strictEqual(assetsOpenCalls, 1);
   assert.match(assetsResult.message, /3 assets/);
   const skillsRoute = harness.resolveNavigationRequest('Count my saved skills.', { directUser: true });
@@ -312,12 +337,12 @@ async function main() {
   assert.strictEqual(reusedDraftResult.ok, true);
   assert.strictEqual(skillActivationPromptCount, promptCountBeforeActiveReuse + 1);
   assert.deepStrictEqual(skillStatusRequest, { skillName: 'Play my YouTube playlist', status: 'active', confirmation: 'ENABLE' });
-  assert.strictEqual(harness.resolveNavigationRequest('How do I create a Skill?', { directUser: true }).action, 'consider_terminal_task');
-  assert.strictEqual(harness.resolveNavigationRequest('Can I create a Skill?', { directUser: true }).action, 'consider_terminal_task');
-  assert.strictEqual(harness.resolveNavigationRequest('Can you create a new Skill?', { directUser: true }).action, 'consider_terminal_task');
-  assert.strictEqual(harness.resolveNavigationRequest('Could you make a Skill?', { directUser: true }).action, 'consider_terminal_task');
+  assert.strictEqual(harness.resolveNavigationRequest('How do I create a Skill?', { directUser: true }), null);
+  assert.strictEqual(harness.resolveNavigationRequest('Can I create a Skill?', { directUser: true }), null);
+  assert.strictEqual(harness.resolveNavigationRequest('Can you create a new Skill?', { directUser: true }), null);
+  assert.strictEqual(harness.resolveNavigationRequest('Could you make a Skill?', { directUser: true }), null);
   ['Create a Skill?', 'Make a new Skill?', 'Add a Skill?', 'Teach a Skill?'].forEach(function(question) {
-    assert.strictEqual(harness.resolveNavigationRequest(question, { directUser: true }).action, 'consider_terminal_task');
+    assert.strictEqual(harness.resolveNavigationRequest(question, { directUser: true }), null);
   });
   const unsolicitedSkillCreate = await harness.execute(
     { action: 'create_skill', requestText: 'Create an unrelated skill.' },
@@ -589,11 +614,11 @@ async function main() {
   assert.strictEqual(workspaceCheckObjective, 'run a smoketest');
   assert.strictEqual(harness.resolveNavigationRequest('Please run the tests for the selected workspace.', { directUser: true }).action, 'run_workspace_check');
   assert.strictEqual(harness.resolveNavigationRequest('Run diagnostics.', { directUser: true }).action, 'run_workspace_check');
-  assert.notStrictEqual(harness.resolveNavigationRequest('Build a website.', { directUser: true }).action, 'run_workspace_check');
+  assert.strictEqual(harness.resolveNavigationRequest('Build a website.', { directUser: true }), null);
   const accountVoiceRoute = harness.resolveNavigationRequest('List accounts under list github repositories enter my account.', { directUser: true });
   assert.strictEqual(accountVoiceRoute.action, 'list_github_repositories');
   assert.strictEqual(harness.resolveNavigationRequest('List GitHub repositories under my account.', { directUser: true }).action, 'list_github_repositories');
-  assert.strictEqual(harness.resolveNavigationRequest('List GitHub repositories for an account.', { directUser: true }).action, 'consider_terminal_task');
+  assert.strictEqual(harness.resolveNavigationRequest('List GitHub repositories for an account.', { directUser: true }), null);
   assert.strictEqual(harness.resolveNavigationRequest('Do not list GitHub repositories under my account.', { directUser: true }), null);
   const selectionRoute = harness.resolveNavigationRequest('Import repo repository.', { directUser: true });
   assert.strictEqual(selectionRoute.action, 'import_github_selection');
@@ -620,10 +645,11 @@ async function main() {
   assert.strictEqual(implicitInspectionRoute.objective, 'check my disk space');
   assert.strictEqual(implicitInspectionRoute.submit, true);
   const genericQuestionRoute = harness.resolveNavigationRequest('What is disk space?', { directUser: true });
-  assert.strictEqual(genericQuestionRoute.action, 'consider_terminal_task');
-  assert.strictEqual(harness.resolveNavigationRequest('What is your favorite color?', { directUser: true }).action, 'consider_terminal_task');
+  assert.strictEqual(genericQuestionRoute, null);
+  assert.strictEqual(harness.resolveNavigationRequest('What is your favorite color?', { directUser: true }), null);
+  assert.strictEqual(harness.resolveNavigationRequest('What did you find?', { directUser: true }), null);
   assert.strictEqual(harness.resolveNavigationRequest('I had a good day.', { directUser: true }), null);
-  assert.strictEqual(harness.resolveNavigationRequest('Can you check this for me?', { directUser: true }).action, 'consider_terminal_task');
+  assert.strictEqual(harness.resolveNavigationRequest('Can you check this for me?', { directUser: true }), null);
   const stagedTaskRoute = harness.resolveNavigationRequest('Type a command to show the current git status in the terminal.', { directUser: true });
   assert.strictEqual(stagedTaskRoute.action, 'plan_terminal_task');
   assert.strictEqual(stagedTaskRoute.submit, false);
@@ -647,12 +673,6 @@ async function main() {
   const taskSubmitted = await harness.execute(naturalTaskRoute, { source: 'voice', userRequest: 'Use the terminal to show the current git status.' });
   assert.strictEqual(taskSubmitted.ok, true);
   assert.deepStrictEqual(plannedTask, { objective: 'show the current git status', submit: true });
-  plannedResult = { declined: true, submitted: false, reviewRequired: false };
-  const candidateDeclined = await harness.execute(genericQuestionRoute, { source: 'voice', userRequest: 'What is disk space?' });
-  assert.strictEqual(candidateDeclined.ok, true);
-  assert.strictEqual(candidateDeclined.data.declined, true);
-  assert.deepStrictEqual(plannedTask, { objective: 'What is disk space?', submit: true, allowDecline: true });
-  plannedResult = null;
 
   const negatedList = await harness.execute({ action: 'list_github_repositories' }, { source: 'model', userRequest: 'Do not list my GitHub repositories.' });
   assert.strictEqual(negatedList.ok, false);

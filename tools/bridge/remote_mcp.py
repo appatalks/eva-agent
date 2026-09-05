@@ -1,4 +1,4 @@
-"""Experimental Streamable-HTTP MCP client for remote, OAuth-protected servers.
+"""Streamable-HTTP MCP client for allowlisted, OAuth-protected services.
 
 Eva's existing `local_mcp` client speaks JSON-RPC over stdio to allowlisted local
 subprocesses. That transport cannot reach a hosted server such as Work IQ, which
@@ -6,9 +6,9 @@ requires HTTPS plus an Entra bearer token. This module adds only that transport;
 authorization decisions live in `bridge.oauth_client` and mail policy lives in
 `bridge.email_policy`.
 
-No configured Eva workflow currently invokes this module. It remains disabled
-as email-provider groundwork until remote connection setup, token persistence,
-refresh, revocation, and live validation are completed as one user workflow.
+GitHub MCP uses this transport with the PAT already configured in Eva's Auth
+settings. Other remote MCP workflows remain disabled until their connection,
+token persistence, refresh, revocation, and live validation are completed.
 
 Boundaries enforced here:
 

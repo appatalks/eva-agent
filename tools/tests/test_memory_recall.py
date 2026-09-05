@@ -12,12 +12,13 @@ TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
 
 from bridge import state
-from bridge import config, learning
+from bridge import config, core, learning
 from bridge.cognition import (
     _active_skill_block,
     _build_memory_context,
     _build_memory_context_sqlite,
     _extract_explicit_user_facts,
+    _persist_explicit_user_facts,
     _post_response_reflection_sqlite,
     _post_response_reflection_sqlite_impl,
     _post_response_reflection_impl,
@@ -74,6 +75,131 @@ class MemoryRecallTests(unittest.TestCase):
             locations = [fact for fact in _extract_explicit_user_facts(message) if fact["Relation"] == "user_location"]
             self.assertEqual(len(locations), 1, message)
             self.assertNotRegex(locations[0]["Value"], r"\b(?:remember|save|store|note)\b")
+
+    def test_ranked_daughters_are_explicit_user_facts(self):
+        facts = _extract_explicit_user_facts(
+            "Nova is my first born daughter, and Rowan is my second-born daughter."
+        )
+        children = [fact for fact in facts if fact["Relation"] == "user_children"]
+        self.assertEqual([(fact["Value"], fact["Confidence"]) for fact in children], [
+            ("Nova", 0.95), ("Rowan", 0.95),
+        ])
+
+    def test_spelling_and_typoed_daughters_are_explicit_facts(self):
+        facts = _extract_explicit_user_facts(
+            "OldHandle is spelled NewHandle. I have Nova and Rowan as my daughterse."
+        )
+        self.assertEqual({(fact["Entity"], fact["Relation"], fact["Value"]) for fact in facts}, {
+            ("OldHandle", "correct_spelling", "NewHandle"),
+            ("User", "user_children", "Nova, Rowan"),
+        })
+
+    def test_remember_facts_endpoint_ignores_ordinary_follow_up(self):
+        responses = []
+        handler = core.BridgeHandler.__new__(core.BridgeHandler)
+        handler._read_json_body = lambda: ({"user_message": "What did you find?"}, "")
+        handler._json_response = lambda status, payload: responses.append((status, payload))
+        with patch.object(core, "_persist_explicit_user_facts") as persist:
+            handler._memory_remember_facts()
+        self.assertEqual(responses, [(200, {"status": "no_explicit_facts", "facts": []})])
+        persist.assert_not_called()
+
+    def test_remember_facts_endpoint_accepts_non_family_fact(self):
+        responses = []
+        handler = core.BridgeHandler.__new__(core.BridgeHandler)
+        handler._read_json_body = lambda: ({
+            "user_message": "I like jazz; recommend an album.",
+            "session_id": "preference-session",
+            "turn_id": "turn-preference-12345678",
+        }, "")
+        handler._json_response = lambda status, payload: responses.append((status, payload))
+        with patch.object(core, "_persist_explicit_user_facts", return_value=True) as persist:
+            handler._memory_remember_facts()
+        self.assertEqual(responses[0][0], 201)
+        self.assertEqual(responses[0][1]["status"], "saved")
+        self.assertEqual(responses[0][1]["facts"], [{
+            "entity": "User", "relation": "user_preference", "value": "jazz",
+        }])
+        persist.assert_called_once()
+
+    def test_fact_preflight_does_not_duplicate_completed_turn_atom(self):
+        message = "I like jazz; recommend an album."
+        facts = _extract_explicit_user_facts(message)
+        self.assertTrue(_persist_explicit_user_facts(
+            message, "preference-session", "turn-preference-12345678", facts,
+        ))
+        self.assertTrue(_post_response_reflection_sqlite(
+            message,
+            "Saved your preference. Try Kind of Blue.",
+            "test-model",
+            "preference-session",
+            "turn-preference-12345678",
+        ))
+        atoms = state.sqlite_mem.query(
+            "SELECT Relation, Value, Trust FROM MemoryAtoms WHERE Relation = 'user_preference'"
+        )
+        self.assertEqual(atoms, [{
+            "Relation": "user_preference", "Value": "jazz", "Trust": "user_confirmed",
+        }])
+
+    def test_spelling_correction_blocks_later_candidate_promotion(self):
+        correction = "OldHandle is spelled NewHandle."
+        self.assertTrue(_persist_explicit_user_facts(
+            correction,
+            "correction-session",
+            "turn-correction-12345678",
+            _extract_explicit_user_facts(correction),
+        ))
+        self.assertTrue(_post_response_reflection_sqlite(
+            "What did OldHandle mean?",
+            "It is the obsolete spelling.",
+            "test-model",
+            "correction-session",
+            "turn-correction-followup-12345678",
+        ))
+        stale_candidates = state.sqlite_mem.query(
+            "SELECT Relation FROM Knowledge WHERE Entity = 'OldHandle' COLLATE NOCASE "
+            "AND Relation IN ('candidate_mentioned', 'recurring_topic')"
+        )
+        self.assertEqual(stale_candidates, [])
+
+    def test_spelling_and_typoed_daughters_persist_as_confirmed_atoms(self):
+        self.assertTrue(_post_response_reflection_sqlite(
+            "OldHandle is spelled NewHandle. I have Nova and Rowan as my daughterse.",
+            "Confirmed.",
+            "test-model",
+            "correction-session",
+            "turn-correction-atoms",
+        ))
+        atoms = state.sqlite_mem.query(
+            "SELECT Entity, Relation, Value, Trust FROM MemoryAtoms "
+            "WHERE Relation IN ('correct_spelling', 'user_children') ORDER BY Relation, Entity"
+        )
+        self.assertEqual(atoms, [
+            {"Entity": "OldHandle", "Relation": "correct_spelling", "Value": "NewHandle", "Trust": "user_confirmed"},
+            {"Entity": "User", "Relation": "user_children", "Value": "Nova, Rowan", "Trust": "user_confirmed"},
+        ])
+        candidate_rows = state.sqlite_mem.query(
+            "SELECT Entity, Relation FROM Knowledge WHERE Entity IN ('OldHandle', 'Nova', 'Rowan') "
+            "AND Relation NOT IN ('correct_spelling', 'user_children')"
+        )
+        self.assertEqual(candidate_rows, [])
+
+    def test_ranked_daughters_persist_as_confirmed_atoms(self):
+        self.assertTrue(_post_response_reflection_sqlite(
+            "Nova is my first born daughter, and Rowan is my second-born daughter.",
+            "Understood.",
+            "test-model",
+            "family-session",
+            "turn-family-atoms",
+        ))
+        atoms = state.sqlite_mem.query(
+            "SELECT Value, Trust FROM MemoryAtoms WHERE Relation = 'user_children' ORDER BY Value"
+        )
+        self.assertEqual(atoms, [
+            {"Value": "Nova", "Trust": "user_confirmed"},
+            {"Value": "Rowan", "Trust": "user_confirmed"},
+        ])
 
     def test_location_parser_rejects_repeated_separator_input(self):
         facts = _extract_explicit_user_facts("I live in " + "/" * 10000 + " Austin.")

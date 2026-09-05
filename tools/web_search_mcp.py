@@ -98,7 +98,7 @@ TOOLS = [
     },
     {
         "name": "weather_current",
-        "description": "Return current Google weather conditions for an explicit city or region.",
+        "description": "Return verified current conditions and today's forecast for an explicit city or region, preferring the National Weather Service for U.S. locations.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -565,10 +565,99 @@ def _google_news_rss(query, max_results=8):
     return results or [{"info": "News search returned no current items", "query": query}]
 
 
+_US_STATE_ABBREVIATIONS = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR", "california": "CA",
+    "colorado": "CO", "connecticut": "CT", "delaware": "DE", "florida": "FL", "georgia": "GA",
+    "hawaii": "HI", "idaho": "ID", "illinois": "IL", "indiana": "IN", "iowa": "IA",
+    "kansas": "KS", "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+    "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV", "new hampshire": "NH",
+    "new jersey": "NJ", "new mexico": "NM", "new york": "NY", "north carolina": "NC",
+    "north dakota": "ND", "ohio": "OH", "oklahoma": "OK", "oregon": "OR", "pennsylvania": "PA",
+    "rhode island": "RI", "south carolina": "SC", "south dakota": "SD", "tennessee": "TN",
+    "texas": "TX", "utah": "UT", "vermont": "VT", "virginia": "VA", "washington": "WA",
+    "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+}
+
+
+def _us_city_state(location):
+    value = re.sub(r"\s+", " ", str(location or "").strip(" ,"))
+    lowered = value.lower()
+    for state_name, abbreviation in sorted(_US_STATE_ABBREVIATIONS.items(), key=lambda item: -len(item[0])):
+        if lowered.endswith(" " + state_name):
+            city = value[:-(len(state_name))].strip(" ,")
+            return (city, abbreviation) if city else ("", "")
+    match = re.match(r"^(.+?)[, ]+([A-Za-z]{2})$", value)
+    if match and match.group(2).upper() in _US_STATE_ABBREVIATIONS.values():
+        return match.group(1).strip(" ,"), match.group(2).upper()
+    return "", ""
+
+
+def _nws_weather(location):
+    city, state = _us_city_state(location)
+    if not city:
+        return []
+    url = "https://forecast.weather.gov/zipcity.php?" + urllib.parse.urlencode({
+        "inputstring": city + "," + state,
+    })
+    status, body = _http_get(url, timeout=12)
+    if status != 200:
+        return []
+    page_text = _strip_html(body)
+    lowered = page_text.lower()
+    city_terms = [term.lower() for term in re.findall(r"[A-Za-z]+", city)]
+    if not city_terms or not all(term in lowered for term in city_terms):
+        return []
+
+    def first_text_from(source, pattern):
+        match = re.search(pattern, source, re.S | re.I)
+        return _strip_html(match.group(1)).strip() if match else ""
+
+    def first_text(pattern):
+        return first_text_from(body, pattern)
+
+    temperature = first_text(r'<p[^>]*class=["\'][^"\']*myforecast-current-lrg[^"\']*["\'][^>]*>(.*?)</p>')
+    condition = first_text(r'<p[^>]*class=["\']myforecast-current["\'][^>]*>(.*?)</p>')
+    forecast_parts = []
+    cards = re.findall(
+        r'<li[^>]*class=["\'][^"\']*forecast-tombstone[^"\']*["\'][^>]*>(.*?)</li>',
+        body,
+        re.S | re.I,
+    )
+    for card in cards[:2]:
+        period = first_text_from(card, r'<p[^>]*class=["\'][^"\']*period-name[^"\']*["\'][^>]*>(.*?)</p>')
+        description = first_text_from(card, r'<p[^>]*class=["\'][^"\']*short-desc[^"\']*["\'][^>]*>(.*?)</p>')
+        temperature_range = first_text_from(card, r'<p[^>]*class=["\'][^"\']*temp[^"\']*["\'][^>]*>(.*?)</p>')
+        if period and description and temperature_range:
+            forecast_parts.append(period + ": " + description + ", " + temperature_range)
+    if not temperature or not condition or not forecast_parts:
+        return []
+    retrieved_at = _quote_retrieved_at()
+    display_location = city + ", " + state
+    return [{
+        "kind": "current",
+        "title": "Current weather for " + display_location,
+        "snippet": condition + "; " + temperature,
+        "url": url,
+        "source": "National Weather Service",
+        "retrieved_at": retrieved_at,
+    }, {
+        "kind": "forecast",
+        "title": "Today's forecast for " + display_location,
+        "snippet": "; ".join(forecast_parts),
+        "url": url,
+        "source": "National Weather Service",
+        "retrieved_at": retrieved_at,
+    }]
+
+
 def google_weather(location):
     location = str(location or "").strip()[:120]
     if not location:
         return [{"info": "Weather location is required"}]
+    nws_results = _nws_weather(location)
+    if nws_results:
+        return nws_results
     query = urllib.parse.quote_plus("weather " + location)
     url = f"https://www.google.com/search?q={query}&hl=en&gl=us"
     status, body = _http_get(url, timeout=12)
@@ -584,21 +673,86 @@ def google_weather(location):
     precipitation = card_value("wob_pp")
     humidity = card_value("wob_hm")
     wind = card_value("wob_ws")
-    if not temperature and not condition:
-        return _google_news_rss("weather forecast " + location + " today", 4)
-    details = [value for value in (
-        condition,
-        (temperature + " F") if temperature else "",
-        ("precipitation " + precipitation) if precipitation else "",
-        ("humidity " + humidity) if humidity else "",
-        ("wind " + wind) if wind else "",
-    ) if value]
-    return [{
-        "title": "Current weather for " + location,
-        "snippet": "; ".join(details),
-        "url": url,
-        "source": "Google Weather",
+    results = []
+    if temperature or condition:
+        details = [value for value in (
+            condition,
+            (temperature + " F") if temperature else "",
+            ("precipitation " + precipitation) if precipitation else "",
+            ("humidity " + humidity) if humidity else "",
+            ("wind " + wind) if wind else "",
+        ) if value]
+        results.append({
+            "kind": "current",
+            "title": "Current weather for " + location,
+            "snippet": "; ".join(details),
+            "url": url,
+            "source": "Google Weather",
+            "retrieved_at": _quote_retrieved_at(),
+        })
+
+    location_terms = [term.lower() for term in re.findall(r"[A-Za-z]+", location)]
+    location_terms = [term for term in location_terms if term not in {
+        "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut",
+        "delaware", "florida", "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa",
+        "kansas", "kentucky", "louisiana", "maine", "maryland", "massachusetts", "michigan",
+        "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada", "hampshire",
+        "jersey", "mexico", "york", "carolina", "dakota", "ohio", "oklahoma", "oregon",
+        "pennsylvania", "rhode", "island", "tennessee", "texas", "utah", "vermont", "virginia",
+        "washington", "wisconsin", "wyoming", "united", "states", "usa", "us", "tx",
     }]
+
+    def matches_location(item):
+        haystack = " ".join(str(item.get(key) or "") for key in ("title", "snippet", "url")).lower()
+        return bool(location_terms) and all(term in haystack for term in location_terms)
+
+    if not results:
+        current_candidates = ddg_search("current weather " + location + " temperature", 6)
+        for item in current_candidates:
+            hostname = (urllib.parse.urlparse(str(item.get("url") or "")).hostname or "").lower()
+            snippet = str(item.get("snippet") or "").strip()
+            if not matches_location(item) or not re.search(r"\b(?:currently|temperature)\b", snippet, re.I):
+                continue
+            source = {
+                "www.accuweather.com": "AccuWeather",
+                "accuweather.com": "AccuWeather",
+                "weather.com": "The Weather Channel",
+                "www.weather.com": "The Weather Channel",
+                "www.theweathernetwork.com": "The Weather Network",
+                "theweathernetwork.com": "The Weather Network",
+            }.get(hostname)
+            if source:
+                results.append({
+                    "kind": "current",
+                    "title": "Current weather for " + location,
+                    "snippet": snippet[:500],
+                    "url": str(item.get("url") or "")[:500],
+                    "source": source,
+                    "retrieved_at": _quote_retrieved_at(),
+                })
+                break
+
+    forecast_candidates = ddg_search(
+        "site:forecast.weather.gov " + location + " Today High Low", 8
+    )
+    for item in forecast_candidates:
+        hostname = (urllib.parse.urlparse(str(item.get("url") or "")).hostname or "").lower()
+        snippet = str(item.get("snippet") or "").strip()
+        if hostname not in {"weather.gov", "www.weather.gov", "forecast.weather.gov"}:
+            continue
+        if not matches_location(item) or not re.search(r"\b(?:high|low|forecast)\b", snippet, re.I):
+            continue
+        results.append({
+            "kind": "forecast",
+            "title": "Today's forecast for " + location,
+            "snippet": snippet[:500],
+            "url": str(item.get("url") or "")[:500],
+            "source": "National Weather Service",
+            "retrieved_at": _quote_retrieved_at(),
+        })
+        break
+
+    return results or [{"info": "Current weather conditions unavailable for " + location}]
 
 
 def ddg_search(query, max_results=8):

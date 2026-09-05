@@ -37,13 +37,15 @@ eva
 
 Eva is also added to your system application menu.
 
-Current standalone release: `Eva Standalone-5.6.3.AppImage`.
+Current standalone release: `Eva Standalone-5.6.4.AppImage`.
 
-On first launch, choose **Eva (AIG)** in the model menu for the integrated experience. Eva works with local SQLite memory by default; the Memory view lets you inspect record provenance, associations, history, and corrections before records are changed or removed from recall. Provider keys, Copilot, and other optional capabilities are configured in Settings.
+On first launch, choose **Eva (AIG)** in the model menu for the integrated experience. Eva works with local SQLite memory by default; the Memory view lets you inspect record provenance, associations, history, and corrections before records are changed or removed from recall. Explicit user-stated facts recognized by Eva's deterministic extractor are committed before acknowledgement; ordinary questions do not create facts, and mixed fact-plus-request messages continue through normal response handling. Provider keys, Copilot, and other optional capabilities are configured in Settings.
 
 LM Studio responses show a live thinking state during long local generations. When a model returns a separate reasoning layer, Eva keeps it available in a collapsed **Thinking** section above the final answer.
 
-Morning briefing requests refresh bounded news, location-aware weather, market, mail, and memory sources. Ready sections appear while the remaining live tools finish, without a second model summarization pass. Weather uses the location Eva has learned from explicit conversation and stored in the structured user profile.
+Morning briefing requests refresh bounded news, location-aware weather, market news, mail, and memory sources. Dated news and market entries older than 36 hours are excluded. Market news is labeled as coverage of the most recently completed U.S. trading session, which may be the previous business day. Weather uses the location Eva has learned from explicit conversation and requires verified current conditions plus today's forecast; U.S. city/state locations prefer the National Weather Service. A briefing is marked partial when weather is unavailable.
+
+GitHub MCP uses GitHub's hosted HTTPS service and the GitHub PAT configured in Settings > Auth; Docker is not required. Local MCP servers that do not support Eva's modern discovery extension can use standard MCP `2025-06-18` initialization.
 
 Current stock quote requests use a verified local receipt when available: a configured loopback provider first, then the local `ticker.sh` Yahoo Finance tool, before the bounded Google Finance fallback. Eva reports unavailable quotes instead of asking a model to infer a current price.
 

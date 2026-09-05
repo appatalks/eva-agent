@@ -418,6 +418,7 @@ from bridge.cognition import (  # noqa: F401
     _clean_explicit_fact_value,
     _normalize_explicit_children,
     _extract_explicit_user_facts,
+    _persist_explicit_user_facts,
     _explicit_user_fact_covers_candidate,
     _normalize_entity_candidate,
     _validate_entity_candidate,
@@ -1519,6 +1520,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._memory_reflect()
         elif parsed_path == "/v1/memory/remember-location":
             self._memory_remember_location()
+        elif parsed_path == "/v1/memory/remember-facts":
+            self._memory_remember_facts()
         elif parsed_path == "/v1/memory/start-fresh":
             self._memory_start_fresh()
         elif parsed_path == "/v1/memory/atoms":
@@ -4651,9 +4654,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "args": ["-y", "@azure/mcp@latest", "server", "start"]
                 },
                 "github": {
-                    "description": "GitHub MCP Server — repos, issues, PRs, actions, code search",
-                    "command": "docker",
-                    "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"],
+                    "description": "GitHub-hosted MCP Server — repos, issues, PRs, actions, code search",
+                    "transport": "https",
+                    "endpoint": "https://api.githubcopilot.com/mcp/",
                     "env_required": ["GITHUB_PERSONAL_ACCESS_TOKEN"]
                 }
             }
@@ -6247,17 +6250,49 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(423, {"error": {"message": "Memory updates are locked."}})
             return
         _mark_user_activity()
-        persisted = _post_response_reflection(
-            user_message,
-            "I've saved your location for future briefings.",
-            "eva-memory-fast-path",
-            session_id,
-            turn_id or None,
-        )
+        persisted = _persist_explicit_user_facts(user_message, session_id, turn_id or None, facts)
         if persisted is not True:
             self._json_response(503, {"error": {"message": "Location could not be committed to durable memory."}})
             return
         self._json_response(201, {"status": "saved", "relation": "user_location"})
+
+    def _memory_remember_facts(self):
+        """Synchronously persist recognized explicit facts before acknowledging them."""
+        data, error = self._read_json_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "Request body must be an object."}})
+            return
+        user_message = data.get("user_message", "")
+        session_id = str(data.get("session_id") or "").strip()[:120]
+        turn_id = str(data.get("turn_id") or "").strip()[:120]
+        if not isinstance(user_message, str) or not user_message.strip() or len(user_message) > 1000:
+            self._json_response(400, {"error": {"message": "Fact statement is invalid."}})
+            return
+        if turn_id and not re.fullmatch(r"turn-[A-Za-z0-9-]{8,115}", turn_id):
+            self._json_response(400, {"error": {"message": "turn_id is invalid"}})
+            return
+        facts = _extract_explicit_user_facts(user_message)[:8]
+        if not facts:
+            self._json_response(200, {"status": "no_explicit_facts", "facts": []})
+            return
+        if _st.protected_memory_model_release:
+            self._json_response(423, {"error": {"message": "Memory updates are locked."}})
+            return
+        _mark_user_activity()
+        persisted = _persist_explicit_user_facts(user_message, session_id, turn_id or None, facts)
+        if persisted is not True:
+            self._json_response(503, {"error": {"message": "Facts could not be committed to durable memory."}})
+            return
+        self._json_response(201, {
+            "status": "saved",
+            "facts": [
+                {"entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"]}
+                for fact in facts
+            ],
+        })
 
     def _kusto_seed(self):
         """Apply the Eva Kusto schema seed file to a configured database."""
@@ -7362,7 +7397,6 @@ def main():
     # block status/cancel/confirm polling on other connections.
     server = ThreadingHTTPServer((args.bind, args.port), BridgeHandler)
     print(f"[Bridge] Listening on http://{args.bind}:{args.port}")
-    start_startup_briefing()
     print(f"[Bridge] Endpoints:")
     print(f"  POST /v1/chat/completions   - Send chat messages")
     print(f"  GET  /v1/models             - List available models")

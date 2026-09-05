@@ -109,6 +109,7 @@ var EvaHarness = (function() {
     { id: 'type_terminal_command', description: 'Type an exact terminal command for review only after a direct user request.' },
     { id: 'plan_terminal_task', description: 'Plan and submit a direct user-requested terminal task.' },
     { id: 'consider_terminal_task', description: 'Consider a direct user request for terminal applicability.' },
+    { id: 'describe_memory_titles', description: 'List available memory titles through the bounded native memory inspector.' },
     { id: 'inspect_form', description: 'Inspect the active native confirmation form. Read-only.' },
     { id: 'set_field', description: 'Set a field in the active native form.' },
     { id: 'submit_form', description: 'Submit the active native form.' },
@@ -309,6 +310,8 @@ var EvaHarness = (function() {
     if (workspaceDescription) return { action: 'describe_workspaces', target: 'workspaces', label: 'Workspaces' };
     var assetsDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:assets?|artifacts?|generated files?|workspace files?)\b|\b(?:assets?|artifacts?|generated files?|workspace files?)\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
     if (assetsDescription) return { action: 'describe_assets', target: 'assets', label: 'Assets' };
+    var memoryTitlesRequest = /\b(?:list|show|display|export|tree)\b[\s\S]{0,64}\b(?:all\s+)?(?:available\s+)?memor(?:y|ies)\b[\s\S]{0,64}\b(?:titles?|names?|tree)\b|\bmemor(?:y|ies)\b[\s\S]{0,64}\b(?:titles?\s+only|names?\s+only|tree\s+(?:structured\s+)?output)\b/.test(phrase);
+    if (memoryTitlesRequest) return { action: 'describe_memory_titles', target: 'memory', label: 'Memory Titles' };
     if (directUser) {
       var createSkillRequest = !/\?\s*$/.test(rawPhrase) && /^(?:please\s+)?(?:create|make|add|teach)\b[\s\S]{0,48}\b(?:new\s+)?skills?\b/i.test(rawPhrase);
       if (createSkillRequest) {
@@ -561,12 +564,8 @@ var EvaHarness = (function() {
     ];
     var navigationRoute = navigationRequested && targets.find(function(item) { return item.match.test(phrase); });
     if (navigationRoute) return navigationRoute;
-    var genericQuestionOrRequest = /\?\s*$/.test(rawPhrase) || /^(?:please\b|(?:can|could|would|will)\s+you\b|(?:what|which|where|when|why|who|how|is|are|do|does|did|has|have)\b|(?:show|tell|find|check|inspect|report|list|search|calculate|compare|explain|summarize|create|update|remove|delete|move|copy|rename|install|build|test)\b)/i.test(rawPhrase);
     var explicitlyNegated = /\b(?:don'?t|do not|never|without|unless|only after|wait|when i say)\b/i.test(rawPhrase);
     if (directUser && boundedSkillIntent(rawPhrase) && !explicitlyNegated) return null;
-    if (directUser && genericQuestionOrRequest && !explicitlyNegated && !/[\r\n\0]/.test(rawPhrase) && rawPhrase.length <= 2000) {
-      return { action: 'consider_terminal_task', target: 'terminal', label: 'Terminal', objective: rawPhrase, submit: true };
-    }
     return null;
   }
 
@@ -701,6 +700,48 @@ var EvaHarness = (function() {
         return result(true, 'describe_assets', message);
       }).catch(function(error) {
         return result(false, 'describe_assets', error && error.message ? error.message : 'Assets could not be described.');
+      });
+    }
+    if (action === 'describe_memory_titles') {
+      var memoryBridge = typeof getSafeBridgeBaseUrl === 'function' ? getSafeBridgeBaseUrl() : 'http://localhost:8888';
+      var memoryHeaders = typeof getBridgeCapabilityHeaders === 'function' ? getBridgeCapabilityHeaders() : {};
+      return fetch(memoryBridge.replace(/\/+$/, '') + '/v1/memory/inspector', {
+        headers: memoryHeaders
+      }).then(function(response) {
+        return response.json().catch(function() { return {}; }).then(function(payload) {
+          if (!response.ok) throw new Error(payload.error && payload.error.message ? payload.error.message : 'Memory inspection failed.');
+          var groups = { 'Atoms': [], 'Persona traits': [], 'Identity claims': [], 'Growth proposals': [] };
+          (payload.atoms || []).forEach(function(atom) {
+            if (atom && atom.Status !== 'deleted') groups['Atoms'].push(String(atom.Entity || 'Memory') + ' > ' + String(atom.Relation || 'memory'));
+          });
+          (payload.traits || []).forEach(function(trait) {
+            if (trait && trait.Status !== 'disabled') groups['Persona traits'].push(String(trait.Trait || 'trait'));
+          });
+          (payload.identity_claims || []).forEach(function(claim) {
+            if (claim) groups['Identity claims'].push(String(claim.ClaimType || 'claim'));
+          });
+          (payload.growth_proposals || []).forEach(function(proposal) {
+            if (proposal && proposal.Status !== 'rejected') groups['Growth proposals'].push(String(proposal.Category || 'proposal'));
+          });
+          var branches = Object.keys(groups).map(function(group) {
+            var titles = Array.from(new Set(groups[group])).sort();
+            return titles.length ? { group: group, titles: titles } : null;
+          }).filter(Boolean);
+          var count = branches.reduce(function(total, branch) { return total + branch.titles.length; }, 0);
+          var lines = ['Memory titles'];
+          branches.forEach(function(branch, branchIndex) {
+            var isLastBranch = branchIndex === branches.length - 1;
+            lines.push((isLastBranch ? '└─ ' : '├─ ') + branch.group);
+            branch.titles.forEach(function(title, titleIndex) {
+              var isLastTitle = titleIndex === branch.titles.length - 1;
+              lines.push((isLastBranch ? '   ' : '│  ') + (isLastTitle ? '└─ ' : '├─ ') + title);
+            });
+          });
+          var message = count ? lines.join('\n') : 'No available memory titles were found.';
+          return result(true, 'describe_memory_titles', message, { outcome: 'completed', count: count });
+        });
+      }).catch(function(error) {
+        return result(false, 'describe_memory_titles', error && error.message ? error.message : 'Memory titles could not be inspected.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
     if (action === 'describe_skills') {
