@@ -1,6 +1,6 @@
 {
   "name": "eva-standalone",
-  "version": "5.6.4",
+  "version": "5.6.5",
   "author": "@apptalks",
   "desktopName": "Eva",
   "description": "Localhost Electron shell for Eva AI Assistant.",
@@ -18,10 +18,14 @@
     "node": ">=24"
   },
   "devDependencies": {
-    "electron": "^39.8.10",
+    "electron": "^44.2.0",
     "electron-builder": "^26.15.3",
     "playwright-core": "^1.62.1",
     "tmp": "^0.2.7"
+  },
+  "overrides": {
+    "@xmldom/xmldom": "0.8.15",
+    "fast-uri": "3.1.6"
   },
   "_comment": "Electron files stay in standalone/. electron-builder copies the parent web UI and bridge with extraResources into resources/app.",
   "build": {

@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current release:** Eva 5.6.4. This document describes the matching browser UI,
+> **Current release:** Eva 5.6.5. This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -19,7 +19,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.6.4.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.6.5.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
@@ -63,6 +63,42 @@ diagnostics, and standing consent for routine read/search tools. Higher-risk act
 including opaque execution, writes, remote mutations, edits, and deletes, require a
 fresh in-chat approval. Skills can be imported from text, URLs, GitHub repositories, or
 files and are normalized before Eva uses them.
+
+### Runtime Behavior and Trust Boundaries
+
+**Durable memory.** Eva uses local SQLite by default. The Memory view exposes record
+provenance, associations, history, and corrections before records are changed or
+removed from recall. Explicit user-stated facts recognized by the deterministic
+extractor are committed before acknowledgement. Ordinary questions do not create
+facts, and mixed fact-plus-request messages continue through normal response handling.
+
+**Local model responses.** LM Studio responses show a live thinking state during long
+generations. When a model returns a separate reasoning layer, Eva keeps it available
+in a collapsed **Thinking** section above the final answer.
+
+**Morning briefings.** Briefing requests refresh bounded news, location-aware weather,
+market news, mail, and memory sources. Dated news and market entries older than 36
+hours are excluded. Market news describes the most recently completed U.S. trading
+session, which may be the previous business day. Weather uses an explicitly learned
+location and requires verified current conditions plus today's forecast; U.S.
+city/state locations prefer the National Weather Service. A briefing is marked partial
+when weather is unavailable.
+
+**Current stock quotes.** Eva uses a verified local receipt when available: a configured
+loopback provider first, then the local `ticker.sh` Yahoo Finance tool, followed by the
+bounded Google Finance fallback. Eva reports an unavailable quote instead of asking a
+model to infer a current price.
+
+**MCP compatibility.** GitHub MCP uses GitHub's hosted HTTPS service and the GitHub PAT
+configured in Settings > Auth; Docker is not required. Local MCP servers that do not
+support Eva's modern discovery extension can use standard MCP `2025-06-18`
+initialization.
+
+**Bounded document abilities.** Native DOCX, PDF, PPTX, XLSX, and MCP Builder abilities
+run locally through the bridge and validate outputs before reporting success. They do
+not fall back to browser, desktop, terminal, package installation, or network access.
+Office-format dependencies are optional and checked by `install.sh`; missing packages
+produce an actionable runtime receipt.
 
 ## Providers
 
@@ -372,7 +408,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.6.4)
+  package.json             Electron + electron-builder config (v5.6.5)
 ```
 
 ## Dependencies
@@ -1872,7 +1908,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.6.4.AppImage'
+./dist/'Eva Standalone-5.6.5.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace
