@@ -427,6 +427,7 @@ from bridge.cognition import (  # noqa: F401
     _extract_explicit_user_facts,
     _persist_explicit_user_facts,
     _backfill_explicit_conversation_facts_sqlite,
+    _backfill_conversation_evidence_links_sqlite,
     _explicit_user_fact_covers_candidate,
     _normalize_entity_candidate,
     _validate_entity_candidate,
@@ -6151,6 +6152,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             model = MemoryModel(memory)
             model.migrate_legacy_knowledge()
             _backfill_explicit_conversation_facts_sqlite(memory)
+            _backfill_conversation_evidence_links_sqlite(memory)
             return model
         cluster, db, ok = self._kusto_context()
         if not ok:
@@ -6160,7 +6162,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if missing:
             self._json_response(409, {"error": {"message": "structured memory tables are unavailable; apply the current Kusto seed", "missing_tables": missing}})
             return None
-        return KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct)
+        return KustoMemoryModel(
+            cluster, db, _kusto_query_direct, _kusto_ingest_direct,
+            conversation_evidence_links_enabled=bool(_get_table_columns(cluster, db, "MemoryEvidenceLinks")),
+        )
 
     def _memory_inspector(self):
         model = self._structured_memory_model()

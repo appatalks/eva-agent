@@ -20,7 +20,7 @@ LOW_RISK_TOOLS = {"", "data-retrieval", "web-search"}
 RESTRICTED_TOOL_TERMS = {"browser", "desktop", "signal", "email", "message", "payment", "purchase", "credential", "protected", "delete", "write"}
 _KUSTO_TURN_LOCK = threading.RLock()
 _FRESH_START_TABLES = (
-    "MemoryEvidence", "ScenarioMembers", "UserPersonaTraits", "MemoryTurnStages",
+    "MemoryEvidence", "MemoryEvidenceLinks", "ScenarioMembers", "UserPersonaTraits", "MemoryTurnStages",
     "MemoryAtoms", "MemoryScenarios", "MemoryTurns", "MemoryOutbox",
     "MemorySemanticClaims", "MemoryClaimEvidence", "MemoryClaimProposals",
     "MemoryClaimProposalConflicts", "MemoryClaimProposalDecisions", "MemoryClaimResolutions",
@@ -46,6 +46,31 @@ def _clip(value, limit):
 
 def _identifier(prefix):
     return prefix + "-" + uuid.uuid4().hex[:16]
+
+
+def _conversation_evidence_link(memory_id, source_type, source_ref, evidence, now):
+    """Return a durable locator for a conversation-derived evidence record."""
+    if str(source_type or "") != "conversation_turn":
+        return None
+    evidence = evidence if isinstance(evidence, dict) else {}
+    session_id = _clip(evidence.get("session_id"), 160)
+    turn_id = _clip(evidence.get("turn_id"), 120)
+    source_ref = _clip(source_ref, 240)
+    if not session_id and source_ref.startswith("conversation:"):
+        parts = source_ref.split(":", 2)
+        if len(parts) == 3:
+            session_id, turn_id = _clip(parts[1], 160), _clip(parts[2], 120)
+    if not session_id:
+        return None
+    link_seed = "\0".join((str(memory_id), str(source_type), source_ref))
+    return {
+        "LinkId": "conversation-evidence-" + hashlib.sha256(link_seed.encode("utf-8")).hexdigest()[:24],
+        "MemoryId": _clip(memory_id, 80), "SourceType": _clip(source_type, 80), "SourceRef": source_ref,
+        "SessionId": session_id, "TurnId": turn_id,
+        "ConversationRowId": _clip(evidence.get("conversation_row_id"), 80),
+        "Timestamp": _clip(evidence.get("timestamp"), 40),
+        "Role": _clip(evidence.get("role"), 40), "CreatedAt": now,
+    }
 
 
 def _scenario_id(scope, scope_id):
@@ -239,6 +264,7 @@ class MemoryModel:
             "ScopeId": _clip(record.get("scope_id"), 160), "Confidence": confidence, "SourceRef": source_ref,
             "CreatedAt": now, "UpdatedAt": now, "ExpiresAt": _clip(record.get("expires_at"), 40), "SupersedesId": _clip(record.get("supersedes_id"), 80),
         }
+        evidence_links_enabled = self.memory.table_exists("MemoryEvidenceLinks")
 
         def write(conn):
             conn.execute(
@@ -255,6 +281,13 @@ class MemoryModel:
                         "INSERT INTO MemoryEvidence (EvidenceId, MemoryId, SourceType, SourceRef, CreatedAt) VALUES (?, ?, ?, ?, ?)",
                         (_identifier("evidence"), memory_id, source_type, evidence_ref, now),
                     )
+                    link = _conversation_evidence_link(memory_id, source_type, evidence_ref, item, now)
+                    if evidence_links_enabled and link:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO MemoryEvidenceLinks (LinkId, MemoryId, SourceType, SourceRef, SessionId, TurnId, ConversationRowId, Timestamp, Role, CreatedAt) "
+                            "VALUES (:LinkId, :MemoryId, :SourceType, :SourceRef, :SessionId, :TurnId, :ConversationRowId, :Timestamp, :Role, :CreatedAt)",
+                            link,
+                        )
             return row
 
         return self.memory.transaction(write)
@@ -409,6 +442,10 @@ class MemoryModel:
         evidence = self.memory.query(
             "SELECT EvidenceId, SourceType, SourceRef, CreatedAt FROM MemoryEvidence WHERE MemoryId = ? ORDER BY CreatedAt DESC", (str(memory_id),)
         ) or []
+        evidence_links = self.memory.query(
+            "SELECT LinkId, SourceType, SourceRef, SessionId, TurnId, ConversationRowId, Timestamp, Role, CreatedAt "
+            "FROM MemoryEvidenceLinks WHERE MemoryId = ? ORDER BY CreatedAt DESC", (str(memory_id),)
+        ) if self.memory.table_exists("MemoryEvidenceLinks") else []
         scenarios = self.memory.query(
             "SELECT s.ScenarioId, s.Scope, s.ScopeId, s.Title, s.Status, m.Role, m.CreatedAt AS MemberCreatedAt "
             "FROM ScenarioMembers m JOIN MemoryScenarios s ON s.ScenarioId = m.ScenarioId WHERE m.MemoryId = ? ORDER BY s.UpdatedAt DESC", (str(memory_id),)
@@ -427,7 +464,7 @@ class MemoryModel:
         successors = self.memory.query(
             "SELECT MemoryId, Entity, Relation, Value, Status, UpdatedAt FROM MemoryAtoms WHERE SupersedesId = ? ORDER BY UpdatedAt DESC", (str(memory_id),)
         ) or []
-        return {"atom": atom, "evidence": evidence, "scenarios": scenarios, "traits": traits, "superseded_atom": predecessor, "corrections": successors}
+        return {"atom": atom, "evidence": evidence, "evidence_links": evidence_links or [], "scenarios": scenarios, "traits": traits, "superseded_atom": predecessor, "corrections": successors}
 
     def register_turn(self, turn_id, session_id, provider=""):
         turn_id = _clip(turn_id, 120)
@@ -585,12 +622,13 @@ class KustoMemoryModel:
     _SKILL_COLUMNS = ["SkillId", "Name", "Description", "Category", "Instructions", "Tools", "Tags", "Config", "Source", "Status", "CreatedAt", "UpdatedAt"]
     _TURN_STAGE_COLUMNS = ["TurnId", "Stage", "Status", "CreatedAt"]
 
-    def __init__(self, cluster, database, query, ingest):
+    def __init__(self, cluster, database, query, ingest, conversation_evidence_links_enabled=False):
         self.cluster = cluster
         self.database = database
         self.query = query
         self.ingest = ingest
         self.last_registration_was_retry = False
+        self.conversation_evidence_links_enabled = bool(conversation_evidence_links_enabled)
 
     @staticmethod
     def _quote(value):
@@ -695,6 +733,14 @@ class KustoMemoryModel:
                 self._write("MemoryEvidence", ["EvidenceId", "MemoryId", "SourceType", "SourceRef", "CreatedAt"], {
                     "EvidenceId": _identifier("evidence"), "MemoryId": row["MemoryId"], "SourceType": source_type, "SourceRef": source_ref, "CreatedAt": now,
                 })
+                link = _conversation_evidence_link(row["MemoryId"], source_type, source_ref, item, now)
+                if link and self.conversation_evidence_links_enabled and not self._read(
+                    "MemoryEvidenceLinks | where LinkId == " + self._quote(link["LinkId"]) + " | take 1"
+                ):
+                    self._write("MemoryEvidenceLinks", [
+                        "LinkId", "MemoryId", "SourceType", "SourceRef", "SessionId", "TurnId",
+                        "ConversationRowId", "Timestamp", "Role", "CreatedAt",
+                    ], link)
         return row
 
     def supersede_atom(self, memory_id, replacement):
@@ -798,6 +844,10 @@ class KustoMemoryModel:
             "MemoryEvidence | where MemoryId == " + self._quote(memory_id)
             + " | project EvidenceId, SourceType, SourceRef, CreatedAt | order by CreatedAt desc"
         )
+        evidence_links = self._read(
+            "MemoryEvidenceLinks | where MemoryId == " + self._quote(memory_id)
+            + " | project LinkId, SourceType, SourceRef, SessionId, TurnId, ConversationRowId, Timestamp, Role, CreatedAt | order by CreatedAt desc"
+        ) if self.conversation_evidence_links_enabled else []
         memberships = self._read(
             "ScenarioMembers | where MemoryId == " + self._quote(memory_id)
             + " | project ScenarioId, Role, MemberCreatedAt=CreatedAt"
@@ -818,7 +868,7 @@ class KustoMemoryModel:
             "MemoryAtoms | where SupersedesId == " + self._quote(memory_id)
             + " | summarize arg_max(UpdatedAt, *) by MemoryId | project MemoryId, Entity, Relation, Value, Status, UpdatedAt | order by UpdatedAt desc"
         )
-        return {"atom": atom, "evidence": evidence, "scenarios": scenarios, "traits": traits, "superseded_atom": predecessor, "corrections": corrections}
+        return {"atom": atom, "evidence": evidence, "evidence_links": evidence_links, "scenarios": scenarios, "traits": traits, "superseded_atom": predecessor, "corrections": corrections}
 
     def register_turn(self, turn_id, session_id, provider=""):
         turn_id = _clip(turn_id, 120)

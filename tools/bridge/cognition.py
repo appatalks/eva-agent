@@ -24,6 +24,8 @@ from bridge.utils import _is_passive_memory_recall
 _ARTIFACTS_DIR = _cfg.ARTIFACTS_DIR
 _CANDIDATE_HISTORY_TTL_SECONDS = _cfg.CANDIDATE_HISTORY_TTL_SECONDS
 _CONVO_CONTENT_CAP = _cfg.CONVO_CONTENT_CAP
+_LAST_CONVERSATION_MAX_ROWS = _cfg.LAST_CONVERSATION_MAX_ROWS
+_LAST_CONVERSATION_CHAR_CAP = _cfg.LAST_CONVERSATION_CHAR_CAP
 _GOALS_LATEST_QUERY = _cfg.GOALS_LATEST_QUERY
 _MEMORY_TABLES = _cfg.MEMORY_TABLES
 _SEMANTIC_MIN_SCORE = _cfg.SEMANTIC_MIN_SCORE
@@ -61,6 +63,78 @@ def _memory_prompt_data_block(title, records):
     if not cleaned:
         return ""
     return f"[{title} - UNTRUSTED MEMORY DATA]\n" + _UNTRUSTED_MEMORY_NOTICE + "\n".join(cleaned)
+
+
+_LAST_CONVERSATION_RE = re.compile(
+    r"\b(?:last|previous|most recent)\s+(?:conversation|converstation|chat|discussion|talk)\b",
+    re.IGNORECASE,
+)
+
+
+def _requests_last_conversation(user_message):
+    """Return whether the user explicitly asks Eva to revisit the latest session."""
+    return bool(_LAST_CONVERSATION_RE.search(str(user_message or "")))
+
+
+def _conversation_transcript_block(session_id, rows):
+    """Render a bounded stored session as untrusted historical reference data."""
+    records = ["Session: " + str(session_id or "")]
+    remaining = _LAST_CONVERSATION_CHAR_CAP
+    truncated = len(rows) > _LAST_CONVERSATION_MAX_ROWS
+    for row in rows[:_LAST_CONVERSATION_MAX_ROWS]:
+        content = _neutralize_memory_text(row.get("Content", ""))
+        record = (
+            "[" + str(row.get("Timestamp", "?")) + " / "
+            + str(row.get("Role", "?")) + "] " + content
+        )
+        if len(record) > remaining:
+            record = record[:max(0, remaining - 25)].rstrip() + " [message truncated]"
+            truncated = True
+        records.append(record)
+        remaining -= len(record)
+        if remaining <= 25:
+            truncated = True
+            break
+    if truncated:
+        records.append("Transcript is bounded to the first " + str(_LAST_CONVERSATION_MAX_ROWS) + " records and " + str(_LAST_CONVERSATION_CHAR_CAP) + " characters.")
+    return _memory_prompt_data_block("Last Conversation", records)
+
+
+def _latest_conversation_block_sqlite(mem):
+    latest = mem.query(
+        "SELECT SessionId, MAX(Timestamp) AS LatestTimestamp, MAX(rowid) AS LatestRowId "
+        "FROM Conversations GROUP BY SessionId "
+        "ORDER BY LatestTimestamp DESC, LatestRowId DESC LIMIT 1"
+    ) or []
+    if not latest or not latest[0].get("SessionId"):
+        return ""
+    session_id = str(latest[0]["SessionId"])
+    rows = mem.query(
+        "SELECT Timestamp, Role, Content FROM Conversations WHERE SessionId = ? "
+        "ORDER BY Timestamp ASC, rowid ASC LIMIT ?",
+        (session_id, _LAST_CONVERSATION_MAX_ROWS + 1),
+    ) or []
+    return _conversation_transcript_block(session_id, rows)
+
+
+def _latest_conversation_block_kusto(cluster, db):
+    latest = _kusto_query_direct(
+        cluster, db,
+        "Conversations | summarize LatestTimestamp=max(Timestamp) by SessionId "
+        "| top 1 by LatestTimestamp desc | project SessionId",
+    ) or []
+    if not latest or not latest[0].get("SessionId"):
+        return ""
+    session_id = str(latest[0]["SessionId"]).replace("'", "''")[:120]
+    rows = _kusto_query_direct(
+        cluster, db,
+        "Conversations | where SessionId == '" + session_id + "' "
+        "| extend RoleOrder=iff(Role =~ 'user', 0, 1) "
+        "| order by Timestamp asc, TurnId asc, RoleOrder asc "
+        "| take " + str(_LAST_CONVERSATION_MAX_ROWS + 1)
+        + " | project Timestamp, Role, Content",
+    ) or []
+    return _conversation_transcript_block(session_id, rows)
 
 
 def _latest_user_profile_rows(rows):
@@ -481,7 +555,10 @@ def _persist_explicit_user_facts(user_message, conversation_id=None, turn_id=Non
                         "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
                         "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
                         "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
-                    }, [{"source_type": "conversation_turn", "source_ref": source_ref}])
+                    }, [{
+                        "source_type": "conversation_turn", "source_ref": source_ref,
+                        "session_id": session_id, "turn_id": str(turn_id or now), "timestamp": now, "role": "user",
+                    }])
                 return True
             return bool(mem.atomic(persist))
         finally:
@@ -490,7 +567,10 @@ def _persist_explicit_user_facts(user_message, conversation_id=None, turn_id=Non
     cluster, db = _get_kusto_config()
     if not cluster or not db or not _get_table_columns(cluster, db, "MemoryAtoms"):
         return False
-    memory_model = KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct)
+    memory_model = KustoMemoryModel(
+        cluster, db, _kusto_query_direct, _kusto_ingest_direct,
+        conversation_evidence_links_enabled=bool(_get_table_columns(cluster, db, "MemoryEvidenceLinks")),
+    )
     existing = {
         (str(row.get("Entity", "")), str(row.get("Relation", "")), str(row.get("Value", "")))
         for row in (_kusto_query_direct(
@@ -507,7 +587,10 @@ def _persist_explicit_user_facts(user_message, conversation_id=None, turn_id=Non
             "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
             "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
             "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
-        }, [{"source_type": "conversation_turn", "source_ref": source_ref}])
+        }, [{
+            "source_type": "conversation_turn", "source_ref": source_ref,
+            "session_id": session_id, "turn_id": str(turn_id or now), "timestamp": now, "role": "user",
+        }])
     return True
 
 
@@ -579,6 +662,79 @@ def _backfill_explicit_conversation_facts_sqlite(mem):
         conn.execute(
             "INSERT INTO MemoryMigrations (MigrationId, AppliedAt, Details) VALUES (?, ?, ?)",
             (migration_id, now, "Promoted latest deterministic facts from historical user turns"),
+        )
+        return inserted
+
+    return mem.transaction(write)
+
+
+def _backfill_conversation_evidence_links_sqlite(mem):
+    """Resolve legacy conversation hashes into durable, directly queryable links once."""
+    migration_id = "conversation-evidence-links-v1"
+    if not mem.table_exists("MemoryEvidenceLinks") or not mem.table_exists("MemoryMigrations"):
+        return 0
+    if mem.query("SELECT MigrationId FROM MemoryMigrations WHERE MigrationId = ?", (migration_id,)):
+        return 0
+    evidence_rows = mem.query(
+        "SELECT e.MemoryId, e.SourceType, e.SourceRef, a.Entity, a.Relation "
+        "FROM MemoryEvidence e JOIN MemoryAtoms a ON a.MemoryId = e.MemoryId "
+        "WHERE e.SourceType = 'conversation_turn'"
+    ) or []
+    conversation_rows = mem.query(
+        "SELECT rowid AS ConversationRowId, SessionId, Timestamp, Role, TurnId FROM Conversations "
+        "ORDER BY rowid ASC"
+    ) or []
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def write(conn):
+        inserted = 0
+        for evidence in evidence_rows:
+            source_ref = str(evidence.get("SourceRef", ""))
+            source_row = None
+            if source_ref.startswith("conversation-history:"):
+                entity = str(evidence.get("Entity", "")).casefold()
+                relation = str(evidence.get("Relation", "")).casefold()
+                for candidate in conversation_rows:
+                    if str(candidate.get("Role", "")).casefold() != "user":
+                        continue
+                    source_seed = "\0".join((
+                        str(candidate.get("SessionId", "")), str(candidate.get("Timestamp", "")),
+                        str(candidate.get("ConversationRowId", "")), entity, relation,
+                    ))
+                    digest = hashlib.sha256(source_seed.encode("utf-8")).hexdigest()[:24]
+                    if source_ref == "conversation-history:" + digest:
+                        source_row = candidate
+                        break
+            elif source_ref.startswith("conversation:"):
+                parts = source_ref.split(":", 2)
+                if len(parts) == 3:
+                    source_row = next((candidate for candidate in conversation_rows if (
+                        str(candidate.get("SessionId", "")) == parts[1]
+                        and str(candidate.get("Role", "")).casefold() == "user"
+                        and (str(candidate.get("TurnId", "")) == parts[2]
+                             or str(candidate.get("Timestamp", "")) == parts[2])
+                    )), None)
+            if source_row is None:
+                continue
+            link_seed = "\0".join((str(evidence.get("MemoryId", "")), "conversation_turn", source_ref))
+            link = {
+                "LinkId": "conversation-evidence-" + hashlib.sha256(link_seed.encode("utf-8")).hexdigest()[:24],
+                "MemoryId": str(evidence.get("MemoryId", "")), "SourceType": "conversation_turn",
+                "SourceRef": source_ref, "SessionId": str(source_row.get("SessionId", "")),
+                "TurnId": str(source_row.get("TurnId", "")),
+                "ConversationRowId": str(source_row.get("ConversationRowId", "")),
+                "Timestamp": str(source_row.get("Timestamp", "")), "Role": str(source_row.get("Role", "")),
+                "CreatedAt": now,
+            }
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO MemoryEvidenceLinks (LinkId, MemoryId, SourceType, SourceRef, SessionId, TurnId, ConversationRowId, Timestamp, Role, CreatedAt) "
+                "VALUES (:LinkId, :MemoryId, :SourceType, :SourceRef, :SessionId, :TurnId, :ConversationRowId, :Timestamp, :Role, :CreatedAt)",
+                link,
+            )
+            inserted += cursor.rowcount
+        conn.execute(
+            "INSERT INTO MemoryMigrations (MigrationId, AppliedAt, Details) VALUES (?, ?, ?)",
+            (migration_id, now, "Resolved legacy conversation evidence to session and turn locators"),
         )
         return inserted
 
@@ -902,6 +1058,7 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
     memory_model = MemoryModel(mem)
     memory_model.migrate_legacy_knowledge()
     _backfill_explicit_conversation_facts_sqlite(mem)
+    _backfill_conversation_evidence_links_sqlite(mem)
     structured_view = memory_model.prompt_view(session_id, _CORE_IDENTITY_CHARTER)
     charter = structured_view["charter"]
     if not charter.startswith("[Core Identity Charter]"):
@@ -1220,7 +1377,11 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
             if any(term in haystack for term in durable_terms):
                 _add_hit(record)
 
-    if relevant_hits:
+    if _requests_last_conversation(user_message):
+        transcript = _latest_conversation_block_sqlite(mem)
+        if transcript:
+            context_parts.append(transcript)
+    elif relevant_hits:
         extra = [f"{k.get('Entity','?')} - {k.get('Relation','?')}: {k.get('Value','?')}"
                  for k in relevant_hits]
         context_parts.append(_memory_prompt_data_block("Memory - Relevant to This Message", extra))
@@ -1269,7 +1430,7 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
             tbl_names = [t.get("name", "?") for t in tables]
             context_parts.append(f"[Live Data] Tables: {', '.join(tbl_names)}")
 
-    if _re.search(r'\b(conversation|history|recent|chat|talked|said)\b', msg_lower):
+    if not _requests_last_conversation(user_message) and _re.search(r'\b(conversation|history|recent|chat|talked|said)\b', msg_lower):
         convos = mem.query(
             "SELECT Timestamp, Role, Content FROM Conversations ORDER BY Timestamp DESC LIMIT 5"
         )
@@ -1347,14 +1508,14 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
     source_id = f"{_st.cognition_launch_id or 'launch'}:{session_id}"
 
     # 1. Log conversation
-    conv_columns = ["SessionId", "Timestamp", "Role", "Provider", "Model", "Content", "TokenEstimate", "ImageGenerated"]
+    conv_columns = ["SessionId", "Timestamp", "Role", "Provider", "Model", "Content", "TokenEstimate", "ImageGenerated", "TurnId"]
     conv_rows = [
         {"SessionId": session_id, "Timestamp": now, "Role": "user", "Provider": "copilot-acp",
          "Model": model_name, "Content": user_message[:_CONVO_CONTENT_CAP],
-         "TokenEstimate": len(user_message.split()), "ImageGenerated": 0},
+         "TokenEstimate": len(user_message.split()), "ImageGenerated": 0, "TurnId": str(turn_id or now)},
         {"SessionId": session_id, "Timestamp": now, "Role": "assistant", "Provider": "copilot-acp",
          "Model": model_name, "Content": assistant_response[:_CONVO_CONTENT_CAP],
-         "TokenEstimate": len(assistant_response.split()), "ImageGenerated": 0},
+         "TokenEstimate": len(assistant_response.split()), "ImageGenerated": 0, "TurnId": str(turn_id or now)},
     ]
     if not mem.ingest("Conversations", conv_columns, conv_rows):
         raise RuntimeError("conversation persistence failed")
@@ -1391,7 +1552,10 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
                 "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
                 "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
                 "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
-            }, [{"source_type": "conversation_turn", "source_ref": source_ref}])
+            }, [{
+                "source_type": "conversation_turn", "source_ref": source_ref,
+                "session_id": session_id, "turn_id": str(turn_id or now), "timestamp": now, "role": "user",
+            }])
 
     # 3. Candidate entities
     candidate_entities, rejected_entities = _extract_entity_candidates(user_message)
@@ -1974,7 +2138,11 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
             if any(term in haystack for term in durable_terms):
                 _add_hit(record)
 
-    if relevant_hits:
+    if _requests_last_conversation(user_message):
+        transcript = _latest_conversation_block_kusto(cluster, db)
+        if transcript:
+            context_parts.append(transcript)
+    elif relevant_hits:
         extra = [f"{k.get('Entity','?')} - {k.get('Relation','?')}: {k.get('Value','?')}"
                  for k in relevant_hits[:6]]
         context_parts.append(_memory_prompt_data_block("Memory - Relevant", extra))
@@ -2033,7 +2201,7 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
             if tbl_names:
                 context_parts.append(f"[Live Data] Tables in {target_db}: {', '.join(tbl_names)}")
 
-    if _re.search(r'\b(conversation|history|recent|chat|talked|said)\b', msg_lower):
+    if not _requests_last_conversation(user_message) and _re.search(r'\b(conversation|history|recent|chat|talked|said)\b', msg_lower):
         conv_query = _with_launch_filter(
             "Conversations | order by Timestamp desc | take 5 | project Timestamp, Role, Content"
         )
@@ -2111,7 +2279,10 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
     session_id = str(conversation_id or uuid.uuid4())[:120]
     memory_model = None
     if _get_table_columns(cluster, db, "MemoryAtoms"):
-        memory_model = KustoMemoryModel(cluster, db, _kusto_query_direct, _kusto_ingest_direct)
+        memory_model = KustoMemoryModel(
+            cluster, db, _kusto_query_direct, _kusto_ingest_direct,
+            conversation_evidence_links_enabled=bool(_get_table_columns(cluster, db, "MemoryEvidenceLinks")),
+        )
     if turn_id and memory_model is not None and _get_table_columns(cluster, db, "MemoryTurns"):
         if not memory_model.register_turn(turn_id, session_id, model_name):
             return
@@ -2207,7 +2378,10 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
                     "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
                     "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
                     "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
-                }, [{"source_type": "conversation_turn", "source_ref": source_ref}])
+                }, [{
+                    "source_type": "conversation_turn", "source_ref": source_ref,
+                    "session_id": session_id, "turn_id": str(turn_id or now), "timestamp": now, "role": "user",
+                }])
         complete_stage("explicit_facts")
 
     # 3. Extract candidate knowledge with validation/classification

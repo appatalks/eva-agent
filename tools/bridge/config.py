@@ -76,6 +76,8 @@ KUSTO_METADATA_TTL_SECONDS = 60
 KUSTO_EMOTION_TTL_SECONDS = 5
 KUSTO_SCHEMA_TTL_SECONDS = 300
 CONVO_CONTENT_CAP = 8000
+LAST_CONVERSATION_MAX_ROWS = 32
+LAST_CONVERSATION_CHAR_CAP = 12000
 EMBEDDING_MODEL = "text-embedding-3-small"
 SEMANTIC_MIN_SCORE = 0.30
 SEMANTIC_POOL_SIZE = 150
@@ -86,7 +88,7 @@ MEMORY_TABLES = [
     "Reflections", "Goals", "SelfState", "HeuristicsIndex",
     "EmotionBaseline", "BackgroundProposals", "BackgroundActivity", "Skills",
     "MemoryMigrations", "CoreIdentity", "IdentityClaims", "MemoryAtoms",
-    "MemoryEvidence", "MemoryScenarios", "ScenarioMembers", "UserPersonaTraits",
+    "MemoryEvidence", "MemoryEvidenceLinks", "MemoryScenarios", "ScenarioMembers", "UserPersonaTraits",
     "MemoryTurns", "MemoryTurnStages", "AutonomyPolicy", "SkillVersions", "SkillEvaluations", "GrowthProposals",
 ]
 

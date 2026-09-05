@@ -12,8 +12,9 @@ while keeping configuration, approvals, and personal data under your control.
 
 - **One intelligent gateway:** route work across OpenAI, GitHub Copilot ACP, LM Studio,
   and MCP tools without changing the conversation model.
-- **Durable, inspectable memory:** retain explicit facts locally with provenance,
-  lifecycle controls, corrections, and a dedicated Memory view.
+- **Durable, inspectable memory:** retain explicit facts locally with provenance
+	linked to source conversation turns, lifecycle controls, corrections, bounded
+	last-session recall, and a dedicated Memory view.
 - **Real work, with approval:** use browser, desktop, email, files, skills, scheduled
   tasks, and coding workspaces through bounded native actions.
 - **Live daily context:** assemble weather, news, markets, mail, and memory into verified

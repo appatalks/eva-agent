@@ -180,6 +180,10 @@
       detailAssociation(associations, 'Evidence', (detail.evidence || []).map(function (item) {
         return formatValue(item.SourceType) + ': ' + formatValue(item.SourceRef) + ' (' + formatValue(item.CreatedAt) + ')';
       }));
+      detailAssociation(associations, 'Conversation sources', (detail.evidence_links || []).map(function (item) {
+        return 'session=' + formatValue(item.SessionId) + ' / turn=' + formatValue(item.TurnId) +
+          ' / ' + formatValue(item.Role) + ' / ' + formatValue(item.Timestamp);
+      }));
       detailAssociation(associations, 'Scenario memberships', (detail.scenarios || []).map(function (item) {
         return formatValue(item.Title) + ' [' + formatValue(item.Role) + '] ' + formatValue(item.Scope) + ':' + formatValue(item.ScopeId);
       }));

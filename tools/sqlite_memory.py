@@ -17,6 +17,7 @@ Usage:
     rows = mem.query("Knowledge", where="Entity = ?", params=("User",), limit=10)
 """
 
+import hashlib
 import json
 import os
 import re
@@ -368,6 +369,25 @@ _SCHEMA = {
             "CREATE INDEX IF NOT EXISTS idx_memory_evidence_memory ON MemoryEvidence(MemoryId)",
         ],
     },
+    "MemoryEvidenceLinks": {
+        "columns": [
+            ("LinkId", "TEXT NOT NULL"),
+            ("MemoryId", "TEXT NOT NULL"),
+            ("SourceType", "TEXT NOT NULL"),
+            ("SourceRef", "TEXT NOT NULL"),
+            ("SessionId", "TEXT NOT NULL"),
+            ("TurnId", "TEXT DEFAULT ''"),
+            ("ConversationRowId", "TEXT DEFAULT ''"),
+            ("Timestamp", "TEXT DEFAULT ''"),
+            ("Role", "TEXT DEFAULT ''"),
+            ("CreatedAt", "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))"),
+        ],
+        "indexes": [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_evidence_links_id ON MemoryEvidenceLinks(LinkId)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_evidence_links_source ON MemoryEvidenceLinks(MemoryId, SourceType, SourceRef)",
+            "CREATE INDEX IF NOT EXISTS idx_memory_evidence_links_session ON MemoryEvidenceLinks(SessionId, TurnId)",
+        ],
+    },
     "MemoryScenarios": {
         "columns": [
             ("ScenarioId", "TEXT NOT NULL"),
@@ -658,6 +678,7 @@ class SqliteMemory:
         # is a no-op when the row already exists (matched by Entity+Relation).
         self._migrate_legacy_identity_claims(conn)
         self._migrate_skills_category(conn)
+        self._migrate_conversation_provenance(conn)
         self._backfill_skills(conn)
 
     def _migrate_legacy_identity_claims(self, conn):
@@ -745,6 +766,49 @@ class SqliteMemory:
             conn.execute(
                 "INSERT OR IGNORE INTO MemoryMigrations (MigrationId, Details) VALUES (?, ?)",
                 ("skills-config-v1", "Added Skills.Config for structured skill defaults and allowed fallbacks"),
+            )
+        conn.commit()
+
+    def _migrate_conversation_provenance(self, conn):
+        """Assign stable turn identifiers to conversation rows created before TurnId existed."""
+        if not self.table_exists("Conversations"):
+            return
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(Conversations)").fetchall()}
+        if "TurnId" not in columns:
+            conn.execute("ALTER TABLE Conversations ADD COLUMN TurnId TEXT DEFAULT ''")
+
+        pending_user_turns = {}
+        rows = conn.execute(
+            "SELECT rowid, SessionId, Timestamp, Role, TurnId FROM Conversations "
+            "ORDER BY SessionId ASC, Timestamp ASC, rowid ASC"
+        ).fetchall()
+        for row in rows:
+            session_id = str(row["SessionId"] or "")
+            timestamp = str(row["Timestamp"] or "")
+            role = str(row["Role"] or "").lower()
+            existing_turn_id = str(row["TurnId"] or "")
+            generated_turn_id = "legacy-turn-" + hashlib.sha256(
+                (session_id + "\0" + timestamp + "\0" + str(row["rowid"])).encode("utf-8")
+            ).hexdigest()[:24]
+
+            if role == "user":
+                assigned_turn_id = existing_turn_id or generated_turn_id
+                pending_user_turns[session_id] = assigned_turn_id
+            elif role == "assistant" and session_id in pending_user_turns:
+                assigned_turn_id = existing_turn_id or pending_user_turns.pop(session_id)
+            else:
+                assigned_turn_id = existing_turn_id or generated_turn_id
+
+            if not existing_turn_id:
+                conn.execute(
+                    "UPDATE Conversations SET TurnId = ? WHERE rowid = ?",
+                    (assigned_turn_id, row["rowid"]),
+                )
+
+        if self.table_exists("MemoryMigrations"):
+            conn.execute(
+                "INSERT OR IGNORE INTO MemoryMigrations (MigrationId, Details) VALUES (?, ?)",
+                ("conversation-provenance-v1", "Added Conversations.TurnId and backfilled legacy conversation turns"),
             )
         conn.commit()
 

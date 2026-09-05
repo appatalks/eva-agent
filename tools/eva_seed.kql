@@ -106,6 +106,19 @@ core-identity-v1,1,"Eva is a personal AI assistant: warm, curious, direct, evide
     CreatedAt: datetime
 )
 
+.create-merge table MemoryEvidenceLinks (
+    LinkId: string,
+    MemoryId: string,
+    SourceType: string,
+    SourceRef: string,
+    SessionId: string,
+    TurnId: string,
+    ConversationRowId: string,
+    Timestamp: datetime,
+    Role: string,
+    CreatedAt: datetime
+)
+
 .create-merge table MemoryScenarios (
     ScenarioId: string,
     Scope: string,
