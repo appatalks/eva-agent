@@ -99,6 +99,7 @@ var EvaHarness = (function() {
     { id: 'retry_workspace_run', description: 'Retry the named workspace run after a direct user request.' },
     { id: 'run_workspace_check', description: 'Start a requested workspace check or build.' },
     { id: 'run_repository_remediation', description: 'Start an explicitly requested repository remediation run.' },
+    { id: 'describe_repository_remediation', description: 'Report the verified status and receipt of the most recently started repository task. Read-only.' },
     { id: 'import_github', description: 'Import an exact GitHub HTTPS URL only after a direct user request.' },
     { id: 'import_github_selection', description: 'Import a named repository selected from a native GitHub listing.' },
     { id: 'describe_github_pull_request', description: 'Inspect a GitHub pull request through authenticated gh. args: {number, repository?}. Read-only.' },
@@ -169,7 +170,9 @@ var EvaHarness = (function() {
     var githubRepository = request.match(/https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:\/[A-Za-z0-9_./-]*)?/i);
     var securityRequest = /\b(?:dependabot|dependency|dependencies|codeql|security|alerts?)\b/i.test(request);
     var remediationAction = /\b(?:resolve|fix|remediate|address|update)\b/i.test(request);
-    if (githubRepository && securityRequest && remediationAction) {
+    var issueDelivery = /\b(?:create|open|submit|publish|post)\b[\s\S]{0,80}\bissues?\b|\bissues?\b[\s\S]{0,80}\b(?:create|open|submit|publish|post)\b/i.test(request);
+    var repositoryAudit = /\b(?:audit|review|inspect|check|validate|assess|find|capabilit(?:y|ies)|gaps?)\b/i.test(request);
+    if (githubRepository && ((securityRequest && remediationAction) || (issueDelivery && repositoryAudit))) {
       return {
         action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Remediation',
         repositoryName: githubRepository[1], objective: request.replace(/[.!?]+$/g, '').trim()
@@ -187,7 +190,8 @@ var EvaHarness = (function() {
     if (!context || !context.repositoryName || !context.objective) return;
     var value = {
       repositoryName: String(context.repositoryName).slice(0, 240),
-      objective: String(context.objective).slice(0, 4000)
+      objective: String(context.objective).slice(0, 4000),
+      runId: String(context.runId || '').slice(0, 120)
     };
     try { localStorage.setItem('eva_last_repository_remediation', JSON.stringify(value)); } catch (_) {}
     try {
@@ -202,7 +206,10 @@ var EvaHarness = (function() {
       if (!window.evaStandalone || typeof window.evaStandalone.workspaceRemediationContextLoad !== 'function') return null;
       var context = window.evaStandalone.workspaceRemediationContextLoad();
       if (context && /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?$/.test(String(context.repositoryName || '')) && String(context.objective || '').trim()) {
-        return { repositoryName: String(context.repositoryName), objective: String(context.objective).slice(0, 4000) };
+        return {
+          repositoryName: String(context.repositoryName), objective: String(context.objective).slice(0, 4000),
+          runId: /^[0-9a-f-]{36}$/i.test(String(context.runId || '')) ? String(context.runId) : ''
+        };
       }
     } catch (_) {}
     return null;
@@ -294,7 +301,8 @@ var EvaHarness = (function() {
           String(savedRemediation.objective || '').trim()) {
         lastRemediation = {
           repositoryName: String(savedRemediation.repositoryName),
-          objective: String(savedRemediation.objective).slice(0, 4000)
+          objective: String(savedRemediation.objective).slice(0, 4000),
+          runId: /^[0-9a-f-]{36}$/i.test(String(savedRemediation.runId || '')) ? String(savedRemediation.runId) : ''
         };
       }
     } catch (_) {}
@@ -304,6 +312,13 @@ var EvaHarness = (function() {
       return {
         action: 'describe_github_pull_request', target: 'workspaces', label: 'GitHub Pull Request',
         number: directPullRequest.number, repository: directPullRequest.repository
+      };
+    }
+    var remediationStatus = directUser && /^(?:did|have)\s+you\s+(?:do|done|finish|finished|complete|completed|submit|submitted|post|posted|create|created)\s+(?:it|that|the\s+(?:issue|task))\s*[?!.,]*$/i.test(rawPhrase);
+    if (remediationStatus && lastRemediation && lastRemediation.runId) {
+      return {
+        action: 'describe_repository_remediation', target: 'workspaces', label: 'Repository Task Status',
+        runId: lastRemediation.runId
       };
     }
     var workspaceDescription = /\b(?:tell me|describe|list|show|summarize|summary|what|which|count|inspect|check|review)\b[\s\S]{0,64}\b(?:current\s+)?workspaces?\b|\bworkspaces?\b[\s\S]{0,48}\b(?:do i have|are available|can you access|current|count|inspect|check|review)\b/.test(phrase);
@@ -393,6 +408,20 @@ var EvaHarness = (function() {
             objective: pullRequestRemediation.objective + '\n\nFollow-up: ' + rawPhrase.replace(/[.!?]+$/g, '').trim()
           };
         }
+      }
+      var issueFollowUp = /\b(?:create|open|submit|publish|post)\b[\s\S]{0,64}\b(?:the\s+|that\s+)?issue\b/i.test(rawPhrase);
+      if (issueFollowUp && lastRemediation) {
+        if (lastRemediation.runId) {
+          return {
+            action: 'describe_repository_remediation', target: 'workspaces', label: 'Repository Task Status',
+            runId: lastRemediation.runId
+          };
+        }
+        return {
+          action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Issue',
+          repositoryName: lastRemediation.repositoryName,
+          objective: lastRemediation.objective + '\n\nFollow-up: ' + rawPhrase.replace(/[.!?]+$/g, '').trim()
+        };
       }
       var workspaceContinuation = /\b(?:continue|resume|proceed)\b[\s\S]{0,96}\b(?:workspace|work|task|pull\s+request|pr)\b/i.test(rawPhrase);
       if (workspaceContinuation) {
@@ -1042,13 +1071,24 @@ var EvaHarness = (function() {
       return Promise.resolve(EvaWorkspaces.startRepositoryRemediation(request.repositoryName, request.objective)).then(function(started) {
         persistRemediationContext({
           repositoryName: started.projectName || request.repositoryName,
-          objective: request.objective
+          objective: request.objective,
+          runId: started.runId || ''
         });
         return result(true, 'run_repository_remediation', started.message, {
           outcome: started.dispatchError ? 'delayed' : 'started', runId: started.runId || '', projectName: started.projectName || ''
         });
       }).catch(function(error) {
         return result(false, 'run_repository_remediation', error && error.message ? error.message : 'Repository remediation could not start.', { outcome: 'failed', reason: failureReason(error) });
+      });
+    }
+    if (action === 'describe_repository_remediation') {
+      if (!window.EvaWorkspaces || typeof EvaWorkspaces.describeRepositoryRemediation !== 'function') return Promise.resolve(result(false, 'describe_repository_remediation', 'Repository task status is unavailable.'));
+      return Promise.resolve(EvaWorkspaces.describeRepositoryRemediation(request.runId)).then(function(statusResult) {
+        return result(true, 'describe_repository_remediation', statusResult.message, {
+          outcome: statusResult.outcome || 'running', runId: request.runId || '', url: statusResult.url || ''
+        });
+      }).catch(function(error) {
+        return result(false, 'describe_repository_remediation', error && error.message ? error.message : 'Repository task status could not be read.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
     if (action === 'import_github_selection') {

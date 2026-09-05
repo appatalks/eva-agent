@@ -900,7 +900,12 @@ function normalizedRemediationContext(value) {
   const repositoryName = String(value.repositoryName || '').trim();
   const objective = String(value.objective || '').trim();
   if (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?$/.test(repositoryName) || !objective || objective.length > 4000) return {};
-  return { repositoryName: repositoryName, objective: objective };
+  const runId = String(value.runId || '').trim();
+  return {
+    repositoryName: repositoryName,
+    objective: objective,
+    runId: validWorkspaceId(runId) ? runId : ''
+  };
 }
 
 function remediationContextPath() {

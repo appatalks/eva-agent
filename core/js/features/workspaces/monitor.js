@@ -1819,7 +1819,8 @@ var EvaWorkspaces = (function() {
     try {
       localStorage.setItem('eva_last_repository_remediation', JSON.stringify({
         repositoryName: project.name,
-        objective: objective
+        objective: objective,
+        runId: run.id
       }));
     } catch (_) {}
     return {
@@ -1830,6 +1831,25 @@ var EvaWorkspaces = (function() {
         ? 'Created Workspace run ' + run.id + ' for ' + project.name + ', but dispatch is delayed: ' + run.dispatchError
         : 'Started Workspace run ' + run.id + ' for ' + project.name + '.'
     };
+  }
+
+  async function describeRepositoryRemediation(runId) {
+    var requestedRunId = String(runId || '').trim();
+    if (!/^[0-9a-f-]{36}$/i.test(requestedRunId)) throw new Error('No tracked repository task is available.');
+    state.runs = await api().workspaceListRuns();
+    var run = state.runs.find(function(item) { return item.id === requestedRunId; });
+    if (!run) throw new Error('The tracked repository task is no longer available.');
+    var agentStatus = String(run.agent && run.agent.status || run.status || 'unknown').toLowerCase();
+    var report = String(run.agent && run.agent.report || '').trim();
+    var submitted = report.match(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/\d+/i);
+    if (submitted) return { completed: true, outcome: 'completed', url: submitted[0], message: 'Yes. The repository task completed: ' + submitted[0] };
+    if (['starting', 'waiting', 'running', 'steering', 'finalizing', 'active'].indexOf(agentStatus) >= 0) {
+      return { completed: false, outcome: 'running', url: '', message: 'Not yet. The repository task is ' + agentStatus + ' in Workspaces, and Eva will notify you when it finishes.' };
+    }
+    if (agentStatus === 'done' || run.status === 'completed') {
+      return { completed: true, outcome: 'completed', url: '', message: 'The repository task completed, but it did not return a verified GitHub submission URL. Review the run report in Workspaces.' };
+    }
+    return { completed: false, outcome: 'failed', url: '', message: 'No. The repository task ended with status ' + agentStatus + '. Review the run report in Workspaces.' };
   }
 
   async function removeProject(project) {
@@ -2197,6 +2217,7 @@ var EvaWorkspaces = (function() {
     runSelectedCheck: runSelectedCheck,
     importGitHubSelection: importGitHubSelection,
     startRepositoryRemediation: startRepositoryRemediation,
+    describeRepositoryRemediation: describeRepositoryRemediation,
     promptGitHubImport: function(repositoryUrl) { return importGitHubProject(repositoryUrl, true); }
   };
 })();

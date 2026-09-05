@@ -23,6 +23,7 @@ let workspaceToolsProject = '';
 let removedWorkspace = '';
 let retriedRunId = '';
 let remediationRequest = null;
+let remediationStatusRunId = '';
 let nativeRemediationContext = null;
 let visibleUserMessages = [];
 let workspaceOpenCalls = 0;
@@ -128,7 +129,11 @@ const window = {
     },
     startRepositoryRemediation(repositoryName, objective) {
       remediationRequest = { repositoryName, objective };
-      return Promise.resolve({ runId: 'run-remediation', projectName: repositoryName, message: 'Started Workspace run run-remediation for ' + repositoryName + '.' });
+      return Promise.resolve({ runId: '12345678-1234-4123-8123-123456789abc', projectName: repositoryName, message: 'Started Workspace run for ' + repositoryName + '.' });
+    },
+    describeRepositoryRemediation(runId) {
+      remediationStatusRunId = runId;
+      return Promise.resolve({ completed: false, outcome: 'running', url: '', message: 'Not yet. The repository task is running in Workspaces, and Eva will notify you when it finishes.' });
     },
     importGitHub(url) {
       importedUrl = url;
@@ -517,8 +522,23 @@ async function main() {
   assert.strictEqual(remediationRoute.action, 'run_repository_remediation');
   const remediationResult = await harness.execute(remediationRoute, { source: 'model', userRequest: 'Resolve Dependabot alerts in ' + fixtureRepository + '.' });
   assert.strictEqual(remediationResult.ok, true);
-  assert.strictEqual(remediationResult.data.runId, 'run-remediation');
+  assert.strictEqual(remediationResult.data.runId, '12345678-1234-4123-8123-123456789abc');
   assert.deepStrictEqual(remediationRequest, { repositoryName: fixtureRepository, objective: 'Resolve Dependabot alerts in ' + fixtureRepository });
+  const auditIssueRequest = 'Audit the harness and submit a sanitized issue to ' + fixtureRepositoryUrl + '/issues.';
+  const auditIssueRoute = harness.resolveNavigationRequest(auditIssueRequest, { directUser: true });
+  assert.strictEqual(auditIssueRoute.action, 'run_repository_remediation');
+  assert.strictEqual(auditIssueRoute.repositoryName, fixtureRepository);
+  const auditIssueResult = await harness.execute(auditIssueRoute, { source: 'voice', userRequest: auditIssueRequest });
+  assert.strictEqual(auditIssueResult.ok, true);
+  const issueFollowUp = harness.resolveNavigationRequest('I made some updates, please go ahead and submit the issue.', { directUser: true });
+  assert.strictEqual(issueFollowUp.action, 'describe_repository_remediation');
+  assert.strictEqual(issueFollowUp.runId, '12345678-1234-4123-8123-123456789abc');
+  const remediationStatusRoute = harness.resolveNavigationRequest('Did you do it?', { directUser: true });
+  assert.strictEqual(remediationStatusRoute.action, 'describe_repository_remediation');
+  const remediationStatusResult = await harness.execute(remediationStatusRoute, { source: 'voice', userRequest: 'Did you do it?' });
+  assert.strictEqual(remediationStatusResult.ok, true);
+  assert.strictEqual(remediationStatusResult.data.outcome, 'running');
+  assert.strictEqual(remediationStatusRunId, '12345678-1234-4123-8123-123456789abc');
   const dependabotUrlRequest = 'Eva please review the Dependabot alerts at: ' + fixtureRepositoryUrl + '/security/dependabot and then please address them in a Pull request';
   const normalizedDependabotUrlRequest = dependabotUrlRequest.replace(/^Eva\s+/i, '');
   const dependabotUrlRoute = harness.resolveNavigationRequest(dependabotUrlRequest, { directUser: true });
@@ -527,7 +547,11 @@ async function main() {
   const dependabotUrlResult = await harness.execute(dependabotUrlRoute, { source: 'model', userRequest: dependabotUrlRequest });
   assert.strictEqual(dependabotUrlResult.ok, true);
   assert.deepStrictEqual(remediationRequest, { repositoryName: fixtureRepository, objective: normalizedDependabotUrlRequest });
-  assert.deepStrictEqual(nativeRemediationContext, { repositoryName: fixtureRepository, objective: normalizedDependabotUrlRequest });
+  assert.deepStrictEqual(nativeRemediationContext, {
+    repositoryName: fixtureRepository,
+    objective: normalizedDependabotUrlRequest,
+    runId: '12345678-1234-4123-8123-123456789abc'
+  });
   delete localStorage.values.eva_last_repository_remediation;
   delete localStorage.values.aigMessages;
   const pullRequestFollowUp = harness.resolveNavigationRequest('Please create the PR now.', { directUser: true });

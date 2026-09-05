@@ -33,7 +33,7 @@ eva
 Eva is also added to the system application menu. On first launch, select **Eva (AIG)**
 for the integrated routing, memory, and tool experience.
 
-Current standalone release: `Eva Standalone-5.6.7.AppImage`.
+Current standalone release: `Eva Standalone-5.6.8.AppImage`.
 
 ## Preview
 
