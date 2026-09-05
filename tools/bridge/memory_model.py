@@ -380,7 +380,22 @@ class MemoryModel:
         proposals = self.memory.query(
             "SELECT ProposalId, Kind, RiskLevel, Status, EvidenceRefs, CreatedAt, ReviewedAt, ReviewedBy FROM GrowthProposals ORDER BY CreatedAt DESC LIMIT 50"
         ) or []
-        return {"scenario": scenario, "atoms": atoms, "traits": traits, "identity_claims": claims, "growth_proposals": proposals}
+        def count(table, where=""):
+            if not self.memory.table_exists(table):
+                return 0
+            rows = self.memory.query("SELECT COUNT(*) AS Count FROM " + table + (" WHERE " + where if where else "")) or []
+            return int((rows[0] if rows else {}).get("Count") or 0)
+
+        coverage = {
+            "structured_total": count("MemoryAtoms"),
+            "structured_active": count("MemoryAtoms", "Status = 'active'"),
+            "confirmed_active": count(
+                "MemoryAtoms", "Status = 'active' AND Trust IN ('user_confirmed', 'operator_approved')"
+            ),
+            "legacy_knowledge": count("Knowledge"),
+            "conversation_entries": count("Conversations"),
+        }
+        return {"scenario": scenario, "atoms": atoms, "traits": traits, "identity_claims": claims, "growth_proposals": proposals, "coverage": coverage}
 
     def atom_detail(self, memory_id):
         """Return one atom with its provenance, usages, and revision lineage."""
@@ -754,7 +769,25 @@ class KustoMemoryModel:
         latest_traits = self._read("UserPersonaTraits | summarize arg_max(UpdatedAt, *) by TraitId | order by UpdatedAt desc | take 50")
         claims = self._read("IdentityClaims | summarize arg_max(CreatedAt, *) by ClaimId | order by CreatedAt desc | take 50")
         proposals = self._read("GrowthProposals | summarize arg_max(CreatedAt, *) by ProposalId | order by CreatedAt desc | take 50")
-        return {"scenario": scenario, "atoms": latest_atoms, "traits": latest_traits, "identity_claims": claims, "growth_proposals": proposals}
+        def count(table, predicate=""):
+            if not _get_table_columns(self.cluster, self.database, table):
+                return 0
+            query = table
+            if table == "MemoryAtoms":
+                query += " | summarize arg_max(UpdatedAt, *) by MemoryId"
+            rows = self._read(query + (" | where " + predicate if predicate else "") + " | count")
+            return int((rows[0] if rows else {}).get("Count") or 0)
+
+        coverage = {
+            "structured_total": count("MemoryAtoms"),
+            "structured_active": count("MemoryAtoms", "Status =~ 'active'"),
+            "confirmed_active": count(
+                "MemoryAtoms", "Status =~ 'active' and Trust in~ ('user_confirmed', 'operator_approved')"
+            ),
+            "legacy_knowledge": count("Knowledge"),
+            "conversation_entries": count("Conversations"),
+        }
+        return {"scenario": scenario, "atoms": latest_atoms, "traits": latest_traits, "identity_claims": claims, "growth_proposals": proposals, "coverage": coverage}
 
     def atom_detail(self, memory_id):
         """Return the current Kusto atom and its provenance, usages, and revisions."""

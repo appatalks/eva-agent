@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current release:** Eva 5.6.5. This document describes the matching browser UI,
+> **Current release:** Eva 5.6.6. This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -19,7 +19,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh
 cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.6.5.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.6.6.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
@@ -408,7 +408,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.6.5)
+  package.json             Electron + electron-builder config (v5.6.6)
 ```
 
 ## Dependencies
@@ -897,6 +897,14 @@ explaining whether and how Eva can use it for recall. Saving changes creates a s
 atom and supersedes the prior record; removal marks any non-deleted record as deleted for
 future recall, so the audit trail remains available for inspection.
 
+The toolbar reports structured-record, active-confirmed, legacy-Knowledge, and
+conversation-entry counts. Conversation entries remain historical evidence rather than
+individual memory cards. On first use after the structured-memory upgrade, Eva performs
+an idempotent migration over user-authored historical turns: only deterministic explicit
+facts are considered, only the latest value for each entity/relation is selected, and an
+existing active confirmed atom always wins. Imported records retain conversation-turn
+provenance.
+
 **Fresh start:** The Memory Inspector's **Start fresh** command requires an explicit
 typed confirmation. It first creates a timestamped local database backup, then clears
 ordinary user/conversation memory and its derived recall state. Eva's approved Core
@@ -917,7 +925,7 @@ output structure:
 | `[Workflow: ...]` | Always | 6 workflow instruction sections |
 | `[Core Identity Charter]` | Always | Operator-approved identity and design principles |
 | `[Adaptive Guidance]` | When active | Bounded effects from retained explicit feedback signals, scoped to the current session |
-| `[User Profile]` | Always | Knowledge where Entity="User", Confidence >= 0.5, framed as untrusted data |
+| `[User Profile]` | Always | Active structured user atoms with Confidence >= 0.5, framed as untrusted data |
 | `[Morning Reflection]` | First msg of day | MemorySummaries (latest 3), framed as untrusted data |
 | `[Memory: Core Facts]` | Always | Knowledge where Confidence >= 0.6 (top 15), framed as untrusted data |
 | `[Active Goals]` | When present | Goals where Status="active" (top 10), framed as untrusted data |
@@ -957,6 +965,7 @@ operator-approved identity workflow and are not automatically extracted.
 | Pattern | Relation | Confidence |
 |---|---|---|
 | "my kids/children are [Name]" | user_children | 0.85 |
+| "we have two daughters. We have [Name] who ... and [Name] who ..." | user_children | 0.95 |
 | "my motto/mantra is [text]" | user_motto | 0.85 |
 | "my wife/husband is [Name]" | user_partner_name | 0.85 |
 | "my dog/cat is [Name]" | user_pet_* | 0.85 |
@@ -1307,12 +1316,12 @@ the control path for sensitive actions.
 
 #### Memory Topology
 
-The bottom pane visualizes a live, bounded projection of Eva's existing
-`Knowledge` table plus the current agent registry. The bridge selects the 30
-newest rows with confidence at least `0.6`, excluding `mentioned`,
-`candidate_mentioned`, and `recurring_topic`. Ignore/reserved-word entities are
-also omitted so extraction artifacts such as command words do not become
-topology labels. It emits:
+The bottom pane visualizes a live, bounded projection of Eva's durable memory plus the
+current agent registry. The bridge selects active user-confirmed or operator-approved
+atoms first, then adds non-duplicate legacy `Knowledge` rows as compatibility fallback,
+up to 30 facts with confidence at least `0.6`. `mentioned`, `candidate_mentioned`, and
+`recurring_topic` rows are excluded. Ignore/reserved-word entities are also omitted so
+extraction artifacts such as command words do not become topology labels. It emits:
 
 ```json
 {
@@ -1908,7 +1917,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.6.5.AppImage'
+./dist/'Eva Standalone-5.6.6.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace

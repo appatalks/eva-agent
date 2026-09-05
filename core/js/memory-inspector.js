@@ -467,7 +467,15 @@
       atoms.appendChild(empty);
     }
     var count = document.getElementById('memoryAtomCount');
-    if (count) count.textContent = filteredAtoms.length + ' of ' + allAtoms.length + ' records';
+    if (count) {
+      var coverage = data.coverage || {};
+      var total = Number(coverage.structured_total || allAtoms.length);
+      var summary = filteredAtoms.length + ' of ' + total + ' structured records';
+      if (Number(coverage.confirmed_active || 0)) summary += ' · ' + Number(coverage.confirmed_active) + ' confirmed active';
+      if (Number(coverage.legacy_knowledge || 0)) summary += ' · ' + Number(coverage.legacy_knowledge) + ' legacy facts';
+      if (Number(coverage.conversation_entries || 0)) summary += ' · ' + Number(coverage.conversation_entries) + ' conversation entries';
+      count.textContent = summary;
+    }
     (data.growth_proposals || []).forEach(function (item) { growth.appendChild(proposalCard(item)); });
     if (!traits || !traits.children.length) status('No approved traits or active proposals are recorded.');
   }

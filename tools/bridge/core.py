@@ -419,6 +419,7 @@ from bridge.cognition import (  # noqa: F401
     _normalize_explicit_children,
     _extract_explicit_user_facts,
     _persist_explicit_user_facts,
+    _backfill_explicit_conversation_facts_sqlite,
     _explicit_user_fact_covers_candidate,
     _normalize_entity_candidate,
     _validate_entity_candidate,
@@ -1038,6 +1039,8 @@ def _knowledge_graph_snapshot(rows):
             "source_label": source_label,
             "relation": relation.replace("_", " "),
             "confidence": float(row.get("Confidence", 0.0) or 0.0),
+            "trust": str(row.get("Trust", "") or ""),
+            "memory_id": str(row.get("MemoryId", "") or ""),
             "description": f"{source_label} · {relation.replace('_', ' ')}",
         }
         edges.append({
@@ -1048,6 +1051,54 @@ def _knowledge_graph_snapshot(rows):
             "type": "memory",
         })
     return {"nodes": list(nodes.values()), "edges": edges}
+
+
+def _memory_graph_rows(limit=30):
+    """Return confirmed atoms first, then non-duplicate legacy facts for topology."""
+    if _resolve_memory_backend() == "sqlite":
+        memory = _get_sqlite_mem()
+        atom_rows = memory.query(
+            "SELECT Entity, Relation, Value, Confidence, UpdatedAt AS Timestamp, Trust, MemoryId "
+            "FROM MemoryAtoms WHERE Status = 'active' AND Confidence >= 0.6 "
+            "AND Trust IN ('user_confirmed', 'operator_approved') "
+            "ORDER BY UpdatedAt DESC LIMIT ?", (limit,)
+        ) or []
+        legacy_rows = memory.query(
+            "SELECT Entity, Relation, Value, Confidence, Timestamp, '' AS Trust, '' AS MemoryId FROM Knowledge "
+            "WHERE Confidence >= 0.6 AND Relation NOT IN ('mentioned', 'candidate_mentioned', 'recurring_topic') "
+            "ORDER BY Timestamp DESC LIMIT ?", (limit * 2,)
+        ) or []
+    else:
+        cluster, database = _get_kusto_config()
+        if not cluster or not database:
+            return []
+        atom_rows = _kusto_query_direct(
+            cluster, database,
+            "MemoryAtoms | summarize arg_max(UpdatedAt, *) by MemoryId "
+            "| where Status =~ 'active' and Confidence >= 0.6 "
+            "and Trust in~ ('user_confirmed', 'operator_approved') "
+            f"| order by UpdatedAt desc | take {int(limit)} "
+            "| project Entity, Relation, Value, Confidence, Timestamp=UpdatedAt, Trust, MemoryId",
+        ) if _get_table_columns(cluster, database, "MemoryAtoms") else []
+        legacy_rows = _kusto_query_direct(
+            cluster, database,
+            "Knowledge | where Confidence >= 0.6 "
+            "and Relation !in~ ('mentioned', 'candidate_mentioned', 'recurring_topic') "
+            f"| order by Timestamp desc | take {int(limit) * 2} "
+            "| project Entity, Relation, Value, Confidence, Timestamp, Trust='', MemoryId=''",
+        ) or []
+
+    rows = []
+    seen = set()
+    for row in list(atom_rows or []) + list(legacy_rows or []):
+        key = tuple(str(row.get(field) or "").strip().casefold() for field in ("Entity", "Relation", "Value"))
+        if not all(key) or key in seen:
+            continue
+        seen.add(key)
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 def _append_agent_topology(graph, tasks):
@@ -3902,22 +3953,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         include_graph = (params.get("include_graph", ["1"])[0] or "1") != "0"
         graph = None
         if include_graph:
-            if _resolve_memory_backend() == "sqlite":
-                rows = _get_sqlite_mem().query(
-                    "SELECT Entity, Relation, Value, Confidence, Timestamp FROM Knowledge "
-                    "WHERE Confidence >= 0.6 AND Relation NOT IN ('mentioned', 'candidate_mentioned', 'recurring_topic') "
-                    "ORDER BY Timestamp DESC LIMIT 30"
-                ) or []
-            else:
-                cluster, database = _get_kusto_config()
-                rows = _kusto_query_direct(
-                    cluster, database,
-                    "Knowledge | where Confidence >= 0.6 "
-                    "and Relation !in~ ('mentioned', 'candidate_mentioned', 'recurring_topic') "
-                    "| order by Timestamp desc | take 30 "
-                    "| project Entity, Relation, Value, Confidence, Timestamp"
-                ) if cluster and database else []
-            graph = _knowledge_graph_snapshot(rows)
+            graph = _knowledge_graph_snapshot(_memory_graph_rows())
             with _st.subagent_lock:
                 all_graph_tasks = dict(_st.subagent_tasks)
                 _, graph_tasks = _select_subagent_overview_tasks(all_graph_tasks, limit=30)
@@ -6045,7 +6081,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(403, {"error": {"message": "structured memory is restricted to loopback"}})
             return None
         if _resolve_memory_backend() == "sqlite":
-            return MemoryModel(_get_sqlite_mem())
+            memory = _get_sqlite_mem()
+            model = MemoryModel(memory)
+            model.migrate_legacy_knowledge()
+            _backfill_explicit_conversation_facts_sqlite(memory)
+            return model
         cluster, db, ok = self._kusto_context()
         if not ok:
             return None

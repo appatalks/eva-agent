@@ -19,6 +19,7 @@ from bridge.cognition import (
     _build_memory_context_sqlite,
     _extract_explicit_user_facts,
     _persist_explicit_user_facts,
+    _backfill_explicit_conversation_facts_sqlite,
     _post_response_reflection_sqlite,
     _post_response_reflection_sqlite_impl,
     _post_response_reflection_impl,
@@ -84,6 +85,68 @@ class MemoryRecallTests(unittest.TestCase):
         self.assertEqual([(fact["Value"], fact["Confidence"]) for fact in children], [
             ("Nova", 0.95), ("Rowan", 0.95),
         ])
+
+    def test_contextual_named_children_are_explicit_user_facts(self):
+        facts = _extract_explicit_user_facts(
+            "We also have two daughters together. We have Nova who is now 14 and Rowan who is now 10"
+        )
+        children = [fact for fact in facts if fact["Relation"] == "user_children"]
+        self.assertEqual([(fact["Value"], fact["Confidence"]) for fact in children], [
+            ("Nova, Rowan", 0.95),
+        ])
+        self.assertFalse(_extract_explicit_user_facts(
+            "We have two daughters. We have fun who is welcome and games who are available."
+        ))
+
+    def test_historical_explicit_fact_backfill_is_latest_confirmed_and_idempotent(self):
+        from bridge.memory import _get_sqlite_mem
+
+        memory = _get_sqlite_mem()
+        initial_conversations = memory.count("Conversations")
+        memory.ingest("Conversations", [
+            "SessionId", "Timestamp", "Role", "Provider", "Model", "Content", "TokenEstimate", "ImageGenerated",
+        ], [
+            {"SessionId": "history", "Timestamp": "2026-01-01T00:00:00Z", "Role": "user", "Provider": "test", "Model": "test", "Content": "I live in Oldtown.", "TokenEstimate": 4, "ImageGenerated": 0},
+            {"SessionId": "history", "Timestamp": "2026-02-01T00:00:00Z", "Role": "user", "Provider": "test", "Model": "test", "Content": "I live in Newtown.", "TokenEstimate": 4, "ImageGenerated": 0},
+            {"SessionId": "history", "Timestamp": "2026-03-01T00:00:00Z", "Role": "user", "Provider": "test", "Model": "test", "Content": "We have two daughters. We have Nova who is 14 and Rowan who is 10.", "TokenEstimate": 14, "ImageGenerated": 0},
+            {"SessionId": "history", "Timestamp": "2026-04-01T00:00:00Z", "Role": "assistant", "Provider": "test", "Model": "test", "Content": "My favorite color is blue.", "TokenEstimate": 5, "ImageGenerated": 0},
+        ])
+        inserted = _backfill_explicit_conversation_facts_sqlite(memory)
+        self.assertEqual(inserted, 2)
+        atoms = memory.query(
+            "SELECT Relation, Value, Trust FROM MemoryAtoms ORDER BY Relation"
+        )
+        self.assertEqual(atoms, [
+            {"Relation": "user_children", "Value": "Nova, Rowan", "Trust": "user_confirmed"},
+            {"Relation": "user_location", "Value": "Newtown", "Trust": "user_confirmed"},
+        ])
+        self.assertEqual(_backfill_explicit_conversation_facts_sqlite(memory), 0)
+
+        coverage = core.MemoryModel(memory).inspector()["coverage"]
+        self.assertEqual(coverage["structured_total"], 2)
+        self.assertEqual(coverage["confirmed_active"], 2)
+        self.assertEqual(coverage["conversation_entries"], initial_conversations + 4)
+
+    def test_agent_memory_graph_prefers_confirmed_atoms_and_deduplicates_legacy_rows(self):
+        from bridge.memory import _get_sqlite_mem
+        from bridge.memory_model import MemoryModel
+
+        memory = _get_sqlite_mem()
+        MemoryModel(memory).add_atom({
+            "entity": "User", "relation": "user_preference", "value": "concise answers",
+            "kind": "preference", "trust": "user_confirmed", "scope": "user", "confidence": 0.95,
+        })
+        memory.ingest("Knowledge", [
+            "Timestamp", "Entity", "Relation", "Value", "Confidence", "Source", "Decay",
+        ], [
+            {"Timestamp": "2026-01-01T00:00:00Z", "Entity": "User", "Relation": "user_preference", "Value": "concise answers", "Confidence": 0.8, "Source": "legacy", "Decay": 0.0},
+            {"Timestamp": "2026-01-02T00:00:00Z", "Entity": "Project", "Relation": "status", "Value": "active", "Confidence": 0.8, "Source": "legacy", "Decay": 0.0},
+        ])
+        rows = core._memory_graph_rows()
+        self.assertEqual(len(rows), 2)
+        preference = next(row for row in rows if row["Relation"] == "user_preference")
+        self.assertEqual(preference["Trust"], "user_confirmed")
+        self.assertTrue(preference["MemoryId"])
 
     def test_spelling_and_typoed_daughters_are_explicit_facts(self):
         facts = _extract_explicit_user_facts(

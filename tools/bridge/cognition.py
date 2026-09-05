@@ -1,6 +1,7 @@
 """Bridge domain: cognition."""
 
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -17,7 +18,7 @@ from bridge.memory import (_memory_query, _memory_ingest, _memory_fts_search,
     _embed_texts, _cosine_similarity, _expand_query_terms,
     _set_openai_key_from)
 from bridge.learning import list_active_guidance as _list_active_learning_guidance
-from bridge.memory_model import KustoMemoryModel, _legacy_kind, _scenario_id
+from bridge.memory_model import KustoMemoryModel, _identifier, _legacy_kind, _scenario_id
 from bridge.utils import _is_passive_memory_recall
 
 _ARTIFACTS_DIR = _cfg.ARTIFACTS_DIR
@@ -231,6 +232,12 @@ _EXPLICIT_HAVE_CHILDREN_RE = re.compile(
     r"\b[Ii] have\s+([A-Z][a-zA-Z]+(?:[\s,]+(?:and\s+)?[A-Z][a-zA-Z]+)*)\s+as\s+my\s+"
     r"(?:kid|kids|child|children|son|sons|daughter|daughters|daughterse)\b"
 )
+_EXPLICIT_CONTEXTUAL_CHILDREN_RE = re.compile(
+    r"\b(?:[Ww]e|[Ii])\s+(?:also\s+)?have\s+(?:one|two|three|four|five|\d+)\s+"
+    r"(?:kids?|children|sons?|daughters?)(?:\s+together)?[.!?]\s*"
+    r"(?:[Ww]e|[Ii])\s+have\s+([A-Z][a-zA-Z]+)\s+who\b[^.!?\n]{0,80}?\band\s+"
+    r"([A-Z][a-zA-Z]+)\s+who\b"
+)
 _EXPLICIT_RANKED_CHILD_RE = re.compile(
     r"\b([A-Z][a-zA-Z]+)\s+is\s+my\s+(?:first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))(?:[-\s]?born)\s+(?:son|daughter|child)\b",
     re.IGNORECASE,
@@ -400,6 +407,8 @@ def _extract_explicit_user_facts(user_message):
         add_fact("user_children", _normalize_explicit_children(match.group(1)), 0.85)
     for match in _EXPLICIT_HAVE_CHILDREN_RE.finditer(user_message or ""):
         add_fact("user_children", _normalize_explicit_children(match.group(1)), 0.95)
+    for match in _EXPLICIT_CONTEXTUAL_CHILDREN_RE.finditer(user_message or ""):
+        add_fact("user_children", f"{match.group(1)}, {match.group(2)}", 0.95)
     for match in _EXPLICIT_RANKED_CHILD_RE.finditer(user_message or ""):
         add_fact("user_children", match.group(1), 0.95)
     for match in _EXPLICIT_SPELLING_CORRECTION_RE.finditer(user_message or ""):
@@ -500,6 +509,80 @@ def _persist_explicit_user_facts(user_message, conversation_id=None, turn_id=Non
             "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
         }, [{"source_type": "conversation_turn", "source_ref": source_ref}])
     return True
+
+
+def _backfill_explicit_conversation_facts_sqlite(mem):
+    """Promote the latest historical explicit user facts into traceable atoms once."""
+    migration_id = "explicit-conversation-facts-v1"
+    if not mem.table_exists("MemoryMigrations") or mem.query(
+        "SELECT MigrationId FROM MemoryMigrations WHERE MigrationId = ?", (migration_id,)
+    ):
+        return 0
+
+    rows = mem.query(
+        "SELECT rowid AS ConversationRowId, SessionId, Timestamp, Content FROM Conversations "
+        "WHERE Role = 'user' ORDER BY Timestamp ASC, rowid ASC"
+    ) or []
+    latest = {}
+    for row in rows:
+        turn_facts = {}
+        for fact in _extract_explicit_user_facts(row.get("Content", "")):
+            key = (str(fact["Entity"]).casefold(), str(fact["Relation"]).casefold())
+            if fact["Relation"] == "user_children" and key in turn_facts:
+                names = _normalize_explicit_children(
+                    str(turn_facts[key]["Value"]) + ", " + str(fact["Value"])
+                )
+                turn_facts[key]["Value"] = names
+                turn_facts[key]["Confidence"] = max(
+                    float(turn_facts[key]["Confidence"]), float(fact["Confidence"])
+                )
+            else:
+                turn_facts[key] = dict(fact)
+        for key, fact in turn_facts.items():
+            latest[key] = (fact, row)
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def write(conn):
+        inserted = 0
+        for (entity_key, relation_key), (fact, row) in latest.items():
+            if conn.execute(
+                "SELECT 1 FROM MemoryAtoms WHERE Entity = ? COLLATE NOCASE "
+                "AND Relation = ? COLLATE NOCASE AND Status = 'active' "
+                "AND Trust IN ('user_confirmed', 'operator_approved') LIMIT 1",
+                (fact["Entity"], fact["Relation"]),
+            ).fetchone():
+                continue
+            source_seed = "\0".join((
+                str(row.get("SessionId", "")), str(row.get("Timestamp", "")),
+                str(row.get("ConversationRowId", "")), entity_key, relation_key,
+            ))
+            source_ref = "conversation-history:" + hashlib.sha256(source_seed.encode("utf-8")).hexdigest()[:24]
+            memory_id = _identifier("memory")
+            created_at = str(row.get("Timestamp") or now)[:40]
+            conn.execute(
+                "INSERT INTO MemoryAtoms (MemoryId, Entity, Relation, Value, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt) "
+                "VALUES (?, ?, ?, ?, ?, 'user_confirmed', 'active', ?, '', ?, ?, ?, ?)",
+                (
+                    memory_id, fact["Entity"], fact["Relation"], str(fact["Value"])[:200],
+                    _legacy_kind(fact["Entity"], fact["Relation"]),
+                    "user" if str(fact["Entity"]).casefold() == "user" else "global",
+                    float(fact["Confidence"]), source_ref, created_at, now,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO MemoryEvidence (EvidenceId, MemoryId, SourceType, SourceRef, CreatedAt) "
+                "VALUES (?, ?, 'conversation_turn', ?, ?)",
+                (_identifier("evidence"), memory_id, source_ref, now),
+            )
+            inserted += 1
+        conn.execute(
+            "INSERT INTO MemoryMigrations (MigrationId, AppliedAt, Details) VALUES (?, ?, ?)",
+            (migration_id, now, "Promoted latest deterministic facts from historical user turns"),
+        )
+        return inserted
+
+    return mem.transaction(write)
 
 
 def _corrected_entity_names(mem=None, cluster=None, db=None):
@@ -818,6 +901,7 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
     mem = _get_sqlite_mem()
     memory_model = MemoryModel(mem)
     memory_model.migrate_legacy_knowledge()
+    _backfill_explicit_conversation_facts_sqlite(mem)
     structured_view = memory_model.prompt_view(session_id, _CORE_IDENTITY_CHARTER)
     charter = structured_view["charter"]
     if not charter.startswith("[Core Identity Charter]"):
