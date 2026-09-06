@@ -27,7 +27,10 @@ def main():
     assert messages[-1]["content"] == "Look at this"
     assert "base64" not in "\n".join(item["content"] for item in messages)
     assert not _lmstudio_camera_request("Look up the news today")
-    assert _lmstudio_camera_request("Look at what I am holding")
+    assert not _lmstudio_camera_request("Look at what I am holding")
+    assert not _lmstudio_camera_request("What can you see?")
+    assert not _lmstudio_camera_request("Do not use the camera")
+    assert not _lmstudio_camera_request("What is a camera shutter?")
     assert _lmstudio_camera_request("What do you see through the webcam?")
     print("LM Studio message ordering tests: PASS")
 

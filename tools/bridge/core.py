@@ -239,12 +239,20 @@ def _lmstudio_chat_messages(system_prompt, history, user_message, system_additio
 def _lmstudio_camera_request(user_message):
     """Return true only for explicit requests to inspect the physical scene."""
     text = str(user_message or "").lower()
+    if re.search(
+        r"\b(?:do not|don't|never|without|avoid|disable|turn off|stop)\b"
+        r"[^.!?]{0,50}\b(?:camera|webcam|look|see)\b",
+        text,
+    ):
+        return False
+    if not re.search(r"\b(?:camera|webcam)\b", text):
+        return False
     return bool(re.search(
-        r"\b(?:camera|webcam)\b|"
-        r"\b(?:look|see)\s+(?:at|through)\b|"
-        r"\bwhat\s+(?:do\s+you|can\s+you)\s+see\b|"
-        r"\bwhat\s+am\s+i\s+(?:holding|showing)\b|"
-        r"\bshow\s+me\s+what\s+(?:i(?:'m|\s+am)|you)\s+(?:holding|showing|see)\b",
+        r"\b(?:use|open|enable|start|turn on|activate|access|check)\b"
+        r"[^.!?]{0,50}\b(?:camera|webcam)\b|"
+        r"\b(?:camera|webcam)\b[^.!?]{0,50}"
+        r"\b(?:use|open|enable|start|turn on|activate|access|check|look|see)\b|"
+        r"\b(?:look|see)\s+through\s+(?:the\s+)?(?:camera|webcam)\b",
         text,
     ))
 
@@ -1677,6 +1685,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._email_allowlist_update()
         elif parsed_path == "/v1/email/credential":
             self._email_credential_set()
+        elif parsed_path == "/v1/email/pending":
+            self._email_pending_prepare()
+        elif parsed_path == "/v1/email/pending/cancel":
+            self._email_pending_cancel()
         elif parsed_path == "/v1/email/send":
             self._email_send_request()
         elif parsed_path == "/v1/notifications/seen":
@@ -4615,24 +4627,84 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if error:
             self._json_response(400, {"error": {"message": error}})
             return
+        session_id = str(data.get("session_id") or "").strip()[:120]
         try:
-            result = email_service.send_message(
-                data.get("message"),
-                account_id=str(data.get("account_id") or ""),
-                from_address=str(data.get("from") or ""),
-                confirmation=data.get("confirmation"),
-            )
+            if data.get("pending_id"):
+                result = email_service.confirm_pending_message(session_id, data.get("pending_id"))
+            elif data.get("confirmation") is not None:
+                self._json_response(400, {"error": {"message": "Use the pending email identifier to confirm delivery"}})
+                return
+            else:
+                result = email_service.send_message(
+                    data.get("message"),
+                    account_id=str(data.get("account_id") or ""),
+                    from_address=str(data.get("from") or ""),
+                )
+                if result.get("decision") == "needs_confirmation":
+                    result = email_service.prepare_message(
+                        data.get("message"), session_id,
+                        account_id=str(data.get("account_id") or ""),
+                        from_address=str(data.get("from") or ""),
+                    )
         except email_service.EmailServiceError as exc:
             self._json_response(502, {"error": {"message": str(exc)}})
             return
-        status = 200 if result.get("decision") in (
-            "sent", "submitted", "partially_sent", "needs_confirmation"
-        ) else 400
+        decision = result.get("decision")
+        if decision == "in_progress":
+            status = 202
+        else:
+            status = 200 if decision in (
+                "sent", "submitted", "partially_sent", "pending_confirmation", "failed"
+            ) else 400
         if status == 400:
             # Carry the refusal reason in the error envelope so the caller can
             # show why, not just that it failed.
             result = dict(result)
             result["error"] = {"message": result.get("reason") or "The message was refused."}
+        self._json_response(status, result)
+
+    def _email_pending_prepare(self):
+        """Prepare an exact session-bound email draft without delivering it."""
+        from bridge import email_service
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "Email sending is restricted to loopback bind"}})
+            return
+        if not self._require_bridge_capability():
+            return
+        data, error = self._email_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        result = email_service.prepare_message(
+            data.get("message"), str(data.get("session_id") or ""),
+            account_id=str(data.get("account_id") or ""),
+            from_address=str(data.get("from") or ""),
+        )
+        status = 200 if result.get("decision") == "pending_confirmation" else 400
+        if status == 400:
+            result = dict(result)
+            result["error"] = {"message": result.get("reason") or "The email draft was refused."}
+        self._json_response(status, result)
+
+    def _email_pending_cancel(self):
+        """Cancel a session-bound pending email without delivering it."""
+        from bridge import email_service
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "Email sending is restricted to loopback bind"}})
+            return
+        if not self._require_bridge_capability():
+            return
+        data, error = self._email_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        result = email_service.cancel_pending_message(
+            str(data.get("session_id") or ""), str(data.get("pending_id") or "")
+        )
+        status = 200 if result.get("decision") == "cancelled" else 400
+        if status == 400:
+            result = dict(result)
+            result["error"] = {"message": result.get("reason") or "The pending email could not be cancelled."}
         self._json_response(status, result)
 
     def _email_message_delete(self, account_id):

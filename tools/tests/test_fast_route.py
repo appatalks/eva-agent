@@ -55,6 +55,10 @@ def main():
         "what is the current stock price for aapl",
         _classify_request_type("what is the current stock price for aapl"),
     )
+    assert _classify_request_type("send a test email to peer@example.com") == "email-action"
+    assert _classify_request_type("please try sending a test email to peer@example.com") == "email-action"
+    assert _classify_request_type("how does email work?") == "general"
+    assert not _needs_acp_preflight("send a test email to peer@example.com", "email-action")
     for message in (
         "Do you remember your original design concept?",
         "What was the original concept behind your memory?",

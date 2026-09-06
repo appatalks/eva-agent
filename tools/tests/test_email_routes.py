@@ -37,7 +37,8 @@ class RouteWiringTests(unittest.TestCase):
     def test_write_routes_are_registered(self):
         for handler in [
             "_email_accounts_update()", "_email_account_upsert()", "_email_allowlist_update()",
-            "_email_credential_set()", "_email_send_request()",
+            "_email_credential_set()", "_email_pending_prepare()", "_email_pending_cancel()",
+            "_email_send_request()",
         ]:
             self.assertIn(handler, self.source, handler)
 
@@ -93,7 +94,7 @@ class RouteWiringTests(unittest.TestCase):
         end = self.source.index("def _email_message_delete(self")
         block = self.source[start:end]
         success = block[block.index("status = 200 if"):block.index("self._json_response(status")]
-        for decision in ("sent", "submitted", "partially_sent", "needs_confirmation"):
+        for decision in ("sent", "submitted", "partially_sent", "pending_confirmation", "failed"):
             self.assertIn(decision, success, decision)
 
     def test_credential_endpoint_does_not_return_the_secret(self):
@@ -204,6 +205,32 @@ class FocusedMutationHTTPTests(unittest.TestCase):
         with open(email_service._EMAIL_CONFIG_PATH, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
         self.assertEqual(raw["accounts"], [opaque])
+
+    def test_pending_email_routes_preserve_session_and_opaque_id(self):
+        prepared = {
+            "decision": "pending_confirmation", "pending_id": "opaque-pending-id",
+            "account_id": "eva", "request": {
+                "to": ["peer@example.com"], "cc": [], "bcc": [],
+                "subject": "Test email", "body": "This is a test email from Eva.",
+            },
+        }
+        with mock.patch.object(email_service, "prepare_message", return_value=prepared) as prepare:
+            status, result = self.call("POST", "/v1/email/pending", {
+                "session_id": "session-a", "account_id": "eva",
+                "message": {"to": "peer@example.com", "subject": "Test email", "body": "This is a test email from Eva."},
+            })
+        self.assertEqual(status, 200)
+        self.assertEqual(result["pending_id"], "opaque-pending-id")
+        self.assertEqual(prepare.call_args.args[1], "session-a")
+
+        receipt = {"decision": "submitted", "pending_id": "opaque-pending-id", "idempotent_replay": False}
+        with mock.patch.object(email_service, "confirm_pending_message", return_value=receipt) as confirm:
+            status, result = self.call("POST", "/v1/email/send", {
+                "session_id": "session-a", "pending_id": "opaque-pending-id",
+            })
+        self.assertEqual(status, 200)
+        self.assertEqual(result["decision"], "submitted")
+        confirm.assert_called_once_with("session-a", "opaque-pending-id")
 
 
 class BriefingMailSourceTests(unittest.TestCase):

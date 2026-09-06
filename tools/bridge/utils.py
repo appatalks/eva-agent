@@ -556,6 +556,12 @@ def _classify_request_type(msg_lower):
     'general', which lets the agentic ACP layer pick its own tools."""
     m = msg_lower or ""
 
+    if re.search(
+        r'\b(?:send|sending|compose|composing|draft|drafting|write|writing)\b[^.!?]{0,80}\b(?:email|e-mail|mail)\b|'
+        r'\b(?:email|e-mail|mail)\b[^.!?]{0,80}\b(?:send|sending|compose|composing|draft|drafting|write|writing)\b', m
+    ):
+        return "email-action"
+
     finance_strong = re.search(
         r'\b(stock price|share price|stock market|stock quote|market cap|ticker symbol|'
         r'nasdaq|s&p ?500|dow jones|earnings report)\b', m

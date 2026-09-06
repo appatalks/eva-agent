@@ -12,7 +12,7 @@ assert.match(source, /var briefingRequest = \/\\b\(\?:morning\|daily\)\\s\+\(\?:
 assert.match(source, /function formatPreparedBriefing\(status, preparing, requestedQuote\)/);
 assert.match(source, /function requestedStockSymbol\(text\)/);
 assert.match(source, /function readAigQuestionInput\(element\)/);
-assert.match(source, /async function fetchBriefingQuote\(bridgeUrl, userMessage, sessionId\)/);
+assert.match(source, /async function fetchBriefingQuote\(bridgeUrl, userMessage, sessionId, resolvedSymbol\)/);
 assert.match(source, /### Requested quote/);
 assert.match(source, /async function waitForPreparedBriefing\(bridgeUrl, initialStatus, onProgress\)/);
 assert.match(source, /var deadline = Date\.now\(\) \+ 30000;/);
@@ -21,7 +21,7 @@ assert.match(source, /if \(briefingRequest\) \{\s+cogDecision = \{ active: false
 assert.match(source, /\/v1\/briefing\/refresh/);
 assert.match(source, /var requestedQuote = await fetchBriefingQuote\(bridgeUrl, sQuestion, sessionId\)/);
 assert.match(source, /if \(isDirectQuoteRequest\) \{\s+var quotePreview = createEvaStreamingBubble\(txtOutput\);/);
-assert.match(source, /var directQuote = await fetchBriefingQuote\(bridgeUrl, sQuestion, sessionId\)/);
+assert.match(source, /var directQuote = await fetchBriefingQuote\(bridgeUrl, sQuestion, sessionId, requestedQuoteSymbol\)/);
 assert.match(source, /Eva verified the current ' \+ requestedQuoteSymbol \+ ' quote\./);
 assert.doesNotMatch(source, /getBriefingWeatherLocation/);
 assert.match(source, /\/v1\/memory\/remember-facts/);
@@ -50,23 +50,28 @@ assert.match(bridge, /_policy_decision = select_model_policy/);
 assert.match(bridge, /not _briefing_request and _st\.cognition_enabled/);
 
 async function checkRequestedQuoteSection() {
+	let fetchedUrl = '';
 	const sandbox = {
 		AbortSignal: { timeout() { return {}; } },
 		getBridgeCapabilityHeaders() { return {}; },
-		fetch: async () => ({
+		fetch: async (url) => {
+			fetchedUrl = url;
+			return ({
 			json: async () => ({ data: JSON.stringify({
 				stock_quote: {
 					symbol: 'PLG', exchange: 'NYSEAMERICAN', currency: 'USD',
 					price: 1.64, change: 0.12, change_percent: 7.89
 				}
 			}) })
-		})
+			});
+		}
 	};
 	require('vm').createContext(sandbox);
 	require('vm').runInContext(source, sandbox);
 	const request = 'Hi Eva, can you give me a morning briefing for today, and include the last price and analysis of the stock PLG';
 	const verified = await sandbox.fetchBriefingQuote('http://localhost:8888', request, 'session');
 	assert.strictEqual(verified.available, true);
+	assert.match(decodeURIComponent(fetchedUrl), /message=\$PLG stock quote/);
 	assert.match(verified.content, /PLG/);
 	assert.match(verified.content, /Session move/);
 	const briefing = sandbox.formatPreparedBriefing({ sources: {} }, false, verified.content);
@@ -91,6 +96,19 @@ async function checkRequestedQuoteSection() {
 	assert.match(unavailable.content, /unavailable/);
 	const directRequest = 'What is the latest stock price of PYPL?';
 	assert.strictEqual(sandbox.requestedStockSymbol(directRequest), 'PYPL');
+	assert.strictEqual(sandbox.requestedStockSymbol('What is PLG stock price?'), 'PLG');
+	assert.strictEqual(sandbox.requestedStockSymbol('What was their last stock price?'), '');
+	assert.strictEqual(sandbox.requestedStockSymbol('Earlier, we added ticker symbol lookup with ticker.sh.'), '');
+	assert.strictEqual(sandbox.requestedStockSymbol('What is the configured local quote source?'), '');
+	assert.strictEqual(sandbox.contextualStockSymbol('What was their last stock price?', [
+		{ role: 'user', content: 'Please include the stock price of PLG in my briefing.' }
+	]), 'PLG');
+	assert.strictEqual(sandbox.contextualStockSymbol('What was its last stock price?', [
+		{ role: 'assistant', content: '### Requested quote\n\n- **PLG · NYSEAMERICAN**: USD 1.64' }
+	]), 'PLG');
+	assert.strictEqual(sandbox.contextualStockSymbol('What is the configured local quote source?', [
+		{ role: 'user', content: 'What is PLG stock price?' }
+	]), '');
 	assert.match(sandbox.committedFactSummary([
 		{ relation: 'correct_spelling', value: 'NewHandle' },
 		{ relation: 'user_children', value: 'Nova, Rowan' },

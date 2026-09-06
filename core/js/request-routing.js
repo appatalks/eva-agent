@@ -4,6 +4,9 @@
 
   function classifyRequestType(message) {
     var text = String(message || '').toLowerCase();
+    if (/\b(?:send|sending|compose|composing|draft|drafting|write|writing)\b[^.!?]{0,80}\b(?:email|e-mail|mail)\b|\b(?:email|e-mail|mail)\b[^.!?]{0,80}\b(?:send|sending|compose|composing|draft|drafting|write|writing)\b/.test(text)) {
+      return 'email-action';
+    }
     if (/\b(stock price|share price|stock market|stock quote|market cap|ticker symbol|nasdaq|s&p ?500|dow jones|earnings report)\b/.test(text) ||
         /(?:^|\s)\$[a-z]{1,5}\b/.test(text) && /\b(price|quote|market|trading|trade|buy|sell|invest|worth|value)\b/.test(text)) {
       return 'financial-data';
@@ -62,6 +65,13 @@
     ).test(text);
   }
 
+  function isExplicitCameraRequest(message) {
+    var text = String(message || '');
+    if (/\b(?:do not|don'?t|never|without|avoid|disable|turn off|stop)\b[^.!?]{0,50}\b(?:camera|webcam|look|see)\b/i.test(text)) return false;
+    if (!/\b(?:camera|webcam)\b/i.test(text)) return false;
+    return /\b(?:use|open|enable|start|turn on|activate|access|check)\b[^.!?]{0,50}\b(?:camera|webcam)\b|\b(?:camera|webcam)\b[^.!?]{0,50}\b(?:use|open|enable|start|turn on|activate|access|check|look|see)\b|\b(?:look|see)\s+through\s+(?:the\s+)?(?:camera|webcam)\b/i.test(text);
+  }
+
   function isNativeWeatherLookup(message) {
     return /\b(?:weather|forecast|temperature|raining|snowing|humidity|wind speed)\b/i.test(String(message || '')) &&
       !isExplicitInteractiveRequest(message);
@@ -71,7 +81,7 @@
     var text = String(message || '');
     if (isExplicitInteractiveRequest(text)) return false;
     var type = classifyRequestType(text);
-    if (['news-search', 'weather-search', 'financial-data', 'web-search', 'github-data', 'kusto-query', 'kusto-operator'].indexOf(type) >= 0) return true;
+    if (['news-search', 'weather-search', 'financial-data', 'web-search', 'github-data', 'kusto-query', 'kusto-operator', 'email-action'].indexOf(type) >= 0) return true;
     return /\b(?:create|generate|make|export|download|write|save|edit|replace|validate|inspect|merge|split|extract|recalculate|scaffold)\b[^.!?]{0,100}\b(?:pdf|docx|pptx|xlsx|csv|json|markdown|md|txt|file|report|document|spreadsheet|invoice|presentation|mcp\s+server|fastmcp)\b/i.test(text);
   }
 
@@ -85,6 +95,7 @@
     isGitHubOperation: function(message) { return classifyRequestType(message) === 'github-data'; },
     needsAcpPreflight: needsAcpPreflight,
     isExplicitInteractiveRequest: isExplicitInteractiveRequest,
+    isExplicitCameraRequest: isExplicitCameraRequest,
     isNativeWeatherLookup: isNativeWeatherLookup,
     isNarrowNativeOperation: isNarrowNativeOperation,
     createTurnId: createTurnId,

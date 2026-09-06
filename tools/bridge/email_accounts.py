@@ -486,6 +486,8 @@ def authorize_send_for_account(account, request, global_allowlist, confirmation=
                         "request": result["request"],
                         "digest": result["digest"],
                         "unknown_recipients": remaining,
+                        "account_id": account["id"],
+                        "backend": account["backend"],
                         "reason": (
                             "best-effort local submission cannot verify delivery; "
                             "confirm this exact message and recipient"

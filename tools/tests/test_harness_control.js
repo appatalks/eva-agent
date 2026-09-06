@@ -46,6 +46,7 @@ let pullRequestViewRequest = null;
 let branchDeleteRequest = null;
 let boundedSkillRequest = null;
 let emailSendRequest = null;
+let emailPrepareRequest = null;
 let memoryInspectorCalls = 0;
 const fixtureRepository = 'fixture-owner/fixture-repository';
 const fixtureShortName = 'fixture-repository';
@@ -83,6 +84,13 @@ const window = {
   EvaEmailSettings: {
     open() { return Promise.resolve(); },
     accounts() { return [{ label: 'Eva', address: 'eva@example.com', backend: 'eva_direct' }]; },
+    prepare(request, sessionId) {
+      emailPrepareRequest = { request, sessionId };
+      return Promise.resolve({
+        decision: 'pending_confirmation', pending_id: 'pending-1',
+        request: { to: [request.to], subject: request.subject, body: request.body }
+      });
+    },
     send(request) { emailSendRequest = request; return Promise.resolve({ decision: 'sent' }); }
   },
   EvaWorkspaces: {
@@ -201,6 +209,7 @@ const sandbox = {
   },
   getSafeBridgeBaseUrl() { return 'http://localhost:8888'; },
   getBridgeCapabilityHeaders() { return { 'Content-Type': 'application/json', 'Authorization': 'Bearer test' }; },
+  ensureActiveSessionId() { return 'session-email'; },
   fetch(url, options) {
     boundedSkillRequest = { url: url, options: options };
     if (url === 'http://localhost:8888/v1/memory/inspector') {
@@ -745,9 +754,52 @@ async function main() {
   assert.strictEqual(describedEmail.ok, true);
   assert.match(describedEmail.message, /eva@example\.com/);
 
+  const preparedEmail = await harness.execute({
+    action: 'prepare_email', to: 'peer@example.com', subject: 'Test email', body: 'This is a test email from Eva.'
+  }, { source: 'model', userRequest: 'Send a test email to peer@example.com.' });
+  assert.strictEqual(preparedEmail.ok, true);
+  assert.strictEqual(preparedEmail.data.outcome, 'pending_confirmation');
+  assert.strictEqual(emailPrepareRequest.sessionId, 'session-email');
+  assert.strictEqual(emailPrepareRequest.request.to, 'peer@example.com');
+  assert.doesNotMatch(preparedEmail.message, /peer@example\.com|Test email|This is a test email/);
+
+  localStorage.setItem('aigMessages', JSON.stringify([
+    { role: 'user', content: 'I would like to send a test email.' },
+    { role: 'assistant', content: 'What is the complete address?' }
+  ]));
+  const completedAddress = await harness.execute({
+    action: 'prepare_email', to: 'peer@example.com', subject: 'Test email', body: 'This is a test email from Eva.'
+  }, { source: 'model', userRequest: 'peer@example.com' });
+  assert.strictEqual(completedAddress.ok, true);
+
+  emailPrepareRequest = null;
+  const deniedPreparation = await harness.execute({
+    action: 'prepare_email', to: 'other@example.com', subject: 'Test email', body: 'This is a test email from Eva.'
+  }, { source: 'model', userRequest: 'Use peer@example.com for the test email.' });
+  assert.strictEqual(deniedPreparation.ok, false);
+  assert.match(deniedPreparation.message, /direct user interaction/);
+  assert.strictEqual(emailPrepareRequest, null);
+
+  const suffixPreparation = await harness.execute({
+    action: 'prepare_email', to: 'attacker@example.com', subject: 'Test email', body: '<img src=x onerror=alert(1)>'
+  }, { source: 'model', userRequest: 'Send a test email to not-attacker@example.com.' });
+  assert.strictEqual(suffixPreparation.ok, false);
+
+  const negatedPreparation = await harness.execute({
+    action: 'prepare_email', to: 'peer@example.com', subject: 'Test email', body: 'Do not send.'
+  }, { source: 'model', userRequest: 'Do not send an email to peer@example.com.' });
+  assert.strictEqual(negatedPreparation.ok, false);
+
   const emailRequest = { action: 'send_email', to: 'peer@example.com', subject: 'Status', body: 'All green.', accountId: 'eva' };
-  const sentEmail = await harness.execute(emailRequest, {
+  const deniedModelSend = await harness.execute(emailRequest, {
     source: 'model', userRequest: 'Send peer@example.com the subject Status with the body All green. from account eva.'
+  });
+  assert.strictEqual(deniedModelSend.ok, false);
+  assert.match(deniedModelSend.message, /direct user interaction/);
+  assert.strictEqual(emailSendRequest, null);
+
+  const sentEmail = await harness.execute(emailRequest, {
+    source: 'user', userRequest: 'Send peer@example.com the subject Status with the body All green. from account eva.'
   });
   assert.strictEqual(sentEmail.ok, true);
   assert.strictEqual(sentEmail.data.outcome, 'sent');

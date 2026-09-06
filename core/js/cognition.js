@@ -554,6 +554,30 @@
   });
 
   registerCapability({
+    id: 'email.prepare',
+    description: 'Prepare, but do not send, an email for explicit user confirmation. args: {to, subject, body, accountId?}. Use this when the recipient is explicit and the message is ready for review. Never claim it was sent.',
+    run: async function(args, context) {
+      if (!window.EvaHarness || typeof EvaHarness.execute !== 'function') {
+        throw new Error('Native email preparation is unavailable.');
+      }
+      var prepared = await Promise.resolve(EvaHarness.execute({
+        action: 'prepare_email',
+        to: args && args.to,
+        subject: args && args.subject,
+        body: args && args.body,
+        accountId: args && args.accountId
+      }, {
+        source: 'model',
+        userRequest: String(context && context.userMessage || '')
+      }));
+      if (!prepared || !prepared.ok) {
+        throw new Error((prepared && prepared.message) || 'The email draft was refused.');
+      }
+      return { html: prepared.message, pending_id: prepared.data && prepared.data.pending_id };
+    }
+  });
+
+  registerCapability({
     id: 'skill.execute',
     description: 'Execute one bounded local DOCX, PDF, PPTX, XLSX, or MCP-builder operation, including PDF forms/tables/OCR, office PDF rendering, and XLSX recalculation. Args: {skill, operation, root?, input?, inputs?, output?, options?}. Paths are relative to Eva artifacts or a trusted approved workspace root; no installation, network, shell, browser, or desktop fallback is used.',
     run: async function(args, context) {
@@ -923,6 +947,8 @@
       '[[/EVA_ACTION]]',
       'The browser will execute it and replace the block with the rendered result.',
       'Use file.download ONLY when the user explicitly asks for a file, document, PDF, report, or download.',
+      'For email, use email.prepare once the recipient, subject, and body are ready. Preparing does not send. Do not ask for confirmation until email.prepare succeeds.',
+      'Never use Browser, Desktop, Camera, or Terminal for email.',
       'When the user asks to launch or kick off parallel/background agents, you MUST invoke agent.spawn_batch.',
       'Do not merely describe hypothetical agents or claim they started. Only accepted task IDs prove launch.',
       'Default: answer inline in chat. Do NOT auto-generate file artifacts unless the user asks for one.'

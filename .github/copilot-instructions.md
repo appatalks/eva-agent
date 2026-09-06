@@ -54,6 +54,9 @@ This project is a simple web UI for interacting with OpenAI, Google Generative m
 
 ## Development Efficiency
 - Work autonomously through focused inspection, implementation, and the smallest relevant manual or executable check.
+- When diagnosing behavior observed in the installed Eva app, inspect a bounded set of the newest relevant rows from the installed local `Conversations` table. Raw stored assistant content shows what Eva saw and emitted, including action markers hidden by rendering; correlate the same timestamp, session, or turn with the privacy-safe runtime audit before deciding that an action actually executed.
+- Treat installed conversation data as sensitive debugging evidence: query only the minimum relevant rows, do not copy real addresses, names, message bodies, or other user data into repository files or committed tests, and replace any necessary regression fixture values with obvious examples.
+- A conversational promise such as "I will check" is not an execution receipt. If the audit has no matching native action, bridge call, or tool outcome, treat the turn as a routing/actionability defect and fix the controlling path rather than Eva's prose.
 - Product code lives under `tools/`; validation code lives under `tools/tests/`. Do not read or use the test suite as product context unless the current change needs a focused check or the user asks for test work.
 - Keep ad hoc regression scripts under `tools/tests/local/`, which is ignored. Promote a local regression into the committed suite only when the user explicitly asks for a CI contract.
 - CI runs an explicit curated set of scripts from `tools/tests/`; do not add broad test discovery or make the application package test files.

@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -446,6 +447,143 @@ class SendTests(EmailServiceTestCase):
             confirmation={"digest": pending["digest"], "addresses": ["stranger@elsewhere.example"]},
         )
         self.assertEqual(result["decision"], "sent")
+
+    def test_pending_confirmation_sends_exactly_once(self):
+        pending = email_service.prepare_message(
+            send_request(to="stranger@elsewhere.example"), "session-a", account_id="work"
+        )
+        self.assertEqual(pending["decision"], "pending_confirmation")
+        self.assertEqual(pending["request"]["subject"], "Status")
+
+        first = email_service.confirm_pending_message("session-a", pending["pending_id"])
+        second = email_service.confirm_pending_message("session-a", pending["pending_id"])
+
+        self.assertEqual(first["decision"], "sent")
+        self.assertFalse(first["idempotent_replay"])
+        self.assertEqual(second["decision"], "sent")
+        self.assertTrue(second["idempotent_replay"])
+        self.assertEqual(len(FakeMailbox.instances), 1)
+        self.assertEqual(len(FakeMailbox.instances[0].sent), 1)
+        tombstone = email_service._pending_messages[pending["pending_id"]]
+        self.assertIsNone(tombstone["request"])
+        self.assertIsNone(tombstone["confirmation"])
+
+    def test_eva_direct_pending_confirmation_preserves_sender(self):
+        email_service.replace_accounts([account(
+            id="Eva-agent", backend="eva_direct", address="eva@custom.example",
+            settings={
+                "direct_consent": [], "delivery_mode": "local_mta",
+                "internal_domains": [], "internal_smtp_host": "mail.custom.example",
+                "internal_smtp_starttls": False, "exim_status": True,
+            },
+        )], [])
+        pending = email_service.prepare_message(
+            send_request(to="outside@example.net"), "session-a", account_id="Eva-agent"
+        )
+        self.assertEqual(pending["decision"], "pending_confirmation")
+        self.assertEqual(pending["account_id"], "Eva-agent")
+        self.assertEqual(
+            email_service._pending_messages[pending["pending_id"]]["account_id"], "Eva-agent"
+        )
+        transport = {
+            "queue_id": "1abcDEF-000000-xy", "status": "failed",
+            "detail": "Mailing to remote domains not supported", "completed": True,
+        }
+        FakeMailbox.mta_queue_id = transport["queue_id"]
+        with mock.patch.object(email_service, "inspect_local_mta_status", return_value=transport):
+            result = email_service.confirm_pending_message("session-a", pending["pending_id"])
+        self.assertEqual(result["decision"], "submitted")
+        self.assertEqual(result["account_id"], "Eva-agent")
+        self.assertEqual(result["transport_status"]["status"], "failed")
+        replay = email_service.confirm_pending_message("session-a", pending["pending_id"])
+        self.assertEqual(replay["transport_status"]["status"], "failed")
+        self.assertTrue(replay["idempotent_replay"])
+        self.assertEqual(len(FakeMailbox.instances), 1)
+        self.assertEqual(len(FakeMailbox.instances[0].sent), 1)
+
+    def test_completed_receipt_survives_the_draft_ttl(self):
+        pending = email_service.prepare_message(send_request(), "session-a", account_id="work")
+        draft_expiry = email_service._pending_messages[pending["pending_id"]]["expires_at"]
+        first = email_service.confirm_pending_message("session-a", pending["pending_id"])
+        with mock.patch.object(email_service.time, "time", return_value=draft_expiry + 1):
+            replay = email_service.confirm_pending_message("session-a", pending["pending_id"])
+        self.assertEqual(first["decision"], "sent")
+        self.assertEqual(replay["decision"], "sent")
+        self.assertTrue(replay["idempotent_replay"])
+        self.assertEqual(len(FakeMailbox.instances[0].sent), 1)
+
+    def test_unexpected_send_failure_is_terminal_and_not_retried(self):
+        pending = email_service.prepare_message(send_request(), "session-a", account_id="work")
+        with mock.patch.object(email_service, "send_message", side_effect=RuntimeError("private detail")) as sender:
+            first = email_service.confirm_pending_message("session-a", pending["pending_id"])
+            replay = email_service.confirm_pending_message("session-a", pending["pending_id"])
+        self.assertEqual(first["decision"], "failed")
+        self.assertNotIn("private detail", first["reason"])
+        self.assertEqual(replay["decision"], "failed")
+        self.assertTrue(replay["idempotent_replay"])
+        self.assertEqual(sender.call_count, 1)
+
+    def test_concurrent_confirmations_enter_delivery_once(self):
+        pending = email_service.prepare_message(send_request(), "session-a", account_id="work")
+        entered = threading.Event()
+        release = threading.Event()
+        original_send = email_service.send_message
+
+        def blocked_send(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=2)
+            return original_send(*args, **kwargs)
+
+        results = []
+        with mock.patch.object(email_service, "send_message", side_effect=blocked_send) as sender:
+            thread = threading.Thread(target=lambda: results.append(
+                email_service.confirm_pending_message("session-a", pending["pending_id"])
+            ))
+            thread.start()
+            self.assertTrue(entered.wait(timeout=2))
+            email_service._pending_messages[pending["pending_id"]]["expires_at"] = 0
+            concurrent = email_service.confirm_pending_message("session-a", pending["pending_id"])
+            release.set()
+            thread.join(timeout=2)
+        replay = email_service.confirm_pending_message("session-a", pending["pending_id"])
+        self.assertEqual(concurrent["decision"], "in_progress")
+        self.assertEqual(results[0]["decision"], "sent")
+        self.assertTrue(replay["idempotent_replay"])
+        self.assertEqual(sender.call_count, 1)
+
+    def test_authorization_change_stores_no_draft_data(self):
+        pending = email_service.prepare_message(send_request(), "session-a", account_id="work")
+        email_service.update_allowlist([])
+        result = email_service.confirm_pending_message("session-a", pending["pending_id"])
+        replay = email_service.confirm_pending_message("session-a", pending["pending_id"])
+        self.assertEqual(result["decision"], "failed")
+        self.assertEqual(replay["decision"], "failed")
+        serialized = repr(email_service._pending_messages[pending["pending_id"]])
+        self.assertNotIn("peer@company.example", serialized)
+        self.assertNotIn("All green", serialized)
+        self.assertNotIn("Status", serialized)
+        self.assertEqual(FakeMailbox.instances, [])
+
+    def test_pending_confirmation_is_session_bound(self):
+        pending = email_service.prepare_message(send_request(), "session-a", account_id="work")
+        result = email_service.confirm_pending_message("session-b", pending["pending_id"])
+        self.assertEqual(result["decision"], "rejected")
+        self.assertEqual(FakeMailbox.instances, [])
+
+    def test_pending_confirmation_can_be_cancelled(self):
+        pending = email_service.prepare_message(send_request(), "session-a", account_id="work")
+        cancelled = email_service.cancel_pending_message("session-a", pending["pending_id"])
+        result = email_service.confirm_pending_message("session-a", pending["pending_id"])
+        self.assertEqual(cancelled["decision"], "cancelled")
+        self.assertEqual(result["decision"], "rejected")
+        self.assertEqual(FakeMailbox.instances, [])
+
+    def test_expired_pending_confirmation_is_rejected(self):
+        pending = email_service.prepare_message(send_request(), "session-a", account_id="work")
+        email_service._pending_messages[pending["pending_id"]]["expires_at"] = 0
+        result = email_service.confirm_pending_message("session-a", pending["pending_id"])
+        self.assertEqual(result["decision"], "rejected")
+        self.assertEqual(FakeMailbox.instances, [])
 
     def test_rejected_request_never_reaches_an_adapter(self):
         result = email_service.send_message(send_request(to="bogus"), account_id="work")

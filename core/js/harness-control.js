@@ -77,7 +77,7 @@ var EvaHarness = (function() {
     { id: 'navigate', description: 'Open a native Eva surface. args: {target}. Read-only navigation.' },
     { id: 'refresh', description: 'Refresh a native surface. args: {target}. Read-only.' },
     { id: 'describe_email', description: 'Open Email settings and summarize configured mailboxes and sign-in state. Read-only.' },
-    { id: 'send_email', description: 'Send one email after an explicit direct user request. args: {to, subject, body, accountId?}. A recipient that is not already approved requires the user to confirm that exact message.' },
+    { id: 'prepare_email', description: 'Prepare, but do not send, one exact email for later user confirmation. args: {to, subject, body, accountId?}. The recipient must appear in the current user request. After preparing, ask the user to confirm or cancel.' },
     { id: 'describe_workspaces', description: 'Open Workspaces and return the real workspace and active-run count. Read-only.' },
     { id: 'describe_assets', description: 'Open Assets and summarize generated and workspace files. Read-only.' },
     { id: 'describe_skills', description: 'Open Skills and summarize saved and active skills. Read-only.' },
@@ -654,15 +654,27 @@ var EvaHarness = (function() {
     }
   }
 
-  function modelEmailRequestMatches(request, userRequest) {
-    var values = [request.to, request.subject, request.body];
-    var account = String(request.accountId || request.account_id || '').trim();
-    if (account) values.push(account);
-    var original = String(userRequest || '').toLowerCase().replace(/\s+/g, ' ').trim();
-    return values.every(function(value) {
-      var expected = String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
-      return expected && original.indexOf(expected) >= 0;
-    });
+  function modelEmailPrepareMatches(request, userRequest) {
+    var original = String(userRequest || '');
+    if (/\b(?:do not|don'?t|never|without|unless|wait|cancel)\b[^.!?]{0,80}\b(?:send|compose|draft|write|email|e-mail|mail)\b/i.test(original)) return false;
+    var addressPattern = /[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi;
+    var explicit = (original.match(addressPattern) || []).map(function(address) { return address.toLowerCase(); });
+    var recipients = (Array.isArray(request.to) ? request.to : String(request.to || '').split(/[;,]/))
+      .map(function(address) { return String(address || '').trim().toLowerCase(); }).filter(Boolean);
+    if (!recipients.length || !recipients.every(function(address) { return explicit.indexOf(address) >= 0; })) return false;
+    var directIntent = /\b(?:send|compose|draft|write)\b[^.!?]{0,80}\b(?:email|e-mail|mail)\b|\b(?:email|e-mail|mail)\b[^.!?]{0,80}\b(?:send|compose|draft|write)\b/i.test(original);
+    if (directIntent) return true;
+    if (original.replace(addressPattern, '').trim().replace(/[.,;:!?]/g, '') !== '') return false;
+    try {
+      var messages = JSON.parse(localStorage.getItem('aigMessages') || '[]');
+      for (var index = messages.length - 1; index >= 0; index--) {
+        var message = messages[index] || {};
+        if (message.role !== 'user' || typeof message.content !== 'string' || message.content === original) continue;
+        return /\b(?:send|compose|draft|write)\b[^.!?]{0,80}\b(?:email|e-mail|mail)\b|\b(?:email|e-mail|mail)\b[^.!?]{0,80}\b(?:send|compose|draft|write)\b/i.test(message.content)
+          && !/\b(?:do not|don'?t|never|without|unless|wait|cancel)\b/i.test(message.content);
+      }
+    } catch (_) {}
+    return false;
   }
 
   function execute(request, context) {
@@ -700,7 +712,7 @@ var EvaHarness = (function() {
       boundedIntent.skill === String(request.skill || '').toLowerCase() &&
       boundedIntent.operation === String(request.operation || '').toLowerCase() &&
       modelBoundedSkillPathsMatchRequest(request, context.userRequest);
-    var modelEmailSend = action === 'send_email' && modelEmailRequestMatches(request, context.userRequest);
+    var modelEmailPrepare = action === 'prepare_email' && modelEmailPrepareMatches(request, context.userRequest);
     var modelSkillMutation = userNativeRoute && action === userNativeRoute.action && (
       action === 'create_skill' ||
       (action === 'update_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase() && JSON.stringify(request.updates || {}) === JSON.stringify(userNativeRoute.updates || {})) ||
@@ -708,7 +720,7 @@ var EvaHarness = (function() {
       (action === 'delete_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase()) ||
       action === 'run_skill'
     );
-    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation && !modelBoundedSkill && !modelEmailSend) {
+    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation && !modelBoundedSkill && !modelEmailPrepare) {
       return result(false, action, 'This native action requires direct user interaction.');
     }
     if (action === 'navigate') return navigate(request.target);
@@ -1192,6 +1204,31 @@ var EvaHarness = (function() {
         return result(false, 'describe_email', failureReason(error));
       });
     }
+    if (action === 'prepare_email') {
+      if (!window.EvaEmailSettings || typeof EvaEmailSettings.prepare !== 'function') {
+        return result(false, 'prepare_email', 'Email preparation is unavailable.');
+      }
+      var draftTo = String(request.to || '').trim();
+      var draftSubject = String(request.subject || '').trim();
+      var draftBody = String(request.body || '').trim();
+      if (!draftTo || !draftSubject || !draftBody) {
+        return result(false, 'prepare_email', 'A recipient, subject, and message are required.');
+      }
+      var sessionId = (typeof ensureActiveSessionId === 'function') ? ensureActiveSessionId() : '';
+      return EvaEmailSettings.prepare({
+        to: draftTo, subject: draftSubject, body: draftBody,
+        account_id: String(request.accountId || request.account_id || '').trim()
+      }, sessionId).then(function(prepared) {
+        if (!prepared || prepared.decision !== 'pending_confirmation') {
+          return result(false, 'prepare_email', (prepared && prepared.reason) || 'The email draft was refused.');
+        }
+        return result(true, 'prepare_email',
+          'The exact email draft is prepared. Confirm it to send, or cancel it.',
+          { outcome: 'pending_confirmation', pending_id: prepared.pending_id });
+      }).catch(function(error) {
+        return result(false, 'prepare_email', failureReason(error), { outcome: 'failed' });
+      });
+    }
     if (action === 'send_email') {
       if (!window.EvaEmailSettings || typeof EvaEmailSettings.send !== 'function') {
         return result(false, 'send_email', 'Email sending is unavailable.');
@@ -1252,6 +1289,7 @@ var EvaHarness = (function() {
   function promptContract() {
     var contract = '\n\nNATIVE EVA HARNESS:\nFor Eva application controls, use [[EVA_HARNESS]]{"action":"navigate","target":"workspaces"}[[/EVA_HARNESS]] instead of browser or desktop automation. Navigate targets: workspaces, skills, memory, assets, sessions, terminal, settings, models, personality, goals, background_jobs, schedules, accounts, tools_memory, learning, profile, voice, and agent_operations. To list or summarize current coding workspaces, use [[EVA_HARNESS]]{"action":"describe_workspaces"}[[/EVA_HARNESS]]. To list the user\'s owned GitHub repositories, use [[EVA_HARNESS]]{"action":"list_github_repositories"}[[/EVA_HARNESS]] and present its returned URLs for user selection. To import a GitHub repository only after the user explicitly requests that import and its exact HTTPS URL is known, use [[EVA_HARNESS]]{"action":"import_github","repository_url":"https://github.com/owner/repository"}[[/EVA_HARNESS]]. When an explicit GitHub listing or import request needs repository authorization, use [[EVA_HARNESS]]{"action":"authorize_github"}[[/EVA_HARNESS]]; this opens a native device-code flow and never exposes a token. Workspace-local MCP servers come from each imported project\'s mcp.json and are isolated from global MCP configuration. When the user explicitly requests a named module, enable it with [[EVA_HARNESS]]{"action":"set_workspace_mcp_server","serverName":"<name>","enabled":true,"projectName":"<optional project>"}[[/EVA_HARNESS]]. When an explicit user request asks to retry a delayed coding run, use [[EVA_HARNESS]]{"action":"retry_workspace_run","runId":"<optional run id>"}[[/EVA_HARNESS]]. Do not use browser or desktop automation for these native workspace operations. Do not open an empty import form or use browser, terminal, or desktop control for GitHub repository listing/import. Terminal commands execute only from a direct user request and cannot be initiated by a model marker. Native forms support inspect_form, set_field, submit_form, and cancel_form for direct user interaction. Other actions: new_chat and voice_control with optional enabled:false. These actions control Eva directly; never use browser, screenshots, or desktop automation for those same Eva surfaces.';
     contract += '\nFor requests to open, count, inspect, list, or summarize Workspaces, use describe_workspaces. It opens the native Workspaces view and returns the real count. Never use browser or desktop automation for this.';
+    contract += '\nFor email: when the recipient is explicit and the subject and body are ready, use prepare_email. Preparing never sends. Do not ask the user to confirm a prose-only draft; first prepare it successfully, then ask them to confirm or cancel. Never use Browser, Desktop, Camera, or Terminal for email.';
     contract += '\nThe complete native action manifest is available when interpreting typed and voice requests. Apply the same direct-user, confirmation, and validation requirements in both modes; awareness never bypasses an action gate. Skill creation and management must use create_skill, update_skill, set_skill_status, or delete_skill instead of Browser, Desktop, or Terminal automation. Spoken or typed requests to run an active Skill use run_skill. Document and MCP-builder requests use run_bounded_skill with the fixed skill, operation, relative paths, and options schema; never use Browser, Desktop, Terminal, or arbitrary file execution for them. open_external_url is reserved for exact URLs in a direct user request or internal execution of a verified active Skill.';
     contract += '\nAVAILABLE NATIVE ACTIONS:\n' + actionManifest.map(function(action) { return '- ' + action.id + ': ' + action.description; }).join('\n');
     if (typeof evaTextPromptDescribe === 'function') {

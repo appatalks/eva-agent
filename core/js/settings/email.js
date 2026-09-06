@@ -40,6 +40,47 @@ var EvaEmailSettings = (function() {
       .filter(Boolean);
   }
 
+  function activeSessionId() {
+    return (typeof ensureActiveSessionId === 'function')
+      ? ensureActiveSessionId()
+      : ((typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '');
+  }
+
+  function pendingStorageKey(sessionId) {
+    return 'evaPendingEmail:' + String(sessionId || '');
+  }
+
+  function rememberPending(sessionId, pendingId) {
+    try {
+      if (sessionId && pendingId) sessionStorage.setItem(pendingStorageKey(sessionId), pendingId);
+    } catch (_) {}
+    try {
+      if (sessionId && pendingId) localStorage.setItem(pendingStorageKey(sessionId), pendingId);
+    } catch (_) {}
+  }
+
+  function rememberedPending(sessionId) {
+    var pendingId = '';
+    try { pendingId = sessionStorage.getItem(pendingStorageKey(sessionId)) || ''; } catch (_) {}
+    if (pendingId) return pendingId;
+    try { return localStorage.getItem(pendingStorageKey(sessionId)) || ''; } catch (_) { return ''; }
+  }
+
+  function forgetPending(sessionId) {
+    try { sessionStorage.removeItem(pendingStorageKey(sessionId)); } catch (_) {}
+    try { localStorage.removeItem(pendingStorageKey(sessionId)); } catch (_) {}
+  }
+
+  async function sendingAccountId(requestedId) {
+    if (requestedId) return requestedId;
+    if (!state.accounts.length) await refresh();
+    var senders = state.accounts.filter(function(account) {
+      return account.status === 'connected' && (account.capabilities || []).indexOf('send') >= 0;
+    });
+    var preferred = senders.filter(function(account) { return account.default_send; })[0];
+    return preferred ? preferred.id : (senders.length === 1 ? senders[0].id : '');
+  }
+
   function fillAccountPickers() {
     [['emailSendFrom', 'send'], ['emailCredentialId', 'credential']].forEach(function(entry) {
       var select = el(entry[0]);
@@ -288,19 +329,21 @@ var EvaEmailSettings = (function() {
   }
 
   async function send(request) {
+    var sessionId = request.session_id || activeSessionId();
+    var accountId = await sendingAccountId(request.account_id);
     var message = {
       to: request.to,
       subject: request.subject,
       body: request.body
     };
-    var payload = { message: message };
-    if (request.account_id) payload.account_id = request.account_id;
+    var payload = { message: message, session_id: sessionId };
+    if (accountId) payload.account_id = accountId;
     var result = await bridge('/v1/email/send', {
       method: 'POST',
       body: JSON.stringify(payload)
     });
 
-    if (result && result.decision === 'needs_confirmation') {
+    if (result && result.decision === 'pending_confirmation') {
       var normalized = result.request || message;
       var body = String(normalized.body || '');
       var bodyPreview = body.slice(0, 2000) + (body.length > 2000 ? '\n… [preview truncated]' : '');
@@ -321,13 +364,58 @@ var EvaEmailSettings = (function() {
             confirmLabel: 'Submit email'
           })
         : false;
-      if (!approved) return { decision: 'cancelled' };
-      payload.confirmation = { digest: result.digest, addresses: result.unknown_recipients };
+      if (!approved) {
+        await bridge('/v1/email/pending/cancel', {
+          method: 'POST',
+          body: JSON.stringify({ session_id: sessionId, pending_id: result.pending_id })
+        }).catch(function() {});
+        return { decision: 'cancelled' };
+      }
+      payload = { pending_id: result.pending_id, session_id: sessionId };
       result = await bridge('/v1/email/send', {
         method: 'POST',
         body: JSON.stringify(payload)
       });
     }
+    return result;
+  }
+
+  async function prepare(request, sessionId) {
+    var currentSessionId = sessionId || activeSessionId();
+    var accountId = await sendingAccountId(request.account_id || request.accountId);
+    var payload = {
+      session_id: currentSessionId,
+      message: { to: request.to, subject: request.subject, body: request.body }
+    };
+    if (accountId) payload.account_id = accountId;
+    var result = await bridge('/v1/email/pending', {
+      method: 'POST', body: JSON.stringify(payload)
+    });
+    if (result && result.decision === 'pending_confirmation') {
+      rememberPending(currentSessionId, result.pending_id);
+    }
+    return result;
+  }
+
+  async function confirmPending(sessionId) {
+    var currentSessionId = sessionId || activeSessionId();
+    var pendingId = rememberedPending(currentSessionId);
+    var result = await bridge('/v1/email/send', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: currentSessionId, pending_id: pendingId })
+    });
+    if (!result || result.decision !== 'in_progress') forgetPending(currentSessionId);
+    return result;
+  }
+
+  async function cancelPending(sessionId) {
+    var currentSessionId = sessionId || activeSessionId();
+    var pendingId = rememberedPending(currentSessionId);
+    var result = await bridge('/v1/email/pending/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: currentSessionId, pending_id: pendingId })
+    });
+    forgetPending(currentSessionId);
     return result;
   }
 
@@ -346,7 +434,16 @@ var EvaEmailSettings = (function() {
         status('emailSendStatus', 'Sent.');
         if (el('emailSendBody')) el('emailSendBody').value = '';
       } else if (decision === 'submitted') {
-        status('emailSendStatus', 'Submitted to the local mail system. Final delivery is not verified.');
+        var transport = result.transport_status || {};
+        var transportMessages = {
+          failed: 'Exim could not deliver the message: ' + String(transport.detail || 'transport failed'),
+          deferred: 'Exim deferred delivery and will retry: ' + String(transport.detail || 'delivery is deferred'),
+          delivered: 'Exim handed the message to its next SMTP hop. Final inbox delivery is not verified.',
+          pending: 'Exim is still processing the message. Final delivery is not yet verified.',
+          unavailable: 'Submitted to the local mail system. Transport status is unavailable.'
+        };
+        status('emailSendStatus', transportMessages[transport.status]
+          || 'Submitted to the local mail system. Transport status is not yet available.', transport.status === 'failed');
         var localDelivery = (result.deliveries || []).find(function(delivery) {
           return delivery.route === 'local_mta' && delivery.mta_queue_id;
         });
@@ -468,6 +565,10 @@ var EvaEmailSettings = (function() {
     open: open,
     refresh: refresh,
     send: send,
+    prepare: prepare,
+    confirmPending: confirmPending,
+    cancelPending: cancelPending,
+    hasPending: function(sessionId) { return !!rememberedPending(sessionId || activeSessionId()); },
     accounts: function() { return state.accounts.slice(); },
     loadAccount: loadAccount
   };

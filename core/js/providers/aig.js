@@ -61,13 +61,132 @@ function formatBriefingSection(summary, limit) {
 
 function requestedStockSymbol(text) {
   var value = String(text || '');
-  var dollar = value.match(/\$([A-Za-z]{1,10})\b/);
-  if (dollar) return dollar[1].toUpperCase();
-  var afterSubject = value.match(/\b(?:stock|ticker|symbol)\s+(?:price\s+)?(?:of\s+|for\s+)?([A-Za-z]{1,10})\b/i);
-  if (afterSubject) return afterSubject[1].toUpperCase();
-  var beforeSubject = value.match(/\b([A-Z]{1,10})\b[^.!?]{0,80}\b(?:stock|share|ticker|quote|price)\b/);
-  if (beforeSubject) return beforeSubject[1].toUpperCase();
+  var stopwords = {
+    A: true, AN: true, AND: true, ARE: true, AT: true, CURRENT: true, FOR: true,
+    HOW: true, IS: true, LAST: true, MARKET: true, ME: true, MY: true, NOT: true,
+    OF: true, ON: true, PRICE: true, QUOTE: true, SHARE: true, STOCK: true,
+    SYMBOL: true, THE: true, THEIR: true, TICKER: true, TODAY: true, WHAT: true
+  };
+  function normalize(candidate) {
+    var symbol = String(candidate || '').toUpperCase();
+    return /^[A-Z][A-Z0-9.-]{0,14}$/.test(symbol) && !stopwords[symbol] ? symbol : '';
+  }
+  var dollar = value.match(/\$([A-Za-z][A-Za-z0-9.-]{0,14})\b/);
+  if (dollar) return normalize(dollar[1]);
+  var qualified = value.match(/\b([A-Za-z][A-Za-z0-9.-]{0,14})\s*:\s*(?:AMEX|NYSEAMERICAN|NASDAQ|NYSE|OTC|OTCMKTS)\b/i);
+  if (qualified) return normalize(qualified[1]);
+  var afterSubject = value.match(/\b(?:stock|share|ticker|quote|price)(?:\s+(?:price|symbol))?\s+(?:of|for)\s+([A-Za-z][A-Za-z0-9.-]{0,14})\b/i);
+  if (afterSubject) return normalize(afterSubject[1]);
+  if (!/\b(?:stock|share|ticker|quote|price)\b/i.test(value)) return '';
+  var uppercaseCandidates = (value.match(/\b[A-Z][A-Z0-9.-]{0,14}\b/g) || []).map(normalize).filter(Boolean);
+  var uniqueCandidates = uppercaseCandidates.filter(function (candidate, index) {
+    return uppercaseCandidates.indexOf(candidate) === index;
+  });
+  if (uniqueCandidates.length === 1) return uniqueCandidates[0];
   return '';
+}
+
+function contextualStockSymbol(text, messages) {
+  var symbol = requestedStockSymbol(text);
+  if (symbol) return symbol;
+  var value = String(text || '');
+  var quoteFollowUp = /\b(?:stock|share|ticker|quote|price)\b/i.test(value)
+    && /\b(?:their|its|that\s+(?:company|stock)|the\s+(?:company|stock))\b/i.test(value);
+  if (!quoteFollowUp) return '';
+  for (var index = (messages || []).length - 1; index >= 0; index--) {
+    var message = messages[index] || {};
+    if (message.role !== 'user' && message.role !== 'assistant') continue;
+    var content = typeof message.content === 'string' ? message.content : '';
+    var receiptSymbol = content.match(/### Requested quote[\s\S]{0,160}?\*\*([A-Z][A-Z0-9.-]{0,14})(?:\s|·|\*)/);
+    symbol = requestedStockSymbol(content) || (receiptSymbol && receiptSymbol[1]);
+    if (symbol) return symbol;
+  }
+  return '';
+}
+
+function pendingEmailCommand(text) {
+  var normalized = String(text || '').toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (/^(?:cancel|cancel it|cancel the email|do not send|don t send)$/.test(normalized)) return 'cancel';
+  if (/^(?:confirm|confirmed|confrimed|approved|yes|yes send it|yes please send|please send|send it|send the email|send the message|confirmed please send|confirmed please continue|confrimed please send|confrimed please continue)$/.test(normalized)) return 'confirm';
+  return '';
+}
+
+function explicitPendingEmailCommand(text, command) {
+  var normalized = String(text || '').toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (command === 'cancel') return /^(?:cancel the email|do not send|don t send)$/.test(normalized);
+  return /^(?:confirmed please send|confirmed please continue|confrimed|confrimed please send|confrimed please continue|please send|send it|send the email|send the message|yes please send|yes send it)$/.test(normalized);
+}
+
+function pendingEmailResultContent(result, command) {
+  var decision = String(result && result.decision || 'failed');
+  var transport = result && result.transport_status || {};
+  if (decision === 'cancelled') return 'The pending email was cancelled. Nothing was sent.';
+  if (decision === 'sent') return result.idempotent_replay
+    ? 'That email was already sent. I did not send a duplicate.'
+    : 'The email was sent.';
+  if (decision === 'submitted') {
+    if (transport.status === 'failed') return 'The local mail system accepted the email, but Exim could not deliver it: ' + String(transport.detail || 'transport failed') + ' The recipient did not receive it.';
+    if (transport.status === 'deferred') return 'The local mail system accepted the email, but Exim deferred delivery and will retry: ' + String(transport.detail || 'delivery is deferred');
+    if (transport.status === 'delivered') return 'Exim handed the email to its next SMTP hop. Final inbox delivery is not verified.';
+    if (transport.status === 'pending') return 'The local mail system accepted the email and Exim is still processing it. Final delivery is not yet verified.';
+    return result.idempotent_replay
+      ? 'That email was already submitted to the local mail system. I did not submit a duplicate.'
+      : 'The email was submitted to the local mail system. Transport status is not yet available.';
+  }
+  if (decision === 'partially_sent') return 'The email was delivered to some recipients only. I did not retry the completed submission.';
+  if (decision === 'in_progress') return 'That email submission is already in progress.';
+  return command === 'cancel'
+    ? 'There is no pending email to cancel.'
+    : 'The pending email could not be sent: ' + String(result && result.reason || 'it is missing or expired') + '.';
+}
+
+function requestedTestEmailDraft(text) {
+  var value = String(text || '');
+  if (/\b(?:do not|don'?t|never|without|unless|wait|cancel)\b[^.!?]{0,80}\b(?:send|sending|email|e-mail|mail)\b/i.test(value)) return null;
+  var requestsTestEmail = /\b(?:send|sending|try\s+sending)\b[^.!?]{0,80}\btest\s+(?:email|e-mail)\b|\btest\s+(?:email|e-mail)\b[^.!?]{0,80}\b(?:send|sending)\b/i.test(value);
+  if (!requestsTestEmail) return null;
+  var addresses = value.match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:localhost|[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+)/gi) || [];
+  var unique = addresses.map(function(address) { return address.toLowerCase(); }).filter(function(address, index, all) {
+    return all.indexOf(address) === index;
+  });
+  if (unique.length !== 1) return null;
+  return { to: unique[0], subject: 'Test email', body: 'This is a test email from Eva.' };
+}
+
+function contextualTestEmailDraft(text, messages) {
+  var direct = requestedTestEmailDraft(text);
+  if (direct) return direct;
+  var value = String(text || '');
+  if (/\b(?:do not|don'?t|never|without|unless|wait|cancel)\b[^.!?]{0,80}\b(?:send|sending|test)\b/i.test(value)) return null;
+  var currentAddresses = value.match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:localhost|[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+)/gi) || [];
+  var currentRecipients = currentAddresses.map(function(address) { return address.toLowerCase(); }).filter(function(address, index, all) {
+    return all.indexOf(address) === index;
+  });
+  var explicitTestContinuation = /\b(?:send|sending)\b[^.!?]{0,80}\btest\b|\btest\b[^.!?]{0,80}\b(?:send|sending)\b/i.test(value);
+  var recipientRevision = currentRecipients.length === 1
+    && /\b(?:send|sending|deliver|delivering|use)\b[^.!?]{0,80}@/i.test(value);
+  if (!explicitTestContinuation && !recipientRevision) return null;
+  var addresses = [];
+  var priorUsers = 0;
+  var hasPriorTestEmail = false;
+  for (var index = (messages || []).length - 1; index >= 0 && priorUsers < 6; index--) {
+    var message = messages[index] || {};
+    if (message.role !== 'user' || typeof message.content !== 'string' || message.content === value) continue;
+    priorUsers += 1;
+    if (!/\b(?:email|e-mail|mail)\b/i.test(message.content)) continue;
+    if (/\btest\s+(?:email|e-mail)\b/i.test(message.content)) hasPriorTestEmail = true;
+    var found = message.content.match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:localhost|[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+)/gi) || [];
+    found.forEach(function(address) {
+      address = address.toLowerCase();
+      if (addresses.indexOf(address) < 0) addresses.push(address);
+    });
+  }
+  if (recipientRevision) {
+    if (!hasPriorTestEmail) return null;
+    return { to: currentRecipients[0], subject: 'Test email', body: 'This is a test email from Eva.' };
+  }
+  if (addresses.length !== 1) return null;
+  return { to: addresses[0], subject: 'Test email', body: 'This is a test email from Eva.' };
 }
 
 function formatBriefingQuote(quote, requestedSymbol) {
@@ -89,11 +208,12 @@ function formatBriefingQuote(quote, requestedSymbol) {
   return lines.join('\n');
 }
 
-async function fetchBriefingQuote(bridgeUrl, userMessage, sessionId) {
-  var symbol = requestedStockSymbol(userMessage);
+async function fetchBriefingQuote(bridgeUrl, userMessage, sessionId, resolvedSymbol) {
+  var symbol = resolvedSymbol || requestedStockSymbol(userMessage);
   if (!symbol) return { content: '', available: false };
   try {
-    var url = bridgeUrl.replace(/\/+$/, '') + '/v1/data/retrieve?message=' + encodeURIComponent(userMessage) + '&session_id=' + encodeURIComponent(sessionId || '');
+    var quoteRequest = '$' + symbol + ' stock quote';
+    var url = bridgeUrl.replace(/\/+$/, '') + '/v1/data/retrieve?message=' + encodeURIComponent(quoteRequest) + '&session_id=' + encodeURIComponent(sessionId || '');
     var response = await fetch(url, {
       headers: (typeof getBridgeCapabilityHeaders === 'function') ? getBridgeCapabilityHeaders() : {},
       signal: AbortSignal.timeout(25000)
@@ -266,6 +386,15 @@ async function aigSend() {
 
   var existingMessages = JSON.parse(localStorage.getItem(storageKey)) || [];
   var requestMessages = existingMessages.concat(newMessages);
+  var currentHarnessContract = (window.EvaHarness && typeof EvaHarness.promptContract === 'function')
+    ? EvaHarness.promptContract() : '';
+  var hasEmailHarnessContract = requestMessages.some(function(message) {
+    return (message.role === 'system' || message.role === 'developer')
+      && String(message.content || '').indexOf('prepare_email') >= 0;
+  });
+  if (currentHarnessContract && !hasEmailHarnessContract) {
+    requestMessages.push({ role: 'system', content: currentHarnessContract });
+  }
   var storedMessages = newMessages.map(function (message) {
     if (!Array.isArray(message.content)) return message;
     var text = message.content.filter(function (part) {
@@ -285,6 +414,64 @@ async function aigSend() {
   // Send to AIG orchestrator via bridge
   var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
   if (typeof watchACPPermissions === 'function') watchACPPermissions(190000);
+
+  var emailCommand = pendingEmailCommand(sQuestion);
+  if (emailCommand && window.EvaEmailSettings && typeof EvaEmailSettings.hasPending === 'function'
+      && (EvaEmailSettings.hasPending(sessionId) || explicitPendingEmailCommand(sQuestion, emailCommand))) {
+    setStatus('info', emailCommand === 'confirm' ? 'Eva is submitting the approved email...' : 'Eva is cancelling the pending email...');
+    var pendingEmailResult;
+    try {
+      pendingEmailResult = emailCommand === 'confirm'
+        ? await EvaEmailSettings.confirmPending(sessionId)
+        : await EvaEmailSettings.cancelPending(sessionId);
+    } catch (emailError) {
+      pendingEmailResult = { decision: 'failed', reason: emailError && emailError.message };
+    }
+    var pendingEmailContent = pendingEmailResultContent(pendingEmailResult, emailCommand);
+    await renderEvaResponse(pendingEmailContent, txtOutput, {
+      nativeRequest: sQuestion,
+      turnId: turnId
+    });
+    existingMessages.push({ role: 'assistant', content: pendingEmailContent });
+    localStorage.setItem(storageKey, JSON.stringify(existingMessages));
+    lastResponse = pendingEmailContent;
+    masterOutput += txtOutput.innerText + '\n';
+    localStorage.setItem('masterOutput', masterOutput);
+    var emailSucceeded = ['sent', 'submitted', 'partially_sent'].indexOf(String(pendingEmailResult && pendingEmailResult.decision || '')) >= 0;
+    setStatus(emailSucceeded || emailCommand === 'cancel' ? 'info' : 'warn', pendingEmailContent);
+    var emailAutoSpeak = document.getElementById('autoSpeak');
+    if (emailAutoSpeak && emailAutoSpeak.checked) speakText();
+    return;
+  }
+
+  var testEmailDraft = contextualTestEmailDraft(sQuestion, existingMessages);
+  if (testEmailDraft && window.EvaEmailSettings && typeof EvaEmailSettings.prepare === 'function') {
+    setStatus('info', 'Eva is preparing the email for confirmation...');
+    var preparedEmail;
+    try {
+      preparedEmail = await EvaEmailSettings.prepare(testEmailDraft, sessionId);
+    } catch (prepareError) {
+      preparedEmail = { decision: 'rejected', reason: prepareError && prepareError.message };
+    }
+    var preparedEmailContent;
+    if (preparedEmail && preparedEmail.decision === 'pending_confirmation') {
+      preparedEmailContent = 'I prepared this email for **' + testEmailDraft.to + '**:\n\n'
+        + '- **Subject:** ' + testEmailDraft.subject + '\n'
+        + '- **Body:** ' + testEmailDraft.body + '\n\n'
+        + 'Confirm this exact message to send it, or cancel it.';
+    } else {
+      preparedEmailContent = 'I could not prepare the email: '
+        + String(preparedEmail && preparedEmail.reason || 'no connected sending account is available') + '.';
+    }
+    await renderEvaResponse(preparedEmailContent, txtOutput, { nativeRequest: sQuestion, turnId: turnId });
+    existingMessages.push({ role: 'assistant', content: preparedEmailContent });
+    localStorage.setItem(storageKey, JSON.stringify(existingMessages));
+    lastResponse = preparedEmailContent;
+    masterOutput += txtOutput.innerText + '\n';
+    localStorage.setItem('masterOutput', masterOutput);
+    setStatus(preparedEmail && preparedEmail.decision === 'pending_confirmation' ? 'info' : 'warn', preparedEmailContent);
+    return;
+  }
 
   var savedFacts;
   try {
@@ -319,7 +506,7 @@ async function aigSend() {
   var cogDecision = (typeof Cognition !== 'undefined' && Cognition.shouldRun)
                       ? Cognition.shouldRun(sQuestion)
                       : { active: false, reason: null };
-  var requestedQuoteSymbol = requestedStockSymbol(sQuestion);
+  var requestedQuoteSymbol = contextualStockSymbol(sQuestion, existingMessages);
   var isDirectQuoteRequest = !!requestedQuoteSymbol
     && /\b(?:stock|share|ticker|quote|price)\b/i.test(sQuestion)
     && !/\b(?:analy[sz]e|forecast|strategy|compare|valuation|fundamental|thesis)\b/i.test(sQuestion);
@@ -388,7 +575,7 @@ async function aigSend() {
       phase: 'thinking',
       text: 'Eva is retrieving live data...'
     }, txtOutput);
-    var directQuote = await fetchBriefingQuote(bridgeUrl, sQuestion, sessionId);
+    var directQuote = await fetchBriefingQuote(bridgeUrl, sQuestion, sessionId, requestedQuoteSymbol);
     removeEvaStreamingBubble(quotePreview);
     await renderEvaResponse(directQuote.content, txtOutput, {
       nativeRequest: sQuestion,

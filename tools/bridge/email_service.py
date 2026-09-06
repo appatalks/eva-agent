@@ -16,9 +16,11 @@ module calls them; it never re-implements or relaxes them.
 
 import json
 import os
+import secrets
 import sys
 import threading
 import time
+from copy import deepcopy
 
 from bridge import config as _cfg
 from bridge import email_accounts
@@ -34,11 +36,16 @@ _credential_lock = threading.RLock()
 _credentials = {}
 _mta_submission_lock = threading.RLock()
 _mta_submissions = {}
+_pending_lock = threading.RLock()
+_pending_messages = {}
 
 MAX_FETCH_LIMIT = 50
 MAX_ACCOUNT_SUMMARY = 8
 MTA_SUBMISSION_TTL_SECONDS = 24 * 60 * 60
 MTA_SUBMISSION_MAX_PER_ACCOUNT = 100
+PENDING_MESSAGE_TTL_SECONDS = 15 * 60
+COMPLETED_MESSAGE_TTL_SECONDS = 24 * 60 * 60
+PENDING_MESSAGE_MAX = 100
 
 
 class EmailServiceError(Exception):
@@ -358,6 +365,145 @@ def authorize(request, account_id="", from_address="", confirmation=None):
     )
 
 
+def _cleanup_pending_messages(now=None):
+    current = time.time() if now is None else now
+    expired = [
+        pending_id for pending_id, record in _pending_messages.items()
+        if record.get("status") != "sending" and record.get("expires_at", 0) <= current
+    ]
+    for pending_id in expired:
+        _pending_messages.pop(pending_id, None)
+    overflow = len(_pending_messages) - PENDING_MESSAGE_MAX
+    if overflow > 0:
+        oldest = sorted(
+            ((pending_id, record) for pending_id, record in _pending_messages.items()
+             if record.get("status") != "sending"),
+            key=lambda item: item[1].get("created_at", 0)
+        )[:overflow]
+        for pending_id, _record in oldest:
+            _pending_messages.pop(pending_id, None)
+
+
+def prepare_message(request, session_id, account_id="", from_address=""):
+    """Store one exact, authorized draft for a later explicit confirmation."""
+    session_key = str(session_id or "").strip()[:120]
+    if not session_key:
+        return {"decision": "rejected", "reason": "session_id is required"}
+    authorization = authorize(request, account_id, from_address)
+    if authorization.get("decision") == "rejected":
+        return authorization
+    now = time.time()
+    pending_id = secrets.token_urlsafe(24)
+    confirmation = None
+    if authorization.get("decision") == "needs_confirmation":
+        confirmation = {
+            "digest": authorization.get("digest", ""),
+            "addresses": list(authorization.get("unknown_recipients") or []),
+        }
+    record = {
+        "pending_id": pending_id,
+        "session_id": session_key,
+        "account_id": authorization.get("account_id", ""),
+        "request": deepcopy(authorization.get("request") or {}),
+        "confirmation": confirmation,
+        "created_at": now,
+        "expires_at": now + PENDING_MESSAGE_TTL_SECONDS,
+        "status": "pending",
+        "result": None,
+    }
+    with _pending_lock:
+        _cleanup_pending_messages(now)
+        for existing_id, existing in list(_pending_messages.items()):
+            if existing.get("session_id") == session_key and existing.get("status") == "pending":
+                _pending_messages.pop(existing_id, None)
+        _pending_messages[pending_id] = record
+    return {
+        "decision": "pending_confirmation",
+        "pending_id": pending_id,
+        "account_id": record["account_id"],
+        "request": deepcopy(record["request"]),
+        "unknown_recipients": list(authorization.get("unknown_recipients") or []),
+        "reason": authorization.get("reason", ""),
+        "expires_in_seconds": PENDING_MESSAGE_TTL_SECONDS,
+    }
+
+
+def confirm_pending_message(session_id, pending_id=""):
+    """Consume one pending draft and return the same receipt on later retries."""
+    session_key = str(session_id or "").strip()[:120]
+    requested_id = str(pending_id or "").strip()[:160]
+    with _pending_lock:
+        _cleanup_pending_messages()
+        if requested_id:
+            record = _pending_messages.get(requested_id)
+        else:
+            matches = [
+                item for item in _pending_messages.values()
+                if item.get("session_id") == session_key
+            ]
+            record = max(matches, key=lambda item: item.get("created_at", 0), default=None)
+        if not record or record.get("session_id") != session_key:
+            return {"decision": "rejected", "reason": "no pending email is available for this session"}
+        if record.get("status") == "completed":
+            result = deepcopy(record.get("result") or {})
+            result["pending_id"] = record["pending_id"]
+            result["idempotent_replay"] = True
+            return result
+        if record.get("status") == "sending":
+            return {"decision": "in_progress", "pending_id": record["pending_id"]}
+        if record.get("status") != "pending":
+            return {"decision": "rejected", "reason": "the pending email is no longer sendable"}
+        record["status"] = "sending"
+        request = deepcopy(record["request"])
+        selected_account = record["account_id"]
+        confirmation = deepcopy(record.get("confirmation"))
+
+    try:
+        result = send_message(request, account_id=selected_account, confirmation=confirmation)
+    except EmailServiceError as exc:
+        result = {"decision": "failed", "reason": str(exc)}
+    except Exception:
+        result = {"decision": "failed", "reason": "email submission failed unexpectedly"}
+    if result.get("decision") not in {"sent", "submitted", "partially_sent", "failed"}:
+        result = {
+            "decision": "failed",
+            "reason": "email authorization changed; prepare and confirm a new draft",
+        }
+    stored_result = {
+        key: deepcopy(result[key]) for key in (
+            "decision", "account_id", "deliveries", "failures", "warning", "reason", "transport_status"
+        ) if key in result
+    }
+    with _pending_lock:
+        record["status"] = "completed"
+        record["result"] = stored_result
+        record["request"] = None
+        record["confirmation"] = None
+        record["expires_at"] = time.time() + COMPLETED_MESSAGE_TTL_SECONDS
+    result = deepcopy(stored_result)
+    result["pending_id"] = record["pending_id"]
+    result["idempotent_replay"] = False
+    return result
+
+
+def cancel_pending_message(session_id, pending_id=""):
+    """Cancel the latest pending draft for a session without sending it."""
+    session_key = str(session_id or "").strip()[:120]
+    requested_id = str(pending_id or "").strip()[:160]
+    with _pending_lock:
+        _cleanup_pending_messages()
+        candidates = [
+            record for record in _pending_messages.values()
+            if record.get("session_id") == session_key
+            and (not requested_id or record.get("pending_id") == requested_id)
+        ]
+        record = max(candidates, key=lambda item: item.get("created_at", 0), default=None)
+        if not record or record.get("status") != "pending":
+            return {"decision": "rejected", "reason": "no pending email is available for this session"}
+        record["status"] = "cancelled"
+        return {"decision": "cancelled", "pending_id": record["pending_id"]}
+
+
 def send_message(request, account_id="", from_address="", confirmation=None):
     """Authorize and deliver one message.
 
@@ -383,30 +529,38 @@ def send_message(request, account_id="", from_address="", confirmation=None):
             raise EmailServiceError("; ".join(failures) or "delivery failed")
         if failures:
             _remember_mta_submissions(account["id"], deliveries)
+            transport_status = _submission_transport_status(account, deliveries)
             # Some recipients already have the message. Say so, so the user does
             # not resend and deliver it twice to the routes that succeeded.
             audit_event(
                 "email_send", correlation_id=account["id"], outcome="partial",
                 **email_policy.audit_fields(normalized, backend=account["backend"]),
             )
-            return {
+            response = {
                 "decision": "partially_sent",
                 "account_id": account["id"],
                 "deliveries": deliveries,
                 "failures": failures,
             }
+            if transport_status:
+                response["transport_status"] = transport_status
+            return response
         if deliveries and all(delivery.get("route") == "local_mta" for delivery in deliveries):
             _remember_mta_submissions(account["id"], deliveries)
+            transport_status = _submission_transport_status(account, deliveries)
             audit_event(
                 "email_send", correlation_id=account["id"], outcome="submitted",
                 **email_policy.audit_fields(normalized, backend=account["backend"]),
             )
-            return {
+            response = {
                 "decision": "submitted",
                 "account_id": account["id"],
                 "deliveries": deliveries,
                 "warning": "The local mail system accepted the message; final delivery is not verified.",
             }
+            if transport_status:
+                response["transport_status"] = transport_status
+            return response
     else:
         deliveries = [_deliver_simple(account, normalized, account["address"])]
 
@@ -525,6 +679,23 @@ def inspect_local_mta_status(account_id, queue_id):
     return result
 
 
+def _submission_transport_status(account, deliveries):
+    """Return a bounded immediate Exim status when the account permits it."""
+    settings = (account or {}).get("settings") or {}
+    if not settings.get("exim_status"):
+        return None
+    queue_id = next((
+        str(delivery.get("mta_queue_id") or "") for delivery in deliveries or []
+        if delivery.get("route") == "local_mta" and delivery.get("mta_queue_id")
+    ), "")
+    if not queue_id:
+        return None
+    try:
+        return inspect_local_mta_status(account.get("id", ""), queue_id)
+    except EmailServiceError as exc:
+        return {"queue_id": queue_id, "status": "unavailable", "detail": str(exc)[:240]}
+
+
 def _remember_mta_submissions(account_id, deliveries):
     """Keep only queue IDs captured from this bridge's local-MTA submissions."""
     now = time.monotonic()
@@ -628,7 +799,10 @@ def capability_summary():
         + "\n"
         "You never choose a recipient on your own authority. An address must already be "
         "approved, or the user confirms that exact message first; the bridge enforces this "
-        "and will refuse otherwise. A locked account needs the user to sign in before you "
+        "and will refuse otherwise. For chat requests, prepare the exact draft with the native "
+        "prepare_email action, then ask the user to confirm or cancel; preparation never sends. "
+        "Do not claim email is unavailable when a connected sending account is listed above. "
+        "A locked account needs the user to sign in before you "
         "can use it. Never state that mail was sent, read, or deleted unless the operation "
         "actually returned success."
     )

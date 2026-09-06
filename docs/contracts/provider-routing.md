@@ -59,6 +59,16 @@ Specialized image generation and camera vision remain application capabilities,
 but their conversational orchestration is owned by AIG or the bridge rather
 than by a standalone model selector route.
 
+Email composition is a native action, not a browser, desktop, camera, or model
+provider operation. A model may prepare an exact draft only when the recipient
+is explicit in the current user turn. The bridge owns the session-bound pending
+draft, and a later confirmation consumes its opaque identifier exactly once;
+retries return the original submission receipt instead of sending again.
+For local-MTA delivery, the native email capability uses the captured Exim
+queue ID and fixed read-only status endpoint to report handoff, deferral, or
+failure. It must not use browser automation or claim inbox delivery from local
+SMTP acceptance alone.
+
 ## Safe Change Sequence
 
 1. Add or update an approved AIG backend value and its model metadata.

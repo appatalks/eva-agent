@@ -67,6 +67,7 @@ Before removing a deprecated or fallback path, consult
 | Workspace bridge lifecycle | `tools/bridge/workspaces.py`, `tools/bridge/core.py`, Electron projection | Workspace unit/e2e test and path-confinement coverage |
 | Terminal broker or PTY lifecycle | `standalone/terminal-broker.js`, `standalone/preload.js`, `core/js/features/workspaces/monitor.js` | `node tools/tests/test_terminal_broker.js`, then `node tools/tests/test_terminal_e2e.js` |
 | Aggregate runtime logging | `standalone/runtime-logger.js`, `standalone/main.js`, `tools/bridge/audit.py` | `node tools/tests/test_runtime_logger.js`, `node tools/tests/test_runtime_log_wiring.js`, `python3 tools/tests/test_audit_log.py` |
+| Installed chat behavior | Installed local `Conversations` rows plus the privacy-safe runtime audit | Query only the newest relevant rows; correlate timestamps/session or turn IDs; anonymize all committed regression fixtures |
 | Native Eva control surface | `core/js/harness-control.js`, `tools/bridge/core.py` prompt contract | `node tools/tests/test_harness_control.js` |
 | GitHub operations from Eva | `standalone/main.js` GitHub IPC handlers, `tools/bridge/core.py`, `tools/bridge/utils.py` | `python3 tools/tests/test_static.py` plus `python3 tools/tests/test_streaming.py` |
 | Skill catalog, routing, or lifecycle | `tools/bridge/skills.py`, `docs/eva_default_skills/manifest.json` | `python3 tools/tests/test_skills_catalog.py`, `node tools/tests/test_skills_voice_management.js` |

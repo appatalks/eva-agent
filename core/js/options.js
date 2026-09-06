@@ -3152,12 +3152,21 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   var nativeRequest = String(renderOptions.nativeRequest || '');
   var nativeGitHubOperation = (window.EvaRequestRouting && typeof EvaRequestRouting.isGitHubOperation === 'function' &&
     EvaRequestRouting.isGitHubOperation(nativeRequest)) || /https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+/i.test(nativeRequest);
-  var nativeVisualForbidden = window.EvaRequestRouting && typeof EvaRequestRouting.isNarrowNativeOperation === 'function'
+  var nativeEmailSessionId = (typeof ensureActiveSessionId === 'function') ? ensureActiveSessionId() : '';
+  var nativeEmailPending = !!(window.EvaEmailSettings && typeof EvaEmailSettings.hasPending === 'function'
+    && EvaEmailSettings.hasPending(nativeEmailSessionId));
+  function isEmailAutomationGoal(value) {
+    return /\b(?:email|e-mail|mail|gmail|outlook|smtp|compose)\b|[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:localhost|[A-Z0-9.-]+\.[A-Z]{2,})/i.test(String(value || ''));
+  }
+  var nativeVisualForbidden = nativeEmailPending || (window.EvaRequestRouting && typeof EvaRequestRouting.isNarrowNativeOperation === 'function'
     ? EvaRequestRouting.isNarrowNativeOperation(nativeRequest)
-    : /\b(?:weather|forecast|temperature|news|stock|github|pdf|docx|pptx|xlsx|csv|file|document|spreadsheet|presentation|mcp\s+server|fastmcp)\b/i.test(nativeRequest);
+    : /\b(?:weather|forecast|temperature|news|stock|email|e-mail|mail|github|pdf|docx|pptx|xlsx|csv|file|document|spreadsheet|presentation|mcp\s+server|fastmcp)\b/i.test(nativeRequest));
   text = text.replace(/\[\[EVA_BROWSER\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_BROWSER\]\])?/g, function (full, json) {
     var parsed = null;
     try { parsed = JSON.parse(json); } catch (e) { /* ignore malformed block */ }
+    if (parsed && isEmailAutomationGoal(String(parsed.goal || '') + ' ' + String(parsed.start_url || ''))) {
+      return '\n_Email operations use Eva\'s native mail capability instead of browser automation._\n';
+    }
     if (nativeGitHubOperation || (parsed && /github\.com/i.test(String(parsed.start_url || parsed.goal || '')))) {
       return '\n_GitHub operations use Eva\'s native GitHub MCP or gh tools instead of browser automation._\n';
     }
@@ -3177,6 +3186,11 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   // [[EVA_DESKTOP]]{"goal":"..."}[[/EVA_DESKTOP]]
   var desktopLaunch = null;
   text = text.replace(/\[\[EVA_DESKTOP\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_DESKTOP\]\])?/g, function (full, json) {
+    var parsed = null;
+    try { parsed = JSON.parse(json); } catch (e) { /* ignore malformed block */ }
+    if (parsed && isEmailAutomationGoal(parsed.goal)) {
+      return '\n_Email operations use Eva\'s native mail capability instead of desktop automation._\n';
+    }
     if (nativeGitHubOperation) {
       return '\n_GitHub operations use Eva\'s native GitHub MCP or gh tools instead of desktop automation._\n';
     }
@@ -3184,10 +3198,7 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
       return '\n_This request uses Eva\'s narrower native capability instead of desktop automation._\n';
     }
     if (!desktopLaunch) {
-      try {
-        var parsed = JSON.parse(json);
-        if (parsed && parsed.goal) desktopLaunch = parsed;
-      } catch (e) { /* ignore malformed block */ }
+      if (parsed && parsed.goal) desktopLaunch = parsed;
     }
     return desktopLaunch ? '\n_Opening the desktop agent…_\n' : '';
   });
@@ -3204,7 +3215,13 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   // Detect Eva camera "look" marker:
   // [[EVA_LOOK]]{"question":"..."}[[/EVA_LOOK]]  (question optional)
   var cameraLook = null;
+  var nativeCameraRequest = window.EvaRequestRouting && typeof EvaRequestRouting.isExplicitCameraRequest === 'function'
+    ? EvaRequestRouting.isExplicitCameraRequest(nativeRequest)
+    : !/\b(?:do not|don'?t|never|without|avoid|disable|turn off|stop)\b[^.!?]{0,50}\b(?:camera|webcam|look|see)\b/i.test(nativeRequest)
+      && /\b(?:camera|webcam)\b/i.test(nativeRequest)
+      && /\b(?:use|open|enable|start|turn on|activate|access|check)\b[^.!?]{0,50}\b(?:camera|webcam)\b|\b(?:camera|webcam)\b[^.!?]{0,50}\b(?:use|open|enable|start|turn on|activate|access|check|look|see)\b|\b(?:look|see)\s+through\s+(?:the\s+)?(?:camera|webcam)\b/i.test(nativeRequest);
   text = text.replace(/\[\[EVA_LOOK\]\]\s*(\{[\s\S]*?\})?\s*(?:\[\[\/EVA_LOOK\]\])?/g, function (full, json) {
+    if (!nativeCameraRequest) return '\n_Camera access requires an explicit request._\n';
     if (!cameraLook) {
       cameraLook = { question: '' };
       if (json) {

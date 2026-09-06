@@ -399,6 +399,8 @@ class DirectDeliveryPlanTests(unittest.TestCase):
             direct, request, ["outside@example.net"], accounts=[direct]
         )
         self.assertEqual(pending["decision"], "needs_confirmation")
+        self.assertEqual(pending["account_id"], "direct")
+        self.assertEqual(pending["backend"], "eva_direct")
         allowed = accounts_module.authorize_send_for_account(
             direct, request, ["outside@example.net"],
             {"digest": pending["digest"], "addresses": ["outside@example.net"]},

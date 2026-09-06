@@ -13,6 +13,12 @@ const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
 const moduleSource = fs.readFileSync(path.join(root, 'core/js/settings/email.js'), 'utf8');
 const dialogsSource = fs.readFileSync(path.join(root, 'core/js/dialogs.js'), 'utf8');
 const harnessSource = fs.readFileSync(path.join(root, 'core/js/harness-control.js'), 'utf8');
+const optionsSource = fs.readFileSync(path.join(root, 'core/js/options.js'), 'utf8');
+const aigSource = fs.readFileSync(path.join(root, 'core/js/providers/aig.js'), 'utf8');
+const cognitionSource = fs.readFileSync(path.join(root, 'core/js/cognition.js'), 'utf8');
+const aigContext = {};
+vm.createContext(aigContext);
+vm.runInContext(aigSource, aigContext);
 
 let failures = 0;
 function check(name, condition) {
@@ -70,13 +76,18 @@ const api = context.EvaEmailSettings;
 check('exposes open()', api && typeof api.open === 'function');
 check('exposes refresh()', api && typeof api.refresh === 'function');
 check('exposes send()', api && typeof api.send === 'function');
+check('exposes pending email operations', api
+  && typeof api.prepare === 'function'
+  && typeof api.confirmPending === 'function'
+  && typeof api.cancelPending === 'function'
+  && typeof api.hasPending === 'function');
 check('exposes accounts()', api && typeof api.accounts === 'function');
 check('accounts() starts empty', Array.isArray(api.accounts()) && api.accounts().length === 0);
 
 console.log('\ncredential handling');
 const codeOnly = moduleSource.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
 check('credential is never written to browser storage',
-  !/localStorage\s*[.[]/.test(codeOnly) && !/sessionStorage\s*[.[]/.test(codeOnly));
+  !/(?:localStorage|sessionStorage)\.setItem\([^)]*credential/i.test(codeOnly));
 check('credential field is cleared after storing',
   /field\.value = ''/.test(moduleSource));
 check('credential is sent only to the credential endpoint',
@@ -88,7 +99,7 @@ const sendFunction = moduleSource.slice(
   moduleSource.indexOf('async function sendFromForm()')
 );
 check('unapproved recipients trigger the native confirmation surface',
-  /needs_confirmation/.test(sendFunction) && /evaConfirmAction/.test(sendFunction));
+  /pending_confirmation/.test(sendFunction) && /evaConfirmAction/.test(sendFunction));
 check('email confirmation does not use generic browser confirm',
   !/\bconfirm\(/.test(sendFunction));
 check('confirmation displays normalized To, Cc, Bcc, subject, and body preview',
@@ -99,12 +110,79 @@ check('confirmation displays normalized To, Cc, Bcc, subject, and body preview',
     && /bodyPreview/.test(sendFunction));
 check('confirmation warns that final delivery is not verified',
   /final delivery is not verified/i.test(sendFunction));
-check('confirmation echoes the server digest',
-  /digest: result\.digest/.test(moduleSource));
+check('confirmation echoes only the opaque pending id',
+  /pending_id: result\.pending_id/.test(sendFunction) && !/digest: result\.digest/.test(moduleSource));
+check('pending browser storage contains only opaque identifiers',
+  /sessionStorage\.setItem\(pendingStorageKey\(sessionId\), pendingId\)/.test(moduleSource)
+    && /localStorage\.setItem\(pendingStorageKey\(sessionId\), pendingId\)/.test(moduleSource)
+    && !/sessionStorage\.setItem[^\n]*(?:subject|body|recipient|message)/i.test(moduleSource));
+check('terse chat confirmation bypasses model routing only with pending state',
+  /function pendingEmailCommand\(text\)/.test(aigSource)
+    && /EvaEmailSettings\.hasPending\(sessionId\)/.test(aigSource)
+    && /EvaEmailSettings\.confirmPending\(sessionId\)/.test(aigSource));
+check('reported confirmation phrase resolves without capturing unrelated approval',
+  aigContext.pendingEmailCommand('confirmed. Please send.') === 'confirm'
+    && aigContext.pendingEmailCommand('Confirmed, please continue') === 'confirm'
+    && aigContext.pendingEmailCommand('yes, continue the coding task') === ''
+    && aigContext.explicitPendingEmailCommand('confirmed. Please send.', 'confirm')
+    && aigContext.explicitPendingEmailCommand('Confirmed, please continue', 'confirm')
+    && aigContext.pendingEmailCommand('Confrimed') === 'confirm'
+    && aigContext.explicitPendingEmailCommand('Confrimed', 'confirm')
+    && !aigContext.explicitPendingEmailCommand('yes', 'confirm'));
+check('chat reports failed local transport as undelivered',
+  /recipient did not receive it/.test(aigContext.pendingEmailResultContent({
+    decision: 'submitted', transport_status: { status: 'failed', detail: 'route unavailable' }
+  }, 'confirm')));
+check('explicit confirmation can recover from bridge state without a browser token',
+  !/if \(!pendingId\) return \{ decision: 'none' \}/.test(moduleSource));
+const reportedTestDraft = aigContext.requestedTestEmailDraft(
+  'Hi Eva, please try sending a test email to peer@example.com'
+);
+check('reported test-email request prepares a deterministic draft',
+  reportedTestDraft
+    && reportedTestDraft.to === 'peer@example.com'
+    && reportedTestDraft.subject === 'Test email'
+    && reportedTestDraft.body === 'This is a test email from Eva.');
+check('deterministic test-email preparation rejects negation and ambiguity',
+  !aigContext.requestedTestEmailDraft("Don't send a test email to peer@example.com")
+    && !aigContext.requestedTestEmailDraft('Send a test email to a@example.com and b@example.com'));
+const contextualDraft = aigContext.contextualTestEmailDraft(
+  'I just want you to send a test, nothing to big',
+  [{ role: 'user', content: 'Please send a test email to peer@example.com' }]
+);
+check('terse test continuation uses one recent user-supplied email address',
+  contextualDraft && contextualDraft.to === 'peer@example.com');
+const localhostRevision = aigContext.contextualTestEmailDraft(
+  "Cool let's deliver to localhost@localhost",
+  [{ role: 'user', content: 'Please send a test email to peer@example.com' }]
+);
+check('test-email recipient can be revised to an explicit localhost address',
+  localhostRevision && localhostRevision.to === 'localhost@localhost');
+check('contextual test continuation rejects assistant-only or ambiguous addresses',
+  !aigContext.contextualTestEmailDraft('Send a test', [{ role: 'assistant', content: 'peer@example.com' }])
+    && !aigContext.contextualTestEmailDraft('Send a test', [
+      { role: 'user', content: 'Email a@example.com' },
+      { role: 'user', content: 'Email b@example.com' }
+    ]));
+check('Cognition can prepare but not directly send email',
+  /id: 'email\.prepare'/.test(cognitionSource)
+    && /action: 'prepare_email'/.test(cognitionSource)
+    && !/id: 'email\.send'/.test(cognitionSource));
+check('pending email blocks browser and desktop automation',
+  /var nativeEmailPending =/.test(optionsSource)
+    && /var nativeVisualForbidden = nativeEmailPending \|\|/.test(optionsSource));
+check('email goals are blocked inside browser and desktop markers',
+  /function isEmailAutomationGoal\(value\)/.test(optionsSource)
+    && /native mail capability instead of browser automation/.test(optionsSource)
+    && /native mail capability instead of desktop automation/.test(optionsSource));
 check('declining does not send', /decision: 'cancelled'/.test(moduleSource));
 check('partial delivery is surfaced', /partially_sent/.test(moduleSource));
 check('local submission is not mislabeled as delivery',
-  /decision === 'submitted'/.test(moduleSource) && /Final delivery is not verified/.test(moduleSource));
+  /decision === 'submitted'/.test(moduleSource) && /Final (?:inbox )?delivery is not verified/.test(moduleSource));
+check('local submission reports automatic Exim transport status',
+  /transport_status/.test(moduleSource)
+    && /Exim could not deliver/.test(moduleSource)
+    && /next SMTP hop/.test(moduleSource));
 check('submitted local MTA queue id enables status inspection',
   /lastMtaSubmission/.test(moduleSource) && /mta_queue_id/.test(moduleSource) && /checkMtaStatus/.test(moduleSource));
 check('status lookup uses account and queue id only',
@@ -145,7 +223,6 @@ check('frontend does not use full-document account replacement',
   !/bridge\('\/v1\/email\/accounts',\s*\{\s*method: 'POST'/.test(moduleSource));
 
 console.log('\npanel lifecycle');
-const optionsSource = fs.readFileSync(path.join(root, 'core/js/options.js'), 'utf8');
 check('opening the Email tab loads mailboxes',
   /target === 'email' && window\.EvaEmailSettings\) EvaEmailSettings\.refresh\(\)/.test(optionsSource));
 check('open() opens settings through the real button',
@@ -170,9 +247,8 @@ console.log('\nnative harness');check('email navigation target registered',
 check('mail aliases resolve to email',
   /mail: 'email'/.test(harnessSource) && /inbox: 'email'/.test(harnessSource));
 check('describe_email action declared', /id: 'describe_email'/.test(harnessSource));
-check('send_email action declared', /id: 'send_email'/.test(harnessSource));
-check('send_email requires an explicit request',
-  /explicit direct user request[^']*args: \{to, subject, body/.test(harnessSource));
+check('prepare_email action declared', /id: 'prepare_email'/.test(harnessSource));
+check('send_email is not advertised to models', !/id: 'send_email'/.test(harnessSource));
 check('send_email validates required fields',
   /A recipient, subject, and message are required/.test(harnessSource));
 check('send_email reports a declined confirmation',
