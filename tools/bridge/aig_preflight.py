@@ -36,7 +36,10 @@ def plan_aig_preflight(
         "github-data", "kusto-query", "kusto-operator",
     } and not briefing_request
 
-    if fast_route:
+    if no_tools:
+        skip_acp = True
+        acp_route = "no-tools"
+    elif fast_route:
         skip_acp = True
         acp_route = "fast/" + fast_route
     elif internal and not force_retrieve and not tool_request:

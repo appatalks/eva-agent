@@ -1,7 +1,7 @@
 # Provider Routing Contract
 
-Status: living contract. Last reviewed 2026-08-22 against `index.html` in Eva
-5.6.2.
+Status: living contract. Last reviewed 2026-09-06 against the current Eva 5.6.9
+workspace, including native research integration.
 
 Eva has one user-facing chat route: the `#selModel` selector contains only
 `aig`, and `sendData()` calls `aigSend()`. Backend model selection belongs to
@@ -30,6 +30,31 @@ The bridge records both `requested_backend` and `selected_backend` in the turn
 audit event, along with the policy reason. The runtime prompt receives the
 requested preference, actual selected model, and routing path as authoritative
 self-awareness data.
+
+### Bounded native research
+
+Explicit online research and topic-bound continuation use bridge-owned MCP search
+and page retrieval, not model-generated browser markers. This route retains the
+requested responder even when an automatic policy is selected: retrieval does not
+require choosing an additional model or crossing a provider billing boundary.
+Existing provider settings and non-research automatic routing are unchanged.
+
+The bridge may use an active MCP manager or start only an already configured web
+profile for the request. It never registers a new server or falls back to an
+unconfigured model/provider. No topic or no usable sources returns an honest
+clarification/unavailable response without a synthesis call. Reviewer `no_tools`
+requests do not re-enter retrieval. Native research response markers cannot launch
+additional actions; explicit UI interaction is a separate route.
+
+Per-turn receipts contain source URLs, retrieval timestamps, page-vs-snippet
+provenance, method attempts, and partial/unavailable status. Source text remains
+untrusted data. This first slice does not provide durable research checkpoints,
+cross-turn source deduplication, or a complete provider/budget grant system.
+
+Focused validation is currently local-only under ignored `tools/tests/local/`:
+`test_native_research.py`, `test_research_frontend.js`, and `test_research_aig.py`.
+These checks cover safe retrieval, context/marker handling, and mocked HTTP/ACP/
+LM Studio lifecycle behavior; this slice has no new curated CI contract.
 
 ## Provider Boundaries
 

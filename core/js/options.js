@@ -689,6 +689,7 @@ function injectWorkspaceStatusBubble(message, kind) {
 // fact rather than from the intent Eva announced before acting.
 function _evaAgentFeedback(status, endpoint, title) {
   if (!status) return;
+  if (typeof _clearAgentConfirm === 'function') _clearAgentConfirm();
   if (typeof EvaLearning !== 'undefined' && EvaLearning) EvaLearning.recordActionOutcome(status, endpoint, title);
   // Clear the progress-narration throttle so the completion line is never
   // suppressed as a near-duplicate of the last "working on it" update.
@@ -696,22 +697,28 @@ function _evaAgentFeedback(status, endpoint, title) {
   var label = (title || 'task').replace(/ Agent$/, '').toLowerCase();
   var goal = String(status.goal || '').trim();
   var state = status.status;
+  var completionVerified = state === 'done' && status.completion_verified === true;
+  var declined = state === 'done' && /^Stopped: user declined/i.test(String(status.result || '').trim());
   var spoken;     // natural, spoken/chat-facing sentence
   var memory;     // factual note for the conversation history
 
   if (state === 'done') {
     var res = String(status.result || '').trim();
-    // Distinguish a real completion from a user-declined sensitive action.
-    if (/^Stopped: user declined/i.test(res)) {
-      spoken = 'Okay, I held off' + (goal ? ' on ' + goal : '') + '.';
+    if (declined) {
+      spoken = 'Understood. I declined that action' + (goal ? ' for ' + goal : '') + '.';
       memory = 'Desktop/browser agent stopped: the user declined the action' + (goal ? ' for "' + goal + '"' : '') + '.';
+    } else if (!completionVerified) {
+      spoken = 'I reached the final step, but completion was not verified.' + (res ? ' Observed result: ' + res : '');
+      memory = 'Desktop/browser agent reached its final step without verified completion' + (goal ? ' for "' + goal + '"' : '') + '. Observed result: ' + (res || 'none') + '.';
     } else {
-      // Lead with a clear completion signal so the user knows she is finished,
-      // then the specifics from the agent's summary.
       var detail = res || ('I finished' + (goal ? ' ' + goal : '') + '.');
       spoken = /^(done|finished|all done|okay)/i.test(detail) ? detail : ('All done. ' + detail);
       memory = 'Desktop/browser agent finished' + (goal ? ' "' + goal + '"' : '') + '. Result: ' + (res || 'completed') + '.';
     }
+  } else if (state === 'blocked') {
+    var blockedResult = String(status.result || status.error || 'The agent could not verify that the task was complete.').trim();
+    spoken = 'I could not verify completion, so I am not claiming success. ' + blockedResult;
+    memory = 'Desktop/browser agent was blocked before verified completion' + (goal ? ' for "' + goal + '"' : '') + '. Result: ' + blockedResult + '.';
   } else if (state === 'cancelled') {
     spoken = 'I stopped the ' + label + ' before finishing' + (goal ? ' ' + goal : '') + '.';
     memory = 'Desktop/browser agent was cancelled' + (goal ? ' for "' + goal + '"' : '') + ' before completing.';
@@ -774,7 +781,7 @@ function _evaAgentFeedback(status, endpoint, title) {
   } catch (_) {}
 
   // 5) Auto-learn: when a complex task completes successfully, extract a reusable skill.
-  if (state === 'done' && goal && typeof autoLearnSkill === 'function') {
+  if (completionVerified && !declined && goal && typeof autoLearnSkill === 'function') {
     try {
       var hist = JSON.parse(localStorage.getItem('aigMessages') || '[]');
       var recent = Array.isArray(hist) ? hist.slice(-10) : [];
@@ -816,7 +823,7 @@ function _evaCameraLookResult(desc) {
 // ---------------------------------------------------------------------------
 // Natural agent confirmation — Eva asks in chat/voice instead of a popup button
 // ---------------------------------------------------------------------------
-// When the browser/desktop agent parks for the final purchase (or needs input),
+// When the browser/desktop agent parks for approval or needs input,
 // it calls _evaAgentConfirmAsk. Eva surfaces the question in chat (and speaks
 // it), and _agentConfirm is armed so the user's next message is interpreted as
 // the answer (yes/no, or free text) and routed to the agent rather than sent as
@@ -827,16 +834,17 @@ var _agentConfirm = { pending: false, needsText: false };
 // speaks/prints a short status when the plan changes, throttled so it does not
 // chatter. Phrased as a brief present-tense update.
 var _agentProgress = { last: 0, lastText: '' };
-function _evaAgentProgress(subgoal) {
-  var sub = String(subgoal || '').trim();
-  if (!sub) return;
+function _evaAgentProgress(receipt) {
+  if (!receipt || typeof receipt !== 'object') return;
+  var action = String(receipt.action || 'Action').trim();
+  var outcome = receipt.outcome === 'error' ? 'error' : 'success';
+  var line = action + ': ' + outcome;
   var now = Date.now();
   // Throttle: at most one spoken update every ~9s, and skip near-duplicates.
   if (now - _agentProgress.last < 9000) return;
-  if (sub === _agentProgress.lastText) return;
+  if (line === _agentProgress.lastText) return;
   _agentProgress.last = now;
-  _agentProgress.lastText = sub;
-  var line = sub.charAt(0).toUpperCase() + sub.slice(1);
+  _agentProgress.lastText = line;
   var txtOutput = document.getElementById('txtOutput');
   if (txtOutput) {
     if (typeof hideEvaWelcome === 'function') hideEvaWelcome();
@@ -861,21 +869,9 @@ function _evaAgentConfirmAsk(question, needsText) {
   _agentConfirm._timeout = setTimeout(function() {
     if (_agentConfirm.pending) {
       console.warn('[AgentConfirm] Auto-cancelling after 60s timeout');
-      _agentConfirm.pending = false;
-      _agentConfirm.needsText = false;
-      // Best-effort decline the parked agent. Ignore errors (run may be stale).
-      try {
-        if (typeof EvaBrowser !== 'undefined' && EvaBrowser &&
-            typeof EvaBrowser.isAwaitingConfirm === 'function' && EvaBrowser.isAwaitingConfirm()) {
-          EvaBrowser.answerConfirm(false, '');
-        }
-      } catch (_) {}
-      try {
-        if (typeof EvaDesktop !== 'undefined' && EvaDesktop &&
-            typeof EvaDesktop.isAwaitingConfirm === 'function' && EvaDesktop.isAwaitingConfirm()) {
-          EvaDesktop.answerConfirm(false, '');
-        }
-      } catch (_) {}
+      _clearAgentConfirm();
+      var controller = _activeAgentController();
+      if (controller && typeof controller.stop === 'function') controller.stop();
     }
   }, 60000);
   var q = String(question || 'Should I continue?').trim();
@@ -900,22 +896,83 @@ function _evaAgentConfirmAsk(question, needsText) {
 var _AFFIRM_RE = /\b(yes|yep|yeah|yup|sure|ok|okay|confirm|confirmed|go ahead|do it|place (the )?order|buy it|proceed|approve|affirmative|please do)\b/i;
 var _NEGATE_RE = /\b(no|nope|nah|stop|cancel|don'?t|do not|decline|abort|never mind|nevermind|hold on|wait)\b/i;
 
+function _activeAgentController() {
+  var controllers = [];
+  if (typeof EvaBrowser !== 'undefined' && EvaBrowser) controllers.push(EvaBrowser);
+  if (typeof EvaDesktop !== 'undefined' && EvaDesktop) controllers.push(EvaDesktop);
+  for (var index = 0; index < controllers.length; index++) {
+    if (typeof controllers[index].isActive === 'function' && controllers[index].isActive()) return controllers[index];
+  }
+  return null;
+}
+
+function _clearAgentConfirm() {
+  _agentConfirm.pending = false;
+  _agentConfirm.needsText = false;
+  if (_agentConfirm._timeout) {
+    clearTimeout(_agentConfirm._timeout);
+    _agentConfirm._timeout = null;
+  }
+}
+
+function _evaParseAgentStop(text) {
+  var value = String(text || '').trim().replace(/\s+/g, ' ');
+  value = value.replace(/^(?:eva|ava)\b\s*[,.:;-]?\s*/i, '').trim();
+  if (!value) return false;
+  if (/\b(?:do not|don't|dont|never)\s+(?:ever\s+)?(?:stop|cancel)\b/i.test(value)) return false;
+  if (/\b(?:stop\s+loss|bus\s+stop)\b/i.test(value)) return false;
+  if (/\btype\s+stop\s+into\s+(?:the\s+)?field\b/i.test(value)) return false;
+  if (/\bno\s+price\s+shown\b/i.test(value)) return false;
+  if (/\bcancel(?:\s+(?:the\s+)?(?:task|run|job|operation))?\b/i.test(value)) return true;
+  if (/\bplease\s+stop\b/i.test(value)) return true;
+  if (/\bstop\s+clicking\b/i.test(value)) return true;
+  return /^stop[.!?]*$/i.test(value) || /\bgo\s+ahead\s+and\s+stop\b/i.test(value);
+}
+
+function _agentStopEcho(userMsg) {
+  var txtOutput = document.getElementById('txtOutput');
+  if (txtOutput) {
+    if (typeof hideEvaWelcome === 'function') hideEvaWelcome();
+    txtOutput.innerHTML += '<div class="chat-bubble user-bubble"><span class="user">You:</span> ' + escapeHtml(String(userMsg || '')) + '</div>';
+    txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> <div class="md">Stopping the task.</div></div>';
+    txtOutput.scrollTop = txtOutput.scrollHeight;
+  }
+  try {
+    var autoSpeakEl = document.getElementById('autoSpeak');
+    var voiceOpen = typeof _vv !== 'undefined' && _vvIsActive();
+    if ((voiceOpen || (autoSpeakEl && autoSpeakEl.checked)) && typeof speakText === 'function') speakText('Stopping the task.');
+  } catch (_) {}
+}
+
+function _maybeStopAgentCommand(text) {
+  if (!_evaParseAgentStop(text)) return false;
+  var controller = _activeAgentController();
+  if (!controller || typeof controller.stop !== 'function') return false;
+  _clearAgentConfirm();
+  controller.stop();
+  _agentStopEcho(text);
+  return true;
+}
+
+if (typeof window !== 'undefined') {
+  window.EvaAgentControl = { parseStop: _evaParseAgentStop, requestStop: _maybeStopAgentCommand };
+}
+
 // If an agent confirmation is pending, interpret `text` as the answer and route
 // it to the agent. Returns true when the message was consumed (so the caller
 // should NOT send it as a normal chat turn).
 function _maybeAnswerAgentConfirm(text) {
   if (!_agentConfirm.pending) return false;
-  var active = (typeof EvaBrowser !== 'undefined' && EvaBrowser &&
-                typeof EvaBrowser.isAwaitingConfirm === 'function' && EvaBrowser.isAwaitingConfirm());
-  if (!active) { _agentConfirm.pending = false; return false; }
+  var controller = _activeAgentController();
+  var active = controller && typeof controller.isAwaitingConfirm === 'function' && controller.isAwaitingConfirm();
+  if (!active) { _clearAgentConfirm(); return false; }
   var msg = String(text || '').trim();
   if (!msg) return false;
 
   // Free-text input request: pass the message straight through.
   if (_agentConfirm.needsText) {
-    _agentConfirm.pending = false;
-    _agentConfirm.needsText = false;
-    EvaBrowser.answerConfirm(true, msg);
+    _clearAgentConfirm();
+    controller.answerConfirm(true, msg);
     _agentConfirmEcho(msg, null);
     return true;
   }
@@ -927,8 +984,8 @@ function _maybeAnswerAgentConfirm(text) {
     _agentConfirmEcho(msg, 'ambiguous');
     return true;
   }
-  _agentConfirm.pending = false;
-  EvaBrowser.answerConfirm(yes, '');
+  _clearAgentConfirm();
+  controller.answerConfirm(yes, '');
   _agentConfirmEcho(msg, yes ? 'yes' : 'no');
   return true;
 }
@@ -940,9 +997,9 @@ function _agentConfirmEcho(userMsg, decision) {
     txtOutput.innerHTML += '<div class="chat-bubble user-bubble"><span class="user">You:</span> ' + safeU + '</div>';
   }
   var reply = '';
-  if (decision === 'yes') reply = 'Okay, confirming now.';
-  else if (decision === 'no') reply = 'Understood, I\'ll stop and not place the order.';
-  else if (decision === 'ambiguous') reply = 'Sorry, was that a yes or a no? Say yes to place the order or no to stop.';
+  if (decision === 'yes') reply = 'Okay, continuing now.';
+  else if (decision === 'no') reply = 'Understood, I declined that action.';
+  else if (decision === 'ambiguous') reply = 'Sorry, was that a yes or a no? Say yes to continue or no to stop.';
   if (reply && txtOutput) {
     txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> <div class="md">' + escapeHtml(reply) + '</div></div>';
     txtOutput.scrollTop = txtOutput.scrollHeight;
@@ -1737,12 +1794,16 @@ function updateButton() {
 }
 
 async function sendData() {
+    var _txtMsgEl = document.getElementById('txtMsg');
+    var _pendingText = _txtMsgEl ? (_txtMsgEl.innerText || _txtMsgEl.textContent || '') : '';
+    if (_maybeStopAgentCommand(_pendingText)) {
+      if (_txtMsgEl) _txtMsgEl.innerHTML = '';
+      return;
+    }
     // Natural agent confirmation: if the browser/desktop agent is parked waiting
     // on a yes/no (e.g. the final purchase), interpret this message as the answer
     // and route it to the agent instead of sending a normal chat turn.
     if (typeof _agentConfirm !== 'undefined' && _agentConfirm.pending) {
-      var _txtMsgEl = document.getElementById('txtMsg');
-      var _pendingText = _txtMsgEl ? (_txtMsgEl.innerText || _txtMsgEl.textContent || '') : '';
       if (_maybeAnswerAgentConfirm(_pendingText)) {
         if (_txtMsgEl) _txtMsgEl.innerHTML = '';
         return;
@@ -3155,10 +3216,14 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   var nativeEmailSessionId = (typeof ensureActiveSessionId === 'function') ? ensureActiveSessionId() : '';
   var nativeEmailPending = !!(window.EvaEmailSettings && typeof EvaEmailSettings.hasPending === 'function'
     && EvaEmailSettings.hasPending(nativeEmailSessionId));
+  var nativeResearch = renderOptions.nativeResearch === true;
+  if (!nativeResearch && window.EvaRequestRouting && typeof EvaRequestRouting.resolveResearchRequest === 'function') {
+    nativeResearch = !!EvaRequestRouting.resolveResearchRequest(nativeRequest, []).active;
+  }
   function isEmailAutomationGoal(value) {
     return /\b(?:email|e-mail|mail|gmail|outlook|smtp|compose)\b|[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:localhost|[A-Z0-9.-]+\.[A-Z]{2,})/i.test(String(value || ''));
   }
-  var nativeVisualForbidden = nativeEmailPending || (window.EvaRequestRouting && typeof EvaRequestRouting.isNarrowNativeOperation === 'function'
+  var nativeVisualForbidden = nativeEmailPending || nativeResearch || (window.EvaRequestRouting && typeof EvaRequestRouting.isNarrowNativeOperation === 'function'
     ? EvaRequestRouting.isNarrowNativeOperation(nativeRequest)
     : /\b(?:weather|forecast|temperature|news|stock|email|e-mail|mail|github|pdf|docx|pptx|xlsx|csv|file|document|spreadsheet|presentation|mcp\s+server|fastmcp)\b/i.test(nativeRequest));
   text = text.replace(/\[\[EVA_BROWSER\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_BROWSER\]\])?/g, function (full, json) {
@@ -3169,6 +3234,9 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     }
     if (nativeGitHubOperation || (parsed && /github\.com/i.test(String(parsed.start_url || parsed.goal || '')))) {
       return '\n_GitHub operations use Eva\'s native GitHub MCP or gh tools instead of browser automation._\n';
+    }
+    if (nativeResearch) {
+      return '\n_Research uses native search; no browser action was launched._\n';
     }
     if (nativeVisualForbidden) {
       return '\n_This request uses Eva\'s narrower native capability instead of browser automation._\n';
@@ -3193,6 +3261,9 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     }
     if (nativeGitHubOperation) {
       return '\n_GitHub operations use Eva\'s native GitHub MCP or gh tools instead of desktop automation._\n';
+    }
+    if (nativeResearch) {
+      return '\n_Research uses native search; no browser action was launched._\n';
     }
     if (nativeVisualForbidden) {
       return '\n_This request uses Eva\'s narrower native capability instead of desktop automation._\n';
@@ -3540,7 +3611,8 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   if (browserLaunch && typeof EvaBrowser !== 'undefined' && EvaBrowser && typeof EvaBrowser.launch === 'function') {
     EvaBrowser.launch(browserLaunch.goal, {
       start_url: browserLaunch.start_url,
-      vision_model: browserLaunch.vision_model,
+      backend: (document.getElementById('selAIGBackend') || {}).value || '',
+      reasoning_effort: typeof getReasoningEffort === 'function' ? getReasoningEffort() : '',
       max_steps: browserLaunch.max_steps,
       onComplete: _evaAgentFeedback,
       onConfirm: _evaAgentConfirmAsk,
@@ -3551,7 +3623,8 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   // Launch the desktop ("computer use") agent if Eva requested it.
   if (desktopLaunch && typeof EvaDesktop !== 'undefined' && EvaDesktop && typeof EvaDesktop.launch === 'function') {
     EvaDesktop.launch(desktopLaunch.goal, {
-      vision_model: desktopLaunch.vision_model,
+      backend: (document.getElementById('selAIGBackend') || {}).value || '',
+      reasoning_effort: typeof getReasoningEffort === 'function' ? getReasoningEffort() : '',
       max_steps: desktopLaunch.max_steps,
       onComplete: _evaAgentFeedback,
       onConfirm: _evaAgentConfirmAsk,

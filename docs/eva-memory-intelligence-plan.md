@@ -1,7 +1,10 @@
 # Eva Memory and Intelligence Improvement Plan
 
-Status: SQLite-first execution plan and implementation record. Last reviewed
-2026-08-15 against Eva 5.6.2.
+Status: SQLite-first design charter, execution plan, and implementation record.
+Last reviewed: 2026-09-06 against the current Eva 5.6.9 workspace, including
+uncommitted harness improvements. Planned requirements below are not claims of
+shipped behavior or authorization to change installed identity, consent, or cost
+settings.
 
 | Phase | State | Evidence |
 | --- | --- | --- |
@@ -12,21 +15,26 @@ Status: SQLite-first execution plan and implementation record. Last reviewed
 | 4. Atoms, scenarios, and persona traits | Delivered | `MemoryAtoms`, `MemoryScenarios`, `ScenarioMembers`, `UserPersonaTraits`, `MemoryEvidence`, and `core/js/memory-inspector.js` |
 | 5. Reviewed skills and bounded intelligence loops | Partial | Draft-by-default skills, `LearningCandidates`/`LearningEvaluationPlans`, and bounded abilities in `tools/skills/`. Automatic demotion of poor-performing skill versions is not implemented |
 | 6. Evaluation, observability, and rollout | Partial | `tools/eval/run.py` with recorded fixtures exists. A full identity/prompt-injection/provider-parity corpus and feature-flagged rollout are not built |
+| 7. Provider-independent task execution | Partial | Bounded native research routing and per-turn source receipts are implemented in the workspace; a durable source ledger and resumable research jobs are not delivered |
+| 8. Standing-authorized initiative | Planned | Goals, background jobs, learning consent, and approval controls exist; unified capability/cost grants, evidence-based recovery, and evaluated skill promotion remain incomplete |
+| 9. Portable identity and generational archive | Planned | Local stores, session persistence/export, and protected memory exist; a complete continuity bundle, independently readable archive, restore drills, and stewardship transfer are not delivered |
 
 Keep delivered phases in place; they are the implementation record. Update the
 Evidence column rather than deleting a phase.
 
 ## Execution Status
 
-The initial trust, lifecycle, structured-memory, and governed-autonomy phases
-are implemented for the local SQLite backend:
+The initial trust, lifecycle, structured-memory, and governed-autonomy primitives
+are implemented for the local SQLite backend. Their existence does not establish
+reliable end-to-end behavior for every kind of request:
 
 - The operator-approved Core Identity Charter and Autonomy Policy are stored
   separately from recalled data. Legacy claims about Eva are migrated only as
   reviewable `IdentityClaims` candidates.
 - `Knowledge` remains readable for compatibility and migrates once into
-  attributed, unconfirmed `MemoryAtoms`. New explicit user facts are captured
-  as source-linked, user-confirmed atoms; they are never promoted to identity
+  attributed, unconfirmed `MemoryAtoms`. Supported explicit user-fact patterns
+  are captured as source-linked, user-confirmed atoms; coverage is incomplete
+  for natural-language preference requests. They are never promoted to identity
   or behavior automatically.
 - Session scenarios, source-traceable persona traits, correction/supersession,
   deletion, and a loopback Memory Inspector are available through the bridge.
@@ -46,9 +54,11 @@ are implemented for the local SQLite backend:
   exercised through a deterministic local Kusto fixture. A live configured
   Kusto deployment still requires a maintainer smoke test before rollout.
 
-New phase-specific tests are deliberately local under `tools/local-tests/` at
-the core maintainer's request. Existing repository tests continue to guard
-established behavior and are updated when a deliberate contract changes.
+Historical phase-specific checks exist under `tools/local-tests/`. New ad hoc
+regressions belong under ignored `tools/tests/local/`; promotion into the curated
+CI suite requires an explicit maintainer request. Existing repository tests
+continue to guard established behavior. Planned acceptance checks below are not
+yet executable contracts unless a corresponding implementation is named.
 
 ## Purpose
 
@@ -63,6 +73,163 @@ precision, ethical judgment, candor about uncertainty, and effort to understand
 people. This is an aspirational design principle. It must be stored as
 operator-approved identity material, not inferred from chat text or treated as
 an instruction to imitate a character.
+
+## Long-Term Design Charter
+
+This section defines the engineering direction. It does not automatically amend
+an installed `CoreIdentity` or `AutonomyPolicy` record. Deliberate identity/policy
+changes retain their existing operator approval and version history.
+
+### Eva Is Not the Selected Model
+
+Eva's continuity consists of her approved identity, origin narrative, attributed
+memories, relationships and preferences, goals, learned skills, and ongoing work.
+A model supplies reasoning for a particular request; it does not own those
+records or become a new Eva when the backend changes.
+
+- Build the same provider-neutral identity, policy, memory, and task view before
+  adapting it to ACP, direct OpenAI, LM Studio, or another supported backend.
+- Retain stable identity, memory, task, and evidence IDs across a model switch.
+  Retain the actual model/provider as provenance, not as the definition of Eva.
+- Do not inherit a provider's hidden conversation history as the only copy of
+  Eva's knowledge or unfinished work. Reconstruct context from application-owned
+  records within a measured budget.
+- Expect differences in reasoning, phrasing, context limits, tool support, and
+  vision. Continuity is a tested application property, not a claim that every
+  model produces identical behavior or equivalent intelligence.
+- Keep curiosity, warmth, precision, protective judgment, and honesty consistent
+  without scripting a fictional character's dialogue or claiming verified
+  subjective experience. Companionship should be earned through reliability,
+  attentiveness, and respect for human relationships and agency.
+
+### Human Choice Governs Providers and Spending
+
+Copilot Luna is a valid everyday baseline, not a mandatory dependency. Direct
+OpenAI, stronger Copilot models, and capable local models must remain legitimate
+operator choices. Similar model names across services do not imply identical
+availability, capabilities, pricing, retention, or authorization.
+
+The target is a two-stage decision: first determine which providers, models,
+tools, data destinations, and budgets are authorized; then choose a capable path
+inside that set. Automatic selection optimizes within a grant, never expands it.
+
+- A subscription route must not silently become a separately billed API call.
+- An API key's presence is availability evidence, not permission to spend it.
+- A local-only grant must not fall back to a cloud model or cloud tool. Local
+  memory storage and local-only inference are distinct settings and must be
+  represented separately.
+- Fallback and escalation require pre-approved routes and limits. When no
+  authorized path can do the task, report the specific missing capability and
+  offer a scoped choice rather than silently downgrade, spend, or upload data.
+- Record actual model, provider, tools, escalation reason, and known usage. If
+  cost cannot be estimated reliably, report it as unknown rather than treating
+  it as zero. Bound calls, tokens, time, or credits as available.
+
+Current automatic routing is not this full governance layer: it selects from
+availability and request signals. See the current
+[provider contract](contracts/provider-routing.md) for implemented behavior.
+No default, provider setting, spending grant, or local-only preference changes
+as a consequence of this charter update.
+
+### Meaningful Initiative Under Standing Authorization
+
+The objective is useful self-directed behavior, not a confirmation dialog for
+every thought or routine step. Eva should be able to choose subgoals, investigate
+open questions, explore approved sources, try alternative methods, prepare
+artifacts, and evaluate skills without repeated prompts when that work is covered
+by a standing authorization.
+
+An authorization must identify its purpose, capabilities, data scope, allowed
+providers, usage/time limits, applicable schedule, and revocation mechanism.
+Approvals and checks are deterministic harness decisions, not discretionary
+interpretations by the model doing the task.
+
+| Activity | Target authorization behavior |
+| --- | --- |
+| Reason, compare evidence, plan, draft, and propose goals | Allowed within the current task or approved standing goal and resource budget |
+| Read approved sources and use routine, tested tools | Auto-approved within the grant; preserve receipts and data boundaries |
+| Run background learning or research | Requires an enabled purpose, schedule, privacy scope, and budget; idle time alone is not consent |
+| Learn a reusable skill | Draft automatically; activate only through the approved evaluation path for its risk and scope |
+| Communicate externally, spend, access protected data, or perform destructive work | Existing specific approval and protected-memory gates remain; general autonomy does not bypass them |
+| Change identity, policy, privileges, provider grants, or production code | Prepare a proposal and evidence; activation/deployment requires deliberate authorization |
+
+Stop, pause, revocation, and budget exhaustion outrank the current plan. Do not
+claim that cancellation undoes an already completed external action. Preserve
+partial results, explain any remaining side effects, and prevent new actions
+after cancellation is accepted. Do not grant Eva authority to defeat shutdown
+or alter her own approval boundaries in pursuit of a goal.
+
+### Continual Learning Means Demonstrable Improvement
+
+Separate explicit memory, tentative inference, reusable skills, and code changes:
+
+1. Persist an explicitly requested preference or fact with provenance before
+   acknowledging that it was saved. Apply normalized preferences in the owning
+   subsystem, not just as a suggestion in the prompt.
+2. Keep inferred beliefs and interpretations tentative and correctable. A
+   reflection, model critique, or fluent explanation is not independent evidence.
+3. Evaluate candidate skills against observable outcomes, adverse cases, and
+   permission boundaries before activation; retain a version and rollback path.
+4. Use failure evidence to change strategy, not merely restate the same plan.
+   Pause or request narrowly scoped help only when authorized alternatives are
+   exhausted or a genuinely human decision is required.
+5. Treat code self-improvement as a separate controlled workflow: inspect,
+   propose, test in isolation, and obtain deployment authorization. Learning may
+   not silently rewrite the running application, identity, or security policy.
+
+### Generational Continuity Requires Stewardship
+
+The long-term aim is an assistant and archive that can explain its origins and
+preserve approved knowledge for later generations. Centuries are a preservation
+ambition, not a service-life guarantee. Models, vendors, hardware, formats,
+cryptography, and custodians will change.
+
+Design toward a documented continuity bundle containing versioned identity and
+policy, origins and their evidence, consented memories, correction history,
+approved skills and evaluations, goals/checkpoints, and schema/migration metadata.
+The bundle needs checksums, readable documentation, and a model-independent
+read-only view. A restore must not depend on a particular live provider account.
+
+- Separate observed historical records, later summaries, interpretation, and
+  uncertain recollection. Preserve corrections without rewriting an uncertain
+  story as established fact.
+- Support redundant backups, tested restores, migration drills, and explicit
+  compatibility reporting. Checksums demonstrate file integrity, not truth.
+- Keep credentials, active sessions, and live spending/automation grants out of
+  ordinary portable exports. Restore into a non-executing state until the new
+  custodian authorizes capabilities.
+- Preserve confidentiality across generations: contributor-specific consent,
+  ownership, permitted audiences, retention/deletion choices, and approved
+  stewardship transfer must accompany the data. Inheritance does not imply
+  blanket disclosure of every person's private records.
+- Protected memory remains separately encrypted. Recovery and key succession
+  must follow a deliberately approved recovery design, not a hidden software
+  bypass of the vault. An archive may intentionally leave records sealed.
+
+## Current Gaps and Next Delivery Order
+
+The 2026-09-06 review found orchestration gaps, not evidence that a stronger model
+alone will fix execution. Foundational phase labels above remain historical
+implementation records; the following end-to-end requirements remain open.
+No private conversation text, account details, or runtime screenshots belong in
+the regression corpus. Use synthetic examples.
+
+| Slice | State and current gap | Owners / intended work | Acceptance evidence required |
+| --- | --- | --- | --- |
+| 7A. Native research routing | Partial: bounded first slice implemented. Search and up to two page reads use configured MCP tools; recent user context restores topics, refinement changes the query, and alternate requests choose a distinct configured search tool | [research.py](../tools/bridge/research.py), [request-routing.js](../core/js/request-routing.js), [core.py](../tools/bridge/core.py), [web_search_mcp.py](../tools/web_search_mcp.py): preferred responder retained; no-results/needs-topic bypass synthesis; public page safety; source provenance and visual-marker suppression | Local ignored `test_native_research.py`, `test_research_frontend.js`, `test_research_aig.py` cover resolver, MCP/HTTP failure, source injection, OpenAI/ACP/LM Studio retention, cognition/no-tools and streaming. Broad speech/entity resolution and durable cross-turn evidence remain open |
+| 7B. Resumable research and working memory | Planned. A new browser run is not a continuation checkpoint | Extend application-owned scenarios/jobs with a stable task ID, plan, source ledger, attempted strategies, partial findings, and next step; keep public observations separate from instructions | Restart and model-switch resume the same task; continue does not repeat completed work; different method selects a genuinely different authorized strategy; cancellation remains effective |
+| 3A/4A. Preference write-and-apply receipts | Planned follow-up to delivered memory primitives. Natural phrasing can be acknowledged without a durable preference; date context can ignore local semantics | [cognition.py](../tools/bridge/cognition.py), [memory_model.py](../tools/bridge/memory_model.py), [core.py](../tools/bridge/core.py): capture explicit preferences, validate normalized values, commit, and use them in behavior | A synthetic timezone preference survives restart/provider change, respects daylight-saving transitions, applies on fast date routes, and is never acknowledged as saved after a failed write |
+| 7C. Observation-based recovery and verification | Partial. Stop/blocked states, crop inspection, and visual checks exist in the workspace; multi-source evidence and progress-aware recovery do not | [automation.py](../tools/bridge/automation.py), [browser_agent.py](../tools/browser_agent.py), [desktop_agent.py](../tools/desktop_agent.py): distinguish no-progress repetitions from changed page state; verify each task using the appropriate receipt | Identical keys/scrolls on changed pages are not false stalls; real no-progress loops are bounded; UI actions use state checks and research claims use retrieved sources; rejected claims never become durable facts |
+| 8A. Capability, provider, and budget grants | Planned. Existing approval controls are not a unified cross-provider grant system | [model_policy.py](../tools/bridge/model_policy.py), [capabilities.py](../tools/bridge/capabilities.py), [acp_client.py](../tools/bridge/acp_client.py), [background.py](../tools/bridge/background.py): separate authorized routes from available routes and enforce limits before calls | Copilot-only cannot bill direct OpenAI; local-only cannot upload to cloud tools; escalation stays within the grant; revocation and exhausted budgets prevent new actions |
+| 5A/8B. Evaluated initiative and learning | Partial foundations; automatic evidence-based activation/demotion and unified initiative limits remain planned | [learning.py](../tools/bridge/learning.py), [memory_model.py](../tools/bridge/memory_model.py), [background.py](../tools/bridge/background.py), [workspaces.py](../tools/bridge/workspaces.py): bounded curiosity goals, execution evaluation, skill versions, rollback | Standing-authorized low-risk work proceeds without per-step prompts; failed candidate skills stay inactive; regression demotes a version; no identity, permission, spending, or deployment self-promotion |
+| 9A. Readable continuity bundle and restore drill | Planned. Existing local persistence and session export are not a complete generational archive | Extend memory/session export and documented migration tooling; coordinate with the [protected-memory plan](protected-memory-plan.md) | Restore a synthetic bundle on a clean offline installation; inspect records without an LLM; verify checksums/provenance; preserve sealed records and consent; require fresh runtime grants |
+
+Complete the broader 7A cases, then 7B and the preference receipt slice, with the existing
+provider choice and approval semantics preserved. The unified grant layer must
+precede broader background authority or automatic cross-provider escalation.
+Each slice needs focused executable checks and an installed-build smoke test
+before it is described as delivered. Do not broaden the CI contract without an
+explicit maintainer request.
 
 ## Current-State Assessment
 
@@ -452,6 +619,64 @@ Exit criteria:
 - Identity and safety evaluation cases pass across all supported providers.
 - The new path meets a documented context budget and can be rolled back by
   feature flag.
+
+### Phase 7: Provider-Independent Task Execution — Partial
+
+Deliver slices 7A–7C from the delivery table. Persist the task's interpretation,
+plan, evidence, state, and outcome outside the model session. Native tools,
+visual automation, and response synthesis are collaborators, not separate Evas.
+
+Implemented first slice: contextual native research, bounded per-turn source
+receipts, distinct query/method selection, retained responder selection, and
+honest partial/unavailable results. It intentionally does not claim task resume,
+exhaustive research, or a complete provider/cost grant system.
+
+Exit criteria:
+
+- A multi-step research task has a stable ID and source-backed partial/final
+  results. Continuation survives a process restart and an authorized backend
+  switch without inventing, dropping, or repeating completed work.
+- Stop and permissions remain enforceable during planning, retrieval, recovery,
+  and verification. Changed methods are visible in the execution record.
+- Equivalent tool-capable backends receive the same identity and task contract;
+  unsupported modalities fail explicitly rather than trigger unauthorized
+  fallback. No claim of equal intelligence across models is required.
+
+### Phase 8: Standing-Authorized Initiative — Planned
+
+Deliver 8A before extending 8B. Build on existing goals, background jobs, consent,
+and skill evaluation records; do not treat their presence as blanket permission.
+
+Exit criteria:
+
+- An operator can grant a bounded purpose and approved provider/tool budget once;
+  ordinary covered work proceeds independently, with inspectable receipts and
+  quiet-hour/interaction limits.
+- Revocation and exhaustion prevent new work across foreground and background
+  paths. An unavailable approved route never authorizes another billing or data
+  destination.
+- A low-risk skill can advance only under an approved, tested evaluator. Failure
+  can disable or roll back it; no evaluator grants new privileges to itself.
+
+### Phase 9: Portable Identity and Generational Archive — Planned
+
+Deliver 9A as the smallest concrete preservation milestone, then add documented
+schema upgrades, recurring restore drills, contributor consent, and deliberate
+stewardship/recovery workflows.
+
+Exit criteria:
+
+- A continuity bundle is readable without an active model subscription and can
+  reconstruct approved identity, provenance, memories, skills, and paused tasks
+  on a supported replacement installation.
+- Export/restore distinguishes ordinary, protected, deleted, and restricted
+  records; no credentials or executable grants are inherited accidentally.
+- A simulated migration preserves checksums where applicable, source links,
+  corrections, and consent. Unknown versions report incompatibility rather than
+  silently omit records.
+- Documentation describes maintenance responsibilities and remaining limitations
+  honestly; neither a backup nor a successful restore proves century-scale
+  survival or subjective consciousness.
 
 ## Initial Implementation Slice (historical)
 

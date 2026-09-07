@@ -14,10 +14,14 @@ Runs as a stdio MCP server (JSON-RPC over stdin/stdout).
 """
 
 import html
+import http.client
+import ipaddress
 import json
 import math
 import os
 import re
+import socket
+import ssl
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -30,6 +34,10 @@ _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+_WEB_FETCH_MAX_BYTES = 512 * 1024
+_WEB_FETCH_MAX_REDIRECTS = 4
+_WEB_FETCH_PORTS = {80, 443}
+_WEB_FETCH_REDIRECTS = {301, 302, 303, 307, 308}
 
 TOOLS = [
     {
@@ -187,6 +195,180 @@ def _http_get(url, timeout=15):
         return e.code, f"HTTP {e.code}: {e.reason}"
     except Exception as e:
         return 0, f"Error: {e}"
+
+
+def _public_address(address):
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return parsed.is_global and not any((
+        parsed.is_private,
+        parsed.is_loopback,
+        parsed.is_link_local,
+        parsed.is_reserved,
+        parsed.is_multicast,
+        parsed.is_unspecified,
+    ))
+
+
+def _resolve_public_addresses(hostname, port):
+    """Resolve a host and reject any answer that is not globally routable."""
+    try:
+        direct = ipaddress.ip_address(hostname)
+    except ValueError:
+        direct = None
+    if direct is not None:
+        return ([str(direct)], "") if _public_address(direct) else ([], "non_global_address")
+    try:
+        records = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except (OSError, socket.gaierror):
+        return [], "dns_unavailable"
+    addresses = []
+    for record in records:
+        address = str(record[4][0])
+        if not _public_address(address):
+            return [], "non_global_address"
+        if address not in addresses:
+            addresses.append(address)
+    return (addresses, "") if addresses else ([], "dns_unavailable")
+
+
+def _validate_public_fetch_url(url):
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+        hostname = parsed.hostname or ""
+        port = parsed.port
+    except (TypeError, ValueError):
+        return None, "invalid_url"
+    hostname = hostname.rstrip(".").lower()
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return None, "scheme_not_allowed"
+    if not hostname:
+        return None, "missing_hostname"
+    if parsed.username is not None or parsed.password is not None:
+        return None, "userinfo_not_allowed"
+    if port is not None and port not in _WEB_FETCH_PORTS:
+        return None, "port_not_allowed"
+    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith((".localhost", ".local", ".internal")):
+        return None, "local_hostname"
+    effective_port = port or (443 if parsed.scheme.lower() == "https" else 80)
+    addresses, reason = _resolve_public_addresses(hostname, effective_port)
+    if not addresses:
+        return None, reason or "non_global_address"
+    return {
+        "url": str(url),
+        "parsed": parsed,
+        "hostname": hostname,
+        "port": effective_port,
+        "addresses": addresses,
+    }, ""
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, address, hostname, port, timeout):
+        super().__init__(address, port, timeout=timeout)
+        self._pinned_address = address
+        self._target_hostname = hostname
+
+    def connect(self):
+        self.sock = socket.create_connection((self._pinned_address, self.port), self.timeout)
+
+
+class _PinnedHTTPSConnection(_PinnedHTTPConnection):
+    def __init__(self, address, hostname, port, timeout, context):
+        super().__init__(address, hostname, port, timeout)
+        self._ssl_context = context
+
+    def connect(self):
+        raw_socket = socket.create_connection((self._pinned_address, self.port), self.timeout)
+        try:
+            self.sock = self._ssl_context.wrap_socket(raw_socket, server_hostname=self._target_hostname)
+        except Exception:
+            raw_socket.close()
+            raise
+
+
+def _pinned_http_get(target, timeout=20):
+    """Fetch one already-validated URL while connecting to its validated IP."""
+    parsed = target["parsed"]
+    target_path = parsed.path or "/"
+    if parsed.query:
+        target_path += "?" + parsed.query
+    hostname = target["hostname"]
+    host_header = hostname
+    if ":" in hostname and not hostname.startswith("["):
+        host_header = "[" + hostname + "]"
+    explicit_port = parsed.port is not None
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    if explicit_port and parsed.port != default_port:
+        host_header += ":" + str(parsed.port)
+    headers = {
+        "User-Agent": _USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity",
+        "Host": host_header,
+        "Connection": "close",
+    }
+    context = ssl.create_default_context() if parsed.scheme.lower() == "https" else None
+    last_error = "network_error"
+    for address in target["addresses"][:2]:
+        connection = None
+        try:
+            if context is None:
+                connection = _PinnedHTTPConnection(address, hostname, target["port"], timeout)
+            else:
+                connection = _PinnedHTTPSConnection(address, hostname, target["port"], timeout, context)
+            connection.request("GET", target_path, headers=headers)
+            response = connection.getresponse()
+            body = response.read(_WEB_FETCH_MAX_BYTES + 1)
+            response_headers = {str(key).lower(): str(value) for key, value in response.getheaders()}
+            return int(response.status), response_headers, body, len(body) > _WEB_FETCH_MAX_BYTES, ""
+        except (OSError, http.client.HTTPException, ssl.SSLError) as error:
+            last_error = type(error).__name__
+        finally:
+            if connection is not None:
+                connection.close()
+    return 0, {}, b"", False, last_error
+
+
+def _guarded_http_fetch(url, timeout=20):
+    current_url = str(url or "")
+    for redirect_count in range(_WEB_FETCH_MAX_REDIRECTS + 1):
+        target, reason = _validate_public_fetch_url(current_url)
+        if target is None:
+            return 0, {}, "", current_url, "unsafe_url:" + reason
+        status, headers, body, too_large, error = _pinned_http_get(target, timeout=timeout)
+        if status in _WEB_FETCH_REDIRECTS and headers.get("location"):
+            if redirect_count >= _WEB_FETCH_MAX_REDIRECTS:
+                return status, headers, "", current_url, "redirect_limit"
+            current_url = urllib.parse.urljoin(current_url, headers["location"])
+            continue
+        charset_match = re.search(r"charset\s*=\s*['\"]?([A-Za-z0-9._-]+)", headers.get("content-type", ""), re.I)
+        charset = charset_match.group(1) if charset_match else "utf-8"
+        try:
+            text = body.decode(charset, errors="replace")
+        except LookupError:
+            text = body.decode("utf-8", errors="replace")
+        if too_large:
+            return status, headers, text[:2000], current_url, "content_too_large"
+        if error:
+            return status, headers, text[:2000], current_url, error
+        return status, headers, text, current_url, ""
+    return 0, {}, "", current_url, "redirect_limit"
+
+
+def _web_fetch_challenge_page(body, text):
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
+    title = _strip_html(title_match.group(1)).lower() if title_match else ""
+    sample = (title + " " + _strip_html(body[:6000])).lower()
+    return bool(re.search(
+        r"just\s+a\s+moment|cf-chl-|challenge-platform|checking\s+your\s+browser|"
+        r"verify\s+(?:you\s+are\s+)?human|captcha|access\s+denied|"
+        r"\b(?:403|404|500|502|503)\s+(?:forbidden|not\s+found|error)\b",
+        sample,
+    )) or not text.strip()
 
 
 def _stock_request(query):
@@ -832,22 +1014,31 @@ def ddg_news(query, max_results=8):
 
 
 def web_fetch(url, max_length=6000):
-    """Fetch a URL and return extracted text."""
-    max_length = min(max(100, max_length), 20000)
-    # Basic URL validation
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return {"error": "Only http/https URLs are supported"}
-    if not parsed.hostname:
-        return {"error": "Invalid URL"}
-
-    status, body = _http_get(url, timeout=20)
+    """Fetch one public web page with pinned DNS and bounded redirects."""
+    try:
+        max_length = min(max(100, int(max_length)), 20000)
+    except (TypeError, ValueError):
+        max_length = 6000
+    status, headers, body, final_url, guard_error = _guarded_http_fetch(url, timeout=20)
+    if guard_error.startswith("unsafe_url:"):
+        return {"error": "unsafe_url", "reason": guard_error.split(":", 1)[1]}
+    if guard_error == "redirect_limit":
+        return {"error": "redirect_limit"}
+    if guard_error == "content_too_large":
+        return {"error": "content_too_large"}
     if status != 200:
-        return {"error": f"HTTP {status}", "body": body[:500]}
-
+        result = {"error": f"HTTP {status}" if status else "fetch_failed"}
+        if status:
+            result["status"] = status
+        return result
+    content_type = headers.get("content-type", "").lower()
+    if content_type and not any(kind in content_type for kind in ("text/html", "application/xhtml+xml", "text/plain")):
+        return {"error": "unsupported_content_type"}
     text = _extract_readable(body, max_length)
+    if _web_fetch_challenge_page(body, text):
+        return {"error": "blocked_page"}
     return {
-        "url": url,
+        "url": final_url,
         "length": len(text),
         "content": text,
     }

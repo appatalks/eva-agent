@@ -192,6 +192,8 @@ class MCPServer:
         result = self._complete_result(resp, "tools/call")
         if isinstance(result, dict) and result.get("_mcp_error"):
             return {"error": result["_mcp_error"]}
+        if isinstance(result, dict) and result.get("isError") is True:
+            return {"error": "MCP tool reported an execution error"}
         # MCP tools return content as an array of {type, text} blocks
         if isinstance(result, dict) and "content" in result:
             parts = result["content"]

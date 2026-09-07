@@ -503,6 +503,7 @@ from bridge.background import (  # noqa: F401
 from bridge.briefing import briefing_prompt_context, briefing_status, briefing_unavailable_sources, start_startup_briefing
 from bridge.audit import audit_event
 from bridge.model_policy import select_model_policy
+from bridge.research import resolve_research_request, retrieve_research, research_prompt, suppress_research_actions
 from bridge.telemetry import (  # noqa: F401
     _StdoutTee,
     _log_ring_add,
@@ -4884,13 +4885,28 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _request_type = _classify_request_type(msg_lower)
         _fast_route = _classify_fast_route(_routing_message)
         _passive_recall = _is_passive_memory_recall(_routing_message)
+        research_history = data.get("research_history")
+        if isinstance(research_history, list):
+            research_history = [{"role": "user", "content": item[:2000]}
+                                for item in research_history[-6:] if isinstance(item, str)]
+        else:
+            research_history = messages
+        research_plan = resolve_research_request(_routing_message, research_history)
+        # Reviewer/planner calls do not gain tools by quoting the research request.
+        native_research = bool(research_plan["active"] and not no_tools
+                       and _request_type in {"general", "web-search"})
+        research_receipt = None
+        if native_research:
+            _request_type = "web-search"
+            _fast_route = ""
+            _passive_recall = False
         _approved_approximate_location = str(
             os.environ.get("EVA_APPROVED_APPROXIMATE_LOCATION", "") or ""
         )[:120]
         _skill_decision, _selected_skill, _weather_location = _skill_execution_for_request(
             _routing_message, _approved_approximate_location
         )
-        _acp_permission_mode = "passive_recall" if _passive_recall else (
+        _acp_permission_mode = "automation_no_tools" if no_tools else "passive_recall" if _passive_recall else (
             "workspace_auto" if acp_auto_approve else "interactive"
         )
         _prompt_fields = _prompt_budget_fields(data.get("prompt_budget"))
@@ -4929,6 +4945,50 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 total_ms=round((time.perf_counter() - _turn_t0) * 1000.0, 1),
             )
             return
+
+        if native_research:
+            if stream_state:
+                self._stream_event(stream_state, {
+                    "type": "status", "phase": "thinking",
+                    "text": "Eva is retrieving sources with native search...",
+                })
+            research_receipt = self._retrieve_native_research(research_plan)
+            audit_event(
+                "research.retrieval", turn_id, research_receipt["status"],
+                backend=requested_backend, strategy=research_receipt["strategy"],
+                source_count=len(research_receipt["sources"]),
+                attempt_count=len(research_receipt["attempts"]),
+                reason=research_receipt["reason"],
+            )
+            # Clarification and unavailable retrieval need no extra billed model call.
+            if research_receipt["status"] in {"needs_topic", "unavailable"}:
+                answer = (
+                    "What public topic should I research? Please specify it without private account or message details."
+                    if research_receipt["status"] == "needs_topic" else
+                    "Native search did not return usable sources for this attempt. "
+                    "I have not completed the research or launched a browser. "
+                    "This does not establish that the requested information does not exist."
+                )
+                if research_receipt["reason"] == "method_unavailable":
+                    answer = "The requested native search method is not configured or available. No browser was launched and no alternative model provider was called."
+                response = {
+                    "id": f"aig-{int(time.time())}", "object": "chat.completion",
+                    "created": int(time.time()), "model": "aig:native-research",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                    "research": {"status": research_receipt["status"], "strategy": research_receipt["strategy"], "source_count": 0, "attempt_count": len(research_receipt["attempts"])},
+                }
+                if stream_state:
+                    self._stream_chunk(stream_state, answer)
+                    self._stream_finish(stream_state, response)
+                else:
+                    self._json_response(200, response)
+                if _st.cognition_enabled and not internal:
+                    threading.Thread(target=_post_response_reflection,
+                                     args=(user_message, answer, response["model"], conversation_id, turn_id), daemon=True).start()
+                audit_event("turn.response", turn_id, research_receipt["status"],
+                            model=response["model"], request_type="web-search", response_chars=len(answer))
+                return
 
         selected_backend = requested_backend
         _policy_decision = {}
@@ -4987,7 +5047,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             bool(data.get("retrieve_data")),
             bool(_st.acp_client and _st.acp_client.alive),
             _st.local_mode,
-            no_tools,
+            no_tools or native_research,
             _needs_acp_preflight,
             _select_acp_tool_profile,
         )
@@ -5012,6 +5072,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _briefing_context = briefing_prompt_context(allow_partial=_briefing_request) if _briefing_request else ""
         _tool_required_request = bool(
             not _briefing_request
+            and not no_tools
+            and not native_research
             and not _fast_route
             and not _passive_recall
             and _request_type in {
@@ -5034,7 +5096,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "lmstudio_model": str(data.get("lmstudio_model") or "local")[:80],
         }
         _policy_decision = select_model_policy(
-            _policy_mode, requested_backend, _request_type,
+            "pinned" if native_research else _policy_mode, requested_backend, _request_type,
             needs_acp_tools or _tool_required_request, _policy_candidates,
             local_only=_st.local_mode,
             deep_reasoning=_deep_reasoning_request,
@@ -5118,6 +5180,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         acp_data = ""
         acp_model_used = ""
+        if native_research:
+            acp_data = research_prompt(research_receipt)
+            acp_model_used = "native-web-search"
         _preflight_ms = 0.0
         _preflight_attempted = bool(needs_acp_tools)
         _preflight_succeeded = False
@@ -5417,7 +5482,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     + ". State the timezone if you use this value.\n"
                 )
 
-        if acp_data:
+        if acp_data and not native_research:
             # Strip blob URLs from ACP data so the model doesn't parrot them.
             # ACP sandbox blob: URLs are not accessible in Electron.
             acp_data = _re.sub(r'blob:file:///[a-f0-9-]+', '', acp_data)
@@ -5428,6 +5493,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "Do not ask the user to confirm running a query that has already been executed. "
                 "Answer directly from [Data Retrieved].\n"
             )
+
+        if native_research:
+            eva_system += (
+                "\n[Native Research - AUTHORITATIVE ROUTING]\n"
+                "The bridge already ran a bounded native search and page retrieval batch. "
+                "Answer from the source DATA below and cite supported claims with source URLs. "
+                "Do not call additional tools, emit action markers, or launch browser/desktop agents. "
+                "This is not a durable or exhaustive research job. Distinguish retrieved pages from snippets, "
+                "state gaps and uncertainty, and do not invent model capabilities from model names.\n"
+                + acp_data + "\n"
+            )
+            _acp_permission_mode = "automation_no_tools"
 
         if not no_tools:
             eva_system += "\n" + runtime_capability_prompt_view() + "\n"
@@ -5501,16 +5578,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "temperature": 0.7,
                     "max_tokens": max_completion_tokens,
                 }
-                if stream_state:
+                if stream_state and not native_research:
                     lms_payload["stream"] = True
                 lms_resp = _req.post(
                     lms_base + "/chat/completions",
                     json=lms_payload,
-                    stream=bool(stream_state),
+                    stream=bool(stream_state and not native_research),
                     timeout=(_LMSTUDIO_CONNECT_TIMEOUT_SECONDS, _LMSTUDIO_READ_TIMEOUT_SECONDS),
                 )
                 if lms_resp.status_code == 200:
-                    if stream_state:
+                    if stream_state and not native_research:
                         streamed_content = []
                         streamed_reasoning = []
                         lms_finish_reason = "stop"
@@ -5608,6 +5685,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                                  args=(user_message, response_text, model_used, conversation_id, turn_id),
                                  daemon=True).start()
 
+            if native_research:
+                response_text = suppress_research_actions(response_text)
             response = {
                 "id": f"aig-{int(time.time())}",
                 "object": "chat.completion",
@@ -5624,6 +5703,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 }],
                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             }
+            if native_research:
+                response["research"] = {
+                    "status": research_receipt["status"], "strategy": research_receipt["strategy"],
+                    "source_count": len(research_receipt["sources"]), "attempt_count": len(research_receipt["attempts"]),
+                }
             if stream_state:
                 stream_state["route"] = _acp_route
                 stream_state["model"] = model_used
@@ -5746,7 +5830,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 openai_payload = _openai_chat_payload(
                     model_for_response, openai_messages, reasoning_effort, max_completion_tokens
                 )
-                if stream_state:
+                if stream_state and not native_research:
                     openai_payload["stream"] = True
                 openai_resp = _req.post(
                     _openai_chat_completions_url(),
@@ -5756,7 +5840,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     },
                     json=openai_payload,
                     timeout=120,
-                    stream=bool(stream_state),
+                    stream=bool(stream_state and not native_research),
                 )
                 if openai_resp.status_code < 200 or openai_resp.status_code >= 300:
                     detail = openai_resp.text[:500] if openai_resp.text else "(empty response)"
@@ -5765,7 +5849,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         "error": {"message": f"OpenAI API failed ({openai_resp.status_code}): {detail}"}
                     })
                     return
-                if stream_state:
+                if stream_state and not native_research:
                     response_parts = []
                     for raw_line in openai_resp.iter_lines(chunk_size=1, decode_unicode=True):
                         line = str(raw_line or "").strip()
@@ -5849,7 +5933,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             self._json_response(503, {"error": {"message": message}})
                         return
                     else:
-                        on_chunk = (lambda chunk: self._stream_chunk(stream_state, chunk)) if stream_state else None
+                        on_chunk = (lambda chunk: self._stream_chunk(stream_state, chunk)) if stream_state and not native_research else None
                         if image_b64 and hasattr(response_client, "prompt_with_image"):
                             acp_result = response_client.prompt_with_image(
                                 full_prompt, image_b64, mime=image_mime, timeout=120,
@@ -5900,6 +5984,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     self._json_response(503, {"error": {"message": message}})
                 return
 
+        if native_research:
+            response_text = suppress_research_actions(response_text)
+
         # Step 5: Post-response reflection (background)
         if response_text and _st.cognition_enabled and not internal:
             threading.Thread(target=_post_response_reflection,
@@ -5922,6 +6009,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             }],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         }
+        if native_research:
+            response["research"] = {
+                "status": research_receipt["status"], "strategy": research_receipt["strategy"],
+                "source_count": len(research_receipt["sources"]),
+                "attempt_count": len(research_receipt["attempts"]),
+            }
         if stream_state:
             stream_state["route"] = _acp_route
             stream_state["model"] = model_used
@@ -6005,6 +6098,49 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
     # Shared ACP data retrieval — used by AIG pipeline and /v1/data/retrieve
     # ------------------------------------------------------------------
+    @staticmethod
+    def _native_research_mcp_config():
+        """Return configured web MCP services, or Eva's bundled public-web fallback."""
+        from bridge.acp_client import _acp_tool_profile_config
+
+        config = _acp_tool_profile_config(_st.configured_mcp_config, "web")
+        if config:
+            return config
+        candidates = (
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web_search_mcp.py"),
+            os.path.expanduser("~/.eva/tools/web_search_mcp.py"),
+        )
+        for path in candidates:
+            if os.path.isfile(path):
+                return {"eva-web-search": {"command": sys.executable, "args": [path]}}
+        return {}
+
+    @staticmethod
+    def _retrieve_native_research(plan):
+        """Use configured or bundled MCP web tools without starting a model."""
+        if plan.get("needs_topic"):
+            return retrieve_research(plan, None, [])
+        manager = _st.local_mcp_manager
+        owned = False
+        if not manager or not manager.alive:
+            from bridge.local_mcp import LocalMCPManager
+            config = BridgeHandler._native_research_mcp_config()
+            if not config:
+                return retrieve_research(plan, None, [])
+            manager = LocalMCPManager()
+            owned = True
+        try:
+            if owned:
+                manager.start_servers(config)
+            return retrieve_research(plan, manager.call_tool, manager.list_tools())
+        except Exception:
+            receipt = retrieve_research(plan, None, [])
+            receipt["reason"] = "configured_service_unavailable"
+            return receipt
+        finally:
+            if owned:
+                manager.stop_all()
+
     @staticmethod
     def _retrieve_acp_data_for(user_message, conversation_id=""):
         """Run data retrieval for a user message and return (data_text, model_used).
@@ -6891,6 +7027,107 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # Vision browser agent endpoints
     # ------------------------------------------------------------------
 
+    def _make_automation_vision(self, data):
+        """Build a per-run vision callable for the selected AIG backend."""
+        import tempfile
+
+        requested_backend = str(data.get("backend") or "").strip()
+        if not requested_backend:
+            return None, None, "legacy", "openai", str(data.get("vision_model") or "gpt-4o")
+        if requested_backend.lower().startswith("lmstudio"):
+            raise ValueError("LM Studio is not supported for browser or desktop vision automation yet")
+        provider, model = _parse_aig_backend(requested_backend)
+        reasoning_effort = str(data.get("reasoning_effort") or "high").strip()
+        if reasoning_effort == "default":
+            reasoning_effort = ""
+        if reasoning_effort and reasoning_effort not in ACP_REASONING_EFFORTS:
+            raise ValueError("Unsupported reasoning_effort for automation vision")
+
+        if provider == "openai":
+            api_key = _set_openai_key_from(data)
+            if not api_key:
+                raise ValueError("An OpenAI API key is required for the selected automation vision backend")
+
+            def openai_vision(system_text, user_text, png_bytes):
+                import requests as _req
+
+                messages = [{
+                    "role": "system",
+                    "content": system_text,
+                }, {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                        {"type": "image_url", "image_url": {
+                            "url": "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+                        }},
+                    ],
+                }]
+                payload = _openai_chat_payload(model, messages, reasoning_effort, 1200)
+                response = _req.post(
+                    _openai_chat_completions_url(),
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=60,
+                )
+                if response.status_code != 200:
+                    raise RuntimeError("selected OpenAI vision provider unavailable")
+                try:
+                    return response.json()["choices"][0]["message"]["content"] or ""
+                except (KeyError, IndexError, TypeError, ValueError) as exc:
+                    raise RuntimeError("selected OpenAI vision provider returned no content") from exc
+
+            return openai_vision, None, requested_backend, provider, model
+
+        template = _st.acp_client
+        if not template or not template.alive:
+            raise RuntimeError("ACP bridge is not connected for the selected automation vision backend")
+        client_state = {"client": None, "cwd": None}
+
+        def acp_vision(system_text, user_text, png_bytes):
+            if client_state["client"] is None:
+                client_state["cwd"] = tempfile.TemporaryDirectory(prefix="eva-vision-")
+                client = ACPClient(
+                    copilot_path=template.copilot_path,
+                    cwd=client_state["cwd"].name,
+                    model=None if model == "acp" else model,
+                    mcp_config={},
+                    reasoning_effort=reasoning_effort or None,
+                    tool_profile="none",
+                    no_tools=True,
+                )
+                client_state["client"] = client
+                client.start()
+            prompt = system_text + "\n\n" + user_text
+            result = client_state["client"].prompt_with_image(
+                prompt,
+                base64.b64encode(png_bytes).decode("ascii"),
+                mime="image/png",
+                timeout=90,
+                conversation_id=uuid.uuid4().hex,
+                permission_mode="automation_no_tools",
+            )
+            if (not isinstance(result, dict) or result.get("error") or
+                    result.get("stop_reason", "end_turn") != "end_turn"):
+                raise RuntimeError("selected ACP vision provider unavailable")
+            text = str(result.get("text") or "")
+            if not text:
+                raise RuntimeError("selected ACP vision provider returned no content")
+            return text
+
+        def cleanup_acp_vision():
+            client = client_state.get("client")
+            try:
+                if client:
+                    client.stop()
+            finally:
+                client_state["client"] = None
+                if client_state["cwd"]:
+                    client_state["cwd"].cleanup()
+                    client_state["cwd"] = None
+
+        return acp_vision, cleanup_acp_vision, requested_backend, provider, model
+
     def _make_director(self):
         """Wire Claude Opus 4.8 (via ACP) as the text-only director. Returns a
         callback(goal, state) -> subgoal string, or None when ACP is unavailable."""
@@ -6932,7 +7169,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "playwright && python3 -m playwright install chromium"}})
             return
         api_key = _set_openai_key_from(data)
-        use_director = data.get("use_director", True)
+        try:
+            vision_call, vision_cleanup, backend, provider, model = self._make_automation_vision(data)
+        except Exception as e:
+            self._json_response(400, {"error": {"message": str(e)}})
+            return
+        use_director = data.get("use_director", True) and not vision_call
         director = self._make_director() if use_director else None
         try:
             status = _BROWSER_AGENT.start_run(
@@ -6944,8 +7186,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 max_steps=data.get("max_steps", 25),
                 start_url=(data.get("start_url") or ""),
                 headless=bool(data.get("headless", False)),
+                vision_call=vision_call,
+                vision_cleanup=vision_cleanup,
+                backend=backend,
+                executor_provider=provider,
+                executor_model=model,
             )
         except Exception as e:
+            if vision_cleanup:
+                vision_cleanup()
             self._json_response(400, {"error": {"message": str(e)}})
             return
         self._json_response(202, status)
@@ -7043,7 +7292,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 detail + ". Install with: python3 -m pip install --user --break-system-packages pyautogui"}})
             return
         api_key = _set_openai_key_from(data)
-        use_director = data.get("use_director", True)
+        try:
+            vision_call, vision_cleanup, backend, provider, model = self._make_automation_vision(data)
+        except Exception as e:
+            self._json_response(400, {"error": {"message": str(e)}})
+            return
+        use_director = data.get("use_director", True) and not vision_call
         director = self._make_desktop_director() if use_director else None
         try:
             status = _DESKTOP_AGENT.start_run(
@@ -7053,8 +7307,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 director=director,
                 autonomy=(data.get("autonomy") or "pause"),
                 max_steps=data.get("max_steps", 25),
+                vision_call=vision_call,
+                vision_cleanup=vision_cleanup,
+                backend=backend,
+                executor_provider=provider,
+                executor_model=model,
             )
         except Exception as e:
+            if vision_cleanup:
+                vision_cleanup()
             self._json_response(400, {"error": {"message": str(e)}})
             return
         self._json_response(202, status)

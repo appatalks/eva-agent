@@ -1382,6 +1382,7 @@ function _vvWhisperRecord() {
     generation: _vv.listenGeneration,
     chunks: [],
     speechDetected: false,
+    discardOnStop: _vv.phase === 'speaking',
     silenceTimer: null,
     recordingCap: null,
     recorder: null
@@ -1412,6 +1413,12 @@ function _vvWhisperRecord() {
       _vv.mediaRecorder = null;
       _vv.recordingCap = null;
       _vv.silenceTimer = null;
+    }
+    if (capture.discardOnStop) {
+      if (ownsCapture && _vvIsActive() && _vv.whisperMode && _vv.phase !== 'thinking') {
+        setTimeout(function() { _vvWhisperRecord(); }, 0);
+      }
+      return;
     }
     if (capture.generation !== _vv.listenGeneration || !_vvIsActive() || !_vv.whisperMode) {
       // A fast stop/start leaves the old recorder pending onstop. Release it
@@ -1787,6 +1794,10 @@ function _vvAfterTurn() {
 
 // --- Barge-in (interrupt Eva while she speaks) ---
 
+function _vvAutomaticBargeInEnabled() {
+  try { return localStorage.getItem('voice_barge_in') === '1'; } catch (e) { return false; }
+}
+
 // Hard-stop any TTS playback. Pausing the audio element silences the network
 // voices; cancel() stops the browser SpeechSynthesis engine.
 function _vvStopTTS() {
@@ -1805,6 +1816,7 @@ function _vvStopTTS() {
 // and immediately opens a conversation window to catch the redirect.
 function _vvBargeIn() {
   if (_vv.phase !== 'speaking') return;
+  if (_vv._capture) _vv._capture.discardOnStop = false;
   if (typeof _vv._finishSpeaking === 'function') {
     _vv._finishSpeaking(true);
   } else {
@@ -1836,8 +1848,8 @@ function _vvAfterBarge() {
 // Local STT keeps an active recorder while Eva speaks. With echo cancellation
 // enabled, sustained microphone energy is a practical low-latency barge signal:
 // stop playback now, then let the same recording finish and transcribe the
-// user's redirect after silence. Browser recognition retains wake-word-only
-// interruption because it does not expose a reliable local VAD result.
+// user's redirect after silence. Direct transcript interruptions require the
+// wake name so a partial transcription cannot bypass the energy gate.
 function _vvStartBargeMonitor() {
   _vvStopBargeMonitor();
   if (_vv.whisperProvider !== 'local' || !_vv.analyser || !_vv.dataArray) return;
@@ -1855,12 +1867,12 @@ function _vvStartBargeMonitor() {
       var level = _vv.dataArray[index];
       total += level;
       if (level > peak) peak = level;
-      if (level > 45) voicedBins += 1;
+      if (level > 60) voicedBins += 1;
     }
     var average = total / _vv.dataArray.length;
-    var speechLike = average > 38 && peak > 90 && voicedBins >= Math.max(3, Math.floor(_vv.dataArray.length * 0.08));
+    var speechLike = average > 40 && peak > 95 && voicedBins >= Math.max(5, Math.floor(_vv.dataArray.length * 0.10));
     _vv._bargeEnergyFrames = speechLike ? _vv._bargeEnergyFrames + 1 : 0;
-    if (_vv._bargeEnergyFrames >= 8) _vvBargeIn();
+    if (_vv._bargeEnergyFrames >= 5) _vvBargeIn();
   }, 100);
 }
 
@@ -1915,8 +1927,7 @@ function _vvHandleTranscript(transcript) {
   // side conversations from stopping playback while preserving "Eva, ..." as
   // an immediate redirect.
   if (_vv.phase === 'speaking') {
-    if (!transcript || transcript.trim().length <= 1) return;
-    if (_vv.whisperProvider !== 'local' && !_vvWakeWordMatch(transcript)) return;
+    if (!transcript || transcript.trim().length <= 1 || !_vvWakeWordMatch(transcript)) return;
     _vvBargeIn();
   }
 
@@ -2067,6 +2078,12 @@ function _vvSpeakAck() {
 }
 function _vvSendCommand(command, fromWakeWord) {
   if (typeof _vvStopTTS === 'function') _vvStopTTS();
+  if (typeof _maybeStopAgentCommand === 'function' && _maybeStopAgentCommand(command)) {
+    var stopTranscript = document.getElementById('vvTranscript');
+    if (stopTranscript) stopTranscript.textContent = '\u25B8 ' + command;
+    if (typeof _vvAfterTurn === 'function') _vvAfterTurn();
+    return;
+  }
   // Natural agent confirmation via voice: if an agent is parked on a yes/no,
   // interpret this utterance as the answer instead of a new command.
   // But NOT if the user used the wake word "Eva" — that signals a new intent.
@@ -2165,6 +2182,7 @@ function _vvWatchForResponse() {
     _vvSetStatus('speaking');
     _vvConnectTTSAnalyser();
     _vvStartBargeMonitor();
+    if (_vv._capture) _vv._capture.discardOnStop = true;
     if (_vv.whisperMode) _vvWhisperRecord();
 
     // Single finalizer for the speaking phase, reachable from both the natural

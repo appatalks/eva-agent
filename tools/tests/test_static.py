@@ -393,7 +393,7 @@ def test_local_speech_contract():
     report("local_speech_capture_generation", "capture.generation !== _vv.listenGeneration" in voice_view and "capture.chunks" in voice_view)
     report("local_speech_recorder_finalizes_before_rearm", "var ownsCapture = _vv._capture === capture;" in voice_view and "if (ownsCapture && _vvIsActive() && _vv.whisperMode" in voice_view)
     report("local_speech_400_recovers", "if (/HTTP 400/.test(message))" in voice_view and "if (_vv.phase === 'speaking')" in voice_view and "if (_vv.phase === 'awake')" in voice_view and "_vvEnterAwake(_vv.convoMode ? _vv.convoTimeoutMs : 10000)" in voice_view)
-    report("local_speech_energy_barge", "_vv.whisperProvider !== 'local'" in voice_view and "average > 38 && peak > 90" in voice_view and "_vv._bargeEnergyFrames >= 8" in voice_view)
+    report("local_speech_energy_barge", "_vv.whisperProvider !== 'local'" in voice_view and "average > 40 && peak > 95" in voice_view and "_vv._bargeEnergyFrames >= 5" in voice_view)
     report("local_speech_voice_threshold", "var threshold = 12;" in voice_view)
     report("local_speech_auto_defaults_english", 'model_language = "ko" if multilingual or language == "ko" else "en"' in bridge)
     report("local_speech_wake_alias", "function _vvWakeWordMatch" in voice_view and "(eva|ava)" in voice_view)

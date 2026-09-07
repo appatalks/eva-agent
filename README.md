@@ -12,15 +12,23 @@ while keeping configuration, approvals, and personal data under your control.
 
 - **One intelligent gateway:** route work across OpenAI, GitHub Copilot ACP, LM Studio,
   and MCP tools without changing the conversation model.
+- **GPT-6 Astra via Copilot:** select Astra through your GitHub Copilot subscription
+  when enabled in Copilot CLI; no separate OpenAI API key is needed for this backend.
 - **Durable, inspectable memory:** retain explicit facts locally with provenance
 	linked to source conversation turns, lifecycle controls, corrections, bounded
 	last-session recall, and a dedicated Memory view.
 - **Real work, with approval:** use browser, desktop, email, files, skills, scheduled
   tasks, and coding workspaces through bounded native actions.
+- **Verified automation:** browser and desktop agents can use the selected AIG vision
+	backend, retain explicit clarifications, and report blocked work when completion is
+	not visually verified.
+- **Native research:** retrieve search results and bounded page excerpts through
+  configured MCP tools, retain the chosen responder, and distinguish partial evidence
+  from completed research instead of launching visual search loops.
 - **Live daily context:** assemble weather, news, markets, mail, and memory into verified
   briefings that clearly identify unavailable sources.
 - **Natural interaction:** combine text, voice, camera input, images, and optional local
-  speech in the same desktop interface.
+	speech in the same desktop interface.
 - **Local-first operation:** use SQLite and local models by default, with cloud services
   enabled only when configured.
 

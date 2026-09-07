@@ -94,6 +94,35 @@ configured in Settings > Auth; Docker is not required. Local MCP servers that do
 support Eva's modern discovery extension can use standard MCP `2025-06-18`
 initialization.
 
+**Native research (bounded first slice).** Explicit online research requests use
+configured `web_search` and `web_fetch` MCP tools before response synthesis. The
+bridge performs one search (up to five results) and reads at most two public pages;
+it does not hire another model to click a search page. The requested AIG responder
+is retained for this path, including Copilot, direct OpenAI, or LM Studio, without
+automatic cross-provider escalation. Local model inference does not make an
+explicit online search offline: the configured web tools still access the network.
+
+Within the recent user-turn context, “please continue” retains the research topic
+and refines the query; “try a different search method” selects the configured
+news-oriented search tool, or reports that the alternative is unavailable. An
+unrelated intervening request breaks continuation. Missing or potentially private
+topics require clarification before any search. No new MCP service is registered;
+an already configured web service may be started and stopped for the request.
+
+Results distinguish page excerpts from search snippets, include retrieval timestamps
+and source URLs, and remain untrusted source data. Failed page reads preserve snippets
+as partial evidence; no usable results do not establish that the information does
+not exist. The bundled public page reader rejects private-network destinations,
+pins validated DNS addresses, verifies TLS, and rechecks redirects. It does not
+bypass sign-in or bot challenges. Configured third-party tools remain within their
+own execution policy.
+
+This is not yet a durable research job or a complete deep-research engine. “Complete”
+in retrieval metadata means the bounded batch finished, not that the topic was
+exhaustively investigated. Persistent task checkpoints, source deduplication across
+turns, and evidence-aware continuation after restart remain planned. Explicit
+browser/desktop interaction requests keep their existing automation path.
+
 **Bounded document abilities.** Native DOCX, PDF, PPTX, XLSX, and MCP Builder abilities
 run locally through the bridge and validate outputs before reporting success. They do
 not fall back to browser, desktop, terminal, package installation, or network access.
@@ -546,7 +575,17 @@ parallel agents cannot share conversation context or leak a client after exit.
 ### Available ACP Models
 
 Models available through the Copilot CLI (requires a GitHub Copilot license). The
-catalog evolves; this list reflects a recent `copilot --list-models` output.
+catalog evolves and varies by account and CLI version; the ACP `session/new`
+response exposes the current `models.availableModels` catalog. The entries below
+include selectable and previously supported models, not an availability guarantee.
+
+**GPT-6 Astra:** in **Settings → Models**, choose **GPT-6 Astra** under
+**GPT (via ACP)** and set **Response policy → Use preferred backend exactly** to
+ensure Astra is the responder. This uses the authenticated Copilot CLI and your
+GitHub Copilot subscription, not a GitHub PAT or a direct OpenAI API key. The CLI
+must expose `gpt-6-astra` for your account; VS Code model access alone is not a
+guarantee of CLI availability. Subscription usage limits and model charges apply.
+Automatic policy remains the default and may choose another responder.
 
 | Provider | Model ID | Notes |
 |---|---|---|
@@ -557,7 +596,8 @@ catalog evolves; this list reflects a recent `copilot --list-models` output.
 | | `claude-sonnet-4.6` | |
 | | `claude-sonnet-4.5`, `claude-sonnet-4` | |
 | | `claude-haiku-4.5` | Fastest Claude |
-| **OpenAI** | `gpt-5.6-luna` | Default AIG backend (High reasoning) |
+| **OpenAI** | `gpt-6-astra` | AIG backend via Copilot subscription; pin for an exact responder |
+| | `gpt-5.6-luna` | Default AIG backend (High reasoning) |
 | | `gpt-5.5` | |
 | | `gpt-5.4`, `gpt-5.4-mini` | |
 | | `gpt-5.3-codex`, `gpt-5.2-codex` | |
@@ -1194,9 +1234,15 @@ Eva uses marker blocks for agent capabilities:
 Autonomous web browsing via Playwright with a persistent Chrome profile.
 
 **Architecture:**
-- Director agent (Claude via ACP): text-only, high-level planning
-- Executor agent (GPT-4o via OpenAI): vision-based, concrete actions
-- Re-consult director every 4 executor steps
+- Legacy runs use the existing GPT-4o-compatible vision path. Runs with a selected
+  AIG backend use that backend directly and disable the redundant text director.
+- ACP vision runs use a lazy, per-run client with no MCP servers and deny every
+  permission request; the model proposes JSON only and Playwright remains the
+  native executor.
+- User clarifications are retained separately from replaceable planner subgoals.
+- Completion requires a fresh screenshot receipt and an independent structured
+  visual check. This check is evidence, not an absolute guarantee; ambiguous or
+  failed checks are reported as blocked rather than done.
 - Long-lived Chrome via CDP on port 9333, persistent profile at `~/.config/eva-standalone/browser_profile`
 
 **Action types:** click, double_click, click_ref, type, type_ref, press, scroll, navigate, wait, done, ask
@@ -1206,13 +1252,30 @@ confirmation before execution. The run parks and waits for
 `POST /v1/browser/confirm` with `run_id`, `approve`, and optional `text` in the
 JSON body.
 
+`confirm_all` parks every mutating action. A direct stop or a declined approval
+cancels the run, and cancellation wins over late model output. Repeated physical
+actions are bounded independently of explanatory wording, and step-limit exhaustion
+is blocked rather than treated as success.
+
 **Trajectories:** Each step logged as JSONL + PNG screenshot to `~/.config/eva-standalone/browser_trajectories/` for fine-tuning.
 
 ### Desktop Agent (`tools/desktop_agent.py`)
 
 Autonomous desktop control via pyautogui screenshot-and-act loop.
 
-**Architecture:** Same director/executor pattern as browser agent. `pyautogui.FAILSAFE = True` (mouse to corner = emergency stop).
+**Architecture:** Legacy runs use the existing GPT-4o-compatible vision path; selected AIG
+vision runs use that backend directly and disable the redundant text director.
+`pyautogui.FAILSAFE = True` (mouse to corner = emergency stop).
+
+**Action types:** launch_app, focus_window, click, double_click, right_click, move,
+type, press, hotkey, scroll, wait, crop, done, ask
+
+The selected AIG vision backend is used in the same way as the browser agent. The
+read-only `crop` action sends an enlarged bounded region together with a whole-screen
+overview and states the mapping back to original screenshot coordinates. It never
+requires approval and cannot click. Desktop coordinates are checked against actual
+screenshot dimensions, including HiDPI dimensions. Completion, cancellation, repeat
+detection, and step-limit behavior follow the browser contract above.
 
 **Safety:** Broader sensitive action set includes delete, sudo, rm, shutdown, reboot, transfer money, send email/message. All require user confirmation.
 

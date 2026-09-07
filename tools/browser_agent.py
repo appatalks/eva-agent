@@ -28,6 +28,15 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 
+from bridge.automation import (
+    action_signature,
+    automation_audit,
+    is_explicit_cancel,
+    parse_action,
+    parse_json_object,
+    recent_signature_count,
+)
+
 _EVA_CONFIG_DIR = os.path.expanduser(os.environ.get("EVA_CONFIG_DIR", "~/.config/eva-standalone"))
 _TRAJ_DIR = os.path.join(_EVA_CONFIG_DIR, "browser_trajectories")
 # Dedicated, persistent Chrome profile for the agent. Logins (e.g. Amazon) made
@@ -61,6 +70,20 @@ _SENSITIVE_RE = re.compile(
 _ACTION_KINDS = {
     "click", "double_click", "click_ref", "type", "type_ref", "press", "scroll",
     "navigate", "wait", "done", "ask",
+}
+
+_ACTION_FIELDS = {
+    "click": {"x": int, "y": int},
+    "double_click": {"x": int, "y": int},
+    "click_ref": {"ref": str},
+    "type_ref": {"ref": str, "text": str},
+    "type": {"text": str},
+    "press": {"key": str},
+    "scroll": {"dy": int},
+    "navigate": {"url": str},
+    "wait": {"ms": int},
+    "ask": {"question": str},
+    "done": {"summary": str},
 }
 
 # run_id -> run record (see _new_run). Guarded by _runs_lock.
@@ -175,8 +198,14 @@ def _new_run(goal):
         "url": "",
         "title": "",
         "subgoal": "",
+        "clarifications": [],
         "result": None,
         "error": None,
+        "completion_verified": False,
+        "verification": None,
+        "executor_provider": "openai",
+        "executor_model": _DEFAULT_VISION_MODEL,
+        "backend": "legacy",
         "pending_action": None,      # action waiting for confirmation
         "pending_question": None,    # question waiting for user input
         "last_screenshot": None,
@@ -187,6 +216,8 @@ def _new_run(goal):
         "_cancel": threading.Event(),
         "_gate": threading.Event(),  # set when a parked run may proceed
         "_decision": None,           # bool for confirm; str for input
+        "_state_lock": threading.RLock(),
+        "_action_lock": threading.Lock(),
         "_thread": None,
     }
     with _runs_lock:
@@ -215,8 +246,24 @@ def public_status(run_id):
                 "id", "goal", "status", "step", "url", "title", "subgoal",
                 "result", "error", "pending_action", "pending_question",
                 "last_screenshot", "started", "finished", "steps",
+                "completion_verified", "verification", "executor_provider", "executor_model",
+                "backend",
             )
         }
+
+
+def _mark_cancelled(rec, outcome="cancelled"):
+    with rec["_state_lock"]:
+        if rec["status"] in ("done", "blocked", "error"):
+            return
+        rec["status"] = "cancelled"
+        rec["completion_verified"] = False
+        rec["result"] = "Automation was cancelled before completion was verified."
+        rec["pending_action"] = None
+        rec["pending_question"] = None
+    rec["_cancel"].set()
+    rec["_gate"].set()
+    automation_audit(rec["id"], "cancel", rec.get("backend"), "run", outcome)
 
 
 def cancel(run_id):
@@ -224,8 +271,8 @@ def cancel(run_id):
         rec = _runs.get(run_id)
     if not rec:
         return False
-    rec["_cancel"].set()
-    rec["_gate"].set()  # unblock if parked
+    with rec["_action_lock"]:
+        _mark_cancelled(rec)
     return True
 
 
@@ -236,12 +283,15 @@ def resolve(run_id, approve=True, text=""):
         rec = _runs.get(run_id)
     if not rec:
         return False
-    if rec["status"] == "awaiting_confirmation":
-        rec["_decision"] = bool(approve)
-    elif rec["status"] == "awaiting_input":
-        rec["_decision"] = text or ""
-    else:
+    with rec["_state_lock"]:
+        status = rec["status"]
+    if status not in ("awaiting_confirmation", "awaiting_input"):
         return False
+    if not approve or is_explicit_cancel(text):
+        _mark_cancelled(rec, "declined" if not approve else "cancelled")
+        return True
+    with rec["_state_lock"]:
+        rec["_decision"] = bool(approve) if status == "awaiting_confirmation" else (text or "")
     rec["_gate"].set()
     return True
 
@@ -295,32 +345,16 @@ def _b64_png(data):
     return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
 
 
-def _call_executor(api_key, model, goal, subgoal, history, url, title, png_bytes, dom_list=""):
+def _call_openai_raw(api_key, model, system_text, user_text, png_bytes):
     """Ask the vision model for the next action. Returns (action_dict, raw_text)."""
     import requests as _req
-
-    hist_lines = []
-    for h in history[-8:]:
-        a = h.get("action", {})
-        hist_lines.append(f"step {h.get('step')}: {json.dumps(a)} -> {h.get('result','')}")
-    history_text = "\n".join(hist_lines) if hist_lines else "(none yet)"
-
-    user_text = (
-        f"GOAL: {goal}\n"
-        f"CURRENT SUBGOAL: {subgoal or goal}\n"
-        f"CURRENT URL: {url}\n"
-        f"PAGE TITLE: {title}\n"
-        f"INTERACTIVE ELEMENTS (prefer click_ref/type_ref by ref):\n{dom_list or '(none)'}\n\n"
-        f"RECENT ACTIONS:\n{history_text}\n\n"
-        "Return the next action JSON."
-    )
 
     payload = {
         "model": model,
         "max_tokens": 400,
         "temperature": 0,
         "messages": [
-            {"role": "system", "content": _EXECUTOR_SYSTEM},
+            {"role": "system", "content": system_text},
             {"role": "user", "content": [
                 {"type": "text", "text": user_text},
                 {"type": "image_url", "image_url": {"url": _b64_png(png_bytes)}},
@@ -334,28 +368,41 @@ def _call_executor(api_key, model, goal, subgoal, history, url, title, png_bytes
         timeout=60,
     )
     if resp.status_code != 200:
-        raise RuntimeError(f"vision model {resp.status_code}: {resp.text[:200]}")
-    raw = resp.json()["choices"][0]["message"]["content"] or ""
+        raise RuntimeError(f"vision model unavailable ({resp.status_code})")
+    try:
+        return resp.json()["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise RuntimeError("vision model returned no content") from exc
+
+
+def _call_executor(api_key, model, goal, subgoal, history, url, title, png_bytes, dom_list="",
+                   vision_call=None, clarifications=None):
+
+    hist_lines = []
+    for h in history[-8:]:
+        a = h.get("action", {})
+        hist_lines.append(f"step {h.get('step')}: {json.dumps(a)} -> {h.get('result','')}")
+    history_text = "\n".join(hist_lines) if hist_lines else "(none yet)"
+
+    user_text = (
+        f"GOAL: {goal}\n"
+        f"USER CLARIFICATIONS: {' | '.join(clarifications or []) or '(none)'}\n"
+        f"CURRENT SUBGOAL: {subgoal or goal}\n"
+        f"CURRENT URL: {url}\n"
+        f"PAGE TITLE: {title}\n"
+        f"INTERACTIVE ELEMENTS (prefer click_ref/type_ref by ref):\n{dom_list or '(none)'}\n\n"
+        f"RECENT ACTIONS:\n{history_text}\n\n"
+        "Return the next action JSON."
+    )
+
+    raw = (vision_call(_EXECUTOR_SYSTEM, user_text, png_bytes)
+           if vision_call else _call_openai_raw(api_key, model, _EXECUTOR_SYSTEM, user_text, png_bytes))
     return _parse_action(raw), raw
 
 
 def _parse_action(raw):
-    """Extract the first JSON object from the model output and validate it."""
-    text = raw.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text).strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return {"action": "ask", "question": "Model returned no actionable JSON."}
-    try:
-        action = json.loads(text[start:end + 1])
-    except Exception:
-        return {"action": "ask", "question": "Model returned malformed action JSON."}
-    if action.get("action") not in _ACTION_KINDS:
-        return {"action": "ask", "question": f"Unknown action: {action.get('action')!r}."}
-    return action
+    """Extract one validated action object without allowing malformed JSON to crash a run."""
+    return parse_action(raw, _ACTION_KINDS, _ACTION_FIELDS)
 
 
 # ---------------------------------------------------------------------------
@@ -405,17 +452,50 @@ def _log_step(run_id, record):
 
 def _park(rec, status, **fields):
     """Park the run and block until resolved or cancelled. Returns the decision."""
-    rec["_gate"].clear()
-    rec["_decision"] = None
-    rec["status"] = status
-    for k, v in fields.items():
-        rec[k] = v
+    with rec["_state_lock"]:
+        if rec["_cancel"].is_set():
+            rec["status"] = "cancelled"
+            return None
+        rec["_gate"].clear()
+        rec["_decision"] = None
+        rec["status"] = status
+        for k, v in fields.items():
+            rec[k] = v
     rec["_gate"].wait()
-    decision = rec["_decision"]
-    rec["pending_action"] = None
-    rec["pending_question"] = None
-    rec["status"] = "running"
-    return decision
+    with rec["_state_lock"]:
+        cancelled = rec["_cancel"].is_set()
+        decision = rec["_decision"]
+        rec["pending_action"] = None
+        rec["pending_question"] = None
+        if not cancelled and rec["status"] not in ("blocked", "error", "done"):
+            rec["status"] = "running"
+    return None if cancelled else decision
+
+
+def _verify_completion(goal, clarifications, summary, png_bytes, vision_call, api_key, model, url, title):
+    system_text = (
+        "You independently verify a browser automation completion claim. Do not use tools "
+        "and do not propose actions. Inspect the current screenshot against the original "
+        "goal and user clarifications. Reply with exactly one JSON object: "
+        '{"verified":true|false,"evidence":"non-empty visual facts"}. '
+        "Verification is not absolute truth: set verified false when the screenshot is "
+        "ambiguous, illegible, or does not visibly establish the goal."
+    )
+    user_text = (
+        f"ORIGINAL GOAL: {goal}\n"
+        f"USER CLARIFICATIONS: {' | '.join(clarifications or []) or '(none)'}\n"
+        f"EXECUTOR SUMMARY (untrusted): {summary}\n"
+        f"CURRENT URL: {url}\nPAGE TITLE: {title}\n"
+        "Return the structured verification JSON now."
+    )
+    raw = (vision_call(system_text, user_text, png_bytes)
+           if vision_call else _call_openai_raw(api_key, model, system_text, user_text, png_bytes))
+    data = parse_json_object(raw)
+    evidence = str(data.get("evidence") or "").strip() if data else ""
+    return {
+        "verified": bool(data and data.get("verified") is True and evidence),
+        "evidence": evidence[:500] or "No non-empty visual evidence was provided.",
+    }
 
 
 def _element_text_at(page, x, y):
@@ -545,7 +625,12 @@ def _execute(page, action):
             page.keyboard.type(str(action.get("text", "")), delay=20)
         return f"typed into {ref}"
     if kind in ("click", "double_click"):
-        x, y = int(action.get("x", 0)), int(action.get("y", 0))
+        x, y = action.get("x"), action.get("y")
+        viewport = page.viewport_size or _VIEWPORT
+        if (not isinstance(x, int) or isinstance(x, bool) or not isinstance(y, int) or
+            isinstance(y, bool) or x < 0 or y < 0 or x >= viewport["width"] or
+            y >= viewport["height"]):
+            return "error: coordinates outside the current viewport"
         if kind == "click":
             page.mouse.click(x, y)
         else:
@@ -570,12 +655,14 @@ def _execute(page, action):
     return "noop"
 
 
-def _worker(rec, api_key, vision_model, director, autonomy, max_steps, start_url, headless):
+def _worker(rec, api_key, vision_model, director, autonomy, max_steps, start_url, headless,
+            vision_call=None, vision_cleanup=None):
     from playwright.sync_api import sync_playwright
 
     run_id = rec["id"]
     history = rec["steps"]
     subgoal = ""
+    automation_audit(run_id, "start", rec.get("backend"), "run", "started")
     try:
         with sync_playwright() as p:
             # Preferred: connect to a long-lived Chrome over CDP and open a NEW
@@ -645,20 +732,27 @@ def _worker(rec, api_key, vision_model, director, autonomy, max_steps, start_url
                     page = browser.new_page(viewport=_VIEWPORT)
 
             page.goto(start_url or "about:blank", wait_until="domcontentloaded", timeout=30000)
-            rec["status"] = "running"
+            rec["status"] = "running" if not rec["_cancel"].is_set() else "cancelled"
+            if rec["_cancel"].is_set():
+                return
 
             # Initial plan from the director (Opus), if wired.
             if director:
                 try:
-                    subgoal = director(rec["goal"], f"Just opened {page.url}. Page title: {page.title()}.") or ""
+                    subgoal = director(
+                        rec["goal"],
+                        f"Just opened {page.url}. Page title: {page.title()}. User clarifications: "
+                        f"{' | '.join(rec['clarifications']) or '(none)'}.",
+                    ) or ""
                 except Exception as e:
                     print(f"[BrowserAgent] director error: {e}")
+                if rec["_cancel"].is_set():
+                    return
             rec["subgoal"] = subgoal
 
             step = 0
             while step < max_steps:
                 if rec["_cancel"].is_set():
-                    rec["status"] = "cancelled"
                     break
 
                 rec["url"], rec["title"] = page.url, page.title()
@@ -681,36 +775,72 @@ def _worker(rec, api_key, vision_model, director, autonomy, max_steps, start_url
                     action, raw = _call_executor(
                         api_key, vision_model, rec["goal"], subgoal,
                         history, rec["url"], rec["title"], png, dom_list,
+                        vision_call=vision_call, clarifications=rec["clarifications"],
                     )
                 except Exception as e:
-                    rec["status"] = "error"
-                    rec["error"] = str(e)
+                    if not rec["_cancel"].is_set():
+                        rec["status"] = "error"
+                        rec["error"] = "vision provider unavailable"
                     break
 
+                if rec["_cancel"].is_set():
+                    break
                 kind = action.get("action")
 
                 if kind == "done":
-                    rec["result"] = action.get("summary", "Task complete.")
-                    rec["status"] = "done"
-                    _record(rec, step, shot_path, subgoal, raw, action, "", "done")
+                    summary = str(action.get("summary") or "").strip()
+                    if not summary:
+                        rec["status"] = "blocked"
+                        rec["result"] = "Completion was blocked because the model supplied no summary."
+                        _record(rec, step, shot_path, subgoal, raw, action, "", "blocked: empty summary")
+                        automation_audit(run_id, "step", rec.get("backend"), "done", "blocked")
+                        break
+                    try:
+                        verification = _verify_completion(
+                            rec["goal"], rec["clarifications"], summary, png,
+                            vision_call, api_key, vision_model, rec["url"], rec["title"],
+                        )
+                    except Exception:
+                        verification = {"verified": False, "evidence": "Verification provider failed."}
+                    with rec["_action_lock"]:
+                        if rec["_cancel"].is_set():
+                            break
+                        rec["verification"] = verification
+                        if verification["verified"]:
+                            rec["result"] = summary
+                            rec["completion_verified"] = True
+                            rec["status"] = "done"
+                            outcome = "done"
+                        else:
+                            rec["completion_verified"] = False
+                            rec["status"] = "blocked"
+                            rec["result"] = "Completion could not be verified from the current screenshot."
+                            outcome = "blocked"
+                    _record(rec, step, shot_path, subgoal, raw, action, "", outcome)
+                    automation_audit(run_id, "step", rec.get("backend"), "done", outcome)
                     break
 
                 if kind == "ask":
                     answer = _park(rec, "awaiting_input",
                                    pending_question=action.get("question", "Need input."))
                     if rec["_cancel"].is_set():
-                        rec["status"] = "cancelled"
                         break
-                    subgoal = (subgoal + f"\nUser said: {answer}").strip()
-                    rec["subgoal"] = subgoal
+                    answer = str(answer or "").strip()
+                    if answer:
+                        rec["clarifications"].append(answer[:500])
                     _record(rec, step, shot_path, subgoal, raw, action, "", "asked user")
+                    automation_audit(run_id, "step", rec.get("backend"), "ask", "awaiting_input")
                     step += 1
+                    rec["step"] = step
                     continue
 
                 # Determine target element text for click actions (sensitivity + dataset value).
                 element_text = ""
                 if kind in ("click", "double_click"):
-                    element_text = _element_text_at(page, int(action.get("x", 0)), int(action.get("y", 0)))
+                    x, y = action.get("x"), action.get("y")
+                    if (isinstance(x, int) and not isinstance(x, bool) and
+                            isinstance(y, int) and not isinstance(y, bool)):
+                        element_text = _element_text_at(page, x, y)
                 elif kind in ("click_ref", "type_ref"):
                     # Use the label from the DOM snapshot for the chosen ref so the
                     # BUY-gate still sees the button text.
@@ -721,67 +851,52 @@ def _worker(rec, api_key, vision_model, director, autonomy, max_steps, start_url
                             break
 
                 sensitive = _is_sensitive(action, element_text, rec["url"])
-                if sensitive and autonomy == "pause":
+                needs_confirmation = autonomy == "confirm_all" or (
+                    autonomy == "pause" and sensitive
+                )
+                if needs_confirmation:
                     approved = _park(rec, "awaiting_confirmation", pending_action=action)
                     if rec["_cancel"].is_set():
-                        rec["status"] = "cancelled"
                         break
                     if not approved:
                         _record(rec, step, shot_path, subgoal, raw, action, element_text, "declined")
-                        rec["result"] = "Stopped: user declined a sensitive action."
-                        rec["status"] = "done"
+                        _mark_cancelled(rec, "declined")
                         break
 
-                try:
-                    result = _execute(page, action)
-                except Exception as e:
-                    result = f"error: {e}"
-                _record(rec, step, shot_path, subgoal, raw, action, element_text, result)
-
-                # Loop guard with self-recovery: a vision agent often re-clicks
-                # the same control because it cannot tell the click landed. On the
-                # first repeat, inject a corrective hint so the model tries a
-                # different element (prefer click_ref) or scrolls, instead of
-                # grinding. Only after several repeats does it stop and ask.
-                sig = json.dumps(action, sort_keys=True)
-                if sig == rec.get("_last_sig"):
-                    rec["_repeat"] = rec.get("_repeat", 0) + 1
-                else:
-                    rec["_repeat"] = 0
-                    rec["_last_sig"] = sig
-
-                if rec["_repeat"] == 1:
-                    # Self-correct: tell the executor not to repeat and to pick a
-                    # different element by ref next time.
-                    hint = ("\nNOTE: the last action did not change the page. Do NOT "
-                            "repeat the same click. Pick a DIFFERENT element from the "
-                            "list using click_ref (e.g. the product title link or the "
-                            "Add to Cart button), or scroll to reveal it.")
-                    if hint not in subgoal:
-                        subgoal = (subgoal + hint).strip()
-                        rec["subgoal"] = subgoal
-                elif rec["_repeat"] >= 3:
-                    rec["_repeat"] = 0
-                    rec["_last_sig"] = None
-                    q = ("I'm stuck repeating the same step and it isn't changing the "
-                         "page. Want me to keep trying, or should I do something else?")
-                    answer = _park(rec, "awaiting_input", pending_question=q)
+                with rec["_action_lock"]:
                     if rec["_cancel"].is_set():
-                        rec["status"] = "cancelled"
                         break
-                    subgoal = (subgoal + f"\nUser said: {answer}").strip()
-                    rec["subgoal"] = subgoal
+                    try:
+                        result = _execute(page, action)
+                    except Exception as e:
+                        result = f"error: {e}"
+                _record(rec, step, shot_path, subgoal, raw, action, element_text, result)
+                automation_audit(run_id, "step", rec.get("backend"), kind,
+                                 "error" if str(result).startswith("error") else "executed")
+
+                sig = action_signature(action)
+                if recent_signature_count(history, sig, window=6) >= 3:
+                    rec["status"] = "blocked"
+                    rec["result"] = "Automation was blocked after repeating the same physical action."
+                    break
 
                 page.wait_for_timeout(400)
+                if rec["_cancel"].is_set():
+                    break
                 step += 1
                 rec["step"] = step
 
                 # Re-consult the director periodically.
                 if director and step % _DIRECTOR_INTERVAL == 0:
                     try:
-                        summary = (f"At {page.url} (title: {page.title()}). "
-                                   f"Last action: {json.dumps(action)} -> {result}.")
+                        summary = (
+                            f"At {page.url} (title: {page.title()}). Last action kind: {kind}. "
+                            f"Execution receipt: {result}. User clarifications: "
+                            f"{' | '.join(rec['clarifications']) or '(none)'}."
+                        )
                         new_sub = director(rec["goal"], summary)
+                        if rec["_cancel"].is_set():
+                            break
                         if new_sub:
                             subgoal = new_sub
                             rec["subgoal"] = subgoal
@@ -789,9 +904,9 @@ def _worker(rec, api_key, vision_model, director, autonomy, max_steps, start_url
                         print(f"[BrowserAgent] director error: {e}")
 
             else:
-                rec["status"] = rec["status"] if rec["status"] in ("error", "cancelled") else "done"
-                if rec["result"] is None:
-                    rec["result"] = f"Reached step limit ({max_steps})."
+                if not rec["_cancel"].is_set() and rec["status"] not in ("error", "blocked"):
+                    rec["status"] = "blocked"
+                    rec["result"] = "Step limit reached before completion was verified."
 
             try:
                 if cdp is not None:
@@ -812,10 +927,21 @@ def _worker(rec, api_key, vision_model, director, autonomy, max_steps, start_url
             except Exception:
                 pass
     except Exception as e:
-        rec["status"] = "error"
-        rec["error"] = str(e)
+        if not rec["_cancel"].is_set():
+            rec["status"] = "error"
+            rec["error"] = "browser automation failed"
     finally:
+        if vision_cleanup:
+            try:
+                vision_cleanup()
+            except Exception:
+                pass
+        if rec["_cancel"].is_set():
+            with rec["_state_lock"]:
+                rec["status"] = "cancelled"
+                rec["completion_verified"] = False
         rec["finished"] = datetime.now(timezone.utc).isoformat()
+        automation_audit(run_id, "finish", rec.get("backend"), "run", rec.get("status"))
 
 
 def _record(rec, step, shot_path, subgoal, raw, action, element_text, result):
@@ -840,14 +966,16 @@ def _record(rec, step, shot_path, subgoal, raw, action, element_text, result):
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def start_run(goal, api_key, vision_model=None, director=None, autonomy="pause",
-              max_steps=_MAX_STEPS_DEFAULT, start_url="", headless=False):
+def start_run(goal, api_key=None, vision_model=None, director=None, autonomy="pause",
+              max_steps=_MAX_STEPS_DEFAULT, start_url="", headless=False,
+              vision_call=None, vision_cleanup=None, backend="legacy",
+              executor_provider="openai", executor_model=None):
     """Launch a browser agent run in a background thread. Returns the run record's
     public status (including its id). Raises if Playwright or the key is missing."""
     ok, detail = playwright_available()
     if not ok:
         raise RuntimeError(detail)
-    if not api_key:
+    if not api_key and vision_call is None:
         raise RuntimeError("OpenAI API key required for the vision executor.")
 
     goal = (goal or "").strip()
@@ -863,9 +991,13 @@ def start_run(goal, api_key, vision_model=None, director=None, autonomy="pause",
         autonomy = "pause"
 
     rec = _new_run(goal)
+    rec["backend"] = str(backend or "legacy")[:64]
+    rec["executor_provider"] = str(executor_provider or "openai")[:32]
+    rec["executor_model"] = str(executor_model or vision_model or _DEFAULT_VISION_MODEL)[:80]
     t = threading.Thread(
         target=_worker,
-        args=(rec, api_key, vision_model, director, autonomy, max_steps, start_url, headless),
+        args=(rec, api_key, vision_model, director, autonomy, max_steps, start_url, headless,
+              vision_call, vision_cleanup),
         daemon=True,
     )
     rec["_thread"] = t

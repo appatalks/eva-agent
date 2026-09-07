@@ -316,6 +316,9 @@
     if (!text) return { content: '', actions: [] };
     options = options || {};
     var actionContext = { userMessage: String(options.userMessage || '') };
+    var nativeResearch = options.nativeResearch === true || (global.EvaRequestRouting &&
+      typeof global.EvaRequestRouting.resolveResearchRequest === 'function' &&
+      global.EvaRequestRouting.resolveResearchRequest(actionContext.userMessage, []).active);
     var actions = [];
     var out = text;
     var match;
@@ -340,6 +343,11 @@
       if (!cap) {
         actions.push({ ok: false, error: 'unknown-capability', id: spec.id });
         // Silently remove — local models often hallucinate capability IDs.
+        out = out.replace(r.full, '');
+        continue;
+      }
+      if (spec.id === 'agent.spawn_batch' && nativeResearch && !_agentLaunchIntent(actionContext.userMessage)) {
+        actions.push({ ok: false, error: 'native-research-agent-blocked', id: spec.id });
         out = out.replace(r.full, '');
         continue;
       }
@@ -702,6 +710,9 @@
     var actions = Array.isArray(opts.actions) ? opts.actions.slice() : [];
     var priorBatch = _loadLastAgentBatch();
     var repeatIntent = _agentRepeatIntent(userMessage) && priorBatch;
+    if (opts.nativeResearch === true && !_agentLaunchIntent(userMessage) && !repeatIntent) {
+      return { content: content, actions: actions, deferredSignal: false };
+    }
     if (!_agentLaunchIntent(userMessage) && !repeatIntent) {
       return { content: content, actions: actions, deferredSignal: false };
     }
@@ -751,6 +762,11 @@
   // ---------------------------------------------------------------------------
   async function callAgent(role, model, systemPrompt, conversation, taskMessage, extra, sessionId, turnId) {
     var url = bridgeUrl().replace(/\/+$/, '') + '/v1/aig/chat';
+    var researchHistory = (global.EvaRequestRouting && typeof global.EvaRequestRouting.getResearchHistory === 'function')
+      ? global.EvaRequestRouting.getResearchHistory(conversation)
+      : (Array.isArray(conversation) ? conversation.filter(function (message) {
+        return message && message.role === 'user' && typeof message.content === 'string';
+      }).map(function (message) { return message.content; }).slice(-6) : []);
     var msgs = [{ role: 'system', content: systemPrompt }];
     if (Array.isArray(conversation) && conversation.length) {
       // Strip any prior system messages so each agent's framing is its own.
@@ -779,12 +795,16 @@
       lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
       image_b64: String((extra && extra.image_b64) || ''),
       image_mime: String((extra && extra.image_mime) || 'image/jpeg'),
+      research_history: researchHistory,
+      retrieve_data: role !== 'reviewer',
       openai_api_key: authOpenAI(),
       internal: true
     };
     if (extra && typeof extra === 'object') {
       Object.keys(extra).forEach(function (k) { payload[k] = extra[k]; });
     }
+    payload.research_history = researchHistory;
+    if (role === 'reviewer' || (extra && extra.no_tools === true)) payload.retrieve_data = false;
     var resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -912,6 +932,14 @@
     var turnId = String(opts.turnId || '');
     var imageB64 = String(opts.imageB64 || '');
     var imageMime = String(opts.imageMime || 'image/jpeg');
+    var researchHistory = Array.isArray(opts.researchHistory)
+      ? opts.researchHistory.slice(-6)
+      : ((global.EvaRequestRouting && typeof global.EvaRequestRouting.getResearchHistory === 'function')
+        ? global.EvaRequestRouting.getResearchHistory(convo) : []);
+    var researchPlan = opts.researchPlan || ((global.EvaRequestRouting && typeof global.EvaRequestRouting.resolveResearchRequest === 'function')
+      ? global.EvaRequestRouting.resolveResearchRequest(userMsg, convo)
+      : { active: false, query: '', strategy: 'search', needs_topic: false, continuation: false });
+    var nativeResearch = opts.nativeResearch === true || !!researchPlan.active;
     var trace = [];
     var _turnStart = Date.now();
     var _draftMs = 0, _reviewMs = 0, _reviseMs = 0;
@@ -983,7 +1011,7 @@
     ].join('\n');
     var draft = await callAgent(
       'eva', cfg.evaModel, cfg.evaPrompt, convo, draftTask,
-      { inject_memory: true, recall_query: userMsg, retrieve_data: true, image_b64: imageB64, image_mime: imageMime }, sessionId, turnId
+      { inject_memory: true, recall_query: userMsg, retrieve_data: true, research_plan: researchPlan, research_history: researchHistory, native_research: nativeResearch, image_b64: imageB64, image_mime: imageMime }, sessionId, turnId
     );
 
     // Eva's silent self-review signal decides whether a second opinion runs.
@@ -1046,7 +1074,7 @@
       try {
         review = await callAgent(
           'reviewer', cfg.reviewerModel, cfg.reviewerPrompt, convo, reviewTask,
-          { no_tools: true }, sessionId, turnId
+          { no_tools: true, retrieve_data: false, research_plan: researchPlan, research_history: researchHistory, native_research: nativeResearch }, sessionId, turnId
         );
       } catch (reviewErr) {
         // Review failed (timeout, network). Skip review and use the draft as-is.
@@ -1087,7 +1115,7 @@
       try {
         revised = await callAgent(
           'eva', cfg.evaModel, cfg.evaPrompt, convo, reviseTask,
-          { inject_memory: true, recall_query: userMsg, image_b64: imageB64, image_mime: imageMime }, sessionId, turnId
+          { inject_memory: true, recall_query: userMsg, retrieve_data: true, research_plan: researchPlan, research_history: researchHistory, native_research: nativeResearch, image_b64: imageB64, image_mime: imageMime }, sessionId, turnId
         );
       } catch (reviseErr) {
         // Revise failed (timeout, network error). Fall back to the draft

@@ -28,7 +28,7 @@ ownership boundaries, and multi-phase plans.
 | [contracts/provider-routing.md](contracts/provider-routing.md) | Contract | AIG-only selector, backend policy, and tool-routing behavior |
 | [contracts/aig-request-lifecycle.md](contracts/aig-request-lifecycle.md) | Contract | Ownership split between the AIG handler, request normalization, and preflight planning |
 | [deprecation-inventory.md](deprecation-inventory.md) | Inventory | Compatibility paths and the evidence required before removal |
-| [eva-memory-intelligence-plan.md](eva-memory-intelligence-plan.md) | Plan | Memory trust boundary, layered memory model, and learning lifecycle |
+| [eva-memory-intelligence-plan.md](eva-memory-intelligence-plan.md) | Plan | Long-term identity charter, model/provider choice, standing-authorized autonomy, execution continuity, memory/learning lifecycle, and generational preservation roadmap |
 | [eva-workspaces-terminal-plan.md](eva-workspaces-terminal-plan.md) | Plan | Coding workspaces, PTY broker, agent runs, and review/handoff |
 | [protected-memory-plan.md](protected-memory-plan.md) | Plan | YubiKey-gated encrypted vault, protected artifacts, and release policy |
 | [eva_default_skills/README.md](eva_default_skills/README.md) | Reference | Default Skills manifest and its generated Kusto seed |

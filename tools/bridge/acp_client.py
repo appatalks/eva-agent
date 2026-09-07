@@ -392,10 +392,11 @@ class ACPClient:
 
     PROTOCOL_VERSION = 1  # ACP protocol major version
 
-    def __init__(self, copilot_path="copilot", cwd=None, model=None, mcp_config=None, reasoning_effort=None, tool_profile=None):
+    def __init__(self, copilot_path="copilot", cwd=None, model=None, mcp_config=None, reasoning_effort=None, tool_profile=None, no_tools=False):
         self.copilot_path = copilot_path
         self.cwd = cwd or os.getcwd()
         self.model = model  # None = use CLI default
+        self.no_tools = bool(no_tools)
         self.reasoning_effort = reasoning_effort  # None = use model default
         self.mcp_config = mcp_config or {}  # MCP servers config dict
         self.tool_profile = _normalize_tool_profile(tool_profile, bool(self.mcp_config))
@@ -429,6 +430,8 @@ class ACPClient:
     def start(self):
         """Spawn copilot subprocess, initialize ACP, create session."""
         cmd = [self.copilot_path, "--acp", "--stdio"]
+        if self.no_tools:
+            cmd.extend(["--available-tools=", "--disable-builtin-mcps", "--no-custom-instructions"])
         if self.model:
             cmd.extend(["--model", self.model])
         if self.reasoning_effort:
@@ -802,6 +805,20 @@ class ACPClient:
             remembered_mode = self._session_permission_modes.get(session_id, "interactive")
         permission_mode = prompt_states[0].get("permission_mode", "interactive") \
             if len(prompt_states) == 1 else remembered_mode
+        if self.no_tools or permission_mode == "automation_no_tools":
+            reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
+            reject_option = reject_option or next(
+                (option for option in options if option["kind"] == "reject_always"), None
+            )
+            if reject_option:
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": reject_option["option_id"]}
+                })
+            else:
+                self._send_rpc_error(rpc_id, -32602, "Automation vision does not authorize tools")
+            _telemetry_emit("acp_permission", decision="automation-no-tools-deny",
+                            tool_kind=tool_kind, option_count=len(options))
+            return
         workspace_mode = permission_mode == "workspace_auto"
         mail_scoped = _mail_scoped_tool_call(tool_call)
         execute_category = _workspace_execute_category(tool_call, self.cwd) \

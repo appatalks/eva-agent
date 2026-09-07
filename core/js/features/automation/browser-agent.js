@@ -21,6 +21,11 @@
   var POLL_MS = 1200;
   var _state = {
     runId: null,
+    starting: false,
+    generation: 0,
+    cancelRequested: false,
+    cancelPromise: null,
+    closeAfterCancel: false,
     poll: null,
     status: null,
     shotTick: 0,
@@ -30,8 +35,8 @@
     completed: false,
     onConfirm: null,           // fired when the agent parks for confirmation/input
     confirmKey: null,          // de-dupes the confirm callback per park
-    onProgress: null,          // fired when the agent's plan/subgoal changes
-    lastProgress: null         // last subgoal narrated, to avoid repeats
+    onProgress: null,          // fired when an executed receipt changes
+    lastProgress: null         // last executed receipt, to avoid repeats
   };
 
   // --- Bridge helpers -------------------------------------------------------
@@ -48,6 +53,27 @@
 
   function setChatStatus(type, text) {
     if (typeof setStatus === 'function') setStatus(type, text);
+  }
+
+  function isTerminal(status) {
+    return status === 'done' || status === 'blocked' || status === 'cancelled' || status === 'error';
+  }
+
+  function isLiveStatus(status) {
+    return !!status && !isTerminal(status.status);
+  }
+
+  function removePopup() {
+    stopPolling();
+    var el = document.getElementById('evaBrowserPopup');
+    if (el) el.remove();
+    _state.runId = null;
+    _state.starting = false;
+    _state.status = null;
+    _state.cancelRequested = false;
+    _state.cancelPromise = null;
+    _state.closeAfterCancel = false;
+    _state.confirmKey = null;
   }
 
   // --- Popup construction ---------------------------------------------------
@@ -76,6 +102,7 @@
       '<div class="ebp-subgoal" id="ebpSubgoal"></div>',
       '<div class="ebp-statusrow">',
       '  <span class="ebp-badge" id="ebpBadge">starting</span>',
+      '  <span class="ebp-executor" id="ebpExecutor"></span>',
       '  <span class="ebp-url" id="ebpUrl"></span>',
       '</div>',
       '<div class="ebp-prompt" id="ebpPrompt" hidden>',
@@ -133,11 +160,12 @@
   }
 
   function closePopup() {
-    stopPolling();
-    var el = document.getElementById('evaBrowserPopup');
-    if (el) el.remove();
-    _state.runId = null;
-    _state.status = null;
+    if (isActive()) {
+      _state.closeAfterCancel = true;
+      stopRun();
+      return;
+    }
+    removePopup();
   }
 
   // --- Rendering ------------------------------------------------------------
@@ -148,9 +176,49 @@
     awaiting_confirmation: 'needs approval',
     awaiting_input: 'needs input',
     done: 'done',
+    blocked: 'blocked',
     cancelled: 'stopped',
     error: 'error'
   };
+
+  function neutralActionLabel(action) {
+    var value = String(action || '').toLowerCase();
+    if (/\b(click|tap|mouse)\b/.test(value)) return 'Click';
+    if (/\b(type|write|input|fill)\b/.test(value)) return 'Type';
+    if (/\b(scroll|wheel)\b/.test(value)) return 'Scroll';
+    if (/\b(navigate|open|visit|url)\b/.test(value)) return 'Navigate';
+    if (/\b(select|choose|pick)\b/.test(value)) return 'Select';
+    if (/\b(key|press|hotkey)\b/.test(value)) return 'Press key';
+    if (/\b(drag|drop|move)\b/.test(value)) return 'Move';
+    if (/\b(wait|sleep)\b/.test(value)) return 'Wait';
+    if (/\b(read|inspect|observe|look|screen|screenshot)\b/.test(value)) return 'Read screen';
+    return 'Action';
+  }
+
+  function executedReceipt(status) {
+    var steps = status && Array.isArray(status.steps) ? status.steps : [];
+    for (var index = steps.length - 1; index >= 0; index--) {
+      var step = steps[index] || {};
+      if (!step.action || step.result == null) continue;
+      var resultText = typeof step.result === 'string' ? step.result : JSON.stringify(step.result);
+      var failed = !!step.error || /\b(error|failed|failure|unable|could not)\b/i.test(resultText || '');
+      return {
+        key: String(step.id || step.step || index) + ':' + String(step.action) + ':' + resultText,
+        action: neutralActionLabel(step.action),
+        outcome: failed ? 'error' : 'success'
+      };
+    }
+    return null;
+  }
+
+  function executorLabel(status) {
+    if (!status) return '';
+    var model = String(status.executor_model || '').trim();
+    var provider = String(status.executor_provider || '').trim();
+    if (!model && !provider) return '';
+    if (model && provider) return model + ' / ' + provider;
+    return model || provider;
+  }
 
   function render(status) {
     if (!status) return;
@@ -159,7 +227,7 @@
     // Always evaluate the confirmation gate so a parked run prompts Eva to ask
     // naturally, regardless of which surface (popup or embedded panel) is shown.
     maybeFireConfirm(status);
-    // Narrate progress when the plan/subgoal meaningfully changes.
+    // Narrate progress only when the latest executed receipt changes.
     maybeFireProgress(status);
 
     // In the fullscreen voice view, render into the faint embedded panel on
@@ -184,7 +252,11 @@
     if (stepEl) stepEl.textContent = status.step != null ? ('step ' + status.step) : '';
 
     var subEl = document.getElementById('ebpSubgoal');
-    if (subEl) subEl.textContent = status.subgoal ? ('Plan: ' + status.subgoal) : '';
+    var popupReceipt = executedReceipt(status);
+    if (subEl) subEl.textContent = popupReceipt ? (popupReceipt.action + ': ' + popupReceipt.outcome) : '';
+
+    var executorEl = document.getElementById('ebpExecutor');
+    if (executorEl) executorEl.textContent = executorLabel(status);
 
     var urlEl = document.getElementById('ebpUrl');
     if (urlEl) urlEl.textContent = status.title || status.url || status.active_app || status.screen || '';
@@ -212,7 +284,7 @@
   function renderEmbedded(status) {
     var panel = document.getElementById('vvVision');
     if (!panel) return;
-    var terminal = (status.status === 'done' || status.status === 'cancelled' || status.status === 'error');
+    var terminal = isTerminal(status.status);
     panel.classList.add('open');
     panel.setAttribute('aria-hidden', 'false');
     if (terminal) panel.classList.remove('looking'); else panel.classList.add('looking');
@@ -248,7 +320,10 @@
     var txt = document.getElementById('vvVisionText');
     if (txt) {
       var line = '[' + (_state.title || 'Agent') + ']';
-      if (status.subgoal) line += '\n' + status.subgoal;
+      var embeddedExecutor = executorLabel(status);
+      if (embeddedExecutor) line += '\n' + embeddedExecutor;
+      var embeddedReceipt = executedReceipt(status);
+      if (embeddedReceipt) line += '\n' + embeddedReceipt.action + ': ' + embeddedReceipt.outcome;
       else if (status.url || status.title) line += '\n' + (status.title || status.url);
       if (terminal && status.result) line += '\n' + status.result;
       else if (terminal && status.error) line += '\nError: ' + status.error;
@@ -269,9 +344,7 @@
     if (status.status === 'awaiting_input') {
       return status.pending_question || 'I need a bit more information to continue. What should I do?';
     }
-    var act = status.pending_action || {};
-    var reason = act.reason || act.text || act.action || 'complete this purchase';
-    return 'I\'m at the final step to ' + reason + '. Do you want me to confirm and place the order? Say yes to go ahead or no to stop.';
+    return 'I\'m ready to continue with the requested action. Do you want me to approve it? Say yes to continue or no to stop.';
   }
 
   // Fire the confirmation callback once per park so Eva asks in chat/voice
@@ -290,19 +363,18 @@
     }
   }
 
-  // Narrate the agent's plan when it changes, so the user hears progress and
-  // knows Eva is working rather than stuck. Throttled to meaningful changes
-  // (the director sets a new subgoal every few steps).
+  // Narrate only executed receipts. Planner text can contain imperatives,
+  // reasons, or user-provided text and is not a trusted activity signal.
   function maybeFireProgress(status) {
     if (typeof _state.onProgress !== 'function') return;
-    var sub = (status && status.subgoal) ? String(status.subgoal).trim() : '';
-    if (!sub) return;
+    var receipt = executedReceipt(status);
+    if (!receipt) return;
     // Skip while parked (the confirm/ask already speaks) or terminal.
     if (status.status === 'awaiting_confirmation' || status.status === 'awaiting_input') return;
-    if (status.status === 'done' || status.status === 'cancelled' || status.status === 'error') return;
-    if (sub === _state.lastProgress) return;
-    _state.lastProgress = sub;
-    try { _state.onProgress(sub, status); } catch (e) {}
+    if (isTerminal(status.status)) return;
+    if (receipt.key === _state.lastProgress) return;
+    _state.lastProgress = receipt.key;
+    try { _state.onProgress(receipt, status); } catch (e) {}
   }
 
   function refreshShot(status) {
@@ -367,7 +439,7 @@
   function renderFooter(status) {
     var stop = document.getElementById('ebpStop');
     if (!stop) return;
-    var terminal = (status.status === 'done' || status.status === 'cancelled' || status.status === 'error');
+    var terminal = isTerminal(status.status);
     if (terminal) {
       stop.textContent = 'Close';
       stop.classList.add('ebp-done');
@@ -397,9 +469,43 @@
 
   // --- Network actions ------------------------------------------------------
 
+  function buildRunPayload(goal, opts) {
+    opts = opts || {};
+    var backend = Object.prototype.hasOwnProperty.call(opts, 'backend')
+      ? String(opts.backend || '').trim()
+      : String((document.getElementById('selAIGBackend') || {}).value || '').trim();
+    var body = {
+      goal: String(goal || '').trim(),
+      autonomy: opts.autonomy || 'pause',
+      use_director: opts.use_director !== false
+    };
+    if (backend) body.backend = backend;
+    var effort = Object.prototype.hasOwnProperty.call(opts, 'reasoning_effort')
+      ? opts.reasoning_effort
+      : (typeof getReasoningEffort === 'function' ? getReasoningEffort() : '');
+    if (effort) body.reasoning_effort = effort;
+    if (opts.start_url) body.start_url = opts.start_url;
+    if (opts.max_steps) body.max_steps = opts.max_steps;
+
+    var legacyVisionModel = String(opts.vision_model || '').trim();
+    var directBackend = backend === 'openai' || backend.indexOf('openai:') === 0;
+    if (!backend && legacyVisionModel) body.vision_model = legacyVisionModel;
+    if (directBackend || (!backend && legacyVisionModel)) {
+      var key = openaiKey();
+      if (key) body.openai_api_key = key;
+    }
+    return body;
+  }
+
   async function launch(goal, opts) {
     opts = opts || {};
     goal = (goal || '').trim();
+    if (isActive()) {
+      setChatStatus('error', (_state.title || 'Agent') + ' is already active. Stop it before starting another task.');
+      return false;
+    }
+    removePopup();
+    var generation = ++_state.generation;
     _state.endpoint = opts.endpoint || '/v1/browser';
     _state.title = opts.title || 'Browser Agent';
     _state.onComplete = (typeof opts.onComplete === 'function') ? opts.onComplete : null;
@@ -408,30 +514,21 @@
     _state.lastProgress = null;
     _state.confirmKey = null;
     _state.completed = false;
+    _state.starting = true;
+    _state.cancelRequested = false;
+    _state.cancelPromise = null;
+    _state.closeAfterCancel = false;
     if (!goal) {
+      _state.starting = false;
       setChatStatus('error', _state.title + ': no goal provided.');
-      return;
-    }
-    var key = openaiKey();
-    if (!key) {
-      setChatStatus('error', _state.title + ' needs an OpenAI key (Settings > Auth).');
-      return;
+      return false;
     }
 
-    closePopup(); // one run at a time
     ensurePopup();
     _applyTitle();
     render({ id: '', goal: goal, status: 'starting', step: 0 });
 
-    var body = {
-      goal: goal,
-      openai_api_key: key,
-      autonomy: opts.autonomy || 'pause',
-      use_director: opts.use_director !== false
-    };
-    if (opts.start_url) body.start_url = opts.start_url;
-    if (opts.vision_model) body.vision_model = opts.vision_model;
-    if (opts.max_steps) body.max_steps = opts.max_steps;
+    var body = buildRunPayload(goal, opts);
 
     try {
       var resp = await fetch(bridgeBase() + _state.endpoint + '/run', {
@@ -440,19 +537,27 @@
         body: JSON.stringify(body)
       });
       var data = await resp.json();
+      if (generation !== _state.generation) return false;
       if (!resp.ok) {
+        _state.starting = false;
         var msg = (data && data.error && data.error.message) || ('HTTP ' + resp.status);
         setChatStatus('error', _state.title + ': ' + msg);
         render({ id: '', goal: goal, status: 'error', error: msg });
-        return;
+        return false;
       }
       _state.runId = data.id;
+      _state.starting = false;
       render(data);
-      startPolling();
+      startPolling(data.id, generation);
+      if (_state.cancelRequested) stopRun();
       setChatStatus('info', _state.title + ' started.');
+      return true;
     } catch (e) {
+      if (generation !== _state.generation) return false;
+      _state.starting = false;
       setChatStatus('error', _state.title + ' could not reach the bridge.');
       render({ id: '', goal: goal, status: 'error', error: String(e) });
+      return false;
     }
   }
 
@@ -461,10 +566,10 @@
     if (t) t.innerHTML = 'Eva &middot; ' + _state.title;
   }
 
-  function startPolling() {
+  function startPolling(runId, generation) {
     stopPolling();
-    _state.poll = setInterval(pollOnce, POLL_MS);
-    pollOnce();
+    _state.poll = setInterval(function () { pollOnce(runId, generation); }, POLL_MS);
+    pollOnce(runId, generation);
   }
 
   function stopPolling() {
@@ -474,27 +579,35 @@
     }
   }
 
-  async function pollOnce() {
-    if (!_state.runId) return;
+  async function pollOnce(runId, generation) {
+    runId = runId || _state.runId;
+    generation = generation == null ? _state.generation : generation;
+    if (!runId || generation !== _state.generation || runId !== _state.runId) return;
     try {
       var resp = await fetch(bridgeBase() + _state.endpoint + '/status?run_id=' +
-        encodeURIComponent(_state.runId), { signal: AbortSignal.timeout(8000) });
+        encodeURIComponent(runId), { signal: AbortSignal.timeout(8000) });
+      if (generation !== _state.generation || runId !== _state.runId) return;
       if (!resp.ok) {
         // Track consecutive failures. After 3 404s the run_id is stale
         // (bridge restarted or run expired). Stop spamming the console.
         _state._pollFails = (_state._pollFails || 0) + 1;
         if (resp.status === 404 && _state._pollFails >= 3) {
-          console.warn('[Agent] Run ' + _state.runId + ' no longer exists, stopping poll');
+          console.warn('[Agent] Run ' + runId + ' no longer exists, stopping poll');
           stopPolling();
           _state.runId = null;
+          _state.status = { status: 'error', error: 'The automation run is no longer available.' };
         }
         return;
       }
       _state._pollFails = 0;
       var status = await resp.json();
+      if (generation !== _state.generation || runId !== _state.runId) return;
+      if (status.id && status.id !== runId) return;
       render(status);
-      if (status.status === 'done' || status.status === 'cancelled' || status.status === 'error') {
+      if (isTerminal(status.status)) {
         stopPolling();
+        _state.starting = false;
+        _state.confirmKey = null;
         // Fire the completion hook exactly once so the caller (Eva) can become
         // aware of the actual outcome and acknowledge it.
         if (!_state.completed) {
@@ -503,6 +616,9 @@
             try { _state.onComplete(status, _state.endpoint, _state.title); } catch (e) {}
           }
         }
+        if (_state.closeAfterCancel) {
+          setTimeout(removePopup, 0);
+        }
       }
     } catch (e) {
       // transient; keep polling
@@ -510,38 +626,82 @@
   }
 
   async function confirmRun(approve, text) {
-    if (!_state.runId) return;
+    if (!_state.runId || _state.cancelRequested || !isLiveStatus(_state.status)) return false;
+    var runId = _state.runId;
+    var generation = _state.generation;
     try {
-      await fetch(bridgeBase() + _state.endpoint + '/confirm', {
+      var resp = await fetch(bridgeBase() + _state.endpoint + '/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ run_id: _state.runId, approve: approve, text: text || '' })
+        body: JSON.stringify({ run_id: runId, approve: approve, text: text || '' })
       });
+      if (generation !== _state.generation || runId !== _state.runId) return false;
+      if (!resp.ok) {
+        var data = await resp.json().catch(function () { return {}; });
+        var msg = (data && data.error && data.error.message) || ('HTTP ' + resp.status);
+        _state.confirmKey = null;
+        setChatStatus('error', _state.title + ': confirmation failed: ' + msg);
+        pollOnce(runId, generation);
+        return false;
+      }
       // optimistic: hide the prompt until next poll
       var wrap = document.getElementById('ebpPrompt');
       if (wrap) wrap.hidden = true;
-      pollOnce();
+      pollOnce(runId, generation);
+      return true;
     } catch (e) {
+      if (generation !== _state.generation || runId !== _state.runId) return false;
+      _state.confirmKey = null;
       setChatStatus('error', 'Browser agent: could not send confirmation.');
+      return false;
     }
   }
 
   async function stopRun() {
-    if (!_state.runId) { closePopup(); return; }
+    if (!_state.runId) {
+      if (_state.starting) {
+        _state.cancelRequested = true;
+        setChatStatus('info', _state.title + ': stopping the task.');
+        return false;
+      }
+      removePopup();
+      return true;
+    }
+    if (_state.cancelPromise) return _state.cancelPromise;
+    var runId = _state.runId;
+    var generation = _state.generation;
+    _state.cancelRequested = true;
+    _state.cancelPromise = (async function () {
     try {
-      await fetch(bridgeBase() + _state.endpoint + '/cancel', {
+      var resp = await fetch(bridgeBase() + _state.endpoint + '/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ run_id: _state.runId })
+        body: JSON.stringify({ run_id: runId })
       });
-      pollOnce();
+      if (generation !== _state.generation || runId !== _state.runId) return false;
+      if (!resp.ok) {
+        var data = await resp.json().catch(function () { return {}; });
+        var msg = (data && data.error && data.error.message) || ('HTTP ' + resp.status);
+        _state.cancelRequested = false;
+        setChatStatus('error', _state.title + ': could not stop the task: ' + msg);
+        return false;
+      }
+      pollOnce(runId, generation);
+      return true;
     } catch (e) {
-      closePopup();
+      if (generation !== _state.generation || runId !== _state.runId) return false;
+      _state.cancelRequested = false;
+      setChatStatus('error', _state.title + ': could not stop the task.');
+      return false;
+    }
+    })();
+    try { return await _state.cancelPromise; } finally {
+      if (generation === _state.generation && runId === _state.runId) _state.cancelPromise = null;
     }
   }
 
   function isActive() {
-    return !!_state.runId;
+    return !!(_state.starting || (_state.runId && isLiveStatus(_state.status)));
   }
 
   // True when the active run is parked waiting for a confirmation or input that
@@ -551,19 +711,19 @@
       (_state.status.status === 'awaiting_confirmation' || _state.status.status === 'awaiting_input'));
   }
 
-  // Answer a parked confirmation. approve=true continues (placing the order /
-  // submitting input); approve=false stops. text carries free-form input when
-  // the park was an input request.
+  // Answer a parked confirmation. approve=true continues or submits input;
+  // approve=false declines. text carries free-form input when requested.
   function answerConfirm(approve, text) {
-    if (!_state.runId) return;
-    confirmRun(!!approve, text || '');
+    return confirmRun(!!approve, text || '');
   }
 
   global.EvaBrowser = {
     launch: launch,
+    buildRunPayload: buildRunPayload,
     isActive: isActive,
     isAwaitingConfirm: isAwaitingConfirm,
     answerConfirm: answerConfirm,
+    stop: stopRun,
     close: closePopup
   };
 
@@ -579,6 +739,7 @@
     isActive: isActive,
     isAwaitingConfirm: isAwaitingConfirm,
     answerConfirm: answerConfirm,
+    stop: stopRun,
     close: closePopup
   };
 

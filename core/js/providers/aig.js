@@ -411,6 +411,15 @@ async function aigSend() {
     if (workspaceMcpContext) requestMessages.push({ role: 'system', content: workspaceMcpContext });
   }
 
+  var researchPlan = (window.EvaRequestRouting && typeof EvaRequestRouting.resolveResearchRequest === 'function')
+    ? EvaRequestRouting.resolveResearchRequest(sQuestion, requestMessages)
+    : { active: false, query: '', strategy: 'search', needs_topic: false, continuation: false };
+  var researchHistory = (window.EvaRequestRouting && typeof EvaRequestRouting.getResearchHistory === 'function')
+    ? EvaRequestRouting.getResearchHistory(requestMessages)
+    : requestMessages.filter(function (message) { return message && message.role === 'user' && typeof message.content === 'string'; })
+      .map(function (message) { return message.content; }).slice(-6);
+  var nativeResearch = !!researchPlan.active;
+
   // Send to AIG orchestrator via bridge
   var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : 'http://localhost:8888';
   if (typeof watchACPPermissions === 'function') watchACPPermissions(190000);
@@ -430,6 +439,7 @@ async function aigSend() {
     var pendingEmailContent = pendingEmailResultContent(pendingEmailResult, emailCommand);
     await renderEvaResponse(pendingEmailContent, txtOutput, {
       nativeRequest: sQuestion,
+      nativeResearch: nativeResearch,
       turnId: turnId
     });
     existingMessages.push({ role: 'assistant', content: pendingEmailContent });
@@ -463,7 +473,7 @@ async function aigSend() {
       preparedEmailContent = 'I could not prepare the email: '
         + String(preparedEmail && preparedEmail.reason || 'no connected sending account is available') + '.';
     }
-    await renderEvaResponse(preparedEmailContent, txtOutput, { nativeRequest: sQuestion, turnId: turnId });
+    await renderEvaResponse(preparedEmailContent, txtOutput, { nativeRequest: sQuestion, nativeResearch: nativeResearch, turnId: turnId });
     existingMessages.push({ role: 'assistant', content: preparedEmailContent });
     localStorage.setItem(storageKey, JSON.stringify(existingMessages));
     lastResponse = preparedEmailContent;
@@ -542,6 +552,7 @@ async function aigSend() {
       var briefingContent = formatPreparedBriefing(briefingStatus, briefingStatus.status === 'preparing', requestedQuote.content);
       await renderEvaResponse(briefingContent, txtOutput, {
         nativeRequest: sQuestion,
+        nativeResearch: nativeResearch,
         turnId: turnId
       });
       existingMessages.push({ role: 'assistant', content: briefingContent });
@@ -558,6 +569,7 @@ async function aigSend() {
       var briefingErrorContent = '## Morning briefing\n\nLive briefing data is unavailable right now. Please try again shortly.';
       await renderEvaResponse(briefingErrorContent, txtOutput, {
         nativeRequest: sQuestion,
+        nativeResearch: nativeResearch,
         turnId: turnId
       });
       existingMessages.push({ role: 'assistant', content: briefingErrorContent });
@@ -579,6 +591,7 @@ async function aigSend() {
     removeEvaStreamingBubble(quotePreview);
     await renderEvaResponse(directQuote.content, txtOutput, {
       nativeRequest: sQuestion,
+      nativeResearch: nativeResearch,
       turnId: turnId
     });
     existingMessages.push({ role: 'assistant', content: directQuote.content });
@@ -611,6 +624,9 @@ async function aigSend() {
         turnId: turnId,
         imageB64: imageB64,
         imageMime: imageMime,
+        researchHistory: researchHistory,
+        researchPlan: researchPlan,
+        nativeResearch: nativeResearch,
         forceEnable: cogDecision.reason === 'phrase',
         forcedReason: cogDecision.reason,
         reviewReason: cogDecision.reason,
@@ -626,7 +642,10 @@ async function aigSend() {
       // Execute any [[EVA_ACTION]] blocks Eva emitted, then render.
       var actionsRun = [];
       if (Cognition.executeActions) {
-        var execRes = await Cognition.executeActions(cogContent, { userMessage: sQuestion });
+        var execRes = await Cognition.executeActions(cogContent, {
+          userMessage: sQuestion,
+          nativeResearch: nativeResearch
+        });
         cogContent = execRes.content;
         actionsRun = execRes.actions || [];
       }
@@ -635,7 +654,8 @@ async function aigSend() {
         var launchResult = await Cognition.ensureAgentLaunch({
           userMessage: sQuestion,
           content: cogContent,
-          actions: actionsRun
+          actions: actionsRun,
+          nativeResearch: nativeResearch
         });
         cogContent = launchResult.content;
         actionsRun = launchResult.actions || actionsRun;
@@ -649,6 +669,7 @@ async function aigSend() {
         signalMessage: deferredSignal ? '' : (signalContext ? signalContext.message : ''),
         signalRequest: sQuestion,
         nativeRequest: sQuestion,
+        nativeResearch: nativeResearch,
         turnId: turnId,
         signalContext: signalContext
       });
@@ -764,6 +785,7 @@ async function aigSend() {
         lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
         image_b64: imageB64,
         image_mime: imageMime,
+        research_history: researchHistory,
         lmstudio_available: aigLmStudioAvailable(),
         openai_api_key: (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : '',
         acp_auto_approve: true,
@@ -803,6 +825,7 @@ async function aigSend() {
       signalMessage: signalContext ? signalContext.message : '',
       signalRequest: sQuestion,
       nativeRequest: sQuestion,
+      nativeResearch: nativeResearch,
       turnId: turnId,
       signalContext: signalContext,
       reasoningContent: reasoningContent

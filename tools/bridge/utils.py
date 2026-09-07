@@ -596,6 +596,9 @@ def _classify_request_type(msg_lower):
     if github_subject and github_operation and not github_explanation:
         return "github-data"
 
+    from bridge.research import resolve_research_request
+    if resolve_research_request(m, []).get("active"):
+        return "web-search"
     return "general"
 
 
