@@ -660,8 +660,14 @@ def test_model_selector():
     report("aig_only_top_level_model", values == ["aig"])
     report("aig_backend_lmstudio_option", "lmstudio" in aig_values,
            "missing" if "lmstudio" not in aig_values else "")
-    direct_openai_models = {"openai:gpt-5.6-luna", "openai:gpt-5.6-terra", "openai:gpt-5.6-sol", "openai:gpt-4.1-nano", "openai:gpt-5.2", "openai:gpt-5", "openai:gpt-5-mini", "openai:gpt-4.1", "openai:gpt-4o", "openai:o3", "openai:o3-mini"}
+    direct_openai_models = {
+        "openai:gpt-6-luna", "openai:gpt-6.1-sol",
+        "openai:gpt-5.6-luna", "openai:gpt-5.6-terra", "openai:gpt-5.6-sol",
+        "openai:gpt-4.1-nano", "openai:gpt-5.2", "openai:gpt-5", "openai:gpt-5-mini",
+        "openai:gpt-4.1", "openai:gpt-4o", "openai:o3", "openai:o3-mini",
+    }
     report("aig_backend_openai_direct_options", direct_openai_models.issubset(set(aig_values)))
+    report("aig_backend_gpt6_acp_options", {"gpt-6-astra", "gpt-6-luna", "gpt-6.1-sol"}.issubset(set(aig_values)))
     report("aig_backend_model_info_panel", all(marker in html for marker in ("aigModelInfo", "aigModelRole", "aigModelInputCost", "aigModelOutputCost")))
 
     with open("core/js/providers/aig.js") as f:
@@ -678,7 +684,7 @@ def test_model_selector():
     report("cognition_reviewer_token_cap", "Math.min" in cognition_source and "8192" in cognition_source and "max_completion_tokens:" in cognition_source)
     report("provider_completion_truncation_warning", "function reportCompletionTruncation" in model_settings_source and all("reportCompletionTruncation" in source for source in (aig_source, open("core/js/providers/openai.js").read(), open("core/js/providers/copilot.js").read(), open("core/js/providers/lm-studio.js").read())))
     report("lmstudio_completion_token_budget", "max_tokens:" in open("core/js/providers/lm-studio.js").read() and "getModelMaxTokens()" in open("core/js/providers/lm-studio.js").read())
-    report("cognition_openai_direct_reviewer", "openai:gpt-5.6-luna" in cognition_source)
+    report("cognition_openai_direct_reviewer", "openai:gpt-6-luna" in cognition_source)
     report("aig_backend_model_info_catalog", all(marker in model_settings_source for marker in ("DIRECT_OPENAI_MODEL_INFO", "Balanced intelligence and cost", "Premium complex reasoning", "Lightweight routing and classification", "updateAIGModelInfo")))
 
     chats_button = re.search(r'<button id="evaChatsBtn"[^>]*title="([^"]+)"[^>]*>(.*?)</button>', html, re.DOTALL)
@@ -847,7 +853,7 @@ def test_reasoning_effort_contract():
 
     aig_match = re.search(r'<select id="selAIGBackend"[^>]*>(.*?)</select>', html, re.DOTALL)
     selected_aig = re.search(r'<option value="([^"]+)" selected>', aig_match.group(1)) if aig_match else None
-    report("aig_default_gpt_5_6_luna", bool(selected_aig and selected_aig.group(1) == "gpt-5.6-luna"))
+    report("aig_default_gpt_6_luna", bool(selected_aig and selected_aig.group(1) == "gpt-6-luna"))
 
     with open("core/js/providers/copilot.js") as f:
         copilot_js = f.read()
@@ -873,13 +879,13 @@ def test_reasoning_effort_contract():
     with open("tools/bridge/core.py") as f:
         bridge_core = f.read()
     report("reasoning_effort_js_default_high", "DEFAULT_REASONING_EFFORT = 'high'" in model_settings_js)
-    report("aig_js_default_gpt_5_6_luna", "|| 'gpt-5.6-luna'" in aig_js)
-    report("cognition_default_gpt_5_6_luna", "? el.value : 'gpt-5.6-luna'" in cognition_js)
-    report("cognition_default_reviewer_provider_aware", "openai:gpt-5.6-luna" in cognition_js and "gpt-5.6-terra" in cognition_js and "reviewerModel.indexOf('openai:') !== 0" in cognition_js and "lsSet('cogReviewerModel', reviewerModel)" in cognition_js)
+    report("aig_js_default_gpt_6_luna", "|| 'gpt-6-luna'" in aig_js)
+    report("cognition_default_gpt_6_luna", "? el.value : 'gpt-6-luna'" in cognition_js)
+    report("cognition_default_reviewer_provider_aware", "openai:gpt-6-luna" in cognition_js and "gpt-5.6-terra" in cognition_js and "reviewerModel.indexOf('openai:') !== 0" in cognition_js and "lsSet('cogReviewerModel', reviewerModel)" in cognition_js)
     report("cognition_adaptive_gate", "adaptiveReviewReason(userMessage)" in cognition_js and "reason: 'adaptive:' + adaptiveReason" in cognition_js)
     report("cognition_selected_turn_forces_review", "requestedReviewReason === 'phrase'" in cognition_js and "requestedReviewReason.indexOf('adaptive:') === 0" in cognition_js)
     report("cognition_legacy_eva_model_not_active", "evaModel:      def" in cognition_js and "cogModelCfg.enabled" not in aig_js)
-    report("bridge_default_gpt_5_6_luna", 'data.get("model", "gpt-5.6-luna")' in open("tools/bridge/aig_request.py").read())
+    report("bridge_default_gpt_6_luna", 'data.get("model", "gpt-6-luna")' in open("tools/bridge/aig_request.py").read())
     report("aig_default_not_overridden_by_lmstudio", "LM Studio detected, set as default backend" not in options_js)
     report("reasoning_effort_cli_flag", 'cmd.extend(["--reasoning-effort", self.reasoning_effort])' in acp_client)
     report("reasoning_effort_bridge_validation", "ACP_REASONING_EFFORTS" in bridge_core and "acp_reasoning_effort" in bridge_core)

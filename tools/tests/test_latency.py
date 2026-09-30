@@ -233,7 +233,7 @@ def _print_report(report):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Production-shaped Eva AIG latency probe")
     parser.add_argument("--bridge", default="http://localhost:8888")
-    parser.add_argument("--eva-model", default="gpt-5.6-luna")
+    parser.add_argument("--eva-model", default="gpt-6-luna")
     parser.add_argument("--reviewer-model", default="gpt-5.6-terra")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--session-id", default="")
