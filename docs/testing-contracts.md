@@ -83,6 +83,11 @@ the published filename and generates `SHA256SUMS`. Release tags must match the
 standalone package version on every platform. This check is not broad test
 discovery and is not bundled in the application.
 
+The direct-OpenAI briefing routing contract preserves one responder and no
+responder-initiated searches. Its cache may still be preparing or may already
+have finished with unavailable sources; both states are legitimate, and an
+unavailable briefing must explicitly remain incomplete.
+
 Add a test to this list only when it is fast, hermetic, and network-free. Update
 this section in the same change that edits the workflow.
 
