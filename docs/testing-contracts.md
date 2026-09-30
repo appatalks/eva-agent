@@ -74,6 +74,15 @@ validate HTML structure, syntax-check every JavaScript and Python file, verify
 model-selector consistency, assert the config templates contain no real values,
 and verify gitignore coverage.
 
+The tag-triggered `release.yml` workflow separately runs the explicit
+`node tools/tests/verify_appimage_release.js --release` artifact check. It
+verifies AppImage static linkage, desktop identity and workspace arguments,
+update metadata, zsync URL/length/checksum, every embedded blockmap checksum,
+and a glibc 2.35 native-payload ceiling before uploading assets. It normalizes
+the published filename and generates `SHA256SUMS`. Release tags must match the
+standalone package version on every platform. This check is not broad test
+discovery and is not bundled in the application.
+
 Add a test to this list only when it is fast, hermetic, and network-free. Update
 this section in the same change that edits the workflow.
 
