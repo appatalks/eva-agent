@@ -127,7 +127,7 @@ def normalize_aig_request(
     recall_query = (data.get("recall_query") or "").strip()
     no_tools = bool(data.get("no_tools")) or translation_mode or native_terminal_plan
     conversation_id = str(data.get("session_id") or data.get("conversation_id") or "").strip()[:120]
-    requested_backend = data.get("model", "gpt-5.6-luna")
+    requested_backend = data.get("model", "gpt-6-luna")
     responder_provider, model_for_response = parse_backend(requested_backend)
     model_policy_mode = str(data.get("model_policy_mode") or "pinned").strip().lower()
     if model_policy_mode not in {"pinned", "auto-balanced", "auto-fast"}:

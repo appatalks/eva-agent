@@ -65,6 +65,15 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+LINUX_INTEGRATION="$SCRIPT_DIR/standalone/linux-integration.sh"
+if [ -f "$LINUX_INTEGRATION" ]; then
+  # shellcheck source=standalone/linux-integration.sh
+  . "$LINUX_INTEGRATION"
+else
+  err "Missing standalone/linux-integration.sh"
+  exit 1
+fi
+
 # ── Parallel arrays acting as the dependency queue (bash 3.2 compatible) ─────
 MISSING_DESC=""    # newline-separated descriptions
 MISSING_CMD=""     # newline-separated install commands (same order)
@@ -288,13 +297,12 @@ register_dependencies() {
     queue "GitHub Copilot CLI" "npm install -g @github/copilot"
   fi
 
-  # FUSE (needed to run the AppImage); skip on macOS.
-  if [ "$OS" = "linux" ]; then
-    if ldconfig -p 2>/dev/null | grep -qi 'libfuse\.so\.2\|libfuse2'; then
-      ok "FUSE (libfuse2) present"; PRESENT_COUNT=$((PRESENT_COUNT+1))
-    else
-      need_sys fusermount "FUSE (for AppImage)" libfuse2 fuse fuse2 libfuse2 ""
-    fi
+  # A normal interactive run asks about rebuilding after this registry has
+  # executed.  Queue the build tools now so accepting that prompt cannot
+  # proceed with an unverified readelf/zsyncmake pair.
+  if [ "$OS" = "linux" ] && [ -d "$SCRIPT_DIR/standalone" ]; then
+    need_sys readelf "AppImage metadata tools" binutils binutils binutils binutils ""
+    need_sys zsyncmake "AppImage update generation" zsync zsync zsync zsync ""
   fi
 
   hr; info "Bridge Python packages"; hr
@@ -428,31 +436,18 @@ self_update() {
 
 # ── Build the standalone AppImage ───────────────────────────────────────────
 newest_appimage() {
-  find "$SCRIPT_DIR/standalone/dist" -maxdepth 1 -type f -name 'Eva Standalone-*.AppImage' -printf '%T@ %p\n' | sort -n | tail -n 1 | cut -d' ' -f2-
+  eva_appimage_find_newest "$SCRIPT_DIR/standalone/dist" || true
 }
 
 refresh_system_launcher() {
   [ "$OS" = "linux" ] || return 0
-  local appimage launcher desktop
-  appimage="${1:-$(newest_appimage)}"
-  [ -n "$appimage" ] && [ -x "$appimage" ] || { warn "Built AppImage was not found; launcher was not refreshed."; return 1; }
-  launcher="$HOME/.local/bin/eva"
-  desktop="$HOME/.local/share/applications/eva.desktop"
-  mkdir -p "$(dirname "$launcher")" "$(dirname "$desktop")"
-  {
-    printf '%s\n' '#!/usr/bin/env bash'
-    printf 'exec %q --eva-workspace-terminal-v1 "$@"\n' "$appimage"
-  } > "$launcher"
-  chmod 755 "$launcher"
-  {
-    printf '%s\n' '[Desktop Entry]'
-    printf '%s\n' 'Type=Application'
-    printf '%s\n' 'Name=Eva'
-    printf 'Exec=%s\n' "$launcher"
-    printf '%s\n' 'Terminal=false'
-    printf '%s\n' 'Categories=Utility;Development;'
-  } > "$desktop"
-  ok "System launcher refreshed: $launcher"
+  # linux-integration.sh keeps --eva-workspace-terminal-v1 on the stable
+  # launcher while resolving the newest versioned AppImage at launch time.
+  eva_refresh_system_integration "$SCRIPT_DIR" || {
+    warn "Built AppImage was not found; launcher was not refreshed."
+    return 1
+  }
+  ok "System launcher refreshed: $HOME/.local/bin/eva"
 }
 
 prune_superseded_appimages() {
@@ -462,24 +457,38 @@ prune_superseded_appimages() {
     appimage="${record#* }"
     if [ "$appimage" = "$built_appimage" ]; then
       continue
-    elif [ "$retained_rollbacks" -lt $((keep - 1)) ]; then
+    fi
+    case "$(basename "$appimage")" in
+      Eva.Standalone-*.AppImage)
+      # AppImageUpdate owns dotted release files.  Never delete them here:
+      # they are externally managed rollback candidates.
+      info "Retained externally updated AppImage: $(basename "$appimage")"
+      continue
+      ;;
+    esac
+    if [ "$retained_rollbacks" -lt $((keep - 1)) ]; then
       retained_rollbacks=$((retained_rollbacks + 1))
     else
       rm -f -- "$appimage"
+      rm -f -- "$(eva_appimage_zsync_path "$appimage")"
       info "Removed superseded AppImage: $(basename "$appimage")"
     fi
-  done < <(find "$SCRIPT_DIR/standalone/dist" -maxdepth 1 -type f -name 'Eva Standalone-*.AppImage' -printf '%T@ %p\n' | sort -nr)
+  done < <(eva_appimage_list "$SCRIPT_DIR/standalone/dist")
 }
 
 build_appimage() {
-  [ -d "$SCRIPT_DIR/standalone" ] || { warn "No standalone/ directory; skipping build."; return; }
-  have_cmd npm || { warn "npm not available; cannot build the AppImage."; return; }
+  [ -d "$SCRIPT_DIR/standalone" ] || { err "No standalone/ directory; cannot build."; return 1; }
+  have_cmd npm || { err "npm not available; cannot build the AppImage."; return 1; }
+  if [ "$OS" = "linux" ]; then
+    have_cmd readelf || { err "readelf (binutils) is required for AppImage update metadata."; return 1; }
+    have_cmd zsyncmake || { err "zsyncmake (zsync) is required for AppImage updates."; return 1; }
+  fi
   info "Building the standalone AppImage..."
   ( cd "$SCRIPT_DIR/standalone" \
       && { [ -d node_modules ] || npm install; } \
       && npm run dist ) \
     && { local appimage; appimage="$(newest_appimage)"; ok "AppImage rebuilt under standalone/dist/"; prune_superseded_appimages "$appimage"; refresh_system_launcher "$appimage"; } \
-    || err "AppImage build failed (see output above)."
+    || { err "AppImage build failed (see output above)."; return 1; }
 }
 
 # ── Run the queued installs ─────────────────────────────────────────────────
@@ -552,11 +561,11 @@ main() {
 
   if [ "$CHECK_ONLY" != "1" ]; then
     if [ "$DO_BUILD" = "1" ]; then
-      build_appimage
+      build_appimage || return 1
     elif [ "$ASSUME_YES" != "1" ] && [ -d "$SCRIPT_DIR/standalone" ] && have_cmd npm; then
       printf '%sRebuild the standalone AppImage now? [y/N] %s' "$BOLD" "$NC"
       read -r breply
-      case "$breply" in y|Y|yes|YES) build_appimage ;; *) info "Skipped AppImage build." ;; esac
+      case "$breply" in y|Y|yes|YES) build_appimage || return 1 ;; *) info "Skipped AppImage build." ;; esac
     fi
   fi
 

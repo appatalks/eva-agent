@@ -758,7 +758,7 @@ async function aigSend() {
 
     // The selected AIG backend is Eva's primary model. Adaptive review uses a
     // separate reviewer model and must never override this direct responder.
-    var aigModel = (document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna';
+    var aigModel = (document.getElementById('selAIGBackend') || {}).value || 'gpt-6-luna';
     var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel('aig') : 'default';
 
     if (!provisional) {

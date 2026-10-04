@@ -67,6 +67,7 @@ Before removing a deprecated or fallback path, consult
 | Workspace bridge lifecycle | `tools/bridge/workspaces.py`, `tools/bridge/core.py`, Electron projection | Workspace unit/e2e test and path-confinement coverage |
 | Terminal broker or PTY lifecycle | `standalone/terminal-broker.js`, `standalone/preload.js`, `core/js/features/workspaces/monitor.js` | `node tools/tests/test_terminal_broker.js`, then `node tools/tests/test_terminal_e2e.js` |
 | Aggregate runtime logging | `standalone/runtime-logger.js`, `standalone/main.js`, `tools/bridge/audit.py` | `node tools/tests/test_runtime_logger.js`, `node tools/tests/test_runtime_log_wiring.js`, `python3 tools/tests/test_audit_log.py` |
+| Linux packaging or external updates | `standalone/package.json`, `standalone/appimage-update.js`, `.github/workflows/release.yml`, `install.sh` | Installed AppImage build; inspect static runtime, desktop name, update information, embedded blockmap, and `.zsync` checksum |
 | Installed chat behavior | Installed local `Conversations` rows plus the privacy-safe runtime audit | Query only the newest relevant rows; correlate timestamps/session or turn IDs; anonymize all committed regression fixtures |
 | Native Eva control surface | `core/js/harness-control.js`, `tools/bridge/core.py` prompt contract | `node tools/tests/test_harness_control.js` |
 | GitHub operations from Eva | `standalone/main.js` GitHub IPC handlers, `tools/bridge/core.py`, `tools/bridge/utils.py` | `python3 tools/tests/test_static.py` plus `python3 tools/tests/test_streaming.py` |
@@ -101,6 +102,9 @@ Before removing a deprecated or fallback path, consult
 | Bridge domains | `tools/bridge/*.py` | Memory, skills, MCP, background, workspaces, telemetry, policy |
 | Bounded skill execution | `tools/skills/` | Document, spreadsheet, presentation, and MCP scaffold abilities under path confinement |
 | Privileged desktop boundary | `standalone/main.js`, `preload.js` | IPC, path-bearing operations, PTY ownership, secure storage |
+| Desktop startup diagnostics | `standalone/startup-runtime.js`, `standalone/main.js` | Bounded prerequisite checks, explicit setup/retry, and first-launch guidance |
+| Linux installation and desktop integration | `install.sh`, `get-eva.sh`, `standalone/linux-integration.sh` | Shared desktop identity and update-aware installed launcher |
+| AppImage update metadata | `standalone/appimage-update.js`, `appimage-metadata.js` | Embedded update feed, regenerated blockmap, and zsync control file |
 | PTY broker | `standalone/terminal-broker.js` | Terminal creation, replay, resize, and process-group cancellation |
 | Workspace projection | `standalone/workspace-projection.js` | Opaque workspace paths exposed to the renderer |
 | Test contracts | `tools/tests/` | Curated regression checks; not bundled into the app |

@@ -147,18 +147,18 @@ if [ -f install.sh ]; then
 fi
 
 # ── Create launcher ───────────────────────────────────────────────────────
-mkdir -p "$EVA_BIN"
+LINUX_INTEGRATION="$EVA_DIR/standalone/linux-integration.sh"
+[ -f "$LINUX_INTEGRATION" ] || fail "Missing standalone/linux-integration.sh"
+# shellcheck source=standalone/linux-integration.sh
+. "$LINUX_INTEGRATION"
 
-APPIMAGE="$(find "$EVA_DIR/standalone/dist" -name '*.AppImage' -type f 2>/dev/null | sort -V | tail -1)"
+mkdir -p "$EVA_BIN"
+APPIMAGE="$(eva_appimage_find_newest "$EVA_DIR/standalone/dist" || true)"
 rm -f "$EVA_BIN/eva"
 
-if [ -n "$APPIMAGE" ]; then
-  {
-    echo '#!/usr/bin/env bash'
-    printf 'exec %q --eva-workspace-terminal-v1 "$@"\n' "$APPIMAGE"
-  } > "$EVA_BIN/eva"
-  chmod +x "$EVA_BIN/eva"
-  ok "Created workspace-enabled launcher: eva -> $APPIMAGE"
+# linux-integration.sh adds --eva-workspace-terminal-v1 to the stable launcher.
+if [ -n "$APPIMAGE" ] && eva_refresh_system_integration "$EVA_DIR"; then
+  ok "Created workspace-enabled launcher: eva -> current AppImage"
 else
   # Fallback: create a launcher script that starts the bridge + opens browser
   cat > "$EVA_BIN/eva" <<'LAUNCHER'
@@ -179,27 +179,10 @@ wait $BRIDGE_PID
 LAUNCHER
   chmod +x "$EVA_BIN/eva"
   ok "Created launcher: $EVA_BIN/eva"
+  eva_write_desktop_entry "$HOME/.local/share/applications/eva.desktop" \
+    "$EVA_BIN/eva" "$EVA_DIR/core/img/eva-icon.svg"
+  ok "Desktop entry: $HOME/.local/share/applications/eva.desktop"
 fi
-
-# ── Create .desktop entry (Linux app launcher icon) ─────────────────────────
-DESKTOP_DIR="$HOME/.local/share/applications"
-mkdir -p "$DESKTOP_DIR"
-EVA_ICON="$EVA_DIR/core/img/eva-icon.svg"
-EVA_EXEC="$EVA_BIN/eva"
-
-cat > "$DESKTOP_DIR/eva.desktop" <<EOF
-[Desktop Entry]
-Name=Eva
-Comment=Eva AI Assistant
-Exec=$EVA_EXEC
-Icon=$EVA_ICON
-Terminal=false
-Type=Application
-Categories=Utility;ArtificialIntelligence;
-StartupWMClass=eva-standalone
-EOF
-chmod 644 "$DESKTOP_DIR/eva.desktop"
-ok "Desktop entry: $DESKTOP_DIR/eva.desktop"
 
 # Ensure ~/.local/bin is on PATH
 case ":$PATH:" in

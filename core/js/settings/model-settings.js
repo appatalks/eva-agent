@@ -47,6 +47,8 @@ function getReasoningEffortForModel(model) {
 }
 
 var DIRECT_OPENAI_MODEL_INFO = {
+  'openai:gpt-6-luna': { role: 'General conversation', input: 'Check current pricing', output: 'Check current pricing', efforts: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+  'openai:gpt-6.1-sol': { role: 'Complex reasoning', input: 'Check current pricing', output: 'Check current pricing', efforts: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'] },
   'openai:gpt-5.6-luna': { role: 'Fast, cost-sensitive conversation', input: '$0.20', output: '$1.20', efforts: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'] },
   'openai:gpt-5.6-terra': { role: 'Balanced intelligence and cost', input: '$2.00', output: '$12.00', efforts: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'] },
   'openai:gpt-5.6-sol': { role: 'Premium complex reasoning', input: '$5.00', output: '$30.00', efforts: ['default', 'none', 'low', 'medium', 'high', 'xhigh', 'max'] },

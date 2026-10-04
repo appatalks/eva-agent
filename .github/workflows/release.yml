@@ -17,9 +17,9 @@ jobs:
       matrix:
         include:
           - name: AppImage
-            os: ubuntu-latest
+            os: ubuntu-22.04
             command: npm --prefix standalone run dist
-            artifact: Eva Standalone-*.AppImage
+            artifact: Eva.Standalone-*.AppImage
           - name: Windows installer
             os: windows-latest
             command: npm --prefix standalone run dist:win
@@ -31,13 +31,26 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: standalone/package-lock.json
+      - name: Verify release version
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./standalone/package.json').version")
+          test "$GITHUB_REF_NAME" = "v$VERSION" || { echo "::error::Release tag must match package version"; exit 1; }
+      - name: Install AppImage update tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y binutils zsync
       - run: npm ci --prefix standalone
       - run: ${{ matrix.command }}
+      - name: Verify AppImage release and generate checksums
+        if: runner.os == 'Linux'
+        run: node tools/tests/verify_appimage_release.js --release
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: |
             standalone/dist/${{ matrix.artifact }}
+            standalone/dist/*.AppImage.zsync
+            standalone/dist/SHA256SUMS
             !standalone/dist/*.__uninstaller.exe
           if-no-files-found: error
 

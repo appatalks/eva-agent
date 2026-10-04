@@ -11,6 +11,7 @@ const { buildContextMenuTemplate } = require('./context-menu');
 const { TerminalBroker } = require('./terminal-broker');
 const { RuntimeLogger } = require('./runtime-logger');
 const { redactKnownPaths } = require('./workspace-projection');
+const { checkRuntime, setupInstructions } = require('./startup-runtime');
 
 const runtimeLogger = new RuntimeLogger({
   logPath: path.join(app.getPath('userData'), 'eva-runtime.log')
@@ -47,7 +48,9 @@ const ADDRESS_IN_USE_PATTERN = /Address already in use|EADDRINUSE/i;
 const AUTH_STORE_KEYS = ['OPENAI_API_KEY', 'GITHUB_PAT', 'GOOGLE_GL_KEY'];
 
 function workspaceTerminalEnabled() {
-  return process.env.EVA_WORKSPACE_TERMINAL_V1 === '1' || process.argv.includes('--eva-workspace-terminal-v1');
+  if (process.argv.includes('--eva-no-workspaces')) return false;
+  return process.env.EVA_WORKSPACE_TERMINAL_V1 === '1' || process.argv.includes('--eva-workspace-terminal-v1') ||
+    (app.isPackaged && process.platform === 'linux' && Boolean(process.env.APPIMAGE));
 }
 
 function getTerminalAssetUrls() {
@@ -63,7 +66,20 @@ function getTerminalAssetUrls() {
 
 function initializeTerminalBroker() {
   if (!workspaceTerminalEnabled() || terminalBroker) return terminalBroker;
-  terminalBroker = new TerminalBroker({ pty: require('node-pty') });
+  let pty;
+  try {
+    pty = require('node-pty');
+  } catch (error) {
+    if (error.code !== 'ERR_DLOPEN_FAILED' && error.code !== 'MODULE_NOT_FOUND') throw error;
+    const startupError = new Error(
+      'The native workspace terminal could not load. Use a supported Linux system with compatible glibc and desktop libraries, ' +
+      'or start Eva with --eva-no-workspaces to use chat without the terminal.',
+      { cause: error }
+    );
+    startupError.code = 'EVA_NATIVE_TERMINAL';
+    throw startupError;
+  }
+  terminalBroker = new TerminalBroker({ pty: pty });
   terminalBroker.registerRoot('app-root', getAppRoot(), { allowSymlinks: true });
   terminalBroker.on('data', function(payload) {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('terminal:data', payload);
@@ -992,14 +1008,74 @@ function formatExitDetails(code, signal) {
 }
 
 function getStartupErrorTitle(err) {
-  return err && err.code === 'ENOENT' ? 'Python 3 is required' : 'Eva Standalone could not start';
+  return err && err.code === 'EVA_NATIVE_TERMINAL' ? 'Eva workspace terminal is unavailable' : 'Eva Standalone could not start';
 }
 
 function getStartupErrorMessage(err) {
   if (err && err.code === 'ENOENT') {
-    return 'Eva Standalone needs Python 3.12 or newer to start the bundled ACP bridge. Install Python and try again.';
+    return 'A required executable or application file could not be found. Complete the Eva runtime setup and restart the application.';
   }
   return err && err.message ? err.message : String(err);
+}
+
+function bridgeEnvironment() {
+  const env = Object.assign({}, process.env);
+  if (process.platform === 'linux' || process.platform === 'darwin') {
+    const home = process.env.HOME || '';
+    const extraPaths = home ? [path.join(home, '.local/bin'), path.join(home, '.npm-global/bin')] : [];
+    if (process.platform === 'darwin') extraPaths.push('/opt/homebrew/bin', '/usr/local/bin', '/usr/local/sbin');
+    env.PATH = extraPaths.concat((env.PATH || '').split(path.delimiter)).filter(function(value, index, values) {
+      return value && values.indexOf(value) === index;
+    }).join(path.delimiter);
+  }
+  return env;
+}
+
+async function showRuntimeSetup(report) {
+  const instructions = setupInstructions(report, process.platform);
+  const blocked = report.blockers.length > 0;
+  const result = await dialog.showMessageBox({
+    type: blocked ? 'error' : 'info',
+    title: blocked ? 'Eva needs runtime setup' : 'Welcome to Eva',
+    message: blocked ? 'Complete these prerequisites, then retry.' : 'Choose the backend that is ready on this computer.',
+    detail: instructions,
+    buttons: blocked ? ['Retry', 'Copy setup instructions', 'Open setup guide', 'Quit'] :
+      ['Continue', 'Copy setup instructions', 'Open setup guide'],
+    defaultId: 0,
+    cancelId: blocked ? 3 : 0,
+    noLink: true
+  });
+  if (result.response === 1) {
+    clipboard.writeText(instructions);
+    return 'again';
+  }
+  if (result.response === 2) {
+    await shell.openExternal('https://github.com/appatalks/eva-agent/blob/main/standalone/README.md#download-and-first-launch');
+    return 'again';
+  }
+  if (blocked && result.response === 3) return 'quit';
+  return blocked ? 'retry' : 'continue';
+}
+
+async function ensureRuntimeReady() {
+  for (;;) {
+    const report = await checkRuntime({ python: getPythonInvocation(), copilot: getCopilotInvocation(), env: bridgeEnvironment() });
+    if (!report.blockers.length) return report;
+    runtimeLogger.event('startup', 'runtime_blocked', { blockers: report.blockers });
+    let decision;
+    do { decision = await showRuntimeSetup(report); } while (decision === 'again');
+    if (decision === 'quit') return null;
+  }
+}
+
+async function showFirstLaunchGuidance(report) {
+  if (!app.isPackaged) return;
+  const marker = path.join(app.getPath('userData'), 'startup-guidance-v1.json');
+  if (fs.existsSync(marker)) return;
+  let decision;
+  do { decision = await showRuntimeSetup(report); } while (decision === 'again');
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, JSON.stringify({ completed: true, version: 1 }) + '\n', { mode: 0o600 });
 }
 
 function logFatalError(label, err) {
@@ -1476,7 +1552,7 @@ function startBridge(port, bridgeToken, workspaceToken) {
   const copilot = getCopilotInvocation();
   const args = python.args.concat([bridgePath, '--bind', '127.0.0.1', '--port', String(port), '--cwd', appRoot]);
   if (copilot) args.push('--copilot-path', copilot);
-  const env = Object.assign({}, process.env, {
+  const env = Object.assign(bridgeEnvironment(), {
     EVA_ACP_PORT: String(port),
     EVA_BRIDGE_TOKEN: bridgeToken,
     EVA_WORKSPACE_CAPABILITY: workspaceToken,
@@ -1486,24 +1562,6 @@ function startBridge(port, bridgeToken, workspaceToken) {
   });
   if (process.platform === 'win32') {
     env.EVA_CONFIG_DIR = path.join(app.getPath('userData'), 'bridge');
-  }
-
-  // GUI-launched apps on macOS inherit a stripped PATH that often misses
-  // Homebrew, python.org, and nvm bin directories. Augment PATH so the bridge
-  // can find python3 and copilot. Harmless on Linux.
-  if (process.platform === 'darwin') {
-    const extraPaths = [
-      '/opt/homebrew/bin',
-      '/usr/local/bin',
-      '/usr/local/sbin',
-      path.join(process.env.HOME || '', '.local/bin'),
-      path.join(process.env.HOME || '', '.npm-global/bin')
-    ].filter(Boolean);
-    const currentPath = env.PATH || '';
-    const merged = extraPaths.concat(currentPath.split(':')).filter(function (p, i, arr) {
-      return p && arr.indexOf(p) === i;
-    }).join(':');
-    env.PATH = merged;
   }
 
   const child = spawn(python.command, args, {
@@ -1985,6 +2043,12 @@ function createWindow(acpBaseUrl) {
 
 async function boot() {
   runtimeLogger.event('electron', 'boot_started', { workspaceTerminal: workspaceTerminalEnabled() });
+  const runtime = await ensureRuntimeReady();
+  if (!runtime) {
+    app.quit();
+    return;
+  }
+  await showFirstLaunchGuidance(runtime);
   bridgeCapabilityToken = crypto.randomBytes(32).toString('hex');
   workspaceCapabilityToken = crypto.randomBytes(32).toString('hex');
   initializeTerminalBroker();

@@ -1,6 +1,6 @@
 {
   "name": "eva-standalone",
-  "version": "5.6.9",
+  "version": "5.6.10",
   "author": "@apptalks",
   "desktopName": "Eva",
   "description": "Localhost Electron shell for Eva AI Assistant.",
@@ -33,12 +33,22 @@
     "productName": "Eva Standalone",
     "icon": "../core/img/eva-icon.svg",
     "npmRebuild": false,
+    "toolsets": {
+      "appimage": "1.0.3"
+    },
+    "artifactBuildCompleted": "./appimage-update.js",
+    "appImage": {
+      "executableArgs": [
+        "--eva-workspace-terminal-v1"
+      ]
+    },
     "files": [
       "package.json",
       "main.js",
       "preload.js",
       "context-menu.js",
       "runtime-logger.js",
+      "startup-runtime.js",
       "workspace-projection.js",
       "terminal-broker.js"
     ],
@@ -102,7 +112,12 @@
         "AppImage"
       ],
       "category": "Utility",
-      "syncDesktopName": true
+      "syncDesktopName": true,
+      "desktop": {
+        "entry": {
+          "Name": "Eva"
+        }
+      }
     },
     "mac": {
       "target": [

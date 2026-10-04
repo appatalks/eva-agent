@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current release:** Eva 5.6.9. This document describes the matching browser UI,
+> **Current release:** Eva 5.6.10. This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -17,13 +17,30 @@ Detailed architecture, dependencies, and implementation notes for Eva AI Assista
 ```bash
 git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
-./install.sh
-cd standalone && npm install && npm run dist
-./dist/'Eva Standalone-5.6.9.AppImage' --eva-workspace-terminal-v1
+./install.sh --build
+cd standalone
+./dist/'Eva Standalone-5.6.10.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
 features. Authenticate the CLI with `copilot auth login` when using Copilot ACP.
+
+Linux AppImage builds also require binutils (`readelf`) and zsync (`zsyncmake`).
+New builds use a static AppImage runtime rather than the legacy host-glibc/
+`libfuse2` launcher, embed AppImageUpdate information, and generate a `.zsync`
+sidecar published with tagged releases. Electron still requires compatible host
+glibc and desktop libraries; Python, Node.js, and Copilot remain external runtime
+prerequisites. The inspected x86_64 payload's native terminal module still
+references `GLIBC_2.34`. This is not a fully self-contained or older-Linux
+compatibility claim. See [standalone packaging](standalone/README.md#runtime-compatibility-and-updates)
+for update behavior and limits.
+
+New AppImages enable coding workspaces by default and provide bounded runtime
+preflight plus first-launch provider guidance. `--eva-no-workspaces` disables
+the native terminal explicitly. Download-only users have a
+[setup guide](standalone/README.md#download-and-first-launch) that does not
+assume a source checkout. Tagged Linux builds use Ubuntu 22.04 with a verified
+glibc 2.35 payload ceiling and publish `SHA256SUMS` with the update assets.
 
 ### Windows Packaging
 
@@ -437,7 +454,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.6.9)
+  package.json             Electron + electron-builder config (v5.6.10)
 ```
 
 ## Dependencies
@@ -1999,18 +2016,25 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.6.9.AppImage'
+./dist/'Eva Standalone-5.6.10.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace
 ```
 
 After a successful `./install.sh --build`, Eva keeps the newly built AppImage
-plus one rollback build, refreshes the launcher to the exact new artifact, and
-removes older AppImages. The unpacked `linux-unpacked` directory remains a local
-packaging and packaged-E2E target.
+plus one locally built rollback and refreshes its update-aware launcher. The
+launcher selects the highest stable version on each launch, accepting spaced
+and dotted filenames. Installer pruning does not remove dotted AppImages
+managed by external updaters. The unpacked `linux-unpacked` directory remains
+a local packaging and packaged-E2E target.
 
 **Electron lifecycle:**
+Before bridge startup, bounded checks verify the selected Python version and
+core packages, offer explicit setup/retry when blocked, and show one-time
+provider guidance. AppImages enable workspaces by default unless
+`--eva-no-workspaces` is supplied.
+
 1. `getFreeLocalPort()`: OS-allocated free port
 2. Generate private bridge and workspace capability tokens.
 3. `startBridge(port)`: Spawn `python3 tools/acp_bridge.py --bind 127.0.0.1 --port <port>` with both tokens in the child environment.
@@ -2019,7 +2043,9 @@ packaging and packaged-E2E target.
 6. On `EADDRINUSE`: retry with a new port (max 3 attempts).
 7. On bridge crash: show an error dialog and quit.
 
-Host prerequisites: Node.js 24+, Python 3.12+, Copilot CLI authenticated (for cloud mode). LM Studio for local-only mode.
+Host prerequisites: Python 3.12+ with requests and cryptography for the bridge;
+Node.js 24+ and authenticated Copilot CLI for ACP. Direct OpenAI and LM Studio
+chat do not require Copilot.
 
 ### ACP Infrastructure Roadmap (tracking)
 
