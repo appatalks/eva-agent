@@ -13,10 +13,10 @@ def select_model_policy(mode, requested_backend, request_type, requires_tools, c
     The caller remains responsible for provider-specific validation and execution.
     """
     mode = str(mode or "pinned").strip().lower()
-    requested = _clean_backend(requested_backend, "gpt-5.6-luna")
+    requested = _clean_backend(requested_backend, "gpt-6-luna")
     candidates = candidates if isinstance(candidates, dict) else {}
     acp_model = _clean_backend(candidates.get("acp_model"), requested)
-    openai_model = _clean_backend(candidates.get("openai_model"), "gpt-5.6-luna")
+    openai_model = _clean_backend(candidates.get("openai_model"), "gpt-6-luna")
     lmstudio_model = _clean_backend(candidates.get("lmstudio_model"), "local")
     acp_available = bool(candidates.get("acp_available"))
     openai_available = bool(candidates.get("openai_available"))

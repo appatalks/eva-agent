@@ -273,8 +273,10 @@ class BriefingMailSourceTests(unittest.TestCase):
 
     def test_mail_is_not_a_required_briefing_source(self):
         status = {"sources": {"mail": {"status": "failed"}, "news": {"status": "ready"},
-                              "markets": {"status": "ready"}}}
+                              "markets": {"status": "ready"}, "weather": {"status": "ready"}}}
         self.assertEqual(briefing.briefing_unavailable_sources(status), [])
+        del status["sources"]["weather"]
+        self.assertEqual(briefing.briefing_unavailable_sources(status), ["weather"])
 
     def test_mail_appears_in_prompt_context(self):
         from bridge import state

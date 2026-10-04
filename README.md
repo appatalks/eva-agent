@@ -12,8 +12,10 @@ while keeping configuration, approvals, and personal data under your control.
 
 - **One intelligent gateway:** route work across OpenAI, GitHub Copilot ACP, LM Studio,
   and MCP tools without changing the conversation model.
-- **GPT-6 Astra via Copilot:** select Astra through your GitHub Copilot subscription
-  when enabled in Copilot CLI; no separate OpenAI API key is needed for this backend.
+- **GPT-6 model options:** GPT-6 Luna is the default AIG model preference, and
+  GPT-6.1 Sol is also selectable through Copilot ACP or OpenAI direct. GPT-6 Astra
+  remains available through Copilot ACP without an OpenAI API key; direct OpenAI
+  selections require an API key.
 - **Durable, inspectable memory:** retain explicit facts locally with provenance
 	linked to source conversation turns, lifecycle controls, corrections, bounded
 	last-session recall, and a dedicated Memory view.

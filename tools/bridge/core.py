@@ -77,7 +77,7 @@ _LMSTUDIO_READ_TIMEOUT_SECONDS = 900
 
 
 def _parse_aig_backend(value):
-    requested = str(value or "gpt-5.6-luna").strip()
+    requested = str(value or "gpt-6-luna").strip()
     if requested.startswith("openai:"):
         model = requested[len("openai:"):].strip()
         if not _AIG_MODEL_RE.fullmatch(model):
@@ -270,7 +270,10 @@ def _openai_chat_payload(model, messages, reasoning_effort="", max_completion_to
         "messages": messages,
         "max_completion_tokens": max_completion_tokens,
     }
-    if model.startswith("gpt-5.6") and reasoning_effort in {"none", "low", "medium", "high", "xhigh", "max"}:
+    if (
+        model.startswith(("gpt-5.6", "gpt-6"))
+        and reasoning_effort in {"none", "low", "medium", "high", "xhigh", "max"}
+    ):
         payload["reasoning_effort"] = reasoning_effort
     elif model == "gpt-5.2" and reasoning_effort in {"none", "low", "medium", "high", "xhigh"}:
         payload["reasoning_effort"] = reasoning_effort
@@ -5090,7 +5093,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "acp_available": bool(_st.acp_client and _st.acp_client.alive),
             "acp_model": (_st.acp_client.model if _st.acp_client else "") or model_for_response,
             "openai_available": bool(openai_api_key),
-            "openai_model": model_for_response if responder_provider == "openai" else "gpt-5.6-luna",
+            "openai_model": model_for_response if responder_provider == "openai" else "gpt-6-luna",
             "openai_deep_model": "gpt-5.6-sol",
             "lmstudio_available": data.get("lmstudio_available") is True,
             "lmstudio_model": str(data.get("lmstudio_model") or "local")[:80],

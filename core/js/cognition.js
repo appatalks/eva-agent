@@ -138,16 +138,16 @@
 
   function getDefaultModel() {
     var el = document.getElementById('selAIGBackend');
-    return (el && el.value) ? el.value : 'gpt-5.6-luna';
+    return (el && el.value) ? el.value : 'gpt-6-luna';
   }
 
   function getCfg() {
     var def = getDefaultModel();
-    var defaultReviewer = def.indexOf('openai:') === 0 ? 'openai:gpt-5.6-luna' :
+    var defaultReviewer = def.indexOf('openai:') === 0 ? 'openai:gpt-6-luna' :
       (def === 'lmstudio' ? 'lmstudio' : 'gpt-5.6-terra');
     var reviewerModel = ls('cogReviewerModel', '') || defaultReviewer;
     if (def.indexOf('openai:') === 0 && reviewerModel.indexOf('openai:') !== 0) {
-      reviewerModel = 'openai:gpt-5.6-luna';
+      reviewerModel = 'openai:gpt-6-luna';
       lsSet('cogReviewerModel', reviewerModel);
     }
     return {
