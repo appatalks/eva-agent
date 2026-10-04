@@ -1734,7 +1734,7 @@ function _vvTranslateLiveTranscript(transcript) {
     body: JSON.stringify({
       input: source,
       target_language: target.label,
-      model: getResolvedLiveTranslationModel() === 'aig' ? ((document.getElementById('selAIGBackend') || {}).value || 'gpt-5.6-luna') : getResolvedLiveTranslationModel(),
+      model: getResolvedLiveTranslationModel() === 'aig' ? ((document.getElementById('selAIGBackend') || {}).value || 'gpt-6-luna') : getResolvedLiveTranslationModel(),
       lmstudio_base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
       lmstudio_model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
       openai_api_key: typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : ''

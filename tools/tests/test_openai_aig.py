@@ -236,12 +236,11 @@ class OpenAIAIGEndToEndTests(unittest.TestCase):
         status, response = _json_request(self.bridge_url + "/v1/aig/chat", {
             "user_message": "Give me a concise status sentence.",
             "messages": [{"role": "user", "content": "Give me a concise status sentence."}],
-            "model": "gpt-5.6-luna",
             "model_policy_mode": "auto-balanced",
             "openai_api_key": "sk-FAKE-OPENAI-E2E",
         })
         self.assertEqual(status, 200)
-        self.assertEqual(response["model"], "aig:gpt-5.6-luna+openai-direct")
+        self.assertEqual(response["model"], "aig:gpt-6-luna+openai-direct")
         self.assertEqual(len(_FakeOpenAIHandler.requests), 1)
 
     def test_aig_automatic_policy_requires_tools_for_live_data(self):
@@ -361,8 +360,10 @@ class OpenAIAIGEndToEndTests(unittest.TestCase):
         self.assertEqual(response["model"], "aig:gpt-5+openai-direct")
         self.assertEqual(len(_FakeOpenAIHandler.requests), 1)
         system_prompt = _FakeOpenAIHandler.requests[0]["payload"]["messages"][0]["content"]
-        self.assertIn("[Morning Briefing Preparation]", system_prompt)
+        self.assertRegex(system_prompt, r"\[Morning Briefing (?:Preparation|Availability)\]")
         self.assertIn("Do not call tools or start searches", system_prompt)
+        if "[Morning Briefing Availability]" in system_prompt:
+            self.assertIn("Never call this a complete briefing", system_prompt)
 
     def test_acp_unavailable_closes_audit_as_failed(self):
         request = urllib.request.Request(
@@ -421,6 +422,8 @@ class OpenAIAIGEndToEndTests(unittest.TestCase):
 
     def test_reasoning_effort_is_model_specific(self):
         cases = [
+            ("openai:gpt-6-luna", "none", "none"),
+            ("openai:gpt-6.1-sol", "max", "max"),
             ("openai:gpt-5.6-luna", "none", "none"),
             ("openai:gpt-5.6-terra", "xhigh", "xhigh"),
             ("openai:gpt-5.6-sol", "max", "max"),

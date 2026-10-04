@@ -1163,7 +1163,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (aigBackendSel.value.indexOf('openai:') === 0 && typeof Cognition !== 'undefined') {
         var cognitionCfg = Cognition.getCfg();
         if (cognitionCfg.reviewerModel.indexOf('openai:') !== 0) {
-          Cognition.setCfg({ reviewerModel: 'openai:gpt-5.6-luna' });
+          Cognition.setCfg({ reviewerModel: 'openai:gpt-6-luna' });
         }
       }
       // Keep cognition model selectors in sync with the live catalog.

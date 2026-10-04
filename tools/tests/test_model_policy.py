@@ -8,12 +8,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from bridge.model_policy import select_model_policy
 
 
-def decision(mode="auto-balanced", requested="gpt-5.6-luna", request_type="general", requires_tools=False, **facts):
+def decision(mode="auto-balanced", requested="gpt-6-luna", request_type="general", requires_tools=False, **facts):
     candidates = {
         "acp_available": True,
-        "acp_model": "gpt-5.6-luna",
+        "acp_model": "gpt-6-luna",
         "openai_available": True,
-        "openai_model": "gpt-5.6-luna",
+        "openai_model": "gpt-6-luna",
         "lmstudio_available": True,
         "lmstudio_model": "test-local-model",
     }
@@ -22,7 +22,7 @@ def decision(mode="auto-balanced", requested="gpt-5.6-luna", request_type="gener
 
 
 def main():
-    assert decision(mode="pinned") == {"provider": "pinned", "backend": "gpt-5.6-luna", "reason": "pinned"}
+    assert decision(mode="pinned") == {"provider": "pinned", "backend": "gpt-6-luna", "reason": "pinned"}
     assert decision(requires_tools=True)["provider"] == "acp"
     assert decision(requires_tools=True, candidates={"acp_available": False})["reason"] == "tool-route-unavailable"
     assert decision(local_only=True)["provider"] == "lmstudio"

@@ -20,7 +20,7 @@ from bridge.utils import _classify_request_type
 
 
 def parse_backend(value):
-    value = str(value or "gpt-5.6-luna")
+    value = str(value or "gpt-6-luna")
     if value.startswith("openai:"):
         return "openai", value.split(":", 1)[1]
     if value == "invalid":
@@ -55,6 +55,7 @@ class AigRequestContractTests(unittest.TestCase):
         })
         self.assertEqual(result["user_message"], "latest")
         self.assertEqual(result["conversation_id"], "s" * 120)
+        self.assertEqual(result["requested_backend"], "gpt-6-luna")
         self.assertFalse(result["internal"])
         self.assertFalse(result["no_tools"])
         self.assertEqual(result["max_completion_tokens"], 16384)

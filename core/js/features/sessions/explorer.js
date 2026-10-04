@@ -1099,7 +1099,7 @@ async function planEvaTerminalTask(objective, submit, allowDecline) {
   var bridgeUrl = typeof getACPBridgeUrl === 'function' ? getACPBridgeUrl() : 'http://localhost:8888';
   var response;
   try {
-    var selectedPlannerModel = modelSelect && modelSelect.value ? modelSelect.value : 'gpt-5.6-luna';
+    var selectedPlannerModel = modelSelect && modelSelect.value ? modelSelect.value : 'gpt-6-luna';
     var plannerOpenAIKey = typeof getAuthKey === 'function' ? getAuthKey('OPENAI_API_KEY') : '';
     var requestTerminalPlan = function(model) {
       return fetch(bridgeUrl.replace(/\/+$/, '') + '/v1/aig/chat', {
