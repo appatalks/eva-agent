@@ -38,8 +38,8 @@ vm.runInNewContext(fs.readFileSync('core/js/cognition.js', 'utf8'), context, {
 
 const directConfig = context.Cognition.getCfg();
 assert.strictEqual(directConfig.evaModel, 'openai:gpt-5');
-assert.strictEqual(directConfig.reviewerModel, 'openai:gpt-5.6-luna');
-assert.strictEqual(stored.get('cogReviewerModel'), 'openai:gpt-5.6-luna');
+assert.strictEqual(directConfig.reviewerModel, 'openai:gpt-6-luna');
+assert.strictEqual(stored.get('cogReviewerModel'), 'openai:gpt-6-luna');
 
 backendModel = 'gpt-5.6-luna';
 context.Cognition.setCfg({ reviewerModel: 'gpt-5.6-terra' });
