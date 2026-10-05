@@ -724,7 +724,10 @@ def test_model_selector():
         artifact_name in readme
         and artifact_name in architecture_readme
         and artifact_name in standalone_readme
-        and f"Current release:** Eva {release_version}." in architecture_readme
+        and (
+            f"Current release:** Eva {release_version}." in architecture_readme
+            or f"Current development version:** Eva {release_version} (unreleased)." in architecture_readme
+        )
         and f"config (v{release_version})" in architecture_readme
     )
     report("app_release_docs_consistent", docs_consistent, f"expected release {release_version}")
@@ -1438,14 +1441,14 @@ def test_coding_workspace_contract():
     report("coding_workspace_remediation_context", "normalizedRemediationContext" in standalone_main and "remediation-context.json" in standalone_main and "workspace-remediation-context-load" in standalone_main and "workspace-remediation-context-save" in standalone_main and "nativeRemediationContext" in remediation_harness and "persistRemediationContext(explicitRemediation)" in remediation_harness and ".chat-bubble.user-bubble" in remediation_harness)
     removal_harness = open("core/js/harness-control.js").read()
     report("coding_workspace_safe_removal", "def delete_project" in workspaces and "source_preserved" in workspaces and "workspace agent is still active" in workspaces.lower() and "workspace-delete-project" in standalone_main and "workspaceDeleteProject" in standalone_preload and "Remove workspace" in workspace_ui and "remove_workspace" in removal_harness and "modelWorkspaceRemoval" in removal_harness and "workspaceRemovalVerb" in removal_harness)
-    report("coding_workspace_completed_actions", "(run.status === 'active' || run.status === 'completed') && !agentActive" in workspace_ui and "['active', 'completed'].indexOf(actionRun.status)" in workspace_ui)
+    report("coding_workspace_completed_actions", "['active', 'completed', 'cancelled'].indexOf(run.status) >= 0 && !agentActive" in workspace_ui and "['active', 'completed', 'cancelled'].indexOf(actionRun.status)" in workspace_ui)
     report("coding_workspace_current_monitor_snapshot", workspace_ui.find("state.runs = runs;") < workspace_ui.find("narrateRunChanges(state.runs);") and "workspaceCheckoutStatus(selected.checkout.id)" in workspace_ui)
     report("coding_workspace_ui_wired", "core/js/features/workspaces/monitor.js" in html and "workspacePanel" in html and "workspaceWorkbench" in html and "openWorkspaceTerminal" in workspace_ui and "_evaWorkspaceTerminalTarget" in sessions_js and "body.eva-standalone .workspace-panel" in style_css)
-    report("coding_workspace_monitor_observation_only", "setInterval(monitor, 10000)" in workspace_ui and "api().terminalList()" in workspace_ui and "terminalCreate" not in workspace_ui.split("async function monitor()", 1)[1].split("function openWorkbench", 1)[0] and "registerWorkspaceRoot" not in list_projects_handler and "registerWorkspaceRoot" not in list_runs_handler and "ensureTerminalRoot(rootId)" in standalone_main)
+    report("coding_workspace_monitor_observation_only", "setInterval(monitor, 3000)" in workspace_ui and "!state.workbenchOpen && Date.now() - state.lastCheckedAt < 10000" in workspace_ui and "api().terminalList()" in workspace_ui and "terminalCreate" not in workspace_ui.split("async function monitor()", 1)[1].split("function openWorkbench", 1)[0] and "registerWorkspaceRoot" not in list_projects_handler and "registerWorkspaceRoot" not in list_runs_handler and "ensureTerminalRoot(rootId)" in standalone_main)
     report("coding_workspace_monitor_text_voice_updates", "addMonitorActivity" in workspace_ui and "forceVoice" in workspace_ui and "autoSpeak.checked" in workspace_ui and "speakText(message)" in workspace_ui and "lastPeriodicNoteAt" in workspace_ui)
     harness_js = open("core/js/harness-control.js").read()
     report("coding_workspace_native_project_checks", "run_workspace_check" in harness_js and "retry_workspace_run" in harness_js and "set_workspace_mcp_server" in harness_js and "smoke\\s*tests?" in harness_js and "runSelectedCheck" in workspace_ui and "retryRun: retryRunById" in workspace_ui and "injectWorkspaceStatusBubble" in options_js)
-    report("coding_workspace_runner_recovery", "workspaceDispatchRun" in workspace_ui and "workspace-dispatch-run" in standalone_main and "/dispatch" in standalone_main and 'stage="redispatch"' in bridge_core and "!['starting', 'running', 'steering'].includes(agentStatus)" in standalone_main and "Retry this failed workspace run" in workspace_ui and "Retry run" in workspace_ui)
+    report("coding_workspace_runner_recovery", "workspaceDispatchRun" in workspace_ui and "workspace-dispatch-run" in standalone_main and "/dispatch" in standalone_main and 'stage="redispatch"' in bridge_core and "!['starting', 'running', 'steering', 'cancelling'].includes(agentStatus)" in standalone_main and "Retry this failed workspace run" in workspace_ui and "Retry run" in workspace_ui)
     report("coding_workspace_failure_categories", all(value in workspace_ui for value in ("user_cancelled", "agent_cancelled", "permission_denied", "runner_unavailable", "test_failure", "bridge_failure")))
     report("coding_workspace_fast_terminal_narration", "!prior && current.status" in workspace_ui and "narrateTerminalRun(run, current)" in workspace_ui and "narrateFailedRun(run)" in workspace_ui)
     report("coding_workspace_scoped_activity_results", "projectId: run && run.projectId" in workspace_ui and "entry.projectId === state.selectedProjectId" in workspace_ui and "workspaceWorkbenchResults" in workspace_ui and "RUN RESULTS" in html and "workspace-monitor-results" in style_css)
@@ -1459,7 +1462,7 @@ def test_coding_workspace_contract():
     report("coding_workspace_github_retry_prompt", "while (repositoryUrl)" in workspace_ui and "Correct GitHub repository URL" in workspace_ui and "The URL is back in the prompt so you can correct it." in workspace_ui and "GitHub workspace imported." in workspace_ui)
     report("coding_workspace_native_description", "async function describeCurrent" in workspace_ui and "Promise.all([api().workspaceListProjects(), api().workspaceListRuns()])" in workspace_ui and "describe: describeCurrent" in workspace_ui)
     report("coding_workspace_project_navigation", "list_project_files" in workspaces and "resolve_project_file" in workspaces and "workspaceListProjectFiles" in standalone_preload and "workspaceOpenProjectFile" in standalone_preload and "workspaceProjectFiles" in workspace_ui and "Open project terminal" in workspace_ui and "['source', 'worktree'].includes(checkout.kind)" in standalone_main)
-    report("coding_workspace_draft_stable", "var shouldRender = changed || permissionsChanged;" in workspace_ui and "state.workbenchOpen && shouldRender" in workspace_ui and "runDrafts" in workspace_ui and "draft.objective = objective.value" in workspace_ui and "draft.baseRef = baseRef.value" in workspace_ui)
+    report("coding_workspace_draft_stable", "var shouldRender = changed || permissionsChanged" in workspace_ui and "state.workbenchOpen && shouldRender" in workspace_ui and "detail.dataset.projectSignature !== contextSignature" in workspace_ui and "runDrafts" in workspace_ui and "draft.objective = objective.value" in workspace_ui and "draft.baseRef = baseRef.value" in workspace_ui)
     report("coding_workspace_permission_rerender", "permissionSignature" in workspace_ui and "permissionsChanged" in workspace_ui and "changed || permissionsChanged" in workspace_ui)
     cancellation_worker = workspace_utils.split('prompt_result = client.prompt(', 1)[1].split('while True:', 1)[0]
     report("coding_workspace_structured_cancellation", '"permission_cancelled": False' in acp_client and '"permission_reason": ""' in acp_client and 'state["permission_cancelled"] = True' in acp_client and 'state["permission_reason"] = "user_rejected"' in acp_client and 'state["permission_reason"] = "permission_timeout"' in acp_client and 'decision="invalid-decision"' in acp_client and '"error": result["error"]' in acp_client and 'prompt_result.get("permission_cancelled")' in workspace_utils and '_workspace_permission_cancelled' not in workspace_utils and cancellation_worker.find('permission_cancelled =') < cancellation_worker.find('result_text = _subagent_result_text'))
@@ -2034,7 +2037,7 @@ def test_agent_operations_contract():
     report("agent_operations_scoped_action_context", "actionContext = { userMessage:" in cognition and "cap.run(spec.args || {}, actionContext)" in cognition)
     report("agent_operations_no_shared_user_context", "_activeAgentUserMessage" not in cognition)
     report("agent_operations_lm_context", "Cognition.executeActions(candidate, { userMessage: sQuestion })" in open("core/js/providers/lm-studio.js").read())
-    report("agent_operations_finalizing_steer_rejected", 'task.get("status") == "finalizing"' in bridge and "task is finalizing completion delivery" in bridge)
+    report("agent_operations_finalizing_steer_rejected", 'task.get("status") in {"finalizing", "cancelling"}' in bridge and "wait for this agent to finish stopping or finalizing" in bridge)
     report("agent_operations_dismiss_endpoint", 'parsed_path.startswith("/v1/subagent/")' in bridge and "def _subagent_dismiss" in bridge)
     report("agent_operations_dismiss_control", "function dismissAgent" in ui and "agent-card-dismiss" in ui)
     report("agent_operations_agent_graph", '"type": "agent"' in bridge and '"label": "feeds"' in bridge)

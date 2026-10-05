@@ -40,6 +40,16 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   },
   workspaceListProjects: function() { return ipcRenderer.invoke('workspace-list-projects'); },
   workspaceSelectProject: function() { return ipcRenderer.invoke('workspace-select-project'); },
+  workspaceNewProject: function() { return ipcRenderer.invoke('workspace-new-project'); },
+  workspaceFolderBrowse: function(id, directory, showHidden) { return ipcRenderer.invoke('workspace-folder-browse', id, directory, showHidden === true); },
+  workspaceFolderComplete: function(id, name) { return ipcRenderer.invoke('workspace-folder-complete', id, name); },
+  workspaceFolderCancel: function(id) { return ipcRenderer.invoke('workspace-folder-cancel', id); },
+  onWorkspaceFolderPicker: function(listener) {
+    if (typeof listener !== 'function') return function() {};
+    const wrapped = function(_event, payload) { listener(payload); };
+    ipcRenderer.on('workspace:folder-picker', wrapped);
+    return function() { ipcRenderer.removeListener('workspace:folder-picker', wrapped); };
+  },
   workspaceImportGitHub: function(repositoryUrl) { return ipcRenderer.invoke('workspace-import-github', repositoryUrl); },
   workspaceListGitHubRepositories: function() { return ipcRenderer.invoke('workspace-list-github-repositories'); },
   workspaceGitHubAuthStart: function() { return ipcRenderer.invoke('workspace-github-auth-start'); },
@@ -59,6 +69,10 @@ contextBridge.exposeInMainWorld('evaStandalone', Object.freeze({
   workspaceDeleteProject: function(projectId, confirmDirty) { return ipcRenderer.invoke('workspace-delete-project', projectId, confirmDirty === true); },
   workspaceCreateRun: function(request) { return ipcRenderer.invoke('workspace-create-run', request); },
   workspaceDispatchRun: function(runId) { return ipcRenderer.invoke('workspace-dispatch-run', runId); },
+  workspacePreviewApply: function(runId) { return ipcRenderer.invoke('workspace-preview-apply', runId); },
+  workspaceApplyRun: function(runId, fingerprint) { return ipcRenderer.invoke('workspace-apply-run', runId, fingerprint); },
+  workspaceAgentControl: function(runId, action, instruction) { return ipcRenderer.invoke('workspace-agent-control', runId, action, instruction); },
+  workspaceAgentSnapshots: function(projectId) { return ipcRenderer.invoke('workspace-agent-snapshots', projectId); },
   workspaceListRuns: function(projectId) { return ipcRenderer.invoke('workspace-list-runs', projectId); },
   workspaceListProjectFiles: function(projectId) { return ipcRenderer.invoke('workspace-list-project-files', projectId); },
   workspaceOpenProjectFile: function(projectId, relativePath) { return ipcRenderer.invoke('workspace-open-project-file', projectId, relativePath); },

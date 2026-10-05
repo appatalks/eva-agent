@@ -148,6 +148,8 @@ def _subagent_dependency_context(task_id, timeout=300):
             task = _st.subagent_tasks.get(task_id)
             if not task:
                 raise RuntimeError("subagent task disappeared")
+            if task.get("_cancel_requested"):
+                raise RuntimeError("Agent interruption requested.")
             dependency_ids = list(task.get("depends_on") or [])
             dependencies = [_st.subagent_tasks.get(value) for value in dependency_ids]
             if any(dependency is None for dependency in dependencies):
@@ -302,7 +304,7 @@ def _load_persisted_mcp_config():
 # Electron file:// localStorage being wiped across app rebuilds. Used for things
 # like the camera-presence auto-wake toggle so the user does not re-enable it
 # every restart.
-_CLIENT_PREFS_PATH = os.path.expanduser("~/.config/eva-standalone/client_prefs.json")
+_CLIENT_PREFS_PATH = os.path.join(_cfg.EVA_CONFIG_DIR, "client_prefs.json")
 
 
 
@@ -383,17 +385,38 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
         task = _st.subagent_tasks.get(task_id)
         if not task:
             return
+    client = None
+
+    def release_client():
+        nonlocal client
+        if client is None:
+            return
+        closing_client = client
+        closing_client.stop()
+        client = None
+        with _st.subagent_lock:
+            if _st.workspace_acp_clients.get(task_id) is closing_client:
+                _st.workspace_acp_clients.pop(task_id, None)
 
     def sync_workspace(status, report=""):
         if not task.get("coding_run_id") or _st.workspace_store is None:
             return
+        if task.get("_cancel_requested") and status in {"running", "steering"}:
+            status = "cancelling"
         try:
             _st.workspace_store.update_agent_run(task_id, status, report)
         except Exception as workspace_error:
             print(f"[Workspace Agent] Status sync failed for {task_id}: {workspace_error}")
 
     def cancel_workspace_run():
-        report = "Workspace run cancelled because a required execution permission was not approved."
+        release_client()
+        report = (
+            "Agent stopped because Eva closed. Its worktree and changes were kept."
+            if task.get("_shutdown_requested") else
+            "Agent interrupted at your request. Its worktree and changes were kept."
+            if task.get("_cancel_requested") else
+            "Workspace run cancelled because a required execution permission was not approved."
+        )
         with _st.subagent_lock:
             task["status"] = "cancelled"
             task["result"] = report
@@ -405,27 +428,42 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
             print(f"[Subagent] Cancellation notification failed for {task_id}: {notify_error}")
 
     try:
+        if task.get("_cancel_requested"):
+            cancel_workspace_run()
+            return
         dependency_context = _subagent_dependency_context(task_id) if task.get("depends_on") else ""
-        from bridge.acp_client import ACPClient
-        with _st.acp_pool_lock:
-            template = _st.acp_client
-            if not template or not template.alive:
-                raise RuntimeError("ACP not available")
-            selected_model = model or template.model
-            assigned_cwd = str(task.get("_cwd") or template.cwd)
-            client = ACPClient(
-                copilot_path=template.copilot_path,
-                cwd=assigned_cwd,
-                model=selected_model,
-                mcp_config=_subagent_mcp_config(template, task),
-                reasoning_effort=template.reasoning_effort,
+        if task.get("_provider") == "lmstudio":
+            from bridge.workspace_local import LocalWorkspaceClient
+            client = LocalWorkspaceClient(
+                task.get("_provider_config") or {}, task["_cwd"],
+                task.get("_workspace_mcp_config") or {},
+                lambda: _st.workspace_store.validated_checkout_path(task["checkout_id"]),
             )
-        client.start()
+        else:
+            from bridge.acp_client import ACPClient
+            with _st.acp_pool_lock:
+                template = _st.acp_client
+                if not template or not template.alive:
+                    raise RuntimeError("ACP not available")
+                selected_model = model or template.model
+                assigned_cwd = str(task.get("_cwd") or template.cwd)
+                client = ACPClient(
+                    copilot_path=template.copilot_path,
+                    cwd=assigned_cwd,
+                    model=selected_model,
+                    mcp_config=_subagent_mcp_config(template, task),
+                    reasoning_effort=template.reasoning_effort,
+                )
         if task.get("coding_run_id"):
             client.workspace_run_id = task["coding_run_id"]
-            with _st.subagent_lock:
-                _st.workspace_acp_clients[task_id] = client
         with _st.subagent_lock:
+            if _st.acp_shutdown.is_set() or task.get("_cancel_requested"):
+                raise RuntimeError("Agent startup was interrupted.")
+            _st.workspace_acp_clients[task_id] = client
+        client.start()
+        with _st.subagent_lock:
+            if task.get("_cancel_requested"):
+                raise RuntimeError("Agent interruption requested.")
             task["model"] = client.model or "default"
             task["status"] = "running"
         sync_workspace("running")
@@ -440,7 +478,7 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
         def on_chunk(text):
             """Expose bounded, user-visible output while the ACP prompt runs."""
             nonlocal live_output, live_output_chars, last_workspace_sync
-            if not text:
+            if not text or task.get("_cancel_requested"):
                 return
             chunk = str(text)
             live_output_chars += len(chunk)
@@ -458,6 +496,8 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
 
         def on_event(event):
             """Expose coarse ACP lifecycle progress without retaining private reasoning."""
+            if task.get("_cancel_requested"):
+                return
             label_text = str((event or {}).get("label") or "Working")[:160]
             with _st.subagent_lock:
                 active_task = _st.subagent_tasks.get(task_id)
@@ -472,6 +512,9 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
             prompt_result = client.prompt(
                 prompt_text, timeout=180, on_chunk=on_chunk, permission_mode=permission_mode, on_event=on_event,
             )
+            if task.get("_cancel_requested"):
+                cancel_workspace_run()
+                return
             permission_cancelled = isinstance(prompt_result, dict) and prompt_result.get("permission_cancelled")
             if task.get("coding_run_id") and permission_cancelled:
                 cancel_workspace_run()
@@ -497,13 +540,13 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                     )
             while True:
                 with _st.subagent_lock:
+                    if task.get("_cancel_requested"):
+                        raise RuntimeError("Agent interruption requested.")
                     task["result"] = result_text[-4000:]
                     steer_queue = task.setdefault("steer_queue", [])
                     instruction = steer_queue.pop(0) if steer_queue else ""
                     if not instruction:
-                        task["status"] = "finalizing" if task.get("signal_on_complete") else "done"
-                        if not task.get("signal_on_complete"):
-                            task["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                        task["status"] = "finalizing"
                         break
                     task["status"] = "steering"
                 prompt_text = (
@@ -516,16 +559,43 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 prompt_result = client.prompt(
                     prompt_text, timeout=180, on_chunk=on_chunk, permission_mode=permission_mode, on_event=on_event,
                 )
+                if task.get("_cancel_requested"):
+                    cancel_workspace_run()
+                    return
                 permission_cancelled = isinstance(prompt_result, dict) and prompt_result.get("permission_cancelled")
                 if task.get("coding_run_id") and permission_cancelled:
                     cancel_workspace_run()
                     return
                 result_text = _subagent_result_text(prompt_result)
         finally:
-            client.stop()
-            with _st.subagent_lock:
-                _st.workspace_acp_clients.pop(task_id, None)
+            release_client()
+        if task.get("_cancel_requested"):
+            cancel_workspace_run()
+            return
         sync_workspace("done", result_text)
+        if task.get("coding_run_id") and _st.workspace_store is not None:
+            run = _st.workspace_store.get_run(task["coding_run_id"])
+            if run.get("apply_on_success"):
+                from bridge.workspaces import WorkspaceError
+                try:
+                    if isinstance(prompt_result, dict) and prompt_result.get("checks_passed") is False:
+                        raise WorkspaceError("Verification commands reported a nonzero exit status. Review the checks before applying.")
+                    if re.search(r"(?:tests?|checks?|build|lint|typecheck).{0,40}(?:failed|failure|failing)", result_text, re.IGNORECASE):
+                        raise WorkspaceError("The agent report includes failed verification. Review it before applying.")
+                    preview = _st.workspace_store.preview_apply_run(run["id"])
+                    applied = _st.workspace_store.apply_run(run["id"], preview["fingerprint"])
+                    integration = applied["message"]
+                except WorkspaceError as error:
+                    integration = "Apply to source blocked: " + str(error) + " Changes remain in the coding worktree."
+                    _st.workspace_store.record_apply(run["id"], "blocked", integration)
+                result_text += "\n\n" + integration
+                with _st.subagent_lock:
+                    task["result"] = result_text[-4000:]
+                sync_workspace("done", result_text)
+        if not task.get("signal_on_complete"):
+            with _st.subagent_lock:
+                task["status"] = "done"
+                task["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         try:
             _push_notification(f"Subagent done: {label}", result_text[:300], channel="chat")
         except Exception as notify_error:
@@ -536,6 +606,10 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 task["status"] = "done"
                 task["ended_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     except Exception as e:
+        release_client()
+        if task.get("_cancel_requested"):
+            cancel_workspace_run()
+            return
         with _st.subagent_lock:
             task["status"] = "error"
             task["result"] = str(e)[:500]
@@ -847,5 +921,3 @@ _CRON_TASKS_PATH = os.path.join(
 )
 # _cron_tasks -> _st.cron_tasks
 _st.cron_lock = _st.cron_lock
-
-

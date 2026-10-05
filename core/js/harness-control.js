@@ -97,6 +97,7 @@ var EvaHarness = (function() {
     { id: 'set_workspace_mcp_server', description: 'Enable or disable a named workspace MCP server only when the user explicitly asks.' },
     { id: 'verify_workspace_mcp_server', description: 'Start an isolated workspace check for a named MCP server after a direct request.' },
     { id: 'retry_workspace_run', description: 'Retry the named workspace run after a direct user request.' },
+    { id: 'apply_workspace_run', description: 'Commit and fast-forward a selected run into its original source branch, only on an explicit user request.' },
     { id: 'run_workspace_check', description: 'Start a requested workspace check or build.' },
     { id: 'run_repository_remediation', description: 'Start an explicitly requested repository remediation run.' },
     { id: 'describe_repository_remediation', description: 'Report the verified status and receipt of the most recently started repository task. Read-only.' },
@@ -496,6 +497,11 @@ var EvaHarness = (function() {
           runId: String(workspaceRetry[1] || '').replace(/[.!?]+$/g, '').trim()
         };
       }
+      var applyWorkspace = rawPhrase.match(/^(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+)?(?:apply|merge|integrate|push|move)\s+(?:the\s+)?(?:(?:selected|current|this)\s+)?(?:(?:workspace|coding)\s+)?(?:run|worktree|workspace)(?:\s+changes)?(?:\s+([0-9a-f-]{36}))?\s+(?:back\s+)?(?:to|into)\s+(?:the\s+)?(?:original|source|main)(?:\s+(?:folder|workspace|project|repository|repo|branch))?[.!?]*$/i);
+      var applyChanges = /^(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|please\s+)?(?:apply|merge|integrate|push|move)\s+(?:(?:these|those|the)\s+)?changes\s+(?:back\s+)?(?:to|into)\s+(?:the\s+)?(?:original|source|main)\s+(?:folder|workspace|project|repository|repo|branch)[.!?]*$/i.test(rawPhrase);
+      if (applyWorkspace || applyChanges) {
+        return { action: 'apply_workspace_run', target: 'workspaces', label: 'Apply to Source', runId: applyWorkspace ? applyWorkspace[1] || '' : '' };
+      }
       var githubContinuation = /^(?:please\s+)?(?:continue|proceed|go ahead)\b/i.test(rawPhrase) &&
         /\b(?:github|repositories|repos|repository|repo|import|clone)\b/i.test(rawPhrase) &&
         !/\b(?:don'?t|do not|never|without|unless|only after|wait|confirmation|if i consent|when i say)\b/.test(phrase);
@@ -700,6 +706,9 @@ var EvaHarness = (function() {
     var modelWorkspaceRetry = action === 'retry_workspace_run' && userNativeRoute &&
       userNativeRoute.action === 'retry_workspace_run' &&
       String(request.runId || '').trim() === String(userNativeRoute.runId || '').trim();
+    var modelWorkspaceApply = action === 'apply_workspace_run' && userNativeRoute &&
+      userNativeRoute.action === 'apply_workspace_run' &&
+      String(request.runId || '').trim() === String(userNativeRoute.runId || '').trim();
     var modelWorkspaceRemoval = action === 'remove_workspace' && userNativeRoute &&
       userNativeRoute.action === 'remove_workspace' &&
       String(request.projectName || '').trim().toLowerCase() === String(userNativeRoute.projectName || '').trim().toLowerCase();
@@ -720,7 +729,7 @@ var EvaHarness = (function() {
       (action === 'delete_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase()) ||
       action === 'run_skill'
     );
-    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation && !modelBoundedSkill && !modelEmailPrepare) {
+    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceApply && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation && !modelBoundedSkill && !modelEmailPrepare) {
       return result(false, action, 'This native action requires direct user interaction.');
     }
     if (action === 'navigate') return navigate(request.target);
@@ -1054,6 +1063,19 @@ var EvaHarness = (function() {
         return result(false, 'retry_workspace_run', error && error.message ? error.message : 'Workspace retry failed.', { outcome: 'failed', reason: failureReason(error) });
       });
     }
+    if (action === 'apply_workspace_run') {
+      if (!modelWorkspaceApply) return Promise.resolve(result(false, action, 'Applying to source requires an explicit matching user request.'));
+      if (!window.EvaWorkspaces || typeof EvaWorkspaces.applyRun !== 'function') return Promise.resolve(result(false, action, 'Apply to source is unavailable.'));
+      var openedApplyWorkspaces = navigate('workspaces');
+      if (!openedApplyWorkspaces.ok) return Promise.resolve(openedApplyWorkspaces);
+      return Promise.resolve(EvaWorkspaces.applyRun(request.runId, true)).then(function(applied) {
+        return result(applied.outcome !== 'cancelled', action, applied.message, {
+          outcome: applied.outcome, revision: applied.revision || ''
+        });
+      }).catch(function(error) {
+        return result(false, action, error && error.message ? error.message : 'Source integration was blocked.', { outcome: 'blocked', reason: failureReason(error) });
+      });
+    }
     if (action === 'verify_workspace_mcp_server') {
       if (!window.EvaWorkspaces || typeof EvaWorkspaces.verifyProjectMcpServerByName !== 'function') return Promise.resolve(result(false, 'verify_workspace_mcp_server', 'Workspace MCP verification is unavailable in this Eva build.'));
       var openedVerificationWorkspaces = navigate('workspaces');
@@ -1296,6 +1318,7 @@ var EvaHarness = (function() {
       var schema = evaTextPromptDescribe();
       if (schema.open) contract += '\nCURRENT NATIVE FORM: ' + JSON.stringify(schema);
     }
+    contract += '\nWhen the user explicitly asks to apply or merge coding-run changes back to the local source/original folder, use [[EVA_HARNESS]]{"action":"apply_workspace_run","runId":"<optional explicitly requested run id>"}[[/EVA_HARNESS]]. This commits reviewed run edits and fast-forwards the captured source branch; it never performs a remote push. It fails on source edits, divergence, running agents, changed previews, or credential material. Do not initiate this action merely because a model thinks the run is done. A per-run Apply to source when done opt-in is separate explicit authorization for automatic completion-time integration.';
     return contract;
   }
 

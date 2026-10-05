@@ -21,6 +21,14 @@ while keeping configuration, approvals, and personal data under your control.
 	last-session recall, and a dedicated Memory view.
 - **Real work, with approval:** use browser, desktop, email, files, skills, scheduled
   tasks, and coding workspaces through bounded native actions.
+- **Workspace control room:** monitor independent terminals and coding agents for
+  the selected workspace, focus a tile, interrupt work, or send new direction.
+  Project files stay beside Live and Details tabs. Create local Git workspaces
+  or import existing projects through a responsive in-app folder browser.
+  Coding runs can use Copilot ACP or the selected local LM Studio/Strata model.
+- **Local source integration:** review and apply retained run changes to the
+  original branch, or opt in per run to apply on successful completion.
+  Clean-source and fast-forward checks prevent overwriting unrelated edits.
 - **Verified automation:** browser and desktop agents can use the selected AIG vision
 	backend, retain explicit clarifications, and report blocked work when completion is
 	not visually verified.
@@ -49,7 +57,7 @@ eva
 Eva is also added to the system application menu. On first launch, select **Eva (AIG)**
 for the integrated routing, memory, and tool experience.
 
-Current development version: **5.6.11** (unreleased).
+Current development version: **5.6.11** (`Eva Standalone-5.6.11.AppImage`, unreleased).
 Latest published standalone release: `Eva Standalone-5.6.10.AppImage`.
 
 ## Preview

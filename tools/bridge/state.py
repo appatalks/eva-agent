@@ -87,6 +87,7 @@ subagent_lock = threading.Lock()
 workspace_store = None
 workspace_lock = threading.RLock()
 workspace_acp_clients = {}  # task_id -> live workspace-scoped ACPClient
+acp_shutdown = threading.Event()
 
 # ── Telemetry ───────────────────────────────────────────────────────
 telemetry_enabled = os.environ.get("EVA_TELEMETRY", "1") not in ("0", "false", "no")
@@ -117,4 +118,3 @@ try:
 except OSError:
     _saved_mode = ""
 local_mode = (_saved_mode == "local")
-

@@ -61,7 +61,14 @@ var EvaWorkspaces = (function() {
     githubAuthRetry: null,
     chatDrawerOpen: false,
     chatNodeOrigins: null,
-    sessionSwitching: false
+    sessionSwitching: false,
+    chatSessionRefresh: 0,
+    chatSessionSignature: '',
+    workbenchTab: 'live',
+    detailTab: 'runs',
+    agentTasks: {},
+    agentTelemetryError: '',
+    terminalRevision: 0
   };
 
   function api() {
@@ -140,16 +147,29 @@ var EvaWorkspaces = (function() {
 
   function refreshChatSessionSelect() {
     var select = document.getElementById('workspaceChatSessionSelect');
-    if (!select || typeof getAllSessions !== 'function') return Promise.resolve();
-    var activeId = '';
-    try { activeId = localStorage.getItem('eva_active_session') || ''; } catch (_) {}
+    if (!select || state.sessionSwitching || typeof getAllSessions !== 'function') return Promise.resolve();
+    var request = ++state.chatSessionRefresh;
     return Promise.resolve(getAllSessions()).then(function(sessions) {
+      if (request !== state.chatSessionRefresh || state.sessionSwitching) return;
+      var activeId = localStorage.getItem('eva_active_session') || '';
       sessions = Array.isArray(sessions) ? sessions.slice() : [];
       sessions.sort(function(left, right) {
         if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
         return Number(right.updatedAt || 0) - Number(left.updatedAt || 0);
       });
+      var signature = JSON.stringify([activeId, sessions.map(function(session) {
+        return [session.id, session.title, session.pinned];
+      })]);
+      if (signature === state.chatSessionSignature) return;
+      state.chatSessionSignature = signature;
       select.replaceChildren();
+      if (!sessions.some(function(session) { return session.id === activeId; })) {
+        var current = document.createElement('option');
+        current.value = activeId;
+        current.textContent = 'Current chat (unsaved)';
+        current.selected = true;
+        select.appendChild(current);
+      }
       sessions.forEach(function(session) {
         var option = document.createElement('option');
         option.value = session.id;
@@ -157,15 +177,13 @@ var EvaWorkspaces = (function() {
         option.selected = session.id === activeId;
         select.appendChild(option);
       });
-      if (!sessions.length) {
-        var empty = document.createElement('option');
-        empty.value = activeId;
-        empty.textContent = 'Current session';
-        select.appendChild(empty);
-      }
-      select.disabled = sessions.length < 2;
-    }).catch(function() {
+      select.value = activeId;
+      select.disabled = select.options.length < 2;
+    }).catch(function(error) {
+      if (request !== state.chatSessionRefresh || state.sessionSwitching) return;
+      state.chatSessionSignature = '';
       select.disabled = true;
+      status('Chat sessions could not be refreshed: ' + (error.message || error), 'error');
     });
   }
 
@@ -178,17 +196,21 @@ var EvaWorkspaces = (function() {
       if (loaded) {
         setChatDrawerOpen(true, false);
         status('Chat session loaded.', 'success');
+      } else {
+        status('That saved session has no restorable transcript. Your current chat was kept.', 'error');
       }
     }).catch(function(error) {
       status(error && error.message ? error.message : 'Chat session could not be loaded.', 'error');
     }).finally(function() {
       state.sessionSwitching = false;
+      state.chatSessionSignature = '';
       refreshChatSessionSelect();
     });
   }
 
   function hideChatDrawerOnOutsidePointer(event) {
     if (!state.workbenchOpen || !state.chatDrawerOpen) return;
+    if (event.target.closest('#workspaceFolderPicker')) return;
     if (event.target.closest('#workspaceChatDrawer') || event.target.closest('#workspaceChatToggleBtn')) return;
     setChatDrawerOpen(false);
   }
@@ -238,14 +260,17 @@ var EvaWorkspaces = (function() {
 
   function setBusy(busy) {
     state.loading = busy;
-    ['workspaceAddProjectBtn', 'workspaceRefreshBtn', 'workspaceCreateRunBtn', 'workspaceAddProjectWorkbenchBtn', 'workspaceListGitHubBtn', 'workspaceImportGitHubBtn'].forEach(function(id) {
+    ['workspaceAddProjectBtn', 'workspaceRefreshBtn', 'workspaceCreateRunBtn', 'workspaceNewRunBtn', 'workspaceAddProjectWorkbenchBtn', 'workspaceNewProjectWorkbenchBtn', 'workspaceListGitHubBtn', 'workspaceImportGitHubBtn'].forEach(function(id) {
       var element = document.getElementById(id);
       if (!element) return;
-      var needsProject = id === 'workspaceCreateRunBtn';
+      var needsProject = id === 'workspaceCreateRunBtn' || id === 'workspaceNewRunBtn';
       element.disabled = busy || !supported() || (needsProject && !state.projects.length);
     });
     var projectSelect = document.getElementById('workspaceProjectSelect');
     if (projectSelect) projectSelect.disabled = busy || !supported() || !state.projects.length;
+    document.querySelectorAll('#workspaceWorkbenchDetail .workspace-workbench-run-form button[type="submit"]').forEach(function(button) {
+      button.disabled = busy || !supported();
+    });
   }
 
   function formatTime(value) {
@@ -432,7 +457,7 @@ var EvaWorkspaces = (function() {
     var run = state.runs.find(function(item) { return item.id === requestedRunId; }) ||
       state.runs.find(function(item) { return item.id === state.selectedRunId; });
     if (!run) throw new Error('Select an active workspace run before retrying it.');
-    if (run.status !== 'active' || (run.agent && ['starting', 'running', 'steering'].indexOf(run.agent.status) >= 0)) {
+    if (run.status !== 'active' || (run.agent && ['starting', 'running', 'steering', 'cancelling'].indexOf(run.agent.status) >= 0)) {
       throw new Error('This workspace run is already active or cannot be retried.');
     }
     var retried = await retryWorkspaceRun(run);
@@ -518,13 +543,13 @@ var EvaWorkspaces = (function() {
     if (run.primarySessionId && typeof loadSession === 'function') {
       actions.appendChild(actionButton('Chat', 'Open this run\'s primary chat', function() { loadSession(run.primarySessionId); }));
     }
-    var agentActive = run.agent && ['starting', 'running', 'steering'].indexOf(run.agent.status) !== -1;
+    var agentActive = run.agent && ['starting', 'running', 'steering', 'cancelling'].indexOf(run.agent.status) !== -1;
     if (run.status === 'active' && run.agent && run.agent.status === 'error') {
       actions.appendChild(actionButton('Retry', 'Retry this failed workspace run', function() {
         retryWorkspaceRun(run);
       }));
     }
-    if ((run.status === 'active' || run.status === 'completed') && !agentActive) {
+    if (['active', 'completed', 'cancelled'].indexOf(run.status) >= 0 && !agentActive) {
       actions.appendChild(actionButton('Archive', 'Keep this run and hide it from active work', function() { applyRunAction(run, 'archive'); }));
       actions.appendChild(actionButton('Discard', 'Review removal of this managed worktree', function() {
         state.pendingDiscardRunId = run.id;
@@ -616,6 +641,11 @@ var EvaWorkspaces = (function() {
   function narrateFailedRun(run) {
     var category = categorizeRunOutcome(run);
     var message = runFailureMessage(run.objective, category);
+    if (category === 'user_cancelled') {
+      addMonitorActivity(message, 'info', false, false, run);
+      publishRunChat(run, message, 'info');
+      return;
+    }
     addMonitorActivity(message, 'error', true, true, run);
     publishRunChat(run, message, 'error');
   }
@@ -630,7 +660,7 @@ var EvaWorkspaces = (function() {
     var agent = run && run.agent || {};
     var report = String(agent.report || '').toLowerCase();
     if (/required execution permission|permission (?:was )?not approved|permission denied|access denied/.test(report)) return 'permission_denied';
-    if (/cancelled by (?:the )?user|user cancel/.test(report)) return 'user_cancelled';
+    if (/cancelled by (?:the )?user|user cancel|interrupted at your request/.test(report)) return 'user_cancelled';
     if (agent.status === 'cancelled') return 'agent_cancelled';
     if (/acp not available|runner.{0,24}unavailable|agent capacity is full|not connected|offline|disabled/.test(report)) return 'runner_unavailable';
     if (/(?:test|tests|build|lint|typecheck|diagnostic|check).{0,48}(?:failed|failure|failing)|(?:failed|failure|failing).{0,48}(?:test|tests|build|lint|typecheck|diagnostic|check)|non[- ]zero exit|exit (?:code|status)\s*[1-9]/.test(report)) return 'test_failure';
@@ -639,7 +669,7 @@ var EvaWorkspaces = (function() {
 
   function runFailureMessage(objective, category) {
     var prefix = 'Eva could not complete "' + objective + '". ';
-    if (category === 'user_cancelled') return prefix + 'The run was cancelled by the user.';
+    if (category === 'user_cancelled') return 'Eva stopped "' + objective + '" at your request. Its worktree and changes were kept.';
     if (category === 'agent_cancelled') return prefix + 'The workspace agent cancelled the run.';
     if (category === 'permission_denied') return prefix + 'A sensitive action required permission and was not approved.';
     if (category === 'runner_unavailable') return prefix + 'The local workspace runner is unavailable. The run remains available for retry.';
@@ -842,6 +872,10 @@ var EvaWorkspaces = (function() {
   function setProjectTerminalTarget(project) {
     var checkout = project && project.sourceCheckout;
     if (!checkout || !checkout.id || typeof setWorkspaceTerminalTarget !== 'function') return;
+    var target = typeof _evaWorkspaceTerminalTarget !== 'undefined' ? _evaWorkspaceTerminalTarget : null;
+    if (target && (target.rootId === checkout.id || state.runs.some(function(run) {
+      return run.projectId === project.id && run.checkout && run.checkout.id === target.rootId && run.checkout.lifecycle === 'active';
+    }))) return;
     setWorkspaceTerminalTarget(checkout.id, project.name + ' | source');
   }
 
@@ -988,7 +1022,7 @@ var EvaWorkspaces = (function() {
     var section = document.createElement('section');
     section.className = 'workspace-workbench-section';
     var heading = document.createElement('h2');
-    heading.textContent = 'PROJECT FILES';
+    heading.textContent = project.name + ' | source';
     var actions = document.createElement('div');
     actions.className = 'workspace-monitor-detail-actions';
     var terminal = document.createElement('button');
@@ -1013,13 +1047,14 @@ var EvaWorkspaces = (function() {
   }
 
   function appendWorkbenchRunComposer(detail, project) {
-    var draft = state.runDrafts[project.id] || (state.runDrafts[project.id] = { objective: '', baseRef: 'HEAD', autoApprove: autoApprovePreference() });
+    var draft = state.runDrafts[project.id] || (state.runDrafts[project.id] = { objective: '', baseRef: 'HEAD', autoApprove: autoApprovePreference(), applyOnSuccess: false });
     var section = document.createElement('section');
     section.className = 'workspace-workbench-section';
     var heading = document.createElement('h2');
     heading.textContent = 'NEW CODING RUN';
     var form = document.createElement('form');
     form.className = 'workspace-workbench-run-form';
+    form.noValidate = true;
     var objectiveLabel = document.createElement('label');
     objectiveLabel.textContent = 'OBJECTIVE';
     var objective = document.createElement('textarea');
@@ -1043,6 +1078,15 @@ var EvaWorkspaces = (function() {
     var autoApproveText = document.createElement('span');
     autoApproveText.textContent = 'Auto approve actions';
     autoApprove.append(autoApproveInput, autoApproveText);
+    var apply = document.createElement('label');
+    apply.className = 'workspace-auto-approve';
+    var applyInput = document.createElement('input');
+    applyInput.type = 'checkbox';
+    applyInput.checked = draft.applyOnSuccess === true;
+    var applyText = document.createElement('span');
+    applyText.textContent = 'Apply to source when done (commit + fast-forward only)';
+    apply.append(applyInput, applyText);
+    applyInput.addEventListener('change', function() { draft.applyOnSuccess = applyInput.checked; });
     objective.addEventListener('input', function() { draft.objective = objective.value; });
     baseRef.addEventListener('input', function() { draft.baseRef = baseRef.value; });
     autoApproveInput.addEventListener('change', function() {
@@ -1053,21 +1097,38 @@ var EvaWorkspaces = (function() {
     submit.type = 'submit';
     submit.textContent = 'Start isolated run';
     submit.disabled = state.loading || !supported();
-    form.append(objectiveLabel, objective, baseLabel, baseRef, autoApprove, submit);
+    form.append(objectiveLabel, objective, baseLabel, baseRef, autoApprove, apply, submit);
     form.addEventListener('submit', async function(event) {
       event.preventDefault();
       submit.disabled = true;
-      var created = await createWorkspaceRun(project.id, objective.value, baseRef.value, { autoApprove: autoApproveInput.checked });
+      var created = await createWorkspaceRun(project.id, objective.value, baseRef.value, { autoApprove: autoApproveInput.checked, applyOnSuccess: applyInput.checked });
       if (created) {
         draft.objective = '';
         draft.baseRef = 'HEAD';
+        draft.applyOnSuccess = false;
         objective.value = '';
         baseRef.value = 'HEAD';
+        applyInput.checked = false;
       }
       if (!state.loading) submit.disabled = !supported();
     });
     section.append(heading, form);
+    var providerNote = document.createElement('p');
+    providerNote.className = 'workspace-run-provider-note';
+    providerNote.textContent = workspaceProviderNote();
+    section.appendChild(providerNote);
     detail.appendChild(section);
+  }
+
+  function workspaceBackend() {
+    var selected = document.getElementById('selAIGBackend');
+    return selected && selected.value ? selected.value : localStorage.getItem('aigBackend') || '';
+  }
+
+  function workspaceProviderNote() {
+    return workspaceBackend() === 'lmstudio'
+      ? 'Coding agents use your configured local LM Studio / Strata model and isolated worktree tools. No Copilot fallback.'
+      : 'Coding agents run through Copilot ACP. Local coding runs are available when LM Studio is selected.';
   }
 
   async function setWorkbenchMcpServer(project, server, checkbox) {
@@ -1158,13 +1219,155 @@ var EvaWorkspaces = (function() {
     detail.appendChild(section);
   }
 
+  function showWorkbenchTab(tab) {
+    state.workbenchTab = tab === 'details' ? 'details' : 'live';
+    [['live', 'workspaceLiveTab', 'workspaceLiveView'], ['details', 'workspaceDetailsTab', 'workspaceDetailsView']].forEach(function(entry) {
+      var selected = state.workbenchTab === entry[0];
+      var button = document.getElementById(entry[1]);
+      var view = document.getElementById(entry[2]);
+      if (button) {
+        button.setAttribute('aria-selected', selected ? 'true' : 'false');
+        button.tabIndex = selected ? 0 : -1;
+      }
+      if (view) view.hidden = !selected;
+    });
+    if (state.workbenchTab === 'live' && window.EvaWorkspaceLive) requestAnimationFrame(window.EvaWorkspaceLive.fit);
+  }
+
+  function showDetailTab(tab) {
+    state.detailTab = ['runs', 'activity', 'results', 'context'].indexOf(tab) >= 0 ? tab : 'runs';
+    ['runs', 'activity', 'results', 'context'].forEach(function(name) {
+      var suffix = name.charAt(0).toUpperCase() + name.slice(1);
+      var button = document.getElementById('workspace' + suffix + 'Tab');
+      var view = document.getElementById('workspace' + suffix + 'View');
+      var selected = state.detailTab === name;
+      if (button) {
+        button.setAttribute('aria-selected', selected ? 'true' : 'false');
+        button.tabIndex = selected ? 0 : -1;
+      }
+      if (view) view.hidden = !selected;
+    });
+  }
+
+  function bindWorkbenchTabs(ids, select) {
+    ids.forEach(function(id, index) {
+      var button = document.getElementById(id);
+      if (!button) return;
+      button.addEventListener('click', function() { select(index); });
+      button.addEventListener('keydown', function(event) {
+        var next;
+        if (event.key === 'ArrowRight') next = (index + 1) % ids.length;
+        else if (event.key === 'ArrowLeft') next = (index + ids.length - 1) % ids.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = ids.length - 1;
+        else return;
+        event.preventDefault();
+        select(next);
+        document.getElementById(ids[next]).focus();
+      });
+    });
+  }
+
+  async function workspaceAgentAction(taskId, action, instruction) {
+    var task = state.agentTasks[taskId];
+    var run = state.runs.find(function(item) {
+      return item.projectId === state.selectedProjectId && item.agent && item.agent.id === taskId;
+    });
+    if (!task || !run || task.coding_run_id !== run.id) throw new Error('This agent is not available in the selected workspace.');
+    if (!api() || typeof api().workspaceAgentControl !== 'function') throw new Error('Agent controls are unavailable. Rebuild and restart Eva.');
+    var data = await api().workspaceAgentControl(run.id, action, instruction);
+    if (!data.task || data.task.id !== taskId) throw new Error('The bridge did not confirm the requested agent action.');
+    state.agentTasks[taskId] = Object.assign({}, task, data.task);
+    monitor();
+    return data;
+  }
+
+  async function applyRun(runId, directAuthorization) {
+    if (!supported() || typeof api().workspacePreviewApply !== 'function' || typeof api().workspaceApplyRun !== 'function') throw new Error('Apply to source is unavailable in this Eva build.');
+    if (!state.runs.length) await refresh();
+    var selected = state.runs.find(function(run) { return run.id === (runId || state.selectedRunId); });
+    if (!selected || selected.projectId !== state.selectedProjectId) throw new Error('Select the intended coding run in its workspace before applying.');
+    var preview = await api().workspacePreviewApply(selected.id);
+    if (directAuthorization !== true) {
+      if (typeof evaConfirmAction !== 'function') throw new Error('Source integration review is unavailable.');
+      var approved = await evaConfirmAction({
+        title: 'Apply run changes to source?',
+        warning: 'This updates the original source folder on ' + preview.target_branch + '. No GitHub or remote push will occur.',
+        details: [
+          'Workspace: ' + preview.project_name,
+          'Target branch: ' + preview.target_branch,
+          preview.will_commit ? 'Uncommitted run edits will be committed first.' : 'Run changes are already committed.',
+          preview.already_applied ? 'The source already contains this run.' : 'Integration is fast-forward only.',
+          'Files:\n' + (preview.changed_files.join('\n') || 'No new changes')
+        ].join('\n'),
+        confirmLabel: 'Apply to source'
+      });
+      if (!approved) return { outcome: 'cancelled', message: 'Source integration cancelled. Both checkouts were left unchanged.' };
+    }
+    setBusy(true);
+    status('Applying reviewed run changes to the source branch...', 'loading');
+    try {
+      var receipt = await api().workspaceApplyRun(selected.id, preview.fingerprint);
+      delete state.projectFiles[selected.projectId];
+      var project = projectById(selected.projectId);
+      if (project) await loadProjectFiles(project);
+      await refresh();
+      status(receipt.message, 'success');
+      return { outcome: receipt.already_applied ? 'already_applied' : 'applied', message: receipt.message, revision: receipt.revision };
+    } catch (error) {
+      status(error.message || 'Source integration failed. Run changes were kept.', 'error');
+      throw error;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function applyRunFromButton(runId) {
+    applyRun(runId, false).catch(function(error) { status(error.message || 'Source integration could not be reviewed.', 'error'); });
+  }
+
+  function renderLiveWorkbench(project, projectRuns) {
+    if (!window.EvaWorkspaceLive) return;
+    var terminals = state.lastTerminals || [];
+    window.EvaWorkspaceLive.render({
+      project: project,
+      runs: projectRuns,
+      selectedRunId: state.selectedRunId,
+      terminals: terminals,
+      allTerminalIds: terminals.map(function(item) { return item.id; }),
+      tasks: state.agentTasks,
+      busy: state.loading,
+      error: state.agentTelemetryError
+    }, {
+      selectRun: selectRun,
+      showResults: function(runId) { selectRun(runId); showWorkbenchTab('details'); showDetailTab('results'); },
+      showLive: function() { showWorkbenchTab('live'); },
+      ensureRoot: function(rootId) {
+        var project = state.projects.find(function(item) { return item.sourceCheckout && item.sourceCheckout.id === rootId; });
+        var run = state.runs.find(function(item) { return item.checkout && item.checkout.id === rootId; });
+        if (!project && !run) throw new Error('This terminal root does not belong to an imported workspace.');
+        if (state.selectedProjectId !== (project ? project.id : run.projectId)) selectProject(project ? project.id : run.projectId);
+      },
+      terminalsChanged: function(value) {
+        state.terminalRevision++;
+        state.lastTerminals = value;
+        renderWorkbench();
+      },
+      agentAction: workspaceAgentAction,
+      retry: retryWorkspaceRun,
+      apply: applyRunFromButton,
+      permissions: appendWorkspacePermissions
+    });
+  }
+
   function renderWorkbench() {
     var projectList = document.getElementById('workspaceWorkbenchProjects');
     var runList = document.getElementById('workspaceWorkbenchRuns');
     var feed = document.getElementById('workspaceMonitorFeed');
     var results = document.getElementById('workspaceWorkbenchResults');
     var detail = document.getElementById('workspaceWorkbenchDetail');
-    if (!projectList || !runList || !feed || !results || !detail) return;
+    var files = document.getElementById('workspaceWorkbenchFiles');
+    if (!projectList || !runList || !feed || !results || !detail || !files) return;
     projectList.replaceChildren();
     if (!state.projects.length) {
       var emptyProject = document.createElement('p');
@@ -1196,6 +1399,8 @@ var EvaWorkspaces = (function() {
     var projectRuns = state.runs.filter(function(run) {
       return run.status !== 'discarded' && run.projectId === state.selectedProjectId;
     });
+    var selected = projectRuns.find(function(run) { return run.id === state.selectedRunId; }) || projectRuns[0];
+    state.selectedRunId = selected ? selected.id : '';
     var orderedRuns = state.clearedCodingRunProjectIds[state.selectedProjectId] ? [] : projectRuns;
     if (!orderedRuns.length) {
       var empty = document.createElement('p');
@@ -1265,20 +1470,31 @@ var EvaWorkspaces = (function() {
       !selectedProject || (!activityCleared && !projectActivity.length)
     );
 
-    detail.replaceChildren();
     var project = selectedProject;
     if (!project) {
+      detail.replaceChildren();
+      files.replaceChildren();
+      files.dataset.projectId = '';
+      detail.dataset.projectSignature = '';
       var unavailable = document.createElement('p');
       unavailable.className = 'workspace-monitor-empty';
       unavailable.textContent = 'Import a local Git workspace to begin.';
       detail.appendChild(unavailable);
     } else {
       setProjectTerminalTarget(project);
-      appendWorkbenchProjectBrowser(detail, project);
-      appendWorkbenchRunComposer(detail, project);
-      appendWorkbenchMcpSettings(detail, project);
+      if (files.dataset.projectId !== project.id) {
+        files.replaceChildren();
+        files.dataset.projectId = project.id;
+        appendWorkbenchProjectBrowser(files, project);
+      }
+      var contextSignature = JSON.stringify([project.id, project.mcpServers]);
+      if (detail.dataset.projectSignature !== contextSignature) {
+        detail.replaceChildren();
+        detail.dataset.projectSignature = contextSignature;
+        appendWorkbenchRunComposer(detail, project);
+        appendWorkbenchMcpSettings(detail, project);
+      }
     }
-    var selected = projectRuns.find(function(run) { return run.id === state.selectedRunId; }) || projectRuns[0];
     var resultCleared = !!(selected && state.clearedResultRunIds[selected.id]);
     configureWorkbenchDisplayControl(
       'workspaceResultsDisplayBtn',
@@ -1318,6 +1534,13 @@ var EvaWorkspaces = (function() {
         openWorkspaceTerminal(selected.checkout.id, (selected.project ? selected.project.name + ' | ' : '') + (selected.checkout.branch || 'worktree'));
       });
       actions.appendChild(terminalButton);
+      var applyButton = document.createElement('button');
+      applyButton.type = 'button';
+      applyButton.textContent = selected.applyStatus === 'applied' ? 'Check source integration' : 'Apply to source';
+      applyButton.disabled = !selected.checkout || selected.checkout.lifecycle !== 'active' ||
+        !!(selected.agent && ['starting', 'running', 'steering', 'cancelling'].indexOf(selected.agent.status) >= 0);
+      applyButton.addEventListener('click', function() { applyRunFromButton(selected.id); });
+      actions.appendChild(applyButton);
       if (selected.status === 'active' && (!selected.agent || selected.agent.status === 'error')) {
         var retryButton = document.createElement('button');
         retryButton.type = 'button';
@@ -1342,6 +1565,13 @@ var EvaWorkspaces = (function() {
         runSection.appendChild(report);
       }
       results.appendChild(runSection);
+      if (selected.applyReport) {
+        var integration = document.createElement('p');
+        integration.className = 'workspace-live-agent-message';
+        integration.dataset.kind = selected.applyStatus === 'blocked' ? 'error' : '';
+        integration.textContent = selected.applyReport;
+        results.appendChild(integration);
+      }
       appendWorkspacePermissions(results, selected);
     } else {
       var emptyResults = document.createElement('p');
@@ -1365,10 +1595,19 @@ var EvaWorkspaces = (function() {
     });
     var updated = document.getElementById('workspaceMonitorUpdated');
     if (updated) updated.textContent = state.lastCheckedAt ? 'UPDATED ' + new Date(state.lastCheckedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'STANDBY';
+    var projectTitle = document.getElementById('workspaceSelectedName');
+    if (projectTitle) projectTitle.textContent = project ? project.name : 'Select a workspace';
+    var summary = document.getElementById('workspaceSelectedSummary');
+    if (summary) summary.textContent = projectRuns.length + ' coding run' + (projectRuns.length === 1 ? '' : 's') + ' | terminals and agents scoped to this workspace';
+    var filesRefresh = document.getElementById('workspaceFilesRefreshBtn');
+    if (filesRefresh) filesRefresh.disabled = !project;
+    renderLiveWorkbench(project, projectRuns);
+    showWorkbenchTab(state.workbenchTab);
+    showDetailTab(state.detailTab);
   }
 
   async function monitor() {
-    if (!supported() || state.monitorInFlight) return;
+    if (!supported() || state.monitorInFlight || (!state.workbenchOpen && Date.now() - state.lastCheckedAt < 10000)) return;
     state.monitorInFlight = true;
     try {
       state.projects = await api().workspaceListProjects();
@@ -1377,7 +1616,22 @@ var EvaWorkspaces = (function() {
       if (selected && selected.checkout && selected.checkout.lifecycle === 'active' && typeof api().workspaceCheckoutStatus === 'function') {
         selected.checkout = await api().workspaceCheckoutStatus(selected.checkout.id);
       }
+      var terminalRevision = state.terminalRevision;
       var terminals = await api().terminalList();
+      if (terminalRevision !== state.terminalRevision) terminals = state.lastTerminals || [];
+      var previousTasks = JSON.stringify(state.agentTasks);
+      if (state.workbenchOpen && state.selectedProjectId && typeof api().workspaceAgentSnapshots === 'function') {
+        try {
+          var telemetryProjectId = state.selectedProjectId;
+          var tasks = await api().workspaceAgentSnapshots(telemetryProjectId);
+          state.agentTasks = {};
+          if (telemetryProjectId === state.selectedProjectId) tasks.forEach(function(task) { state.agentTasks[task.id] = task; });
+          state.agentTelemetryError = '';
+        } catch (error) {
+          state.agentTasks = {};
+          state.agentTelemetryError = 'Live agent controls could not refresh: ' + (error.message || error);
+        }
+      }
       var previousPermissionIds = state.pendingPermissions.map(function(permission) { return permission.id; });
       var workspacePermissionRelevant = runs.some(function(run) { return run.status === 'active'; }) || state.pendingPermissions.length > 0;
       if (workspacePermissionRelevant && typeof backgroundBridgeRequest === 'function' && typeof getBridgeCapabilityHeaders === 'function') {
@@ -1410,7 +1664,7 @@ var EvaWorkspaces = (function() {
       });
       var signature = monitorSignature(runs, terminals, state.projects);
       var changed = signature !== state.monitorSignature;
-      var shouldRender = changed || permissionsChanged;
+      var shouldRender = changed || permissionsChanged || previousTasks !== JSON.stringify(state.agentTasks) || !!state.agentTelemetryError;
       state.runs = runs;
       pruneWorkspaceDisplayState();
       state.lastTerminals = terminals;
@@ -1503,7 +1757,7 @@ var EvaWorkspaces = (function() {
       return project.name + (active ? ' with ' + active + ' active run' + (active === 1 ? '' : 's') : '') + (enabledTools ? ' and ' + enabledTools + ' enabled workspace tool' + (enabledTools === 1 ? '' : 's') : '');
     });
     var remaining = state.projects.length - names.length;
-    var activeRuns = state.runs.filter(function(run) { return run.status === 'active' || (run.agent && ['starting', 'waiting', 'running', 'steering', 'finalizing'].indexOf(run.agent.status) !== -1); }).length;
+    var activeRuns = state.runs.filter(function(run) { return run.status === 'active' || (run.agent && ['starting', 'waiting', 'running', 'steering', 'cancelling', 'finalizing'].indexOf(run.agent.status) !== -1); }).length;
     return 'I can access ' + state.projects.length + ' coding workspace' + (state.projects.length === 1 ? '' : 's') + ': ' + names.join(', ') + (remaining > 0 ? ', and ' + remaining + ' more' : '') + '. There ' + (activeRuns === 1 ? 'is 1 active coding run' : 'are ' + activeRuns + ' active coding runs') + '.';
   }
 
@@ -1572,6 +1826,30 @@ var EvaWorkspaces = (function() {
       await refresh();
     } catch (error) {
       status(error.message || 'Project selection failed.', 'error');
+      setBusy(false);
+    }
+  }
+
+  async function newProject() {
+    if (!supported() || state.loading) return;
+    if (typeof api().workspaceNewProject !== 'function') {
+      status('New workspace creation is unavailable. Rebuild and restart Eva.', 'error');
+      return;
+    }
+    setBusy(true);
+    status('Choose a name and parent folder for the new workspace.', 'loading');
+    try {
+      var result = await api().workspaceNewProject();
+      if (result && result.canceled) {
+        await refresh();
+        return;
+      }
+      if (!result || !result.project) throw new Error('Eva did not confirm workspace creation.');
+      state.selectedProjectId = result.project.id;
+      await refresh();
+      status('Workspace created with Git and a starter README.', 'success');
+    } catch (error) {
+      status(error.message || 'Workspace creation failed.', 'error');
       setBusy(false);
     }
   }
@@ -1826,7 +2104,7 @@ var EvaWorkspaces = (function() {
     var report = String(run.agent && run.agent.report || '').trim();
     var submitted = report.match(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/\d+/i);
     if (submitted) return { completed: true, outcome: 'completed', url: submitted[0], message: 'Yes. The repository task completed: ' + submitted[0] };
-    if (['starting', 'waiting', 'running', 'steering', 'finalizing', 'active'].indexOf(agentStatus) >= 0) {
+    if (['starting', 'waiting', 'running', 'steering', 'cancelling', 'finalizing', 'active'].indexOf(agentStatus) >= 0) {
       return { completed: false, outcome: 'running', url: '', message: 'Not yet. The repository task is ' + agentStatus + ' in Workspaces, and Eva will notify you when it finishes.' };
     }
     if (agentStatus === 'done' || run.status === 'completed') {
@@ -1997,12 +2275,26 @@ var EvaWorkspaces = (function() {
         objective: objective,
         primarySessionId: primarySessionId,
         baseRef: String(baseRefValue || '').trim() || 'HEAD',
-        autoApprove: autoApprove
+        autoApprove: autoApprove,
+        applyOnSuccess: !!(options && options.applyOnSuccess === true),
+        modelPolicy: workspaceBackend() === 'lmstudio' ? 'lmstudio' :
+          workspaceBackend().indexOf('openai:') === 0 ? '' : workspaceBackend(),
+        providerConfig: workspaceBackend() === 'lmstudio' ? {
+          base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
+          model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
+          max_tokens: typeof getModelMaxTokens === 'function' ? getModelMaxTokens() : 16384
+        } : {}
       });
       state.selectedProjectId = run.projectId;
       state.selectedRunId = run.id;
       await refresh();
-      status(run.dispatchError ? 'Workspace ready; agent dispatch delayed: ' + run.dispatchError : 'Workspace agent dispatched.', run.dispatchError ? 'error' : 'success');
+      var dispatched = !!(run.agent && run.agent.id) && !run.dispatchError;
+      var receipt = 'Eva created an isolated worktree for "' + run.objective + '". ' +
+        (dispatched ? 'Its coding agent was dispatched.' : 'Agent dispatch is pending.');
+      addMonitorActivity(receipt, 'change', false, false, run);
+      if (dispatched && state.workbenchOpen) showWorkbenchTab('live');
+      status(run.dispatchError ? 'Workspace ready; agent dispatch delayed: ' + run.dispatchError :
+        dispatched ? 'Workspace agent dispatched.' : 'Workspace created; agent dispatch is pending.', run.dispatchError ? 'error' : 'success');
       return run;
     } catch (error) {
       status(error.message || 'Could not create coding run.', 'error');
@@ -2069,10 +2361,10 @@ var EvaWorkspaces = (function() {
       if (action === 'discard') {
         var currentRuns = await api().workspaceListRuns(run.projectId);
         actionRun = currentRuns.find(function(item) { return item.id === run.id; }) || null;
-        if (!actionRun || !actionRun.checkout || ['active', 'completed'].indexOf(actionRun.status) === -1) {
+        if (!actionRun || !actionRun.checkout || ['active', 'completed', 'cancelled'].indexOf(actionRun.status) === -1) {
           throw new Error('This coding run is no longer available for discard.');
         }
-        if (actionRun.agent && ['starting', 'running', 'steering'].indexOf(actionRun.agent.status) !== -1) {
+        if (actionRun.agent && ['starting', 'running', 'steering', 'cancelling'].indexOf(actionRun.agent.status) !== -1) {
           throw new Error('The workspace agent is still running. Wait for completion before discard.');
         }
         if (typeof api().terminalCloseRoot === 'function') {
@@ -2117,6 +2409,7 @@ var EvaWorkspaces = (function() {
     var projectSelect = document.getElementById('workspaceProjectSelect');
     var openWorkbenchButton = document.getElementById('workspaceOpenWorkbenchBtn');
     var workbenchAddProject = document.getElementById('workspaceAddProjectWorkbenchBtn');
+    var workbenchNewProject = document.getElementById('workspaceNewProjectWorkbenchBtn');
     var workbenchGitHubImport = document.getElementById('workspaceImportGitHubBtn');
     var workbenchGitHubList = document.getElementById('workspaceListGitHubBtn');
     var workbenchGitHubAuth = document.getElementById('authGitHubCliBtn');
@@ -2128,6 +2421,23 @@ var EvaWorkspaces = (function() {
     var chatToggle = document.getElementById('workspaceChatToggleBtn');
     var chatClose = document.getElementById('workspaceChatCloseBtn');
     var chatSessionSelect = document.getElementById('workspaceChatSessionSelect');
+    var backendSelect = document.getElementById('selAIGBackend');
+    if (backendSelect) backendSelect.addEventListener('change', function() {
+      document.querySelectorAll('.workspace-run-provider-note').forEach(function(note) { note.textContent = workspaceProviderNote(); });
+    });
+    bindWorkbenchTabs(['workspaceLiveTab', 'workspaceDetailsTab'], function(index) { showWorkbenchTab(index ? 'details' : 'live'); });
+    bindWorkbenchTabs(['workspaceRunsTab', 'workspaceActivityTab', 'workspaceResultsTab', 'workspaceContextTab'], function(index) {
+      showDetailTab(['runs', 'activity', 'results', 'context'][index]);
+    });
+    var newRun = document.getElementById('workspaceNewRunBtn');
+    if (newRun) newRun.addEventListener('click', function() {
+      showWorkbenchTab('details');
+      showDetailTab('context');
+      var objective = document.querySelector('#workspaceWorkbenchDetail textarea');
+      if (objective) objective.focus();
+    });
+    var filesRefresh = document.getElementById('workspaceFilesRefreshBtn');
+    if (filesRefresh) filesRefresh.addEventListener('click', function() { loadProjectFiles(projectById(state.selectedProjectId)); });
     bindWorkbenchContextMenus();
     if (close) close.addEventListener('click', toggle);
     if (add) add.addEventListener('click', addProject);
@@ -2136,6 +2446,7 @@ var EvaWorkspaces = (function() {
     if (projectSelect) projectSelect.addEventListener('change', function() { selectProject(projectSelect.value); });
     if (openWorkbenchButton) openWorkbenchButton.addEventListener('click', openWorkbench);
     if (workbenchAddProject) workbenchAddProject.addEventListener('click', addProject);
+    if (workbenchNewProject) workbenchNewProject.addEventListener('click', newProject);
     if (workbenchGitHubImport) workbenchGitHubImport.addEventListener('click', importGitHubProject);
     if (workbenchGitHubAuth) workbenchGitHubAuth.addEventListener('click', authorizeGitHub);
     if (githubCopyCode) githubCopyCode.addEventListener('click', function() {
@@ -2156,6 +2467,7 @@ var EvaWorkspaces = (function() {
     if (chatToggle) chatToggle.addEventListener('click', function() { setChatDrawerOpen(!state.chatDrawerOpen); });
     if (chatClose) chatClose.addEventListener('click', function() { setChatDrawerOpen(false); });
     if (chatSessionSelect) chatSessionSelect.addEventListener('change', function() { switchChatSession(chatSessionSelect.value); });
+    if (chatSessionSelect) chatSessionSelect.addEventListener('focus', refreshChatSessionSelect);
     document.addEventListener('pointerdown', hideChatDrawerOnOutsidePointer);
     if (monitorNew) monitorNew.addEventListener('click', async function() {
       closeWorkbench();
@@ -2173,7 +2485,7 @@ var EvaWorkspaces = (function() {
         autoApprove.addEventListener('change', function() { autoApprovePreference(autoApprove.checked); });
       }
       monitor();
-      state.monitorTimer = setInterval(monitor, 10000);
+      state.monitorTimer = setInterval(monitor, 3000);
     }
   }
 
@@ -2197,6 +2509,8 @@ var EvaWorkspaces = (function() {
     setProjectMcpServerByName: setProjectMcpServerByName,
     verifyProjectMcpServerByName: verifyProjectMcpServerByName,
     retryRun: retryRunById,
+    applyRun: applyRun,
+    refreshChatSessions: refreshChatSessionSelect,
     runSelectedCheck: runSelectedCheck,
     importGitHubSelection: importGitHubSelection,
     startRepositoryRemediation: startRepositoryRemediation,

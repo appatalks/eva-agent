@@ -256,7 +256,11 @@ function _saveSessionRecoveryCopy(id, snapshot) {
   }
 }
 
-function _showSessionRestoreUnavailable(id) {
+function _showSessionRestoreUnavailable(id, options) {
+  if (options && options.preserveWorkspace) {
+    if (typeof setStatus === 'function') setStatus('error', 'This saved session is unavailable. Your current chat was kept.');
+    return;
+  }
   var indexEntry = _getSessionIndex().find(function(entry) { return entry.id === id; });
   var output = document.getElementById('txtOutput');
   if (output) {
@@ -393,7 +397,7 @@ function loadSession(id, options) {
       }
     }
     if (!data) {
-      _showSessionRestoreUnavailable(id);
+      _showSessionRestoreUnavailable(id, options);
       return false;
     }
     _restoreSession(data);
@@ -408,7 +412,7 @@ function loadSession(id, options) {
     return true;
   }).catch(function(e) {
     console.error('Failed to load session:', e);
-    _showSessionRestoreUnavailable(id);
+    _showSessionRestoreUnavailable(id, options);
     return false;
   });
 }
@@ -448,6 +452,9 @@ async function renameSession(id) {
 
 /** Render the session list in the panel */
 function renderSessionList() {
+  if (window.EvaWorkspaces && typeof window.EvaWorkspaces.refreshChatSessions === 'function') {
+    window.EvaWorkspaces.refreshChatSessions();
+  }
   var ul = document.getElementById('sessionList');
   if (!ul) return;
 
@@ -976,6 +983,9 @@ function purgeAssets() {
 // ── Terminal Panel ───────────────────────────────────────────
 
 function toggleTerminalPanel() {
+  if (document.body.classList.contains('workspace-workbench-open') && window.EvaWorkspaceLive) {
+    return openWorkspaceTerminal(_evaWorkspaceTerminalTarget.rootId, _evaWorkspaceTerminalTarget.label);
+  }
   var panel = document.getElementById('terminalPanel');
   if (!panel) return;
   panel.classList.toggle('terminal-panel-docked', document.body.classList.contains('workspace-workbench-open'));
@@ -1024,6 +1034,11 @@ function setWorkspaceTerminalTarget(rootId, label) {
 function openWorkspaceTerminal(rootId, label) {
   if (typeof rootId !== 'string' || !rootId) return;
   setWorkspaceTerminalTarget(rootId, label);
+  if (document.body.classList.contains('workspace-workbench-open') && window.EvaWorkspaceLive) {
+    return window.EvaWorkspaceLive.openTerminal({ rootId: rootId, label: label }).catch(function(error) {
+      if (typeof setStatus === 'function') setStatus('error', error.message || 'Workspace terminal could not be opened.');
+    });
+  }
   var panel = document.getElementById('terminalPanel');
   if (panel) panel.classList.toggle('terminal-panel-docked', document.body.classList.contains('workspace-workbench-open'));
   var workspacePanel = document.getElementById('workspacePanel');
@@ -1044,6 +1059,9 @@ function runEvaTerminalCommand(command, submit) {
   var text = String(command || '').trim();
   if (!text || /[\r\n\0]/.test(text) || text.length > 8192) {
     return Promise.reject(new Error('Terminal commands must be one non-empty line.'));
+  }
+  if (document.body.classList.contains('workspace-workbench-open') && window.EvaWorkspaceLive) {
+    return window.EvaWorkspaceLive.runCommand(_evaWorkspaceTerminalTarget, text, submit !== false);
   }
   openWorkspaceTerminal(_evaWorkspaceTerminalTarget.rootId, _evaWorkspaceTerminalTarget.label);
   var deadline = Date.now() + 5000;
@@ -1234,10 +1252,28 @@ function _workspaceTerminalColor(name, fallback) {
 }
 
 async function _buildWorkspaceTerminal(frame) {
-  await _loadWorkspaceTerminalAssets();
-  var api = window.evaStandalone;
   var parent = frame.parentNode;
   frame.style.display = 'none';
+  var view = await createWorkspaceTerminalView(parent, _evaWorkspaceTerminalTarget);
+  parent._evaWorkspaceTerminalFit = view.fit;
+  window.EvaTerminal = window.EvaTerminal || {};
+  window.EvaTerminal.open = function(target) {
+    if (!target || typeof target.rootId !== 'string' || !target.rootId) return Promise.reject(new Error('Select an approved terminal root.'));
+    _evaWorkspaceTerminalTarget = { rootId: target.rootId, label: String(target.label || 'Workspace') };
+    return view.open(_evaWorkspaceTerminalTarget);
+  };
+  window.EvaTerminal.runCommand = async function(command, submit) {
+    await view.open(_evaWorkspaceTerminalTarget);
+    return view.runCommand(command, submit !== false);
+  };
+}
+
+async function createWorkspaceTerminalView(parent, initialTarget, options) {
+  if (!parent || !initialTarget || !initialTarget.rootId) throw new Error('Select an approved terminal root.');
+  await _loadWorkspaceTerminalAssets();
+  var api = window.evaStandalone;
+  var terminalTarget = { rootId: initialTarget.rootId, label: String(initialTarget.label || 'Workspace') };
+  options = options || {};
 
   var surface = document.createElement('section');
   surface.className = 'workspace-terminal';
@@ -1253,7 +1289,7 @@ async function _buildWorkspaceTerminal(frame) {
 
   var rootLabel = document.createElement('span');
   rootLabel.className = 'workspace-terminal-root';
-  rootLabel.textContent = _evaWorkspaceTerminalTarget.label;
+  rootLabel.textContent = terminalTarget.label;
 
   var status = document.createElement('span');
   status.className = 'workspace-terminal-status';
@@ -1277,6 +1313,7 @@ async function _buildWorkspaceTerminal(frame) {
   restartButton.className = 'workspace-terminal-tool';
   restartButton.textContent = 'Restart';
   restartButton.title = 'Close this shell and start a new one';
+  restartButton.hidden = options.managed === true;
 
   toolbar.append(identity, rootLabel, status, searchInput, searchButton, restartButton);
 
@@ -1342,17 +1379,18 @@ async function _buildWorkspaceTerminal(frame) {
   });
 
   async function fitAndResize() {
-    if (!surface.isConnected) return;
+    if (!surface.isConnected || terminalHost.clientWidth < 2 || terminalHost.clientHeight < 2) return;
     fitAddon.fit();
     if (terminalId && !exited) {
       try {
         await api.terminalResize(terminalId, terminal.cols, terminal.rows);
-      } catch (_) {}
+      } catch (error) {
+        setStatus(error.message || 'Terminal could not be resized.', 'error');
+      }
     }
   }
 
   async function attachTerminal(forceNew) {
-    var terminalTarget = _evaWorkspaceTerminalTarget;
     setStatus('CONNECTING', 'connecting');
     replayReady = false;
     pendingEvents = [];
@@ -1360,18 +1398,19 @@ async function _buildWorkspaceTerminal(frame) {
     exited = false;
     if (terminalId && (forceNew || attachedRootId !== terminalTarget.rootId)) {
       if (forceNew) {
-        try { await api.terminalClose(terminalId); } catch (_) {}
+        await api.terminalClose(terminalId);
       }
       terminalId = '';
       terminal.reset();
     }
     var sessions = await api.terminalList();
     var descriptor = forceNew ? null : sessions.find(function(item) {
-      return item.rootId === terminalTarget.rootId && !item.exited;
+      return item.rootId === terminalTarget.rootId && (options.terminalId ? item.id === options.terminalId : !item.exited);
     });
-    if (!descriptor && !forceNew) {
+    if (!descriptor && !forceNew && !options.terminalId) {
       descriptor = sessions.find(function(item) { return item.rootId === terminalTarget.rootId; });
     }
+    if (!descriptor && options.terminalId) throw new Error('This terminal is no longer available.');
     if (!descriptor) {
       fitAddon.fit();
       descriptor = await api.terminalCreate({
@@ -1392,7 +1431,8 @@ async function _buildWorkspaceTerminal(frame) {
     pendingEvents = [];
     setStatus(exited ? 'EXIT ' + (replay.exitCode === null ? '?' : replay.exitCode) : 'CONNECTED', exited ? 'exited' : 'connected');
     await fitAndResize();
-    terminal.focus();
+    if (options.managed !== true) terminal.focus();
+    return descriptor;
   }
 
   terminal.onData(function(data) {
@@ -1416,29 +1456,43 @@ async function _buildWorkspaceTerminal(frame) {
 
   var resizeObserver = new ResizeObserver(function() { fitAndResize(); });
   resizeObserver.observe(terminalHost);
-  parent._evaWorkspaceTerminalFit = fitAndResize;
-  window.EvaTerminal = window.EvaTerminal || {};
-  window.EvaTerminal.open = function(target) {
-    if (!target || typeof target.rootId !== 'string' || !target.rootId) return Promise.resolve();
-    _evaWorkspaceTerminalTarget = { rootId: target.rootId, label: String(target.label || 'Workspace') };
+  function open(target) {
+    if (!target || typeof target.rootId !== 'string' || !target.rootId) return Promise.reject(new Error('Select an approved terminal root.'));
+    terminalTarget = { rootId: target.rootId, label: String(target.label || 'Workspace') };
     return attachTerminal(false);
-  };
-  window.EvaTerminal.runCommand = async function(command, submit) {
+  }
+  async function runCommand(command, submit) {
     var text = String(command || '').trim();
     if (!text || /[\r\n\0]/.test(text) || text.length > 8192) throw new Error('Terminal commands must be one non-empty line.');
-    await attachTerminal(false);
+    if (!terminalId) await attachTerminal(false);
     if (!terminalId || exited) throw new Error('Native terminal is not connected.');
     await api.terminalWrite(terminalId, text + (submit === false ? '' : '\r'));
     terminal.focus();
     return { id: terminalId, submitted: submit !== false };
-  };
-  window.addEventListener('beforeunload', function() {
+  }
+  function dispose() {
     removeDataListener();
     removeExitListener();
     resizeObserver.disconnect();
-  }, { once: true });
+    terminal.dispose();
+    surface.remove();
+    window.removeEventListener('beforeunload', dispose);
+  }
+  window.addEventListener('beforeunload', dispose, { once: true });
 
-  await attachTerminal(false);
+  try {
+    await attachTerminal(false);
+  } catch (error) {
+    dispose();
+    throw error;
+  }
+  return {
+    open: open,
+    runCommand: runCommand,
+    fit: fitAndResize,
+    focus: function() { terminal.focus(); },
+    dispose: dispose
+  };
 }
 
 function _buildSimpleTerminal(frame, bridgeBase) {

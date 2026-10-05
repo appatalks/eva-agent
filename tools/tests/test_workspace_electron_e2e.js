@@ -28,20 +28,23 @@ function reservePort() {
 function waitForPage(endpoint) {
   const deadline = Date.now() + 90000;
   return new Promise(function(resolve, reject) {
+    let connectedBrowser = null;
     function tryConnect() {
-      chromium.connectOverCDP(endpoint).then(function(browser) {
+      (connectedBrowser ? Promise.resolve(connectedBrowser) : chromium.connectOverCDP(endpoint)).then(function(browser) {
+        connectedBrowser = browser;
         const pages = browser.contexts().flatMap(function(context) { return context.pages(); });
-        const page = pages.find(function(candidate) { return candidate.url().endsWith('/index.html'); });
+        const page = pages.find(function(candidate) { return candidate.url().split(/[?#]/, 1)[0].endsWith('/index.html'); });
         if (page) {
           resolve({ browser: browser, page: page });
         } else {
-          browser.close().then(retry, retry);
+          retry();
         }
       }, retry);
     }
     function retry() {
       if (Date.now() >= deadline) {
-        reject(new Error('Timed out waiting for the packaged Eva renderer.'));
+        if (connectedBrowser) connectedBrowser.close().finally(function() { reject(new Error('Timed out waiting for the packaged Eva renderer.')); });
+        else reject(new Error('Timed out waiting for the packaged Eva renderer.'));
         return;
       }
       setTimeout(tryConnect, 500);
@@ -119,10 +122,13 @@ async function main() {
     execFileSync('python3', [path.join(root, 'tools', 'tests', 'test_workspace_electron_setup.py'), configDirectory, repository], { encoding: 'utf8' });
 
     const debuggingPort = await reservePort();
+    const profileDirectory = path.join(sandbox, 'electron-profile');
+    fs.mkdirSync(profileDirectory);
+    fs.writeFileSync(path.join(profileDirectory, 'startup-guidance-v1.json'), '{"completed":true,"version":1}\n');
     child = spawn(electronPath, [
       '--eva-workspace-terminal-v1',
       '--remote-debugging-port=' + debuggingPort,
-      '--user-data-dir=' + path.join(sandbox, 'electron-profile')
+      '--user-data-dir=' + profileDirectory
     ], {
       env: Object.assign({}, process.env, { EVA_CONFIG_DIR: configDirectory, EVA_WORKSPACE_AGENT_AUTODISPATCH: '0' }),
       stdio: ['ignore', 'ignore', 'pipe']
@@ -315,13 +321,14 @@ async function main() {
       const projects = await window.evaStandalone.workspaceListProjects();
       return projects.find(function(project) { return project.name === 'project'; }).sourceCheckout;
     });
-    await page.locator('#workspaceWorkbenchDetail .workspace-monitor-detail-actions button', { hasText: 'Open project terminal' }).click();
+    await page.locator('#workspaceWorkbenchFiles .workspace-monitor-detail-actions button', { hasText: 'Open project terminal' }).click();
     await page.locator('.workspace-terminal-status').filter({ hasText: 'CONNECTED' }).waitFor();
     const sourceTerminals = await page.evaluate(async function() { return window.evaStandalone.terminalList(); });
     const sourceTerminal = sourceTerminals.find(function(terminal) { return terminal.rootId === sourceCheckout.id; });
     assert.ok(sourceTerminal, 'Project terminal did not use the selected source checkout');
     await page.evaluate(async function(terminalId) { await window.evaStandalone.terminalClose(terminalId); }, sourceTerminal.id);
-    await page.locator('#terminalPanelClose').click();
+    await page.locator('#workspaceDetailsTab').click();
+    await page.locator('#workspaceContextTab').click();
     const mcpToggle = page.locator('#workspaceWorkbenchDetail .workspace-mcp-row input');
     page.once('dialog', function(dialog) { return dialog.accept(); });
     await mcpToggle.check();
@@ -367,10 +374,12 @@ async function main() {
     });
     await page.evaluate(async function(terminalId) { await window.evaStandalone.terminalClose(terminalId); }, monitorChangeTerminal.id);
     await page.locator('#workspaceWorkbenchDetail .workspace-workbench-run-form').evaluate(function(form) { form.requestSubmit(); });
+    await page.locator('#workspaceRunsTab').click();
     const monitoredRun = page.locator('#workspaceWorkbenchRuns .workspace-monitor-run').filter({ hasText: 'E2E workspace run' });
     await monitoredRun.waitFor();
     await monitoredRun.click();
-    await page.locator('#workspaceMonitorFeed').filter({ hasText: 'Eva monitor:' }).waitFor();
+    await page.locator('#workspaceActivityTab').click();
+    await page.locator('#workspaceMonitorFeed').filter({ hasText: 'Eva created an isolated worktree' }).waitFor();
     await projectWorkspace.click({ button: 'right' });
     await page.locator('#workspaceContextMenu').filter({ hasText: 'Remove workspace' }).waitFor();
     await page.locator('#evaAssetsBtn').click();
@@ -378,6 +387,8 @@ async function main() {
     assert.strictEqual(await page.locator('#workspaceContextMenu').isHidden(), true, 'Workspace context menu remained visible after navigation');
     await page.locator('#evaWorkspacesBtn').click();
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
+    await page.locator('#workspaceDetailsTab').click();
+    await page.locator('#workspaceRunsTab').click();
     await page.locator('#workspaceRunsDisplayBtn').click();
     await page.locator('#workspaceWorkbenchRuns').filter({ hasText: 'Coding runs display cleared.' }).waitFor();
     await page.locator('#evaAssetsBtn').click();
@@ -387,8 +398,10 @@ async function main() {
     await page.locator('#workspaceWorkbenchRuns').filter({ hasText: 'Coding runs display cleared.' }).waitFor();
     await page.locator('#workspaceRunsDisplayBtn').click();
     await monitoredRun.waitFor();
+    await page.locator('#workspaceActivityTab').click();
     await page.locator('#workspaceActivityDisplayBtn').click();
     await page.locator('#workspaceMonitorFeed').filter({ hasText: 'Activity display cleared. Click Show to restore it.' }).waitFor();
+    await page.locator('#workspaceResultsTab').click();
     await page.locator('#workspaceResultsDisplayBtn').click();
     await page.locator('#workspaceWorkbenchResults').filter({ hasText: 'Run result display cleared.' }).waitFor();
     await page.locator('#workspaceResultsDisplayBtn').click();
@@ -402,13 +415,15 @@ async function main() {
     assert.strictEqual(terminalActionVisible, true, 'Workspace terminal action is unreachable in the main monitor');
     await terminalAction.click({ force: true });
     await page.locator('.workspace-terminal-status').filter({ hasText: 'CONNECTED' }).waitFor();
-    assert.strictEqual(await page.locator('#terminalPanel').evaluate(function(panel) { return panel.classList.contains('terminal-panel-docked'); }), true, 'Workspace terminal did not use the monitor dock');
+    assert.strictEqual(await page.locator('#workspaceLiveView').isVisible(), true, 'Workspace terminal did not open in Live');
+    assert.strictEqual(await page.locator('#terminalPanel').getAttribute('aria-hidden'), 'true', 'Workspace terminal unexpectedly opened a dock');
     assert.strictEqual(await page.locator('#workspaceWorkbench').isVisible(), true, 'Opening a terminal hid Workspace Monitor');
-    const dockGeometry = await page.locator('#terminalPanel').evaluate(function(panel) {
+    const tileGeometry = await page.locator('#workspaceLiveGrid .workspace-live-card[data-kind="terminal"]').evaluate(function(panel) {
       const bounds = panel.getBoundingClientRect();
-      return { top: bounds.top, height: bounds.height, viewport: window.innerHeight };
+      const center = document.querySelector('.workspace-center').getBoundingClientRect();
+      return { width: bounds.width, height: bounds.height, withinCenter: bounds.left >= center.left && bounds.right <= center.right + 1 };
     });
-    assert.ok(dockGeometry.top >= dockGeometry.viewport * 0.4 && dockGeometry.height <= dockGeometry.viewport * 0.55, 'Terminal dock does not occupy the lower half');
+    assert.ok(tileGeometry.width > 280 && tileGeometry.height >= 300 && tileGeometry.withinCenter, 'Terminal tile is clipped or too small');
     await page.locator('.workspace-terminal-host').click();
     await page.keyboard.type('pwd');
     await page.keyboard.press('Enter');
@@ -440,10 +455,6 @@ async function main() {
     assert.strictEqual(terminalSessions[0].rootId, selectedRun.checkout.id, 'Terminal root does not match the selected worktree');
     await page.screenshot({ path: path.join(artifactDirectory, 'workspace-e2e-desktop.png'), fullPage: true });
 
-    await page.locator('#terminalPanelClose').click();
-    await page.waitForFunction(function() {
-      return document.querySelector('#terminalPanel').getAttribute('aria-hidden') === 'true';
-    });
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
     await page.locator('#evaAssetsBtn').click();
     await page.locator('#assetsView').waitFor({ state: 'visible' });
@@ -455,10 +466,9 @@ async function main() {
     await page.locator('#workspaceWorkbench').waitFor({ state: 'visible' });
     assert.match(await page.locator('#workspaceWorkbenchProjects').innerText(), /1 MCP available/, 'Imported workspace MCP modules are not visible in the project summary');
     await page.locator('#evaTerminalBtn').click();
-    await page.locator('#terminalPanel[aria-hidden="false"]').waitFor();
+    await page.locator('#workspaceLiveView').waitFor({ state: 'visible' });
     assert.strictEqual(await page.locator('#workspaceWorkbench').isVisible(), true, 'Terminal sidebar navigation returned to chat');
-    assert.strictEqual(await page.locator('#terminalPanel').evaluate(function(panel) { return panel.classList.contains('terminal-panel-docked'); }), true, 'Sidebar terminal was not docked');
-    await page.locator('#terminalPanelClose').click();
+    assert.strictEqual(await page.locator('#terminalPanel').getAttribute('aria-hidden'), 'true', 'Sidebar terminal should use Live while Workspaces is open');
     await page.evaluate(async function(run) {
       await window.evaStandalone.workspaceRunAction(run.id, 'discard', {
         confirmDirty: true,
