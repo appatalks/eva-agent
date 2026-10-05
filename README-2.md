@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current release:** Eva 5.6.10. This document describes the matching browser UI,
+> **Current development version:** Eva 5.6.11 (unreleased). This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -19,7 +19,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh --build
 cd standalone
-./dist/'Eva Standalone-5.6.10.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.6.11.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
@@ -454,7 +454,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.6.10)
+  package.json             Electron + electron-builder config (v5.6.11)
 ```
 
 ## Dependencies
@@ -1568,6 +1568,31 @@ defaults to automatic dispatch.
 
 ### Workspace agent execution
 
+The run composer snapshots the selected workspace backend when Start is pressed.
+Selecting **LM Studio** uses the configured local OpenAI-compatible endpoint and
+model (including Strata), with no Copilot client or fallback. Each run retains
+its endpoint, model override, and output budget so retry/steering do not change
+provider when Chat settings change. Older runs without this metadata retain the
+ACP path.
+
+The local runner supplies bounded `list_files`, `read_file`, `write_file`,
+`edit_file`, and direct-argument `run_command` tools rooted in the isolated
+worktree. File tools reject traversal, symlinks, hardlinks, Git metadata, and
+protected credential/config paths. Commands reuse the ACP workspace safety
+policy and run in a secret-stripped environment; this is a command policy, not
+an operating-system sandbox for arbitrary repository programs. Approved stdio
+workspace MCP servers run with that worktree as their working directory.
+Remote workspace MCP transport is not supported by this initial local coding
+runner and is reported explicitly rather than silently dropped.
+
+A local model must return successful tool calls before its coding report can
+complete a run. Invalid responses, unsupported tools, HTTP failures, truncated
+output, and exhausted iteration budgets surface as run errors. The report
+includes actual tool receipts. Interruption closes that run's inference
+connection and stops its owned command/MCP processes, leaving the shared local
+model server running. Steering/resume and run lifecycle use the existing agent
+registry.
+
 Workspace and generic subagents reuse the observable subagent registry, so the
 same task is visible in Agent Operations with `coding_run_id`, `checkout_id`,
 and `capability_policy`. Every subagent receives an isolated worktree: it uses
@@ -1656,8 +1681,29 @@ crosses preload.
 
 ### Workspace Monitor and progress narration
 
+**New workspace**, **Import workspace**, and **Import GitHub** are separate
+header actions. Local import and creation use an in-app folder browser rather
+than a native desktop file dialog. Navigate with Home, Up, folder buttons, or
+an absolute path (including `~`); hidden folders can be shown explicitly.
+Cancel and Escape close the browser without adding a project.
+
+New workspace creates a named child of the selected parent, initializes Git
+on `main`, and commits a starter README so isolated coding runs work immediately.
+It never overwrites an existing folder or creates a source project inside a
+managed run worktree. Initial commit identity and signing/hook settings are
+limited to that bootstrap operation; global Git settings are unchanged.
+Initialization errors are reported and a partially created folder is retained
+for inspection rather than deleted. Import keeps an existing Git repository
+in its original location.
+
 `core/js/features/workspaces/monitor.js` implements the full main-window monitor:
 
+- workspace navigation on the left, a selected-workspace Live/Details area in
+  the center, and a full-height Project Files tree with refresh on the right;
+- Live tiles for independent native terminals and active or selected coding
+  agents, with focus/grid controls that preserve each shell's output and input;
+- Details tabs for Coding Runs, Eva Activity, Run Results, and Run Context,
+  including the new-run composer and workspace MCP settings;
 - run list with project, objective, agent state, branch, and dirty count;
 - context actions to remove a workspace and clear/show Coding Runs, activity,
   and displayed run results without deleting durable run records;
@@ -1666,16 +1712,37 @@ crosses preload.
 - selected run context, policy, linked session, terminal/chat actions, and
   bounded final report;
 - activity history capped at 60 events;
-- observation polling every 10 seconds;
+- observation polling every three seconds while Workspaces is open and every
+  ten seconds otherwise; PTY output remains event-driven;
 - dispatch, state transition, bounded live report, completion, and failure
   narration;
 - significant transition speech only when Auto Speak is enabled, with a
   two-minute voice rate limit and Local Voices readiness check;
-- five-minute heartbeat summaries for active work.
+- execution receipts for newly created worktrees, distinguishing pending
+  dispatch from an actual coding agent.
 
 Polling is observation-only. List IPC does not grant terminal roots or start an
 agent. Terminal authority is resolved only after an explicit terminal-open
 action.
+
+The Chat drawer's session picker stays synchronized with saved, renamed,
+pinned, and deleted sessions while open. An unsaved current chat remains a
+separate choice. Switching a missing transcript from the drawer leaves the
+current conversation and workspace visible instead of clearing them.
+
+Agent direction uses the existing ACP steering queue: a running agent applies
+the instruction on its next turn, while an available finished or interrupted
+agent resumes in its retained worktree. Interruption requests cancel only the
+selected agent's ACP prompts. The UI shows `CANCELLING` until its worker stops;
+archive, discard, and workspace removal remain blocked during cancellation.
+Interruption stops that client's owned CLI and command process groups without
+stopping other agents or local model servers. Worktrees and local changes are
+kept. If the runtime shuts down before cancellation is confirmed, the retained
+run stays protected rather than assuming its processes stopped.
+These controls require the installed
+workspace capability and a live agent in the current bridge process. Coding
+agents execute through the backend captured when the run was created.
+Local LM Studio/Strata chat routing is unchanged.
 
 ### Electron terminal broker
 
@@ -1699,18 +1766,40 @@ descendants can receive SIGTERM and bounded SIGKILL escalation even if the PTY
 parent exits first; Windows uses `taskkill` process-tree termination.
 
 Outside the monitor, Terminal is a horizontally resizable left surface with an
-expand control. Inside the monitor it is a vertically resizable lower dock
-(46% viewport height; 72% expanded). Opening Terminal from the run context or
-sidebar keeps Workspace Monitor visible. xterm rows are explicitly left
-aligned.
+expand control. Inside Workspaces, terminals appear as independent Live tiles.
+`+ Terminal` creates another shell in the chosen project source or active
+worktree. Open-terminal actions reuse a running shell for that checkout.
+Interrupt sends Ctrl+C to that shell; Close shell confirms termination without
+closing other shells or agents. Switching workspace or Details tabs keeps
+shells alive and retains their views. Opening Terminal from run context keeps
+Workspaces visible. xterm rows are explicitly left aligned.
 
 ### Lifecycle and cleanup
+
+**Apply to source** is available in Live run tiles and Run Results. A native
+in-app review lists the target branch and changed files, including whether
+uncommitted run edits will be committed first. Approval binds to the reviewed
+source/run state; changed previews require another review.
+
+The composer defaults **Apply to source when done** to off. Enable it for a run
+to authorize local commit/integration after successful execution, or explicitly
+ask Eva to “apply the current workspace changes to the source folder.”
+The `apply_workspace_run` harness action is matched to the current user's
+request; a model cannot initiate it just because it believes work is done.
+
+Integration verifies the captured source branch, a clean source checkout,
+an inactive run agent, a bounded credential-safe diff, and a fast-forward
+relationship. Existing source edits, divergence, changed previews, protected
+files, or reported verification failures block automatic integration and keep
+the run worktree for review. The integration receipt records the applied
+revision. Repeating an already applied run is a verified no-op. This action
+does not configure a remote or run `git push`; publishing to GitHub is separate.
 
 Completed worktrees remain available for review. Archive retains the checkout.
 Discard is explicit and:
 
 1. Refreshes and verifies the run-to-checkout relationship.
-2. Refuses while an agent is starting, running, or steering.
+2. Refuses while an agent is starting, running, steering, or cancelling.
 3. Terminates every PTY and descendant process for the checkout.
 4. Refuses dirty cleanup without explicit confirmation.
 5. Removes the Git worktree and generated run branch.
@@ -2016,7 +2105,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.6.10.AppImage'
+./dist/'Eva Standalone-5.6.11.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace

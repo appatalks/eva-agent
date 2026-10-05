@@ -12,6 +12,7 @@ const { TerminalBroker } = require('./terminal-broker');
 const { RuntimeLogger } = require('./runtime-logger');
 const { redactKnownPaths } = require('./workspace-projection');
 const { checkRuntime, setupInstructions } = require('./startup-runtime');
+const { WorkspaceFolderBrowser } = require('./workspace-folder-browser');
 
 const runtimeLogger = new RuntimeLogger({
   logPath: path.join(app.getPath('userData'), 'eva-runtime.log')
@@ -40,6 +41,16 @@ let bridgeBaseUrl = '';
 let githubAuthProcess = null;
 let githubAuthState = { state: 'idle', message: '' };
 let githubCliAuthPreferred = false;
+const workspaceFolderBrowser = new WorkspaceFolderBrowser({
+  import: async function(directory) {
+    const response = await requestWorkspaceBridge('/v1/workspaces/projects', 'POST', { path: directory });
+    return checkedWorkspaceProject(response.project);
+  },
+  create: async function(directory, name) {
+    const response = await requestWorkspaceBridge('/v1/workspaces/projects/create', 'POST', { parent_path: directory, name: name });
+    return checkedWorkspaceProject(response.project);
+  }
+});
 
 const BRIDGE_READY_TIMEOUT_MS = 60000;
 const LOCAL_VOICES_READY_TIMEOUT_MS = 10000;
@@ -492,7 +503,7 @@ async function dispatchPendingWorkspaceRuns() {
   for (const run of runs) {
     if (run.status !== 'active') continue;
     const agentStatus = run.agent && run.agent.status;
-    if (agentStatus && !['starting', 'running', 'steering'].includes(agentStatus)) continue;
+    if (agentStatus && !['starting', 'running', 'steering', 'cancelling'].includes(agentStatus)) continue;
     try {
       await requestWorkspaceBridge('/v1/workspaces/runs/' + encodeURIComponent(run.id) + '/dispatch', 'POST');
     } catch (error) {
@@ -558,6 +569,11 @@ function workspaceRunForRenderer(run) {
     status: run.status,
     primarySessionId: run.primary_session_id,
     modelPolicy: run.model_policy,
+    targetBranch: run.target_branch,
+    applyOnSuccess: run.apply_on_success === true,
+    applyStatus: run.apply_status || '',
+    applyRevision: run.apply_revision || '',
+    applyReport: typeof run.apply_report === 'string' ? run.apply_report : '',
     autoApprove: run.auto_approve === 1 || run.auto_approve === true,
     finalDisposition: run.final_disposition,
     createdAt: run.created_at,
@@ -586,24 +602,34 @@ async function workspaceListProjects(event) {
 
 async function workspaceSelectProject(event) {
   requireWorkspaceFeature(event);
-  const selection = await dialog.showOpenDialog(mainWindow, {
-    title: 'Choose a Git project',
-    properties: ['openDirectory']
-  });
-  if (selection.canceled || !selection.filePaths[0]) return { canceled: true };
-  let response;
-  try {
-    response = await requestWorkspaceBridge('/v1/workspaces/projects', 'POST', {
-      path: selection.filePaths[0]
-    });
-  } catch (error) {
-    return { canceled: false, error: error.message || 'The selected directory is not a Git repository.' };
-  }
-  const project = response.project;
+  return workspaceFolderBrowser.open(event.sender, 'import');
+}
+
+function checkedWorkspaceProject(project) {
   if (!project || !validWorkspaceId(project.id) || typeof project.path !== 'string') {
     throw new Error('Workspace bridge returned an invalid project record.');
   }
-  return { canceled: false, project: workspaceProjectForRenderer(project) };
+  return workspaceProjectForRenderer(project);
+}
+
+async function workspaceNewProject(event) {
+  requireWorkspaceFeature(event);
+  return workspaceFolderBrowser.open(event.sender, 'create');
+}
+
+async function workspaceFolderBrowse(event, id, directory, showHidden) {
+  requireWorkspaceFeature(event);
+  return workspaceFolderBrowser.browse(event.sender, id, directory, showHidden);
+}
+
+async function workspaceFolderComplete(event, id, name) {
+  requireWorkspaceFeature(event);
+  return workspaceFolderBrowser.complete(event.sender, id, name);
+}
+
+function workspaceFolderCancel(event, id) {
+  requireWorkspaceFeature(event);
+  workspaceFolderBrowser.cancel(event.sender, id);
 }
 
 function workspaceGitHubImportErrorMessage(error) {
@@ -747,6 +773,9 @@ async function workspaceCreateRun(event, request) {
     primary_session_id: typeof input.primarySessionId === 'string' ? input.primarySessionId : '',
     base_ref: typeof input.baseRef === 'string' ? input.baseRef : 'HEAD',
     model_policy: typeof input.modelPolicy === 'string' ? input.modelPolicy : '',
+    provider_config: input.modelPolicy === 'lmstudio' && input.providerConfig && typeof input.providerConfig === 'object'
+      ? input.providerConfig : {},
+    apply_on_success: input.applyOnSuccess === true,
     auto_approve: input.autoApprove === true
   });
   const run = response.run;
@@ -765,6 +794,67 @@ async function workspaceDispatchRun(event, runId) {
   const run = response.run;
   if (!run || !run.checkout || !validWorkspaceId(run.checkout.id)) throw new Error('Workspace bridge returned an invalid coding run.');
   return workspaceRunForRenderer(run);
+}
+
+async function workspacePreviewApply(event, runId) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(runId)) throw new Error('Invalid workspace run ID.');
+  const response = await requestWorkspaceBridge('/v1/workspaces/runs/' + encodeURIComponent(runId) + '/apply-preview', 'GET');
+  if (!response.preview || response.preview.run_id !== runId || typeof response.preview.fingerprint !== 'string') {
+    throw new Error('Workspace apply preview was not confirmed.');
+  }
+  return response.preview;
+}
+
+async function workspaceApplyRun(event, runId, fingerprint) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(runId) || typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(fingerprint)) throw new Error('Invalid reviewed workspace application.');
+  const response = await requestWorkspaceBridge('/v1/workspaces/runs/' + encodeURIComponent(runId) + '/apply', 'POST', { fingerprint });
+  if (!response.result || response.result.applied !== true || typeof response.result.revision !== 'string') throw new Error('Source integration was not verified.');
+  return response.result;
+}
+
+async function workspaceAgentControl(event, runId, action, instruction) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(runId) || !['stop', 'steer'].includes(action)) throw new Error('Invalid workspace agent action.');
+  const direction = typeof instruction === 'string' ? instruction.trim() : '';
+  if (action === 'steer' && (!direction || direction.length > 2000)) throw new Error('Agent direction must contain 1 to 2,000 characters.');
+  const current = await requestWorkspaceBridge('/v1/workspaces/runs/' + encodeURIComponent(runId), 'GET');
+  const agentId = current.run && current.run.agent && current.run.agent.id;
+  if (typeof agentId !== 'string' || !/^sub-[0-9a-f]{8}$/.test(agentId)) throw new Error('This coding run has no available agent.');
+  const response = await requestWorkspaceBridge('/v1/subagent/' + (action === 'stop' ? 'cancel' : 'steer'), 'POST', {
+    id: agentId, instruction: direction
+  });
+  if (!response.task || response.task.id !== agentId || typeof response.task.status !== 'string' ||
+      (action === 'steer' && typeof response.queued !== 'boolean')) {
+    throw new Error('The bridge did not confirm the workspace agent action.');
+  }
+  return { task: { id: agentId, status: response.task.status }, queued: response.queued === true };
+}
+
+async function workspaceAgentSnapshots(event, projectId) {
+  requireWorkspaceFeature(event);
+  if (!validWorkspaceId(projectId)) throw new Error('Invalid workspace project ID.');
+  const [runsResponse, tasksResponse] = await Promise.all([
+    requestWorkspaceBridge('/v1/workspaces/runs?project_id=' + encodeURIComponent(projectId), 'GET'),
+    requestWorkspaceBridge('/v1/subagent/status', 'GET')
+  ]);
+  if (!Array.isArray(runsResponse.runs) || !Array.isArray(tasksResponse.tasks)) throw new Error('Live agent status is unavailable.');
+  return tasksResponse.tasks.flatMap(function(task) {
+    const run = runsResponse.runs.find(function(item) {
+      return item.id === task.coding_run_id && item.project_id === projectId && item.agent && item.agent.id === task.id;
+    });
+    if (!run) return [];
+    const paths = [run.checkout && run.checkout.path, run.project && run.project.path];
+    return [{
+      id: task.id,
+      coding_run_id: run.id,
+      status: task.status,
+      model: typeof task.model === 'string' ? task.model : '',
+      activity: redactKnownPaths(task.activity, paths),
+      result: redactKnownPaths(task.result, paths)
+    }];
+  });
 }
 
 async function workspaceListRuns(event, projectId) {
@@ -857,7 +947,7 @@ async function workspaceRunAction(event, runId, action, options) {
       throw new Error('Workspace checkout no longer matches this run.');
     }
     const agentStatus = current.run && current.run.agent && current.run.agent.status;
-    if (['starting', 'running', 'steering'].includes(agentStatus)) {
+    if (['starting', 'running', 'steering', 'cancelling'].includes(agentStatus)) {
       throw new Error('The workspace agent is still running. Wait for completion before discard.');
     }
     await terminalBroker.terminateByRoot(requestedCheckoutId);
@@ -1924,6 +2014,10 @@ ipcMain.handle('terminal-close-root', function(event, rootId) {
 });
 ipcMain.handle('workspace-list-projects', workspaceListProjects);
 ipcMain.handle('workspace-select-project', workspaceSelectProject);
+ipcMain.handle('workspace-new-project', workspaceNewProject);
+ipcMain.handle('workspace-folder-browse', workspaceFolderBrowse);
+ipcMain.handle('workspace-folder-complete', workspaceFolderComplete);
+ipcMain.handle('workspace-folder-cancel', workspaceFolderCancel);
 ipcMain.handle('workspace-import-github', workspaceImportGitHub);
 ipcMain.handle('workspace-list-github-repositories', workspaceListGitHubRepositories);
 ipcMain.handle('workspace-github-auth-start', workspaceGitHubAuthStart);
@@ -1935,6 +2029,10 @@ ipcMain.handle('workspace-set-mcp-server', workspaceSetMcpServer);
 ipcMain.handle('workspace-delete-project', workspaceDeleteProject);
 ipcMain.handle('workspace-create-run', workspaceCreateRun);
 ipcMain.handle('workspace-dispatch-run', workspaceDispatchRun);
+ipcMain.handle('workspace-preview-apply', workspacePreviewApply);
+ipcMain.handle('workspace-apply-run', workspaceApplyRun);
+ipcMain.handle('workspace-agent-control', workspaceAgentControl);
+ipcMain.handle('workspace-agent-snapshots', workspaceAgentSnapshots);
 ipcMain.handle('workspace-list-runs', workspaceListRuns);
 ipcMain.handle('workspace-list-project-files', workspaceListProjectFiles);
 ipcMain.handle('workspace-open-project-file', workspaceOpenProjectFile);

@@ -122,11 +122,14 @@ def normalize_mcp_config(mcp_config):
 class MCPServer:
     """Manages a single MCP server subprocess (JSON-RPC over stdio)."""
 
-    def __init__(self, name, command, args=None, env=None):
+    def __init__(self, name, command, args=None, env=None, cwd=None):
         self.name = name
         self.command = command
         self.args = args or []
         self.env = env or {}
+        self.cwd = cwd
+        self.lifecycle_lock = threading.RLock()
+        self.cancel_event = threading.Event()
         self.process = None
         self.tools = []           # list of tool dicts from tools/list
         self.lock = threading.Lock()
@@ -162,21 +165,26 @@ class MCPServer:
         process_env.update(_safe_child_environment(self.env))
         process_env.pop("EVA_BRIDGE_TOKEN", None)
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-                env=process_env,
-            )
+            with self.lifecycle_lock:
+                if self.cancel_event.is_set():
+                    raise RuntimeError("Workspace MCP startup was interrupted.")
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0,
+                    env=process_env,
+                    cwd=self.cwd,
+                    start_new_session=bool(self.cwd) and os.name != "nt",
+                )
+                self._generation += 1
+                generation = self._generation
+                self.process = process
+                self.alive = True
         except FileNotFoundError:
             raise RuntimeError(f"MCP server '{self.name}': command not found: {self.command}")
 
-        self._generation += 1
-        generation = self._generation
-        self.process = process
-        self.alive = True
         self._reader = threading.Thread(target=self._read_loop, args=(process, generation), daemon=True)
         self._reader.start()
         # stderr drain

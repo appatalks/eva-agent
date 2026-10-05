@@ -5,12 +5,14 @@ import hashlib
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import threading
 import time
 import uuid
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from bridge import config as _cfg
 from bridge import state as _st
 from bridge.utils import _safe_child_environment
@@ -402,6 +404,10 @@ class ACPClient:
         self.tool_profile = _normalize_tool_profile(tool_profile, bool(self.mcp_config))
         self.config_fingerprint = _acp_config_fingerprint(self.mcp_config)
         self.process = None
+        self._owns_process_group = False
+        self._stop_lock = threading.RLock()
+        self._stopped = False
+        self._terminal_lock = threading.RLock()
         self.request_id = 0
         self.lock = threading.Lock()
         self.write_lock = threading.Lock()
@@ -414,6 +420,7 @@ class ACPClient:
         self.session_usage = {}     # session_id -> latest context usage metadata
         self._prompt_state_lock = threading.RLock()
         self._active_prompts = {}   # prompt_id -> session/callback/timing state
+        self._cancel_requested = threading.Event()
         self._session_permission_modes = {}  # session_id -> last explicit prompt policy
         self._session_permission_mode_order = []
         self.reader_thread = None
@@ -429,6 +436,9 @@ class ACPClient:
 
     def start(self):
         """Spawn copilot subprocess, initialize ACP, create session."""
+        with self._stop_lock:
+            if self._cancel_requested.is_set() or _st.acp_shutdown.is_set():
+                raise RuntimeError("ACP client startup was interrupted.")
         cmd = [self.copilot_path, "--acp", "--stdio"]
         if self.no_tools:
             cmd.extend(["--available-tools=", "--disable-builtin-mcps", "--no-custom-instructions"])
@@ -452,22 +462,26 @@ class ACPClient:
                     process_env[k] = str(v) if not isinstance(v, str) else v
             process_env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
 
-            self.process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-                env=process_env,
-                **_hidden_subprocess_options(),
-            )
+            with self._stop_lock:
+                if self._cancel_requested.is_set() or _st.acp_shutdown.is_set():
+                    raise RuntimeError("ACP client startup was interrupted.")
+                self._owns_process_group = bool(getattr(self, "workspace_run_id", "")) and os.name != "nt"
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0,
+                    env=process_env,
+                    start_new_session=self._owns_process_group,
+                    **_hidden_subprocess_options(),
+                )
+                self.alive = True
         except FileNotFoundError:
             raise RuntimeError(
                 f"Copilot CLI not found at '{self.copilot_path}'. "
                 "Install it (https://github.com/github/copilot-cli) and authenticate with 'copilot auth login'."
             )
-
-        self.alive = True
 
         # Start reader thread
         self.reader_thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -516,15 +530,100 @@ class ACPClient:
             print(f"[ACP] Warning: session/new returned: {session_result}")
 
     def stop(self):
-        """Shut down the copilot subprocess."""
-        self.alive = False
-        if self.process:
+        """Stop this client's owned processes before releasing its requests."""
+        with self._stop_lock:
+            if self._stopped:
+                return
+            self.alive = False
+            self._cancel_requested.set()
+            with self._terminal_lock:
+                processes = [(term["process"], term.get("owns_process_group", False)) for term in self.terminals.values()]
+                if self.process is not None:
+                    processes.append((self.process, self._owns_process_group))
+                if processes:
+                    with ThreadPoolExecutor(max_workers=min(len(processes), 16)) as pool:
+                        futures = [pool.submit(self._terminate_owned_process, proc, group) for proc, group in processes]
+                        for future in futures:
+                            future.result()
+                self.terminals.clear()
+            if self.process is not None:
+                if self.process.stdin and not self.process.stdin.closed:
+                    self.process.stdin.close()
+            with self.permission_lock:
+                self.pending_permissions.clear()
+            self._stopped = True
+            for entry in list(self.pending.values()):
+                entry["error"] = "ACP client stopped."
+                entry["event"].set()
+
+    @staticmethod
+    def _terminate_owned_process(proc, owns_group=False):
+        if os.name == "nt":
+            if proc.poll() is None:
+                result = subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    **_hidden_subprocess_options(),
+                )
+                if result.returncode and proc.poll() is None:
+                    raise RuntimeError("Agent process tree could not be stopped.")
+        elif owns_group:
+            # A reaped leader with a live PID now belongs to somebody else.
+            if proc.poll() is not None:
+                try:
+                    os.getpgid(proc.pid)
+                except ProcessLookupError:
+                    pass
+                else:
+                    return
             try:
-                self.process.stdin.close()
-                self.process.terminate()
-                self.process.wait(timeout=5)
-            except Exception:
-                self.process.kill()
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(proc.pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            if proc.poll() is not None:
+                try:
+                    os.getpgid(proc.pid)
+                except ProcessLookupError:
+                    pass
+                else:
+                    return
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        elif proc.poll() is None:
+            proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("Agent process did not stop.") from error
+
+    def cancel(self):
+        """Interrupt this client's prompts and prevent further prompt dispatch."""
+        self._cancel_requested.set()
+        with self._prompt_state_lock:
+            sessions = {state["session_id"] for state in self._active_prompts.values()}
+            for state in self._active_prompts.values():
+                state["permission_cancelled"] = True
+                state["permission_reason"] = "user_interrupted"
+        notified = all(self._send_notification("session/cancel", {"sessionId": session_id}) for session_id in sessions)
+        try:
+            self.stop()
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError("Agent-owned processes could not be stopped.") from error
+        if not notified:
+            print("[ACP] Cancellation notification unavailable; owned processes were stopped directly.")
 
     # --- JSON-RPC Communication ---
 
@@ -548,9 +647,12 @@ class ACPClient:
 
         try:
             with self.write_lock:
+                if self._cancel_requested.is_set():
+                    self.pending.pop(rid, None)
+                    return {"error": "ACP prompt was interrupted."}
                 self.process.stdin.write(msg.encode("utf-8"))
                 self.process.stdin.flush()
-        except (BrokenPipeError, OSError) as e:
+        except (BrokenPipeError, OSError, ValueError) as e:
             self.pending.pop(rid, None)
             return {"error": f"Copilot process pipe error: {e}"}
 
@@ -594,8 +696,9 @@ class ACPClient:
             with self.write_lock:
                 self.process.stdin.write(msg.encode("utf-8"))
                 self.process.stdin.flush()
+            return True
         except (BrokenPipeError, OSError):
-            pass
+            return False
 
     # --- Reader Loop ---
 
@@ -1005,28 +1108,33 @@ class ACPClient:
         terminal_id = str(uuid.uuid4())
 
         try:
-            proc = subprocess.Popen(
-                full_cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                cwd=cwd,
-                env=env,
-                **_hidden_subprocess_options(),
-            )
-            self.terminals[terminal_id] = {"process": proc, "output": ""}
+            with self._terminal_lock:
+                if self._cancel_requested.is_set() or _st.acp_shutdown.is_set():
+                    raise RuntimeError("This agent has been interrupted.")
+                proc = subprocess.Popen(
+                    full_cmd,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    cwd=cwd,
+                    env=env,
+                    start_new_session=os.name != "nt",
+                    **_hidden_subprocess_options(),
+                )
+                entry = {"process": proc, "output": "", "owns_process_group": os.name != "nt"}
+                self.terminals[terminal_id] = entry
 
             # Read output in background
             def read_output():
                 try:
                     out, _ = proc.communicate(timeout=60)
-                    self.terminals[terminal_id]["output"] = out.decode("utf-8", errors="replace")
-                    self.terminals[terminal_id]["exit_code"] = proc.returncode
+                    entry["output"] = out.decode("utf-8", errors="replace")
+                    entry["exit_code"] = proc.returncode
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    self._terminate_owned_process(proc, entry["owns_process_group"])
                     out, _ = proc.communicate()
-                    self.terminals[terminal_id]["output"] = out.decode("utf-8", errors="replace") + "\n[TIMEOUT]"
-                    self.terminals[terminal_id]["exit_code"] = -1
+                    entry["output"] = out.decode("utf-8", errors="replace") + "\n[TIMEOUT]"
+                    entry["exit_code"] = -1
 
             t = threading.Thread(target=read_output, daemon=True)
             t.start()
@@ -1069,9 +1177,10 @@ class ACPClient:
     def _handle_terminal_release(self, rid, params):
         """Release a terminal."""
         terminal_id = params.get("terminalId", "")
-        term = self.terminals.pop(terminal_id, None)
-        if term and term["process"].poll() is None:
-            term["process"].kill()
+        with self._terminal_lock:
+            term = self.terminals.pop(terminal_id, None)
+            if term:
+                self._terminate_owned_process(term["process"], term.get("owns_process_group", False))
         print(f"[ACP Terminal] Released: {terminal_id[:8] if terminal_id else '?'}")
         self._send_response(rid, {})
 
@@ -1503,6 +1612,3 @@ def _acquire_acp_client(requested_model, reasoning_effort=None, tool_profile=Non
     finally:
         if selected_client:
             _release_acp_client(selected_client)
-
-
-

@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 6
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 _MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
 _MCP_CONFIG_MAX_BYTES = 256 * 1024
@@ -193,8 +193,23 @@ class WorkspaceStore:
                 )
                 self.connection.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (_SCHEMA_VERSION, _utc_now()),
+                    (4, _utc_now()),
                 )
+            if 5 not in applied:
+                self.connection.execute("ALTER TABLE coding_runs ADD COLUMN provider_config TEXT NOT NULL DEFAULT '{}'")
+                self.connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (5, _utc_now()),
+                )
+            if 6 not in applied:
+                for column in [
+                    "target_branch TEXT NOT NULL DEFAULT ''",
+                    "apply_on_success INTEGER NOT NULL DEFAULT 0",
+                    "apply_status TEXT NOT NULL DEFAULT ''",
+                    "apply_revision TEXT NOT NULL DEFAULT ''",
+                    "apply_report TEXT NOT NULL DEFAULT ''",
+                ]:
+                    self.connection.execute("ALTER TABLE coding_runs ADD COLUMN " + column)
+                self.connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (6, _utc_now()))
 
     def register_project(self, requested_path, display_name=None):
         root_path = self._canonical_git_root(requested_path)
@@ -246,6 +261,55 @@ class WorkspaceStore:
                 self._git(str(project_path), ["commit", "-m", "Initialize Eva ready workspace"])
         return self.register_project(project_path, "Eva Ready Workspace")
 
+    def create_project(self, requested_parent, requested_name):
+        if not isinstance(requested_parent, str) or not requested_parent or len(requested_parent) > 4096:
+            raise WorkspaceError("Choose a valid parent folder.")
+        if not isinstance(requested_name, str):
+            raise WorkspaceError("Enter a workspace name.")
+        name = requested_name.strip()
+        reserved = {"CON", "PRN", "AUX", "NUL"} | {f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)}
+        if (
+            not name or len(name) > 80 or name in {".", ".."} or name.lower() == ".git"
+            or re.search(r'[/\\<>:"|?*\x00-\x1f\x7f]', name) or name.endswith(".")
+            or name.split(".", 1)[0].upper() in reserved
+        ):
+            raise WorkspaceError("Use a folder name of up to 80 characters, without path separators or reserved characters.")
+        try:
+            parent = Path(requested_parent).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise WorkspaceError("The parent folder is unavailable.") from error
+        if not parent.is_dir() or any(part.lower() == ".git" for part in parent.parts):
+            raise WorkspaceError("Choose a regular parent folder outside Git metadata.")
+        if self._is_within(parent, self.runtime_root.resolve()):
+            raise WorkspaceError("Create new workspaces outside managed coding-run worktrees.")
+        destination = parent / name
+        with self.lock:
+            try:
+                destination.mkdir(mode=0o700)
+            except FileExistsError as error:
+                raise WorkspaceError("A folder with that name already exists. Choose another name; existing files were not changed.") from error
+            except OSError as error:
+                raise WorkspaceError("The workspace folder could not be created. Check the parent folder's permissions.") from error
+            try:
+                self._git(str(destination), [
+                    "--git-dir=" + str(destination / ".git"), "--work-tree=" + str(destination),
+                    "init", "-b", "main", "--template=",
+                ])
+                if destination.resolve(strict=True) != destination:
+                    raise WorkspaceError("The new workspace path changed during creation.")
+                with (destination / "README.md").open("x", encoding="utf-8") as readme:
+                    readme.write("# " + name + "\n\nLocal coding workspace created with Eva.\n")
+                self._git(str(destination), ["add", "--", "README.md"])
+                self._git(str(destination), [
+                    "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false",
+                    "-c", "user.name=Eva Workspace", "-c", "user.email=eva-workspace@local.invalid",
+                    "commit", "-m", "Initialize workspace",
+                    "-m", "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>",
+                ])
+                return self.register_project(destination, name)
+            except (WorkspaceError, OSError, RuntimeError, sqlite3.Error) as error:
+                raise WorkspaceError("Workspace initialization failed. The new folder was retained for inspection; existing folders were not changed.") from error
+
     def import_github_repository(self, repository_url, github_token=""):
         """Clone a selected github.com repository into Eva-owned workspace storage."""
         normalized_url, owner, repository = self._normalize_github_repository_url(repository_url)
@@ -282,7 +346,7 @@ class WorkspaceStore:
             active_agent = self.connection.execute(
                 """SELECT agent_runs.id FROM agent_runs
                    JOIN coding_runs ON coding_runs.id = agent_runs.coding_run_id
-                   WHERE coding_runs.project_id = ? AND agent_runs.status IN ('starting', 'running', 'steering')
+                   WHERE coding_runs.project_id = ? AND agent_runs.status IN ('starting', 'running', 'steering', 'cancelling')
                    LIMIT 1""",
                 (project_id,),
             ).fetchone()
@@ -472,7 +536,7 @@ class WorkspaceStore:
                     (now, project_id),
                 )
 
-    def create_run(self, project_id, objective, primary_session_id="", base_ref="HEAD", model_policy="", auto_approve=False):
+    def create_run(self, project_id, objective, primary_session_id="", base_ref="HEAD", model_policy="", auto_approve=False, provider_config=None, apply_on_success=False):
         clean_objective = _json_text(objective).strip()
         if not clean_objective or len(clean_objective) > 4000:
             raise WorkspaceError("A coding-run objective between 1 and 4000 characters is required.")
@@ -485,12 +549,22 @@ class WorkspaceStore:
         policy = _json_text(model_policy).strip()
         if len(policy) > 160:
             raise WorkspaceError("Invalid model policy.")
+        if provider_config is None:
+            provider_config = {}
+        if not isinstance(provider_config, dict) or set(provider_config) - {"base_url", "model", "max_tokens"}:
+            raise WorkspaceError("Invalid workspace provider configuration.")
+        encoded_provider = json.dumps(provider_config)
+        if len(encoded_provider) > 8192:
+            raise WorkspaceError("Workspace provider configuration exceeds the limit.")
 
         with self.lock:
             project_row = self.connection.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         if not project_row:
             raise WorkspaceError("Unknown project.")
         source_root = project_row["root_path"]
+        target_branch = self._current_branch(source_root)
+        if apply_on_success is True and (not target_branch or target_branch == "HEAD"):
+            raise WorkspaceError("Check out a source branch before enabling automatic application.")
         base_revision = self._git(source_root, ["rev-parse", "--verify", reference + "^{commit}"])
         run_id = self._new_id()
         checkout_id = self._new_id()
@@ -524,9 +598,9 @@ class WorkspaceStore:
                 self.connection.execute(
                     """INSERT INTO coding_runs(
                         id, project_id, checkout_id, objective, status, primary_session_id, model_policy,
-                        auto_approve, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)""",
-                    (run_id, project_id, checkout_id, clean_objective, session_id, policy, int(auto_approve is True), now, now),
+                        auto_approve, provider_config, target_branch, apply_on_success, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (run_id, project_id, checkout_id, clean_objective, session_id, policy, int(auto_approve is True), encoded_provider, target_branch, int(apply_on_success is True), now, now),
                 )
                 self.connection.execute(
                     "UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id)
@@ -673,6 +747,12 @@ class WorkspaceStore:
             "status": run_row["status"],
             "primary_session_id": run_row["primary_session_id"],
             "model_policy": run_row["model_policy"],
+            "provider_config": json.loads(run_row["provider_config"]),
+            "target_branch": run_row["target_branch"],
+            "apply_on_success": bool(run_row["apply_on_success"]),
+            "apply_status": run_row["apply_status"],
+            "apply_revision": run_row["apply_revision"],
+            "apply_report": run_row["apply_report"],
             "auto_approve": bool(run_row["auto_approve"]),
             "final_disposition": run_row["final_disposition"],
             "created_at": run_row["created_at"],
@@ -711,7 +791,7 @@ class WorkspaceStore:
         return self.get_run(coding_run_id)["agent"]
 
     def update_agent_run(self, agent_id, status, report=""):
-        allowed = {"starting", "running", "steering", "done", "error", "cancelled"}
+        allowed = {"starting", "running", "steering", "cancelling", "done", "error", "cancelled"}
         if status not in allowed:
             raise WorkspaceError("Invalid agent run status.")
         now = _utc_now()
@@ -723,7 +803,13 @@ class WorkspaceStore:
                 "UPDATE agent_runs SET status = ?, report = ?, updated_at = ? WHERE id = ?",
                 (status, _json_text(report)[-4000:], now, agent_id),
             )
-            if status == "done":
+            if status == "steering":
+                self.connection.execute(
+                    """UPDATE coding_runs SET status = 'active', final_disposition = '', updated_at = ?
+                       WHERE id = ? AND status IN ('completed', 'cancelled')""",
+                    (now, row["coding_run_id"]),
+                )
+            elif status == "done":
                 self.connection.execute(
                     """UPDATE coding_runs
                        SET status = 'completed', final_disposition = 'agent_completed', updated_at = ?
@@ -769,6 +855,24 @@ class WorkspaceStore:
             refreshed = self.connection.execute("SELECT * FROM checkouts WHERE id = ?", (checkout_id,)).fetchone()
         return self._checkout_payload(refreshed)
 
+    def preview_apply_run(self, run_id):
+        from bridge.workspace_apply import preview_apply
+        with self.lock:
+            return preview_apply(self, run_id)
+
+    def apply_run(self, run_id, expected_fingerprint):
+        from bridge.workspace_apply import apply_run
+        return apply_run(self, run_id, expected_fingerprint)
+
+    def record_apply(self, run_id, status, report, revision=""):
+        if status not in {"applied", "blocked"}:
+            raise WorkspaceError("Invalid source integration status.")
+        with self.lock, self.connection:
+            self.connection.execute(
+                "UPDATE coding_runs SET apply_status=?, apply_report=?, apply_revision=?, updated_at=? WHERE id=?",
+                (status, _json_text(report)[:1000], revision, _utc_now(), run_id),
+            )
+
     def archive_run(self, run_id):
         now = _utc_now()
         with self.lock, self.connection:
@@ -784,7 +888,7 @@ class WorkspaceStore:
             ).fetchone()
             if not existing:
                 raise WorkspaceError("Unknown coding run.")
-            if existing["agent_status"] in {"starting", "running", "steering"}:
+            if existing["agent_status"] in {"starting", "running", "steering", "cancelling"}:
                 raise WorkspaceError("The workspace agent is still running. Wait for completion before archive.")
             self.connection.execute(
                 "UPDATE coding_runs SET status = 'archived', archived_at = ?, updated_at = ? WHERE id = ?",
@@ -796,7 +900,7 @@ class WorkspaceStore:
         run = self.get_run(run_id)
         if run["status"] == "discarded":
             return run
-        if run.get("agent") and run["agent"].get("status") in {"starting", "running", "steering"}:
+        if run.get("agent") and run["agent"].get("status") in {"starting", "running", "steering", "cancelling"}:
             raise WorkspaceError("The workspace agent is still running. Wait for completion before discard.")
         checkout = self.checkout_status(run["checkout"]["id"])
         if checkout["dirty_file_count"] and not confirm_dirty:

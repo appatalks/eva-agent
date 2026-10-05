@@ -31,7 +31,7 @@ var EvaAgents = (function() {
   }
 
   function isActive(status) {
-    return ['starting', 'waiting', 'running', 'steering', 'finalizing', 'awaiting_confirmation', 'awaiting_input'].indexOf(status) !== -1;
+    return ['starting', 'waiting', 'running', 'steering', 'cancelling', 'finalizing', 'awaiting_confirmation', 'awaiting_input'].indexOf(status) !== -1;
   }
 
   function statusLabel(status) {
@@ -411,16 +411,20 @@ var EvaAgents = (function() {
       if (!instruction) return;
       button.disabled = true;
       try {
-        var response = await fetch(bridgeUrl() + '/v1/subagent/steer', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: agent.id, instruction: instruction })
-        });
-        if (!response.ok) throw new Error('Steering failed (' + response.status + ')');
+        if (agent.coding_run_id && window.evaStandalone && typeof window.evaStandalone.workspaceAgentControl === 'function') {
+          await window.evaStandalone.workspaceAgentControl(agent.coding_run_id, 'steer', instruction);
+        } else {
+          var response = await fetch(bridgeUrl() + '/v1/subagent/steer', {
+            method: 'POST',
+            headers: typeof getBridgeCapabilityHeaders === 'function' ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: agent.id, instruction: instruction })
+          });
+          if (!response.ok) throw new Error('Steering failed (' + response.status + ')');
+        }
         input.value = '';
         await refresh();
       } catch (error) {
-        input.value = error.message || String(error);
+        if (typeof setStatus === 'function') setStatus('error', error.message || String(error));
       } finally {
         button.disabled = false;
       }

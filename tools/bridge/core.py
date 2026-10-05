@@ -38,6 +38,8 @@ import os
 import platform
 import re
 import shutil
+import signal
+import sqlite3
 import socket
 import subprocess
 import sys
@@ -46,6 +48,7 @@ import time
 import urllib.parse
 import uuid
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
+from concurrent.futures import ThreadPoolExecutor
 
 # Centralized constants (paths, schemas, thresholds).
 # Aliased with underscore prefix so existing code keeps working as-is.
@@ -613,7 +616,7 @@ _ALERT_CHANNELS = _cfg.ALERT_CHANNELS
 _TELEMETRY_RING_MAX = _cfg.TELEMETRY_RING_MAX
 _BG_PROPOSAL_COLUMNS = _cfg.BG_PROPOSAL_COLUMNS
 _SUBAGENT_MAX = 4
-_SUBAGENT_ACTIVE_STATUSES = {"starting", "waiting", "running", "steering", "finalizing"}
+_SUBAGENT_ACTIVE_STATUSES = {"starting", "waiting", "running", "steering", "cancelling", "finalizing"}
 _AGENT_ACTIVE_STATUSES = _SUBAGENT_ACTIVE_STATUSES | {"awaiting_confirmation", "awaiting_input"}
 
 
@@ -732,11 +735,13 @@ def _discard_subagent_workspace_scope(task, reason):
 def _dispatch_workspace_run(run):
     """Start one implementation agent in the run's bridge-resolved worktree."""
     existing_agent = run.get("agent") or {}
-    if existing_agent.get("status") in {"starting", "running", "steering"}:
+    if existing_agent.get("status") in {"starting", "running", "steering", "cancelling"}:
         with _st.subagent_lock:
             existing_task = _st.subagent_tasks.get(existing_agent.get("id"))
             if existing_task and existing_task.get("status") in _SUBAGENT_ACTIVE_STATUSES:
                 return _public_subagent_task(existing_task)
+        if existing_agent.get("status") == "cancelling":
+            raise WorkspaceError("Interruption could not be verified after runtime shutdown. The worktree remains protected.")
         _workspace_store().update_agent_run(
             existing_agent["id"], "error", "Agent process ended before the coding run completed."
         )
@@ -838,6 +843,8 @@ def _dispatch_workspace_run(run):
         "required_github_repository": str((run.get("project") or {}).get("name") or "").strip(),
         "_cwd": checkout_path,
         "_workspace_mcp_config": workspace_mcp_config,
+        "_provider": "lmstudio" if run.get("model_policy") == "lmstudio" else "acp",
+        "_provider_config": run.get("provider_config") or {},
     }
     if not _reserve_subagent_task(task):
         raise WorkspaceError(f"Agent capacity is full ({_SUBAGENT_MAX} active agents).")
@@ -1008,6 +1015,8 @@ def _prepare_subagent_steer(task, instruction):
         f"Previous result:\n{prior_result}\n\nNew direction:\n{instruction}"
     )
     task["status"] = "steering"
+    task["_cancel_requested"] = False
+    task["steer_queue"] = []
     task["ended_at"] = None
     task["signal_on_complete"] = False
     task["signal_status"] = ""
@@ -1520,6 +1529,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._notifications_list()
         elif parsed_path == "/v1/workspaces/projects":
             self._workspace_projects_list()
+        elif re.fullmatch(r"/v1/workspaces/runs/[^/]+/apply-preview", parsed_path):
+            self._workspace_apply_preview(urllib.parse.unquote(parsed_path.split("/")[-2]))
         elif re.fullmatch(r"/v1/workspaces/projects/[^/]+/files", parsed_path):
             self._workspace_project_files_list(urllib.parse.unquote(parsed_path.split("/v1/workspaces/projects/", 1)[1].rsplit("/files", 1)[0]))
         elif parsed_path == "/v1/workspaces/runs":
@@ -1637,6 +1648,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._subagent_spawn_batch()
         elif parsed_path == "/v1/subagent/steer":
             self._subagent_steer()
+        elif parsed_path == "/v1/subagent/cancel":
+            self._subagent_cancel()
         elif parsed_path == "/v1/browser/run":
             self._browser_run()
         elif parsed_path == "/v1/desktop/run":
@@ -1699,6 +1712,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._notifications_mark_seen()
         elif parsed_path == "/v1/workspaces/projects":
             self._workspace_project_register()
+        elif parsed_path == "/v1/workspaces/projects/create":
+            self._workspace_project_create()
+        elif re.fullmatch(r"/v1/workspaces/runs/[^/]+/apply", parsed_path):
+            self._workspace_apply(urllib.parse.unquote(parsed_path.split("/")[-2]))
         elif parsed_path == "/v1/workspaces/github-import":
             self._workspace_github_import()
         elif re.fullmatch(r"/v1/workspaces/projects/[^/]+/mcp-servers/[^/]+", parsed_path):
@@ -1847,6 +1864,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except WorkspaceError as error:
             self._json_response(400, {"error": {"message": str(error)}})
 
+    def _workspace_project_create(self):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            project = _workspace_store().create_project(data.get("parent_path"), data.get("name"))
+            self._json_response(201, {"project": project})
+        except WorkspaceError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
     def _workspace_github_import(self):
         data, error = self._workspace_body()
         if error:
@@ -1958,6 +1986,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if error:
             self._json_response(400, {"error": {"message": error}})
             return
+        if data.get("model_policy") == "lmstudio":
+            from bridge.workspace_local import normalize_local_config
+            try:
+                data["provider_config"] = normalize_local_config(data.get("provider_config"))
+            except ValueError as error:
+                self._json_response(400, {"error": {"message": str(error)}})
+                return
         try:
             run = _workspace_store().create_run(
                 data.get("project_id"),
@@ -1966,6 +2001,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 data.get("base_ref", "HEAD"),
                 data.get("model_policy", ""),
                 data.get("auto_approve") is True,
+                data.get("provider_config", {}),
+                data.get("apply_on_success") is True,
             )
         except WorkspaceError as error:
             self._json_response(400, {"error": {"message": str(error)}})
@@ -1992,6 +2029,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"checkout": _workspace_store().checkout_status(checkout_id)})
         except WorkspaceError as error:
             self._json_response(404, {"error": {"message": str(error)}})
+
+    def _workspace_apply_preview(self, run_id):
+        try:
+            self._json_response(200, {"preview": _workspace_store().preview_apply_run(run_id)})
+        except WorkspaceError as error:
+            self._json_response(409, {"error": {"message": str(error)}})
+
+    def _workspace_apply(self, run_id):
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        try:
+            applied = _workspace_store().apply_run(run_id, data.get("fingerprint"))
+            self._json_response(200, {"result": applied, "run": _workspace_store().get_run(run_id)})
+        except WorkspaceError as error:
+            _workspace_store().record_apply(run_id, "blocked", str(error))
+            self._json_response(409, {"error": {"message": str(error)}})
 
     def _workspace_run_disposition(self, parsed_path):
         data, error = self._workspace_body()
@@ -4147,10 +4202,54 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "deferred_signal": signal_on_complete,
         })
 
+    def _subagent_cancel(self):
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "agent interruption is restricted to loopback"}})
+            return
+        if not self._require_workspace_capability():
+            return
+        data, err = self._read_json_body()
+        if err:
+            self._json_response(400, {"error": {"message": err}})
+            return
+        task_id = str((data or {}).get("id", "")).strip()
+        with _st.subagent_lock:
+            task = _st.subagent_tasks.get(task_id)
+            if not task or not task.get("coding_run_id"):
+                self._json_response(404, {"error": {"message": "workspace agent not found"}})
+                return
+            if task.get("status") == "cancelling":
+                self._json_response(202, {"task": _public_subagent_task(task)})
+                return
+            if task.get("status") not in {"starting", "waiting", "running", "steering"}:
+                self._json_response(409, {"error": {"message": "this agent is not running"}})
+                return
+            try:
+                _workspace_store().update_agent_run(task_id, "cancelling", "Interruption requested; waiting for the agent to stop.")
+            except WorkspaceError as error:
+                self._json_response(409, {"error": {"message": str(error)}})
+                return
+            task["_cancel_requested"] = True
+            task["status"] = "cancelling"
+            task["steer_queue"] = []
+            client = _st.workspace_acp_clients.get(task_id)
+        try:
+            if client is not None:
+                client.cancel()
+        except RuntimeError as error:
+            self._json_response(503, {"error": {"message": str(error)}})
+            return
+        with _st.subagent_lock:
+            public_task = _public_subagent_task(task)
+        self._json_response(202, {"task": public_task})
+
     def _subagent_steer(self):
         """Queue a direction for a running task or resume a completed task."""
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "subagent restricted to loopback"}})
+            return
+        if _st.acp_shutdown.is_set():
+            self._json_response(503, {"error": {"message": "Eva is shutting down; agent direction was not accepted"}})
             return
         data, err = self._read_json_body()
         if err:
@@ -4167,9 +4266,26 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if not task:
                 self._json_response(404, {"error": {"message": "subagent task not found"}})
                 return
-            if task.get("status") == "finalizing":
-                self._json_response(409, {"error": {"message": "task is finalizing completion delivery"}})
+            if task.get("status") in {"finalizing", "cancelling"}:
+                self._json_response(409, {"error": {"message": "wait for this agent to finish stopping or finalizing"}})
                 return
+            if task.get("coding_run_id"):
+                if not self._require_workspace_capability():
+                    return
+                try:
+                    store = _workspace_store()
+                    run = store.get_run(task["coding_run_id"])
+                    if run["status"] not in {"active", "completed", "cancelled"}:
+                        raise WorkspaceError("This coding run is archived or discarded.")
+                    store.validated_checkout_path(task["checkout_id"])
+                    if task.get("status") not in _SUBAGENT_ACTIVE_STATUSES:
+                        if _subagent_active_count() >= _SUBAGENT_MAX:
+                            self._json_response(429, {"error": {"message": f"max {_SUBAGENT_MAX} concurrent subagents"}})
+                            return
+                        store.update_agent_run(task_id, "steering", task.get("result") or "")
+                except WorkspaceError as error:
+                    self._json_response(409, {"error": {"message": str(error)}})
+                    return
             steer = _prepare_subagent_steer(task, instruction)
             if steer is None:
                 self._json_response(429, {"error": {"message": f"max {_SUBAGENT_MAX} concurrent subagents"}})
@@ -4200,7 +4316,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             else:
                 tasks = [_public_subagent_task(t) for t in _st.subagent_tasks.values()]
                 active = _subagent_active_count()
-                self._json_response(200, {"tasks": tasks[-20:], "running": active, "max": _SUBAGENT_MAX})
+                self._json_response(200, {"tasks": _select_active_history(tasks, _SUBAGENT_ACTIVE_STATUSES, 20), "running": active, "max": _SUBAGENT_MAX})
 
     def _subagent_dismiss(self, task_id):
         """Dismiss a completed/error/cancelled task from Agent Operations."""
@@ -7620,6 +7736,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
 def main():
     # global statement removed — writes go to _st.*
+    _st.acp_shutdown.clear()
+    if threading.current_thread() is threading.main_thread():
+        def terminate_bridge(signum, frame):
+            _st.acp_shutdown.set()
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, terminate_bridge)
     _install_log_tee()
     default_port = 8888
     env_port = os.environ.get("EVA_ACP_PORT", "").strip()
@@ -7882,9 +8004,36 @@ def main():
     except KeyboardInterrupt:
         print("\n[Bridge] Shutting down...")
     finally:
+        with _st.subagent_lock:
+            _st.acp_shutdown.set()
+            active_tasks = [task for task in _st.subagent_tasks.values() if task.get("status") in _SUBAGENT_ACTIVE_STATUSES]
+            for task in active_tasks:
+                task["_cancel_requested"] = True
+                task["_shutdown_requested"] = True
+                task["status"] = "cancelling"
+        if _st.workspace_store is not None:
+            for task in active_tasks:
+                if not task.get("coding_run_id"):
+                    continue
+                try:
+                    _st.workspace_store.update_agent_run(task["id"], "cancelling", "Eva is shutting down; worktree remains protected until the agent stops.")
+                except (WorkspaceError, sqlite3.Error) as error:
+                    print(f"[Bridge] Agent shutdown status could not be saved: {error}")
+        clients = BridgeHandler._acp_clients()
+        if clients:
+            with ThreadPoolExecutor(max_workers=min(len(clients), 16)) as pool:
+                futures = [pool.submit(client.stop) for client in clients]
+                for future in futures:
+                    try:
+                        future.result()
+                    except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+                        print(f"[Bridge] Agent shutdown failed: {error}")
+        deadline = time.monotonic() + 1
+        for task in active_tasks:
+            worker = task.get("thread")
+            if worker is not None:
+                worker.join(timeout=max(0, deadline - time.monotonic()))
         _stop_bg_loop()
-        if _st.acp_client:
-            _st.acp_client.stop()
         server.server_close()
 
 

@@ -1,6 +1,6 @@
 {
   "name": "eva-standalone",
-  "version": "5.6.10",
+  "version": "5.6.11",
   "author": "@apptalks",
   "desktopName": "Eva",
   "description": "Localhost Electron shell for Eva AI Assistant.",
@@ -49,6 +49,7 @@
       "context-menu.js",
       "runtime-logger.js",
       "startup-runtime.js",
+      "workspace-folder-browser.js",
       "workspace-projection.js",
       "terminal-broker.js"
     ],
@@ -73,6 +74,7 @@
           "core/audio/eva_voice_profile-korean.wav",
           "core/audio/appatalks_voice_profile-english.wav",
           "tools/acp_bridge.py",
+          "tools/workspace_diff_guard.py",
           "tools/generate_skill_seed.py",
           "tools/skills/**",
           "tools/local_voices_bridge.py",
