@@ -1579,8 +1579,11 @@ The local runner supplies bounded `list_files`, `read_file`, `write_file`,
 `edit_file`, and direct-argument `run_command` tools rooted in the isolated
 worktree. File tools reject traversal, symlinks, hardlinks, Git metadata, and
 protected credential/config paths. Commands reuse the ACP workspace safety
-policy and run in a secret-stripped environment; this is a command policy, not
-an operating-system sandbox for arbitrary repository programs. Approved stdio
+policy and run in a secret-stripped environment. Repository programs and
+mutating commands require the run's **Auto approve actions** permission, which
+authorizes ordinary user-level execution; this is not an operating-system
+sandbox. With that permission off, only bounded static Git inspection and
+`pwd` are automatic; file tools remain worktree-confined. Approved stdio
 workspace MCP servers run with that worktree as their working directory.
 Remote workspace MCP transport is not supported by this initial local coding
 runner and is reported explicitly rather than silently dropped.
@@ -1695,6 +1698,10 @@ limited to that bootstrap operation; global Git settings are unchanged.
 Initialization errors are reported and a partially created folder is retained
 for inspection rather than deleted. Import keeps an existing Git repository
 in its original location.
+On platforms with no-follow directory descriptors, creation and bootstrap Git
+operations stay anchored to the opened parent/child directories even if a path
+is replaced. Other platforms revalidate paths during bootstrap but do not offer
+the same descriptor-level protection against concurrent filesystem changes.
 
 `core/js/features/workspaces/monitor.js` implements the full main-window monitor:
 
@@ -1780,6 +1787,12 @@ Workspaces visible. xterm rows are explicitly left aligned.
 in-app review lists the target branch and changed files, including whether
 uncommitted run edits will be committed first. Approval binds to the reviewed
 source/run state; changed previews require another review.
+Uncommitted changes are staged into a private index and verified against the
+reviewed file bytes, deletions, executable modes, and credential-safe diff.
+Eva holds the run's Git index lock while preparing that exact commit, refusing
+concurrent staging rather than resetting or overwriting another Git operation.
+An already committed run is applied by its reviewed immutable revision, never
+by a newer branch tip that appeared after review.
 
 The composer defaults **Apply to source when done** to off. Enable it for a run
 to authorize local commit/integration after successful execution, or explicitly

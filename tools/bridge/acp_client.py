@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -47,8 +48,11 @@ _WORKSPACE_AUTONOMY_DESTRUCTIVE_PATTERN = re.compile(
     r"systemctl|service|launchctl|os\.remove|os\.unlink|shutil\.rmtree|remove-item)\b",
     re.IGNORECASE,
 )
-_WORKSPACE_SAFE_GIT_SUBCOMMANDS = {"add", "commit", "status", "diff", "log", "show", "rev-parse"}
+_WORKSPACE_SAFE_GIT_SUBCOMMANDS = {"add", "commit", "status", "diff", "log", "show", "rev-parse", "ls-files"}
 _WORKSPACE_SAFE_PACKAGE_SUBCOMMANDS = {"test", "run", "lint", "check", "build"}
+_GIT_CONTEXT_OPTIONS = {
+    "--git-dir", "--work-tree", "--exec-path", "--namespace", "--config-env", "--config",
+}
 _GH_FILE_OPTIONS = {"--body-file", "--template", "--input"}
 _WORKSPACE_SENSITIVE_PATH_RE = re.compile(
     r"(?:^|[/\s])(?:\.env(?:\.[A-Za-z0-9_.-]+)?|\.ssh|\.aws|\.azure|\.npmrc|\.pypirc|"
@@ -222,6 +226,23 @@ def _workspace_gh_path_category(arguments, cwd=None):
     return ""
 
 
+def _workspace_git_has_context_option(arguments):
+    """Reject Git options that can redirect repository/configuration context."""
+    before_subcommand = True
+    for argument in arguments:
+        if argument == "--":
+            break
+        option = argument.split("=", 1)[0]
+        if option in _GIT_CONTEXT_OPTIONS or argument.startswith("-C") or argument == "-c" or argument.startswith("-c="):
+            return True
+        if before_subcommand:
+            if argument.startswith("-c"):
+                return True
+            if not argument.startswith("-"):
+                before_subcommand = False
+    return False
+
+
 def _workspace_read_only_execute(tool_call, cwd=None):
     """Allow only transparent, non-mutating workspace inspection commands."""
     command = _tool_call_command(tool_call)
@@ -241,8 +262,10 @@ def _workspace_read_only_execute(tool_call, cwd=None):
     if parts[0] == "git":
         if len(parts) < 2 or parts[1] not in _WORKSPACE_READ_ONLY_GIT_SUBCOMMANDS:
             return False
-        forbidden_git = {"--output", "--ext-diff", "--textconv", "--exec-path", "--config-env", "--no-index"}
-        if any(part == "-c" or part.startswith("-c=") or part.split("=", 1)[0] in forbidden_git for part in parts[2:]):
+        forbidden_git = {"--output", "--ext-diff", "--textconv", "--no-index"}
+        if _workspace_git_has_context_option(parts[1:]) or any(
+            part.split("=", 1)[0] in forbidden_git for part in parts[2:]
+        ):
             return False
         return all(_workspace_local_path(part, cwd) for part in parts[2:])
     return False
@@ -284,7 +307,7 @@ def _workspace_execute_category(tool_call, cwd=None):
     if executable in {"bash", "sh", "zsh", "fish", "env", "eval", "source"}:
         return "shell_interpreter"
     if executable == "git":
-        if len(arguments) < 1 or any(argument == "-c" or argument.startswith("-c=") or argument == "--config-env" for argument in arguments):
+        if len(arguments) < 1 or _workspace_git_has_context_option(arguments):
             return "git_configuration_override"
         subcommand = next((argument for argument in arguments if not argument.startswith("-")), "")
         if subcommand not in _WORKSPACE_SAFE_GIT_SUBCOMMANDS:
@@ -439,7 +462,8 @@ class ACPClient:
         with self._stop_lock:
             if self._cancel_requested.is_set() or _st.acp_shutdown.is_set():
                 raise RuntimeError("ACP client startup was interrupted.")
-        cmd = [self.copilot_path, "--acp", "--stdio"]
+        copilot_executable = self._validated_copilot_executable()
+        cmd = [copilot_executable, "--acp", "--stdio"]
         if self.no_tools:
             cmd.extend(["--available-tools=", "--disable-builtin-mcps", "--no-custom-instructions"])
         if self.model:
@@ -482,6 +506,10 @@ class ACPClient:
                 f"Copilot CLI not found at '{self.copilot_path}'. "
                 "Install it (https://github.com/github/copilot-cli) and authenticate with 'copilot auth login'."
             )
+        except OSError as error:
+            raise RuntimeError(
+                f"Copilot CLI at '{self.copilot_path}' could not be started: {error}"
+            ) from error
 
         # Start reader thread
         self.reader_thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -528,6 +556,32 @@ class ACPClient:
             print(f"[ACP] Session created: {self.session_id}")
         else:
             print(f"[ACP] Warning: session/new returned: {session_result}")
+
+    def _validated_copilot_executable(self):
+        """Allow only the named CLI or a canonical absolute executable path."""
+        configured = self.copilot_path
+        if not isinstance(configured, (str, os.PathLike)):
+            raise RuntimeError("Copilot CLI path must be 'copilot' or an absolute executable path.")
+        configured = os.fspath(configured)
+        if not isinstance(configured, str) or not configured or "\x00" in configured:
+            raise RuntimeError("Copilot CLI path is invalid.")
+        if configured == "copilot":
+            resolved = shutil.which(configured)
+            if not resolved:
+                raise RuntimeError(
+                    "Copilot CLI 'copilot' was not found on PATH. "
+                    "Install it (https://github.com/github/copilot-cli) and authenticate with 'copilot auth login'."
+                )
+            resolved = os.path.realpath(resolved)
+        else:
+            if not os.path.isabs(configured):
+                raise RuntimeError("Copilot CLI path must be the bare 'copilot' name or an absolute executable path.")
+            resolved = os.path.realpath(configured)
+        if not os.path.isfile(resolved) or not os.path.isdir(os.path.dirname(resolved)):
+            raise RuntimeError(f"Copilot CLI path is not a regular file: '{configured}'.")
+        if os.name != "nt" and not os.access(resolved, os.X_OK):
+            raise RuntimeError(f"Copilot CLI path is not executable: '{configured}'.")
+        return resolved
 
     def stop(self):
         """Stop this client's owned processes before releasing its requests."""

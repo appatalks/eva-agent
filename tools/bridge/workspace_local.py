@@ -65,6 +65,7 @@ class LocalWorkspaceClient:
         self.successful_tools = 0
         self.receipts = []
         self.command_checks = {}
+        self.programs_allowed = False
         self.tools = [
             tool_schema("list_files", "List tracked and unignored files in the assigned worktree.", {}, []),
             tool_schema("read_file", "Read bounded UTF-8 lines relative to the worktree. Follow next_line when content is partial.", {
@@ -193,6 +194,19 @@ class LocalWorkspaceClient:
             raise ValueError("Command timeout must be between 1 and 300 seconds.")
         if ("/" in command or "\\" in command) and not Path(self.cwd, command).resolve().is_relative_to(Path(self.cwd)):
             raise ValueError("Explicit executable paths must be inside the worktree.")
+        if not self.programs_allowed:
+            inspection_flags = {
+                "status": {"--short", "--branch", "--porcelain", "--porcelain=v1", "-z", "-uno"},
+                "ls-files": {"-z", "-co", "--cached", "--others", "--exclude-standard"},
+                "diff": {"--stat", "--numstat", "--name-only", "-z"},
+            }
+            safe = command == "pwd" and not arguments
+            if command == "git" and arguments and arguments[0] in inspection_flags:
+                safe = all(argument in inspection_flags[arguments[0]] for argument in arguments[1:])
+                if arguments[0] == "diff" and not any(argument in {"--stat", "--numstat", "--name-only"} for argument in arguments[1:]):
+                    safe = False
+            if not safe:
+                raise ValueError("Repository programs and mutating commands require this run's Auto approve actions permission. They are not OS-sandboxed.")
         reason = _workspace_autonomy_block_reason({"rawInput": {"command": shlex.join([command, *arguments])}}, self.cwd)
         if reason:
             raise ValueError("Workspace command was blocked by policy: " + reason)
@@ -226,7 +240,9 @@ class LocalWorkspaceClient:
         if not isinstance(args, dict):
             raise ValueError("Tool arguments must be a JSON object.")
         if name == "list_files":
-            result = self.command({"command": "git", "arguments": ["ls-files", "-co", "--exclude-standard", "-z"]})
+            result = self.command({"command": "git", "arguments": ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]})
+            if result["exit_code"] != 0:
+                raise ValueError("Git could not list the workspace files.")
             return {"files": [item for item in result["output"].split("\0") if item and not _workspace_argument_is_protected(item)][:1000]}
         if name == "read_file":
             start, count = args.get("start_line", 1), args.get("line_count", 200)
@@ -281,7 +297,8 @@ class LocalWorkspaceClient:
         raise ValueError("Unknown workspace tool.")
 
     def prompt(self, text, timeout=900, conversation_id=None, on_chunk=None, permission_mode="workspace_write", on_event=None):
-        del conversation_id, permission_mode
+        del conversation_id
+        self.programs_allowed = permission_mode == "workspace_auto"
         self.check()
         if not self.messages:
             self.messages.append({"role": "system", "content": (

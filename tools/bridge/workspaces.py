@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import threading
 import uuid
@@ -282,30 +283,96 @@ class WorkspaceStore:
             raise WorkspaceError("Choose a regular parent folder outside Git metadata.")
         if self._is_within(parent, self.runtime_root.resolve()):
             raise WorkspaceError("Create new workspaces outside managed coding-run worktrees.")
-        destination = parent / name
+        parent_path = str(parent)
+        destination_path = os.path.normpath(os.path.join(parent_path, name))
+        if (
+            not destination_path.startswith(parent_path.rstrip(os.sep) + os.sep)
+            or os.path.dirname(destination_path) != parent_path
+        ):
+            raise WorkspaceError("The workspace must be an immediate child of the selected parent folder.")
+        destination = Path(destination_path)
+        name = os.path.basename(destination_path)
         with self.lock:
+            descriptor_parent = self._open_directory_chain(parent)
+            if descriptor_parent is not None:
+                child_fd = None
+                try:
+                    try:
+                        os.mkdir(name, mode=0o700, dir_fd=descriptor_parent)
+                    except FileExistsError as error:
+                        raise WorkspaceError(
+                            "A folder with that name already exists. Choose another name; existing files were not changed."
+                        ) from error
+                    child_fd = self._open_directory_at(descriptor_parent, name)
+                    child_identity = os.fstat(child_fd)
+                    self._verify_directory_child(descriptor_parent, name, child_identity)
+                    self._git_at_directory(child_fd, ["init", "-b", "main", "--template="])
+                    self._verify_directory_child(descriptor_parent, name, child_identity)
+                    self._write_exclusive_file_at(
+                        child_fd,
+                        "README.md",
+                        "# " + name + "\n\nLocal coding workspace created with Eva.\n",
+                    )
+                    self._git_at_directory(child_fd, ["add", "--", "README.md"])
+                    self._git_at_directory(child_fd, [
+                        "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false",
+                        "-c", "user.name=Eva Workspace", "-c", "user.email=eva-workspace@local.invalid",
+                        "commit", "-m", "Initialize workspace",
+                        "-m", "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>",
+                    ])
+                    self._verify_directory_child(descriptor_parent, name, child_identity)
+                    if not self._same_directory(parent, descriptor_parent):
+                        raise WorkspaceError("The parent folder changed during workspace creation.")
+                    return self.register_project(destination, name)
+                except (WorkspaceError, OSError, RuntimeError, sqlite3.Error) as error:
+                    if isinstance(error, WorkspaceError) and str(error).startswith("A folder with that name"):
+                        raise
+                    raise WorkspaceError(
+                        "Workspace initialization failed. The new folder was retained for inspection; existing folders were not changed."
+                    ) from error
+                finally:
+                    if child_fd is not None:
+                        os.close(child_fd)
+                    os.close(descriptor_parent)
+            # Platforms without dir_fd/O_NOFOLLOW use a deliberately explicit
+            # fallback: revalidate the path at each step and retain partial output.
             try:
+                parent_identity = parent.stat()
                 destination.mkdir(mode=0o700)
             except FileExistsError as error:
                 raise WorkspaceError("A folder with that name already exists. Choose another name; existing files were not changed.") from error
             except OSError as error:
                 raise WorkspaceError("The workspace folder could not be created. Check the parent folder's permissions.") from error
             try:
+                child_identity = destination.stat(follow_symlinks=False)
+
+                def verify_paths():
+                    for path, identity in ((parent, parent_identity), (destination, child_identity)):
+                        current = path.stat(follow_symlinks=False)
+                        if (
+                            path.resolve(strict=True) != path or not stat.S_ISDIR(current.st_mode)
+                            or current.st_dev != identity.st_dev or current.st_ino != identity.st_ino
+                        ):
+                            raise WorkspaceError("The parent or new workspace path changed during creation.")
+
+                verify_paths()
                 self._git(str(destination), [
                     "--git-dir=" + str(destination / ".git"), "--work-tree=" + str(destination),
                     "init", "-b", "main", "--template=",
                 ])
-                if destination.resolve(strict=True) != destination:
-                    raise WorkspaceError("The new workspace path changed during creation.")
+                verify_paths()
                 with (destination / "README.md").open("x", encoding="utf-8") as readme:
                     readme.write("# " + name + "\n\nLocal coding workspace created with Eva.\n")
+                verify_paths()
                 self._git(str(destination), ["add", "--", "README.md"])
+                verify_paths()
                 self._git(str(destination), [
                     "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false",
                     "-c", "user.name=Eva Workspace", "-c", "user.email=eva-workspace@local.invalid",
                     "commit", "-m", "Initialize workspace",
                     "-m", "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>",
                 ])
+                verify_paths()
                 return self.register_project(destination, name)
             except (WorkspaceError, OSError, RuntimeError, sqlite3.Error) as error:
                 raise WorkspaceError("Workspace initialization failed. The new folder was retained for inspection; existing folders were not changed.") from error
@@ -1231,31 +1298,129 @@ class WorkspaceStore:
             return "stdio"
         return "configured"
 
-    def _current_branch(self, root_path):
-        result = self._git_status_output(root_path, ["symbolic-ref", "--quiet", "--short", "HEAD"])
-        return result[1].strip() if result[0] == 0 else ""
+    @staticmethod
+    def _directory_fd_prefix():
+        for prefix in ("/proc/self/fd", "/dev/fd"):
+            if os.path.isdir(prefix):
+                return prefix
+        return ""
 
-    def _git(self, cwd, arguments):
-        code, output = self._git_status_output(cwd, arguments)
+    def _open_directory_chain(self, directory):
+        """Open every parent component without following a replacement symlink."""
+        if (
+            os.name == "nt"
+            or not self._directory_fd_prefix()
+            or not hasattr(os, "O_NOFOLLOW")
+            or not hasattr(os, "O_DIRECTORY")
+            or os.open not in os.supports_dir_fd
+            or os.mkdir not in os.supports_dir_fd
+        ):
+            return None
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        current = os.open(os.sep, flags)
+        try:
+            for part in Path(directory).parts[1:]:
+                next_fd = os.open(part, flags, dir_fd=current)
+                os.close(current)
+                current = next_fd
+            return current
+        except OSError:
+            os.close(current)
+            raise WorkspaceError("The parent folder is unavailable.")
+
+    def _open_directory_at(self, parent_fd, name):
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        try:
+            return os.open(name, flags, dir_fd=parent_fd)
+        except OSError as error:
+            raise WorkspaceError("The new workspace folder could not be opened safely.") from error
+
+    @staticmethod
+    def _same_directory(path, directory_fd):
+        try:
+            expected = os.fstat(directory_fd)
+            actual = os.stat(path, follow_symlinks=False)
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(actual.st_mode)
+            and actual.st_dev == expected.st_dev
+            and actual.st_ino == expected.st_ino
+        )
+
+    @staticmethod
+    def _verify_directory_child(parent_fd, name, identity):
+        try:
+            actual = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as error:
+            raise WorkspaceError("The new workspace folder changed during creation.") from error
+        if (
+            not stat.S_ISDIR(actual.st_mode)
+            or actual.st_dev != identity.st_dev
+            or actual.st_ino != identity.st_ino
+        ):
+            raise WorkspaceError("The new workspace folder changed during creation.")
+
+    @staticmethod
+    def _write_exclusive_file_at(directory_fd, name, content):
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            file_fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+        except OSError as error:
+            raise WorkspaceError("The workspace README could not be created safely.") from error
+        try:
+            with os.fdopen(file_fd, "w", encoding="utf-8") as readme:
+                readme.write(content)
+        except OSError as error:
+            raise WorkspaceError("The workspace README could not be written.") from error
+
+    def _git_at_directory(self, directory_fd, arguments):
+        code, output = self._git_status_output(None, arguments, directory_fd=directory_fd)
         if code != 0:
             raise WorkspaceError("Git operation failed.")
         return output.strip()
 
-    def _git_status(self, cwd, arguments):
-        return self._git_status_output(cwd, arguments)[0]
+    def _current_branch(self, root_path):
+        result = self._git_status_output(root_path, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+        return result[1].strip() if result[0] == 0 else ""
 
-    def _git_status_output(self, cwd, arguments):
+    def _git(self, cwd, arguments, index_file=None):
+        code, output = self._git_status_output(cwd, arguments, index_file=index_file)
+        if code != 0:
+            raise WorkspaceError("Git operation failed.")
+        return output.strip()
+
+    def _git_status(self, cwd, arguments, index_file=None):
+        return self._git_status_output(cwd, arguments, index_file=index_file)[0]
+
+    def _git_status_output(self, cwd, arguments, index_file=None, directory_fd=None):
         try:
-            requested_cwd = os.path.abspath(os.fspath(cwd))
-            normalized_cwd = os.path.realpath(requested_cwd)
+            if directory_fd is not None:
+                if os.name == "nt" or not stat.S_ISDIR(os.fstat(directory_fd).st_mode):
+                    raise ValueError
+                requested_cwd = self._directory_fd_prefix() + "/" + str(directory_fd)
+                normalized_cwd = requested_cwd
+            else:
+                requested_cwd = os.path.abspath(os.fspath(cwd))
+                normalized_cwd = os.path.realpath(requested_cwd)
         except (TypeError, ValueError, OSError):
             raise WorkspaceError("The Git working directory is invalid.")
-        if normalized_cwd != requested_cwd or not os.path.isdir(normalized_cwd):
+        if directory_fd is None and (normalized_cwd != requested_cwd or not os.path.isdir(normalized_cwd)):
             raise WorkspaceError("The Git working directory is unavailable or contains a symbolic link.")
+        if directory_fd is not None and not os.path.isdir(normalized_cwd):
+            raise WorkspaceError("The Git working directory is unavailable.")
+        environment = self._git_environment()
+        if index_file is not None:
+            environment["GIT_INDEX_FILE"] = os.path.abspath(os.fspath(index_file))
+        process_options = {}
+        if directory_fd is not None:
+            process_options["pass_fds"] = (directory_fd,)
         try:
             completed = subprocess.run(
                 ["git", "-C", normalized_cwd, *arguments],
-                env=self._git_environment(),
+                env=environment,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -1263,6 +1428,7 @@ class WorkspaceStore:
                 stderr=subprocess.PIPE,
                 timeout=30,
                 check=False,
+                **process_options,
             )
         except (OSError, subprocess.SubprocessError):
             raise WorkspaceError("Git is unavailable for this workspace operation.")
