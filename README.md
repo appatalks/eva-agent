@@ -12,40 +12,15 @@ while keeping configuration, approvals, and personal data under your control.
 
 - **One intelligent gateway:** route work across OpenAI, GitHub Copilot ACP, LM Studio,
   and MCP tools without changing the conversation model.
-- **GPT-6 model options:** GPT-6 Luna is the default AIG model preference, and
-  GPT-6.1 Sol is also selectable through Copilot ACP or OpenAI direct. GPT-6 Astra
-  remains available through Copilot ACP without an OpenAI API key; direct OpenAI
-  selections require an API key.
 - **Durable, inspectable memory:** retain explicit facts locally with provenance
 	linked to source conversation turns, lifecycle controls, corrections, bounded
 	last-session recall, and a dedicated Memory view.
-- **Real work, with approval:** use browser, desktop, email, files, skills, scheduled
-  tasks, and coding workspaces through bounded native actions.
 - **Workspace control room:** monitor independent terminals and coding agents for
   the selected workspace, focus a tile, interrupt work, or send new direction.
   Project files stay beside Live and Details tabs. Create local Git workspaces
   or import existing projects through a responsive in-app folder browser.
-  Coding runs can use Copilot ACP or the selected local LM Studio/Strata model.
-- **Local source integration:** review and apply retained run changes to the
-  original branch, or opt in per run to apply on successful completion.
-  Clean-source and fast-forward checks prevent overwriting unrelated edits.
-- **Verified automation:** browser and desktop agents can use the selected AIG vision
-	backend, retain explicit clarifications, and report blocked work when completion is
-	not visually verified.
-- **Native research:** retrieve search results and bounded page excerpts through
-  configured MCP tools, retain the chosen responder, and distinguish partial evidence
-  from completed research instead of launching visual search loops.
-- **Live daily context:** assemble weather, news, markets, mail, and memory into verified
-  briefings that clearly identify unavailable sources.
-- **Natural interaction:** combine text, voice, camera input, images, and optional local
-	speech in the same desktop interface.
 - **Local-first operation:** use SQLite and local models by default, with cloud services
   enabled only when configured.
-- **AppImage update support:** new Linux builds use a static AppImage launcher and
-  include metadata for external AppImageUpdate-compatible tools; tagged releases
-  publish the matching differential-update sidecar.
-- **Guided desktop startup:** check core runtime prerequisites before launch,
-  explain provider setup, and enable coding workspaces by default in AppImages.
 
 ## Quick Start
 
