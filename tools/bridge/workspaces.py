@@ -275,7 +275,6 @@ class WorkspaceStore:
             or name.split(".", 1)[0].upper() in reserved
         ):
             raise WorkspaceError("Use a folder name of up to 80 characters, without path separators or reserved characters.")
-        name = os.path.basename(name)
         try:
             parent = Path(requested_parent).expanduser().resolve(strict=True)
         except (OSError, RuntimeError) as error:
@@ -284,7 +283,15 @@ class WorkspaceStore:
             raise WorkspaceError("Choose a regular parent folder outside Git metadata.")
         if self._is_within(parent, self.runtime_root.resolve()):
             raise WorkspaceError("Create new workspaces outside managed coding-run worktrees.")
-        destination = parent / name
+        parent_path = str(parent)
+        destination_path = os.path.normpath(os.path.join(parent_path, name))
+        if (
+            not destination_path.startswith(parent_path.rstrip(os.sep) + os.sep)
+            or os.path.dirname(destination_path) != parent_path
+        ):
+            raise WorkspaceError("The workspace must be an immediate child of the selected parent folder.")
+        destination = Path(destination_path)
+        name = os.path.basename(destination_path)
         with self.lock:
             descriptor_parent = self._open_directory_chain(parent)
             if descriptor_parent is not None:
