@@ -17,7 +17,14 @@ if TOOLS_DIR not in sys.path:
 
 from bridge.acp_client import ACPClient, _workspace_autonomy_block_reason, _workspace_execute_category
 from bridge import state
-from bridge.core import BridgeHandler, _lmstudio_response_parts, _lmstudio_stream_deltas, _scope_subagent_task_to_workspace
+from bridge.core import (
+    BridgeHandler,
+    _is_deferred_briefing_response,
+    _lmstudio_response_parts,
+    _lmstudio_stream_deltas,
+    _repair_utf8_mojibake,
+    _scope_subagent_task_to_workspace,
+)
 from bridge.utils import _verify_workspace_github_delivery, _workspace_github_delivery_url
 from bridge.telemetry import _telemetry_summarize
 
@@ -104,6 +111,15 @@ class StreamingContractTests(unittest.TestCase):
         self.assertEqual(content, "Visible answer")
         self.assertEqual(reasoning, "private partial reasoning")
 
+    def test_utf8_mojibake_is_repaired_without_changing_valid_unicode(self):
+        broken = "Your âlocationâ isnât GPS data â it is context."
+        self.assertEqual(
+            _repair_utf8_mojibake(broken),
+            "Your “location” isn’t GPS data — it is context.",
+        )
+        valid = "Eva remembers 서울 and “quoted text” correctly."
+        self.assertEqual(_repair_utf8_mojibake(valid), valid)
+
     def test_lmstudio_sse_separates_reasoning_and_answer_deltas(self):
         class Response:
             def iter_lines(self, decode_unicode=True):
@@ -121,6 +137,11 @@ class StreamingContractTests(unittest.TestCase):
             ("", "sources", ""),
             ("Final answer", "", "stop"),
         ])
+
+    def test_deferred_briefing_response_is_not_accepted_as_final(self):
+        self.assertTrue(_is_deferred_briefing_response("Gathering the remaining live sections..."))
+        self.assertTrue(_is_deferred_briefing_response("I'll follow up once I check the data."))
+        self.assertFalse(_is_deferred_briefing_response("Here are the available headlines and weather details."))
 
     def test_workspace_gh_classification_checks_only_file_arguments(self):
         cwd = os.path.join(os.sep, "workspace")

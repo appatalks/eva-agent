@@ -615,7 +615,9 @@ function refreshActiveSessionList() {
       title.title = title.textContent;
       var kind = document.createElement('span');
       kind.className = 'active-session-kind';
-      kind.textContent = _activeSessionKindLabel(agent.kind) + (agent.model ? ' · ' + agent.model : '');
+      kind.textContent = _activeSessionKindLabel(agent.kind) + (agent.model
+        ? ' · ' + (typeof evaDisplayModelLabel === 'function' ? evaDisplayModelLabel(agent.model) : agent.model)
+        : '');
       var status = document.createElement('span');
       status.className = 'active-session-status';
       status.textContent = _activeSessionStatusLabel(agent.status) + (agent.activity ? ' · ' + agent.activity : '');

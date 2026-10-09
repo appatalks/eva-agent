@@ -22,7 +22,11 @@ var EvaAgents = (function() {
     lastFrame: 0,
     refreshController: null,
     refreshSequence: 0,
-    graphFetchedAt: 0
+    graphFetchedAt: 0,
+    parallaxX: 0,
+    parallaxY: 0,
+    parallaxTargetX: 0,
+    parallaxTargetY: 0
   };
 
   function bridgeUrl() {
@@ -41,6 +45,10 @@ var EvaAgents = (function() {
   function kindLabel(kind) {
     var labels = { eva: 'PRIMARY AGENT', subagent: 'ACP SUBAGENT', browser: 'BROWSER', desktop: 'DESKTOP', background: 'BACKGROUND' };
     return labels[kind] || String(kind || 'AGENT').toUpperCase();
+  }
+
+  function modelLabel(model) {
+    return typeof evaDisplayModelLabel === 'function' ? evaDisplayModelLabel(model) : String(model || '');
   }
 
   function elapsed(agent) {
@@ -273,7 +281,7 @@ var EvaAgents = (function() {
     card.querySelector('[data-field="status"]').textContent = statusLabel(agent.status);
     card.querySelector('[data-field="title"]').textContent = agent.label || 'Agent session';
     var model = card.querySelector('[data-field="model"]');
-    model.textContent = agent.model || '';
+    model.textContent = modelLabel(agent.model);
     model.hidden = !agent.model;
     card.querySelector('[data-field="detail"]').textContent = agent.detail || 'Waiting for runtime detail';
     var signal = card.querySelector('[data-field="signal"]');
@@ -332,7 +340,7 @@ var EvaAgents = (function() {
   }
 
   function detailStatusText(agent) {
-    return statusLabel(agent.status) + '  ' + elapsed(agent) + (agent.model ? '  ' + agent.model : '') +
+    return statusLabel(agent.status) + '  ' + elapsed(agent) + (agent.model ? '  ' + modelLabel(agent.model) : '') +
       (agent.signal_status ? '  SIGNAL ' + String(agent.signal_status).toUpperCase() : '');
   }
 
@@ -492,13 +500,26 @@ var EvaAgents = (function() {
     keep.forEach(function(node) { allowed[node.id] = true; });
     var visibleEdges = sourceEdges.filter(function(edge) { return allowed[edge.source] && allowed[edge.target]; });
     var homes = graphHomes(keep, visibleEdges);
+    var connectionCounts = {};
+    visibleEdges.forEach(function(edge) {
+      connectionCounts[edge.source] = (connectionCounts[edge.source] || 0) + 1;
+      connectionCounts[edge.target] = (connectionCounts[edge.target] || 0) + 1;
+    });
+    var maximumConnections = Math.max.apply(Math, [1].concat(Object.keys(connectionCounts).map(function(id) {
+      return connectionCounts[id];
+    })));
     state.nodes = keep.map(function(raw, index) {
       var existing = state.nodeMap[raw.id];
       var home = homes[raw.id] || { x: 0.5, y: 0.5 };
+      var confidence = raw.type === 'core' ? 1 : (raw.type === 'agent' ? 0.86 : Number(raw.confidence || 0.58));
+      var influence = (connectionCounts[raw.id] || 0) / maximumConnections;
+      var depth = Math.max(0.12, Math.min(1, confidence * 0.7 + influence * 0.3));
       if (existing) {
         Object.keys(raw).forEach(function(key) { existing[key] = raw[key]; });
         existing.homeX = home.x;
         existing.homeY = home.y;
+        existing.depth = depth;
+        existing.influence = influence;
         if (raw.id === 'eva-root') { existing.x = 0.5; existing.y = 0.5; existing.vx = 0; existing.vy = 0; }
         return existing;
       }
@@ -511,7 +532,10 @@ var EvaAgents = (function() {
         homeX: home.x,
         homeY: home.y,
         vx: 0,
-        vy: 0
+        vy: 0,
+        depth: depth,
+        influence: influence,
+        neuralPhase: graphUnit(raw.id + ':neural') * Math.PI * 2
       };
       Object.keys(raw).forEach(function(key) { node[key] = raw[key]; });
       state.nodeMap[raw.id] = node;
@@ -542,6 +566,17 @@ var EvaAgents = (function() {
     canvas.height = Math.round(state.canvasHeight * ratio);
     var context = canvas.getContext('2d');
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  }
+
+  function projectedNode(node, width, height) {
+    var depth = Number(node.depth || 0.5);
+    var scale = 0.72 + depth * 0.38;
+    return {
+      x: width / 2 + (node.x - 0.5) * width * scale + state.parallaxX * (depth - 0.35) * 34,
+      y: height / 2 + (node.y - 0.5) * height * scale + state.parallaxY * (depth - 0.35) * 24,
+      scale: scale,
+      alpha: 0.3 + depth * 0.7
+    };
   }
 
   function simulate() {
@@ -596,106 +631,155 @@ var EvaAgents = (function() {
     var context = canvas.getContext('2d');
     var width = state.canvasWidth;
     var height = state.canvasHeight;
+    var reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    state.parallaxX += (state.parallaxTargetX - state.parallaxX) * (reducedMotion ? 1 : 0.055);
+    state.parallaxY += (state.parallaxTargetY - state.parallaxY) * (reducedMotion ? 1 : 0.055);
     context.clearRect(0, 0, width, height);
     drawGrid(context, width, height, time);
     simulate();
+    state.nodes.forEach(function(node) {
+      var projected = projectedNode(node, width, height);
+      node.renderX = projected.x;
+      node.renderY = projected.y;
+      node.renderScale = projected.scale;
+      node.renderAlpha = projected.alpha;
+    });
     state.nodes.filter(function(node) { return node.type === 'entity'; }).forEach(function(node) {
-      var x = node.x * width;
-      var y = node.y * height;
+      var x = node.renderX;
+      var y = node.renderY;
       context.beginPath();
-      context.arc(x, y, 30 + Math.sin(time * 0.001 + graphUnit(node.id) * 8) * 3, 0, Math.PI * 2);
-      context.strokeStyle = 'rgba(213, 134, 255, 0.11)';
-      context.lineWidth = 0.7;
+      context.arc(x, y, (30 + node.depth * 16) + Math.sin(time * 0.0008 + node.neuralPhase) * 2, 0, Math.PI * 2);
+      context.strokeStyle = 'rgba(196,160,255,' + (0.035 + node.depth * 0.075) + ')';
+      context.lineWidth = 1;
       context.stroke();
     });
     state.edges.forEach(function(edge, index) {
       var source = state.nodeMap[edge.source];
       var target = state.nodeMap[edge.target];
       if (!source || !target) return;
-      var sx = source.x * width;
-      var sy = source.y * height;
-      var tx = target.x * width;
-      var ty = target.y * height;
+      var sx = source.renderX;
+      var sy = source.renderY;
+      var tx = target.renderX;
+      var ty = target.renderY;
       var focused = state.focusNode && (state.focusNode.id === source.id || state.focusNode.id === target.id);
+      var bend = (graphUnit(edge.source + ':' + edge.target) - 0.5) * 42;
+      var middleX = (sx + tx) / 2;
+      var middleY = (sy + ty) / 2;
+      var distance = Math.hypot(tx - sx, ty - sy) || 1;
+      var controlX = middleX - (ty - sy) / distance * bend;
+      var controlY = middleY + (tx - sx) / distance * bend;
       context.beginPath();
       context.moveTo(sx, sy);
-      context.lineTo(tx, ty);
+      context.quadraticCurveTo(controlX, controlY, tx, ty);
       var dependency = edge.type === 'dependency';
       var orchestration = edge.type === 'orchestration';
-      context.strokeStyle = dependency ? 'rgba(167, 139, 250,' + (focused ? '0.95' : '0.62') + ')' :
-                (orchestration ? 'rgba(91, 154, 255,' + (focused ? '0.88' : '0.5') + ')' : 'rgba(74, 222, 199, ' + (focused ? '0.76' : 0.12 + edge.confidence * 0.2) + ')');
-      context.lineWidth = dependency ? (focused ? 2.5 : 2) : (orchestration ? (focused ? 2 : 1.4) : 0.7 + edge.confidence + (focused ? 0.8 : 0));
+      context.strokeStyle = dependency ? 'rgba(167,139,250,' + (focused ? '0.92' : '0.48') + ')' :
+                (orchestration ? 'rgba(104,162,255,' + (focused ? '0.86' : '0.42') + ')' : 'rgba(104,235,215,' + (focused ? '0.7' : 0.1 + edge.confidence * 0.16) + ')');
+      context.lineWidth = dependency ? (focused ? 2.4 : 1.7) : (orchestration ? (focused ? 2 : 1.3) : 0.6 + edge.confidence * 0.8 + (focused ? 0.8 : 0));
+      context.globalAlpha = focused ? 1 : Math.min(source.renderAlpha, target.renderAlpha);
       context.stroke();
-      if (!target.status || isActive(target.status)) {
-        var progress = ((time * 0.00012) + index * 0.173) % 1;
+      context.globalAlpha = 1;
+      if (edge.type === 'memory') {
         context.beginPath();
-        context.arc(sx + (tx - sx) * progress, sy + (ty - sy) * progress, 1.7, 0, Math.PI * 2);
-        context.fillStyle = dependency ? 'rgba(196, 181, 253, 0.9)' : 'rgba(137, 255, 234, 0.82)';
+        context.arc(controlX, controlY, focused ? 2.5 : 1.4, 0, Math.PI * 2);
+        context.fillStyle = focused ? 'rgba(197,255,246,0.88)' : 'rgba(104,235,215,0.24)';
+        context.fill();
+      }
+      if (!reducedMotion && (!target.status || isActive(target.status))) {
+        var progress = ((time * 0.00008) + index * 0.173) % 1;
+        var inverse = 1 - progress;
+        context.beginPath();
+        context.arc(
+          inverse * inverse * sx + 2 * inverse * progress * controlX + progress * progress * tx,
+          inverse * inverse * sy + 2 * inverse * progress * controlY + progress * progress * ty,
+          1.5, 0, Math.PI * 2
+        );
+        context.fillStyle = dependency ? 'rgba(205,188,255,0.88)' : 'rgba(150,255,238,0.78)';
         context.fill();
       }
       if (focused && edge.label) {
         context.font = '600 9px monospace';
-        context.fillStyle = 'rgba(224, 255, 248, 0.82)';
+        context.fillStyle = 'rgba(224,255,248,0.78)';
         context.textAlign = 'center';
-        context.fillText(String(edge.label).replace(/_/g, ' '), (sx + tx) / 2, (sy + ty) / 2 - 5);
+        context.fillText(String(edge.label).replace(/_/g, ' '), controlX, controlY - 7);
         context.textAlign = 'left';
       }
     });
-    state.nodes.forEach(function(node, index) {
-      var x = node.x * width;
-      var y = node.y * height;
+    state.nodes.slice().sort(function(left, right) { return left.depth - right.depth; }).forEach(function(node, index) {
+      var x = node.renderX;
+      var y = node.renderY;
       var entity = node.type === 'entity';
       var agent = node.type === 'agent';
       var core = node.type === 'core';
       var doneAgent = agent && node.status === 'done';
-      var radius = core ? 9 : (entity ? 5.5 : (agent ? 7 : 3.4));
-      var pulse = 1 + Math.sin(time * 0.002 + index) * 0.18;
+      var radius = (core ? 12 : (entity ? 7 : (agent ? 9 : 5))) * (0.72 + node.depth * 0.42);
+      var pulse = reducedMotion ? 1 : 1 + Math.sin(time * 0.0014 + index) * 0.1;
+      var color = core ? '#ffcb82' : (entity ? '#c4a0ff' : (doneAgent ? '#76ead9' : (agent ? '#68a2ff' : (node.review_required ? '#ffbd66' : '#68ebd7'))));
+      var haloColor = core ? 'rgba(255,203,130,0.28)' : (entity ? 'rgba(196,160,255,0.28)' : (agent ? 'rgba(104,162,255,0.28)' : 'rgba(104,235,215,0.28)'));
+      context.globalAlpha = node.renderAlpha;
       context.beginPath();
-      context.arc(x, y, radius * 2.4 * pulse, 0, Math.PI * 2);
-      context.fillStyle = core ? 'rgba(255, 190, 92, 0.16)' : (entity ? 'rgba(213, 134, 255, 0.12)' : (agent ? 'rgba(91, 154, 255, 0.11)' : 'rgba(74, 222, 199, 0.055)'));
+      context.arc(x, y, radius * 2.5 * pulse, 0, Math.PI * 2);
+      context.fillStyle = core ? 'rgba(255,203,130,0.12)' : (entity ? 'rgba(196,160,255,0.1)' : (agent ? 'rgba(104,162,255,0.1)' : 'rgba(104,235,215,0.07)'));
       context.fill();
+      context.save();
+      context.shadowColor = color;
+      context.shadowBlur = state.focusNode === node || state.hoverNode === node ? 18 : 9;
       context.beginPath();
       if (agent && !doneAgent) {
-        context.rect(x - radius, y - radius, radius * 2, radius * 2);
+        context.roundRect(x - radius, y - radius, radius * 2, radius * 2, 3);
       } else if (!core && !entity && !agent) {
-        context.save();
-        context.translate(x, y);
-        context.rotate(Math.PI / 4);
-        context.rect(-radius, -radius, radius * 2, radius * 2);
-        context.restore();
+        context.roundRect(x - radius, y - radius, radius * 2, radius * 2, 3);
       } else {
         context.arc(x, y, radius, 0, Math.PI * 2);
       }
-      context.fillStyle = core ? '#ffbe5c' : (entity ? '#d586ff' : (doneAgent ? '#4adec7' : (agent ? '#5b9aff' : '#4adec7')));
+      context.fillStyle = color;
       context.fill();
-      context.strokeStyle = core ? 'rgba(255,224,168,0.8)' : (entity ? 'rgba(244,202,255,0.88)' : (agent ? 'rgba(195,218,255,0.9)' : 'rgba(184,255,245,0.72)'));
-      context.lineWidth = 1;
+      context.shadowBlur = 0;
+      context.strokeStyle = 'rgba(240,255,252,0.7)';
+      context.lineWidth = state.focusNode === node ? 2 : 1;
       context.stroke();
+      context.restore();
+      context.globalAlpha = 1;
+      if (state.focusNode === node || state.hoverNode === node) {
+        context.beginPath();
+        context.arc(x, y, radius + 7, 0, Math.PI * 2);
+        context.strokeStyle = haloColor;
+        context.lineWidth = 1;
+        context.stroke();
+      }
       if (core) {
         context.beginPath();
-        context.arc(x, y, radius + 5, 0, Math.PI * 2);
-        context.strokeStyle = 'rgba(255,190,92,0.42)';
-        context.lineWidth = 1.5;
+        context.arc(x, y, radius + 7, 0, Math.PI * 2);
+        context.strokeStyle = 'rgba(255,203,130,0.3)';
+        context.lineWidth = 1;
         context.stroke();
-        context.font = '700 10px monospace';
-        context.fillStyle = 'rgba(255,235,201,0.98)';
-        context.textAlign = 'center';
-        context.fillText('EVA CORE', x, y - radius - 10);
-        context.textAlign = 'left';
       }
       if (doneAgent) {
         context.font = '700 9px monospace'; context.fillStyle = '#07100f'; context.textAlign = 'center';
         context.fillText('✓', x, y + 3); context.textAlign = 'left';
       }
-      if (!core && (entity || agent || state.hoverNode === node || state.focusNode === node)) {
+      if (!core && (agent || state.hoverNode === node || state.focusNode === node || (entity && node.depth > 0.6))) {
         var statusSuffix = agent ? ' · ' + statusLabel(node.status) : '';
         var label = (node.label || node.id).slice(0, 24) + statusSuffix;
-        context.font = (core || entity || agent) ? '600 10px monospace' : '10px monospace';
-        context.fillStyle = (core || entity) ? 'rgba(255,235,201,0.92)' : (agent ? 'rgba(218,231,255,0.95)' : 'rgba(219,255,250,0.9)');
+        context.font = (entity || agent) ? '600 10px monospace' : '10px monospace';
         var labelWidth = context.measureText(label).width;
-        var labelX = x + radius + 6;
-        if (labelX + labelWidth > width - 8) labelX = x - radius - 6 - labelWidth;
-        context.fillText(label, Math.max(8, labelX), y + 3);
+        var labelX = x + radius + 9;
+        if (labelX + labelWidth + 14 > width - 8) labelX = x - radius - 9 - labelWidth - 14;
+        context.fillStyle = 'rgba(7,20,24,0.86)';
+        context.beginPath();
+        context.roundRect(labelX, y - 10, labelWidth + 14, 20, 7);
+        context.fill();
+        context.strokeStyle = 'rgba(132,240,224,0.12)';
+        context.stroke();
+        context.fillStyle = agent ? 'rgba(218,231,255,0.95)' : 'rgba(226,255,251,0.92)';
+        context.fillText(label, labelX + 7, y + 3);
+      }
+      if (core) {
+        context.font = '700 9px monospace';
+        context.fillStyle = 'rgba(255,235,201,0.9)';
+        context.textAlign = 'center';
+        context.fillText('EVA', x, y - radius - 13);
+        context.textAlign = 'left';
       }
     });
     state.animationFrame = requestAnimationFrame(drawGraph);
@@ -703,14 +787,12 @@ var EvaAgents = (function() {
 
   function drawGrid(context, width, height, time) {
     context.save();
-    context.strokeStyle = 'rgba(74, 222, 199, 0.035)';
-    context.lineWidth = 1;
-    var offset = (time * 0.004) % 28;
-    for (var x = offset; x < width; x += 28) {
-      context.beginPath(); context.moveTo(x, 0); context.lineTo(x, height); context.stroke();
-    }
-    for (var y = offset; y < height; y += 28) {
-      context.beginPath(); context.moveTo(0, y); context.lineTo(width, y); context.stroke();
+    context.fillStyle = 'rgba(132,240,224,0.055)';
+    var offset = 18;
+    for (var x = offset; x < width; x += 32) {
+      for (var y = offset; y < height; y += 32) {
+        context.fillRect(x, y, 1, 1);
+      }
     }
     context.restore();
   }
@@ -725,8 +807,8 @@ var EvaAgents = (function() {
     var nearest = null;
     var best = 18 * 18;
     state.nodes.forEach(function(node) {
-      var dx = node.x * state.canvasWidth - position.x;
-      var dy = node.y * state.canvasHeight - position.y;
+      var dx = (node.renderX === undefined ? node.x * state.canvasWidth : node.renderX) - position.x;
+      var dy = (node.renderY === undefined ? node.y * state.canvasHeight : node.renderY) - position.y;
       var distance = dx * dx + dy * dy;
       if (distance < best) { best = distance; nearest = node; }
     });
@@ -739,6 +821,8 @@ var EvaAgents = (function() {
     canvas.dataset.bound = 'true';
     canvas.addEventListener('pointermove', function(event) {
       var position = pointerPosition(event);
+      state.parallaxTargetX = (position.x / Math.max(state.canvasWidth, 1) - 0.5) * 2;
+      state.parallaxTargetY = (position.y / Math.max(state.canvasHeight, 1) - 0.5) * 2;
       if (state.dragNode) {
         state.dragNode.x = position.x / state.canvasWidth;
         state.dragNode.y = position.y / state.canvasHeight;
@@ -767,6 +851,10 @@ var EvaAgents = (function() {
       var end = pointerPosition(event);
       if (node && start && Math.hypot(end.x - start.x, end.y - start.y) < 5) {
         state.focusNode = state.focusNode === node ? null : node;
+        if (node.type === 'fact' && node.memory_id && window.EvaMemoryInspector &&
+            typeof window.EvaMemoryInspector.openAtomById === 'function') {
+          window.EvaMemoryInspector.openAtomById(node.memory_id);
+        }
       }
       state.dragNode = null;
       state.graphPointerStart = null;
@@ -775,6 +863,8 @@ var EvaAgents = (function() {
       state.dragNode = null;
       state.graphPointerStart = null;
       state.hoverNode = null;
+      state.parallaxTargetX = 0;
+      state.parallaxTargetY = 0;
       var tooltip = document.getElementById('agentGraphTooltip');
       if (tooltip) tooltip.setAttribute('aria-hidden', 'true');
     });
@@ -791,7 +881,11 @@ var EvaAgents = (function() {
     } else if (node.type === 'fact') {
       lines.push((node.source_label || 'Memory') + ' → ' + (node.relation || 'related fact'));
       lines.push(node.full_label || node.label || '');
+      if (node.context) lines.push('Context: ' + node.context);
       if (node.confidence) lines.push('Confidence: ' + Math.round(node.confidence * 100) + '%');
+      lines.push('Neural influence: ' + Math.round((node.influence || 0) * 100) + '%');
+      if (node.trust) lines.push('Trust: ' + String(node.trust).replace(/_/g, ' '));
+      lines.push(node.memory_id ? 'Select to inspect or edit this record.' : 'Imported legacy fact · review in the full Memory workspace.');
     } else {
       lines.push(node.description || 'Remembered entity');
     }
@@ -839,9 +933,15 @@ var EvaAgents = (function() {
     var refreshButton = document.getElementById('agentsRefreshBtn');
     var closeButton = document.getElementById('agentsCloseBtn');
     var detailClose = document.getElementById('agentDetailClose');
+    var memoryReviewButton = document.getElementById('agentGraphMemoryReview');
     if (refreshButton) refreshButton.addEventListener('click', function() { refresh(true); });
     if (closeButton) closeButton.addEventListener('click', close);
     if (detailClose) detailClose.addEventListener('click', closeDetail);
+    if (memoryReviewButton) memoryReviewButton.addEventListener('click', function() {
+      if (window.EvaMemoryInspector && typeof window.EvaMemoryInspector.openFromAgents === 'function') {
+        window.EvaMemoryInspector.openFromAgents();
+      }
+    });
     document.addEventListener('keydown', function(event) {
       if (event.key === 'Escape' && state.open) {
         if (state.selectedId) closeDetail(); else close();

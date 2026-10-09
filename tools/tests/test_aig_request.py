@@ -113,6 +113,23 @@ class AigRequestContractTests(unittest.TestCase):
             "Did you do it?",
         )
 
+    def test_github_continuation_routing_bounds_oversized_input(self):
+        oversized = "Sounds good, please proceed" + (" " * 100000)
+        messages = [{"role": "user", "content": "Create a GitHub issue for this"}]
+        routed = github_continuation_routing_message(messages, oversized, _classify_request_type)
+        self.assertLess(len(routed), 4096)
+        self.assertIn("Explicit user continuation: Sounds good, please proceed", routed)
+        long_request = ("Please analyze this text: " + ("example " * 1000)).strip()
+        self.assertEqual(
+            github_continuation_routing_message(messages, long_request, _classify_request_type),
+            long_request,
+        )
+        misleading_prefix = "please proceed" + (" " * 4096) + "but do not create an issue"
+        self.assertEqual(
+            github_continuation_routing_message(messages, misleading_prefix, _classify_request_type),
+            misleading_prefix,
+        )
+
     def test_action_status_uses_only_immediately_preceding_receipt(self):
         created = verified_action_status_reply([
             {"role": "assistant", "content": "Created https://github.com/example/eva-agent/issues/42"},

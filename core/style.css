@@ -4,6 +4,10 @@
 html {
   background: transparent;
 }
+#evaMemoryBtn[hidden],
+#lcarsChipMemory[hidden] {
+  display: none !important;
+}
 body {
   font-family: Arial, sans-serif;
   margin: 0;
@@ -798,7 +802,7 @@ body.eva-standalone #settingsMenu {
 .workspace-workbench { display: none; }
 .assets-view { display: none; }
 .skills-view { display: none; }
-body.agents-view-open #idContainer > :not(#agentsView) { display: none !important; }
+body.agents-view-open #idContainer > :not(#agentsView):not(#memoryInspectorPanel):not(#memoryAtomDetailDialog) { display: none !important; }
 body.agents-view-open #idContainer { max-width: none; width: 100%; }
 body.agents-view-open .eva-status-footer,
 body.agents-view-open .eva-disclaimer,
@@ -889,14 +893,19 @@ body.memory-view-open #idContainer { display: none !important; }
 body.memory-view-open .eva-status-footer,
 body.memory-view-open .eva-disclaimer,
 body.memory-view-open .cog-badge { display: none !important; }
-body.memory-view-open #evaMemoryBtn { background: rgba(74,222,199,0.12); color: #c7fff7; }
 body.memory-view-open .memory-inspector-panel { display: flex; position: fixed; inset: 0; width: 100vw; max-width: none; height: 100vh; transform: none !important; transition: none !important; border: 0; border-radius: 0; flex-direction: column; background: #081211; z-index: 9001; }
 body.eva-standalone.memory-view-open .memory-inspector-panel { top: 32px; height: calc(100vh - 32px); }
 body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 16px 22px 11px; border-bottom-color: rgba(74,222,199,0.18); }
-.memory-inspector-toolbar { display: grid; grid-template-columns: auto auto minmax(150px, 1fr) repeat(4, minmax(100px, 126px)) auto minmax(110px, 0.8fr); align-items: center; gap: 8px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
+#memoryInspectorClose { width: auto; font: 700 10px monospace; }
+.memory-inspector-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 48px; padding: 7px 16px; border-bottom: 1px solid rgba(74,222,199,0.13); background: rgba(5,17,16,0.92); }
+.memory-inspector-intro { display: flex; align-items: baseline; gap: 12px; padding: 8px 16px; border-bottom: 1px solid rgba(74,222,199,0.12); background: rgba(74,222,199,0.035); }
+.memory-inspector-intro strong { flex: none; color: #dffffa; font-size: 11px; }
+.memory-inspector-intro span { color: #779b95; font: 9px/1.45 monospace; }
 .memory-inspector-toolbar .auth-note { margin: 0; }
 .memory-inspector-toolbar input,
 .memory-inspector-toolbar select { min-width: 0; height: 32px; border: 1px solid rgba(74,222,199,0.18); border-radius: 3px; background: #0c1b19; color: #e5faf7; padding: 0 9px; font: 10px monospace; }
+.memory-inspector-toolbar input { flex: 1 1 220px; }
+.memory-inspector-toolbar select { flex: 0 1 126px; }
 .memory-inspector-toolbar input:focus,
 .memory-inspector-toolbar select:focus { outline: none; border-color: #4adec7; }
 #memoryAtomCount { color: #83bbb4; font: 10px monospace; white-space: nowrap; }
@@ -924,6 +933,7 @@ body.memory-view-open .memory-inspector-panel .session-panel-header { padding: 1
 .memory-inspector-card:focus { border-color: rgba(74,222,199,0.58); outline: none; }
 .memory-inspector-card strong { color: #e8fffb; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .memory-inspector-value { color: #abc6c1; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }
+.memory-inspector-context { padding: 7px 8px; border-left: 2px solid rgba(196,160,255,0.55); background: rgba(196,160,255,0.055); color: #9eb7b3; font: 10px/1.45 monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
 .memory-inspector-meta,
 .memory-inspector-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: stretch; }
 .memory-inspector-pill { max-width: 100%; padding: 2px 5px; border: 1px solid rgba(129,177,168,0.25); border-radius: 3px; color: #82a9a2; font: 9px monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1413,22 +1423,54 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
 .agent-steer-form input { min-width: 0; flex: 1; padding: 9px 10px; border: 1px solid rgba(74,222,199,0.24); border-radius: 3px; outline: none; background: #0a1917; color: #eafffc; }
 .agent-steer-form input:focus { border-color: #4adec7; }
 .agent-steer-form button { padding: 0 14px; border: 0; border-radius: 3px; background: #4adec7; color: #07110f; font: 700 10px monospace; cursor: pointer; }
-.agent-graph { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid rgba(74,222,199,0.2); background: rgba(3,12,11,0.82); }
-.agent-graph-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 22px 7px; }
-.agent-graph-heading h2 { font-size: 15px; }
-.agent-graph-legend { display: flex; align-items: center; gap: 14px; color: #608b86; font: 9px monospace; }
-.agent-graph-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.agent-graph {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin: 12px 18px 18px;
+  overflow: hidden;
+  border: 1px solid rgba(132,240,224,0.16);
+  border-radius: 18px;
+  background:
+    linear-gradient(145deg, rgba(17,35,35,0.82), rgba(6,13,20,0.92)),
+    rgba(5,14,16,0.86);
+  box-shadow: 0 24px 70px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.025);
+  backdrop-filter: blur(18px);
+}
+.agent-graph-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 18px 13px; border-bottom: 1px solid rgba(132,240,224,0.1); background: rgba(8,22,23,0.56); }
+.agent-graph-heading h2 { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+.agent-graph-guidance { margin: 5px 0 0; max-width: 680px; color: #759d98; font: 10px/1.5 monospace; }
+.agent-graph-legend { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; color: #85aaa5; font: 9px monospace; }
+.agent-graph-legend span { display: inline-flex; align-items: center; gap: 6px; min-height: 25px; padding: 0 8px; border: 1px solid rgba(132,240,224,0.1); border-radius: 999px; background: rgba(255,255,255,0.025); }
 .agent-graph-legend i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; }
 .legend-entity { background: #d586ff; box-shadow: 0 0 7px rgba(213,134,255,0.5); }
 .legend-fact { background: #4adec7; box-shadow: 0 0 7px rgba(74,222,199,0.5); }
+.legend-memory-review { background: #ffbe5c; box-shadow: 0 0 7px rgba(255,190,92,0.5); }
 .legend-agent { background: #5b9aff; box-shadow: 0 0 7px rgba(91,154,255,0.55); }
 .legend-relation { width: 14px !important; height: 2px !important; border-radius: 0 !important; background: #dffffa; box-shadow: 0 0 7px rgba(223,255,250,0.5); }
-.agent-graph-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
-#agentGraphCanvas { display: block; width: 100%; height: 100%; touch-action: none; }
-.agent-graph-empty { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; color: rgba(74,222,199,0.35); font: 11px monospace; letter-spacing: 0.18em; }
+.agent-graph-memory-button { width: auto; height: 27px; padding: 0 11px; border-radius: 999px; white-space: nowrap; font: 700 9px monospace; }
+.agent-graph-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(132,240,224,0.08);
+  border-radius: 12px;
+  background:
+    radial-gradient(ellipse at 50% 48%, rgba(74,222,199,0.075), transparent 34%),
+    radial-gradient(ellipse at 18% 78%, rgba(167,139,250,0.065), transparent 31%),
+    radial-gradient(ellipse at 84% 24%, rgba(104,162,255,0.045), transparent 27%),
+    rgba(2,9,13,0.74);
+  box-shadow: inset 0 0 80px rgba(0,0,0,0.32);
+}
+.agent-graph-stage::after { content: ''; position: absolute; inset: 0; pointer-events: none; border-radius: inherit; box-shadow: inset 0 0 50px rgba(0,0,0,0.22); }
+#agentGraphCanvas { position: relative; z-index: 1; display: block; width: 100%; height: 100%; touch-action: none; }
+.agent-graph-empty { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; pointer-events: none; color: rgba(137,255,234,0.38); font: 10px monospace; letter-spacing: 0.18em; }
 .agent-graph-empty[hidden] { display: none; }
-.agent-graph-tooltip { position: absolute; top: 0; left: 0; width: min(310px, calc(100% - 16px)); padding: 9px 11px; pointer-events: none; border: 1px solid rgba(74,222,199,0.3); border-radius: 3px; background: rgba(3,13,12,0.96); color: #dffffa; font: 10px/1.55 monospace; white-space: pre-line; overflow-wrap: anywhere; box-sizing: border-box; }
+.agent-graph-tooltip { position: absolute; top: 0; left: 0; z-index: 3; width: min(330px, calc(100% - 16px)); padding: 12px 14px; pointer-events: none; border: 1px solid rgba(132,240,224,0.22); border-radius: 10px; background: rgba(8,20,24,0.93); box-shadow: 0 18px 45px rgba(0,0,0,0.38); backdrop-filter: blur(14px); color: #dffffa; font: 10px/1.65 monospace; white-space: pre-line; overflow-wrap: anywhere; box-sizing: border-box; }
 .agent-graph-tooltip[aria-hidden="true"] { display: none; }
+.agent-graph-depth-key { color: #a5c8c3 !important; letter-spacing: 0.06em; }
 @keyframes agentPulse { 50% { opacity: 0.35; transform: scale(0.65); } }
 @keyframes agentCardIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @media (max-width: 599px) {
@@ -2773,10 +2815,9 @@ body.theme-eva .workspace-panel .session-panel-header { border-color: var(--eva-
 .workspace-discard-confirm .workspace-detail-action:last-child { border-color: rgba(255,138,138,0.55); color: #ffb4b4; }
 
 @media (max-width: 560px) {
-  .memory-inspector-toolbar { grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); }
-  .memory-inspector-toolbar input { grid-column: 1 / -1; }
-  .memory-inspector-toolbar select { min-width: 0; }
-  #memoryAtomCount { justify-self: end; }
+  .memory-inspector-toolbar input { flex-basis: 100%; }
+  .memory-inspector-toolbar select { flex: 1 1 calc(50% - 8px); }
+  .memory-inspector-intro { align-items: flex-start; flex-direction: column; gap: 3px; }
   .workspace-run-options { grid-template-columns: auto minmax(0, 1fr); }
   .workspace-run-options button { grid-column: 1 / -1; }
 }

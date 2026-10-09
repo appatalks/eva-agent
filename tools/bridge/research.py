@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 
 _MAX_QUERY_LENGTH = 500
+_MAX_REGEX_INPUT = 2_048
 _MAX_TOOL_TEXT = 240_000
 _MAX_SOURCES = 5
 _MAX_SOURCE_SNIPPET = 1_200
@@ -89,7 +90,10 @@ def _strip_markers(text):
 
 
 def _clean_text(value):
-    text = str(value or "").strip()
+    # All routing regexes operate on a bounded slice.  This keeps malformed
+    # model/user input from turning the intentionally readable heuristics into
+    # a regex denial-of-service primitive while retaining normal requests.
+    text = str(value or "")[:_MAX_REGEX_INPUT].strip()
     text = re.sub(r"^\s*<(?:user|human)>\s*|\s*</(?:user|human)>\s*$", "", text, flags=re.I)
     text = re.sub(
         r"^\s*(?:\[\s*(?:current\s+)?(?:user|request|message)\s*\]|"

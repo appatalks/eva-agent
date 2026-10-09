@@ -10,11 +10,14 @@ while keeping configuration, approvals, and personal data under your control.
 
 ## Highlights
 
-- **One intelligent gateway:** route work across OpenAI, GitHub Copilot ACP, LM Studio,
-  and MCP tools without changing the conversation model.
+- **One intelligent gateway:** route work across OpenAI, GitHub Copilot ACP, the
+  SI Harness for OpenAI-compatible endpoints, and MCP tools without changing the
+  conversation model.
 - **Durable, inspectable memory:** retain explicit facts locally with provenance
-	linked to source conversation turns, lifecycle controls, corrections, bounded
-	last-session recall, and a dedicated Memory view.
+	linked to source conversation turns, editable explanatory context, lifecycle
+	controls, corrections, bounded
+	last-session recall, and interactive review through Agent Operations'
+	Memory Topology workspace.
 - **Workspace control room:** monitor independent terminals and coding agents for
   the selected workspace, focus a tile, interrupt work, or send new direction.
   Project files stay beside Live and Details tabs. Create local Git workspaces
@@ -32,7 +35,7 @@ eva
 Eva is also added to the system application menu. On first launch, select **Eva (AIG)**
 for the integrated routing, memory, and tool experience.
 
-Current development version: **5.6.11** (`Eva Standalone-5.6.11.AppImage`, unreleased).
+Current development version: **5.6.12** (`Eva Standalone-5.6.12.AppImage`, unreleased).
 Latest published standalone release: `Eva Standalone-5.6.10.AppImage`.
 
 ## Preview
@@ -58,6 +61,8 @@ Latest published standalone release: `Eva Standalone-5.6.10.AppImage`.
   questions do not become memory writes.
 - Consequential actions remain behind confirmation and authorization boundaries.
 - Live answers use source receipts and fail visibly when current data is unavailable.
+- Model-supplied image HTML is sanitized; application-generated images retain
+  their normal rendering without additional permission prompts.
 - Secrets, runtime state, and personal memory stay outside the repository and release
   artifacts.
 

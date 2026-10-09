@@ -85,6 +85,7 @@ core-identity-v1,1,"Eva is a personal AI assistant: warm, curious, direct, evide
     Entity: string,
     Relation: string,
     Value: string,
+    Context: string,
     Kind: string,
     Trust: string,
     Status: string,

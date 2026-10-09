@@ -126,7 +126,7 @@ function lmsSend() {
         _lmsModel = String((((_lmsCatalogBody || {}).data || [])[0] || {}).id || '').trim();
       } catch (_) {}
     }
-    if (!_lmsModel) throw new Error('LM Studio did not report a loaded model. Load a model in LM Studio or enter a model override in Settings.');
+    if (!_lmsModel) throw new Error('The SI Harness endpoint did not report a loaded model. Load a model at the endpoint or enter a model override in Settings.');
     const openAIUrl = _lmsBaseUrl.replace(/\/+$/, '') + '/chat/completions';
     const requestOptions = {
         method: "POST",

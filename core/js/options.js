@@ -1,6 +1,53 @@
 // Javascript for Options
 // 
 
+function evaDisplayModelLabel(value) {
+  var raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw === 'lmstudio' || raw === 'lm-studio') return 'SI Harness';
+  var match = raw.match(/^(?:aig:)?lmstudio:(.+)$/);
+  return match ? 'SI Harness \u00b7 ' + match[1] : raw;
+}
+
+// AI text is untrusted.  Only restore image elements that we construct with a
+// small allow-list of attributes; in particular, never restore event handlers
+// or arbitrary markup from a model response.
+function _sanitizeImageTag(fragment) {
+  if (typeof DOMParser === 'undefined' || typeof document === 'undefined') return '';
+  var parsed = new DOMParser().parseFromString(String(fragment || ''), 'text/html');
+  var image = parsed.body && parsed.body.querySelector('img');
+  if (!image) return '';
+  var source = image.getAttribute('src') || '';
+  if (!/^https?:\/\//i.test(source)) return '';
+  var safe = document.createElement('img');
+  safe.src = source;
+  ['title', 'alt', 'class'].forEach(function(name) {
+    var value = image.getAttribute(name);
+    if (value !== null) safe.setAttribute(name, value);
+  });
+  if (image.getAttribute('data-generated') === 'true') safe.setAttribute('data-generated', 'true');
+  return safe.outerHTML;
+}
+
+function repairEvaTextEncoding(value) {
+  var text = String(value || '');
+  if (!/(?:Ã.|Â.|â[\u0080-\u00bf]|ð[\u0080-\u00bf])/.test(text) || typeof TextDecoder === 'undefined') {
+    return text;
+  }
+  return text.replace(/[\u0000-\u00ff]+/g, function(chunk) {
+    if (!/(?:Ã.|Â.|â[\u0080-\u00bf]|ð[\u0080-\u00bf])/.test(chunk)) return chunk;
+    try {
+      var bytes = Uint8Array.from(Array.prototype.map.call(chunk, function(character) {
+        return character.charCodeAt(0);
+      }));
+      var decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      return decoded.indexOf('\ufffd') < 0 ? decoded : chunk;
+    } catch (_) {
+      return chunk;
+    }
+  });
+}
+
 // Streaming responses are provisional text only. Marker execution remains
 // exclusively in renderEvaResponse after the final event arrives.
 function createEvaStreamingBubble(txtOutput) {
@@ -3166,9 +3213,9 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     return;
   }
 
-  var text = content.trim();
+  var text = repairEvaTextEncoding(content.trim());
   renderOptions = renderOptions || {};
-  var reasoningText = String(renderOptions.reasoningContent || '').trim();
+  var reasoningText = repairEvaTextEncoding(String(renderOptions.reasoningContent || '').trim());
   var artifactNames = [];
   var surfacedAssets = [];
   var feedbackKey = renderOptions.feedbackId || ('response_' + Array.from(text).reduce(function (hash, character) {
@@ -3517,6 +3564,7 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     });
 
     var results = await Promise.all(fetchPromises);
+    var imgFragments = [];
 
     results.forEach(function(r) {
       if (r.url) {
@@ -3526,7 +3574,8 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
         if (r.generated) {
           imgTag = '<div class="eva-generated-wrap">' + imgTag + '<span class="eva-generated-badge">AI Generated</span></div>';
         }
-        text = text.replace(r.placeholder.full, imgTag);
+        imgFragments.push(imgTag);
+        text = text.replace(r.placeholder.full, '\u0000IMG' + (imgFragments.length - 1) + '\u0000');
         surfacedAssets.push({ url: r.url, caption: r.placeholder.query, generated: r.generated });
       } else {
         // Replace with a styled placeholder showing what was requested
@@ -3544,13 +3593,19 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     }
 
     // Tokenize generated image wrappers and standalone <img> tags before markdown.
-    var imgFragments = [];
     text = text.replace(/<div class="eva-generated-wrap">[\s\S]*?<\/div>/g, function(m) {
-      imgFragments.push(m);
+      var image = m.match(/<img\b[^>]*>/i);
+      var safeImage = image ? _sanitizeImageTag(image[0]) : '';
+      if (!safeImage) return '';
+      var safeWrapper = '<div class="eva-generated-wrap">' + safeImage +
+        '<span class="eva-generated-badge">AI Generated</span></div>';
+      imgFragments.push(safeWrapper);
       return '\u0000IMG' + (imgFragments.length - 1) + '\u0000';
     });
     text = text.replace(/<img[^>]*>/g, function(m) {
-      imgFragments.push(m);
+      var safeImage = _sanitizeImageTag(m);
+      if (!safeImage) return '';
+      imgFragments.push(safeImage);
       return '\u0000IMG' + (imgFragments.length - 1) + '\u0000';
     });
 

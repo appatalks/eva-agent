@@ -983,7 +983,7 @@
     ].join('\n');
 
     // Stage 1: Eva plans and drafts the user-facing answer
-    reportStatus('Eva drafting [eva: ' + cfg.evaModel + ']...');
+    reportStatus('Eva drafting [eva: ' + evaDisplayModelLabel(cfg.evaModel) + ']...');
     var draftTask = [
       'User message:',
       userMsg,
@@ -1052,7 +1052,7 @@
     // Stage 2+: reviewer loop, bounded by cfg.maxCycles, gated by doReview
     for (var cycle = 1; doReview && cycle <= cfg.maxCycles; cycle++) {
       cyclesUsed = cycle;
-      reportStatus('Eva reviewing [reviewer: ' + cfg.reviewerModel + '] cycle ' + cycle + '/' + cfg.maxCycles + '...');
+      reportStatus('Eva reviewing [reviewer: ' + evaDisplayModelLabel(cfg.reviewerModel) + '] cycle ' + cycle + '/' + cfg.maxCycles + '...');
       var reviewTask = [
         'User message:',
         userMsg,
@@ -1091,7 +1091,7 @@
       if (verdict === 'APPROVE' || verdict === 'BLOCKED') break;
 
       // Eva revises against reviewer feedback
-      reportStatus('Eva revising [eva: ' + cfg.evaModel + '] cycle ' + cycle + '...');
+      reportStatus('Eva revising [eva: ' + evaDisplayModelLabel(cfg.evaModel) + '] cycle ' + cycle + '...');
       var reviseTask = [
         'User message:',
         userMsg,

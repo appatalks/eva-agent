@@ -2,6 +2,7 @@
 """Behavioral tests for durable fact capture and passive SQLite recall."""
 
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -58,6 +59,29 @@ class MemoryRecallTests(unittest.TestCase):
         else:
             os.environ["EVA_MEMORY_DB"] = self.old_db
         self.tempdir.cleanup()
+
+    def test_existing_memory_atoms_table_gains_context_column(self):
+        from sqlite_memory import SqliteMemory
+
+        path = str(Path(self.tempdir.name) / "legacy-memory.db")
+        connection = sqlite3.connect(path)
+        connection.execute(
+            "CREATE TABLE MemoryAtoms (MemoryId TEXT NOT NULL, Entity TEXT DEFAULT '', "
+            "Relation TEXT DEFAULT '', Value TEXT NOT NULL, SourceRef TEXT DEFAULT '')"
+        )
+        connection.execute(
+            "INSERT INTO MemoryAtoms (MemoryId, Entity, Relation, Value, SourceRef) "
+            "VALUES ('legacy-test', 'User', 'answer_style', 'concise', 'conversation:test:turn')"
+        )
+        connection.commit()
+        connection.close()
+        memory = SqliteMemory(path)
+        try:
+            self.assertIn("Context", {name for name, _kind in memory.get_schema("MemoryAtoms")})
+            context = memory.query("SELECT Context FROM MemoryAtoms WHERE MemoryId = 'legacy-test'")[0]["Context"]
+            self.assertIn("prior conversation", context)
+        finally:
+            memory.close()
 
     def test_explicit_eva_design_assertion_is_not_automatic_identity(self):
         facts = _extract_explicit_user_facts(
@@ -162,14 +186,19 @@ class MemoryRecallTests(unittest.TestCase):
         self.assertEqual(link["Role"], "user")
         self.assertTrue(link["TurnId"])
 
-    def test_agent_memory_graph_prefers_confirmed_atoms_and_deduplicates_legacy_rows(self):
+    def test_agent_memory_graph_includes_reviewable_atoms_and_deduplicates_legacy_rows(self):
         from bridge.memory import _get_sqlite_mem
         from bridge.memory_model import MemoryModel
 
         memory = _get_sqlite_mem()
         MemoryModel(memory).add_atom({
             "entity": "User", "relation": "user_preference", "value": "concise answers",
+            "context": "Use this preference when choosing response length.",
             "kind": "preference", "trust": "user_confirmed", "scope": "user", "confidence": 0.95,
+        })
+        reviewable = MemoryModel(memory).add_atom({
+            "entity": "User", "relation": "candidate_preference", "value": "visual explanations",
+            "kind": "candidate", "trust": "unconfirmed", "scope": "user", "confidence": 0.7,
         })
         memory.ingest("Knowledge", [
             "Timestamp", "Entity", "Relation", "Value", "Confidence", "Source", "Decay",
@@ -178,10 +207,41 @@ class MemoryRecallTests(unittest.TestCase):
             {"Timestamp": "2026-01-02T00:00:00Z", "Entity": "Project", "Relation": "status", "Value": "active", "Confidence": 0.8, "Source": "legacy", "Decay": 0.0},
         ])
         rows = core._memory_graph_rows()
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 3)
         preference = next(row for row in rows if row["Relation"] == "user_preference")
         self.assertEqual(preference["Trust"], "user_confirmed")
         self.assertTrue(preference["MemoryId"])
+        candidate = next(row for row in rows if row["Relation"] == "candidate_preference")
+        self.assertEqual(candidate["MemoryId"], reviewable["MemoryId"])
+        self.assertEqual(candidate["Trust"], "unconfirmed")
+        graph = core._knowledge_graph_snapshot(rows)
+        candidate_node = next(node for node in graph["nodes"] if node.get("memory_id") == reviewable["MemoryId"])
+        self.assertTrue(candidate_node["review_required"])
+        preference_node = next(node for node in graph["nodes"] if node.get("memory_id") == preference["MemoryId"])
+        self.assertEqual(preference_node["context"], "Use this preference when choosing response length.")
+
+    def test_memory_context_survives_correction_and_enters_prompt_view(self):
+        from bridge.memory import _get_sqlite_mem
+        from bridge.memory_model import MemoryModel
+
+        memory = _get_sqlite_mem()
+        model = MemoryModel(memory)
+        original = model.add_atom({
+            "entity": "User", "relation": "answer_style", "value": "concise",
+            "context": "Use for routine answers, but allow detail when the user asks.",
+            "kind": "preference", "trust": "user_confirmed", "scope": "user", "confidence": 0.9,
+        })
+        corrected = model.supersede_atom(original["MemoryId"], {
+            "value": "concise by default",
+            "context": "Keep routine answers brief while preserving requested technical depth.",
+        })
+        detail = model.atom_detail(corrected["MemoryId"])
+        self.assertEqual(detail["atom"]["Context"], "Keep routine answers brief while preserving requested technical depth.")
+        prompt_atom = next(
+            atom for atom in model.prompt_view("context-session", "charter")["user_atoms"]
+            if atom["MemoryId"] == corrected["MemoryId"]
+        )
+        self.assertEqual(prompt_atom["Context"], detail["atom"]["Context"])
 
     def test_spelling_and_typoed_daughters_are_explicit_facts(self):
         facts = _extract_explicit_user_facts(

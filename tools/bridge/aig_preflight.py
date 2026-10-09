@@ -9,6 +9,10 @@ _META_RE = re.compile(
     r"^(how are you|how do you feel|what is your name|who are you|what can you do|tell me about yourself)\b"
 )
 _BRIEFING_RE = re.compile(r"\b(?:morning|daily)\s+(?:briefing|report|update)\b")
+_BEHAVIOR_META_RE = re.compile(
+    r"\b(?:why did you|did you use|what (?:exactly )?(?:are|were) your instructions|"
+    r"what (?:skill|tool)s? did you|should i (?:have )?(?:called|call)|how did you)\b"
+)
 
 
 def plan_aig_preflight(
@@ -30,7 +34,8 @@ def plan_aig_preflight(
     words = message_stripped.split()
     skip_acp = False
     acp_route = "default"
-    briefing_request = bool(_BRIEFING_RE.search(message_lower))
+    behavior_meta_question = bool(_BEHAVIOR_META_RE.search(message_lower))
+    briefing_request = bool(_BRIEFING_RE.search(message_lower)) and not behavior_meta_question
     tool_request = request_type in {
         "news-search", "weather-search", "financial-data", "web-search",
         "github-data", "kusto-query", "kusto-operator",
@@ -51,7 +56,7 @@ def plan_aig_preflight(
     elif len(words) <= 4 and _GREETING_RE.match(message_stripped):
         skip_acp = True
         acp_route = "greeting/trivial"
-    elif len(words) <= 6 and _META_RE.match(message_stripped):
+    elif behavior_meta_question or (len(words) <= 6 and _META_RE.match(message_stripped)):
         skip_acp = True
         acp_route = "meta-question"
 

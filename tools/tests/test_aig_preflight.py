@@ -71,6 +71,16 @@ class AigPreflightTests(unittest.TestCase):
         self.assertTrue(report["briefing_request"])
         self.assertFalse(report["needs_acp_tools"])
 
+    def test_briefing_meta_question_does_not_run_briefing(self):
+        result = self.plan(
+            "Did you use any skills, and what exactly are your instructions for the morning briefing?",
+            "news-search",
+        )
+        self.assertFalse(result["briefing_request"])
+        self.assertFalse(result["needs_acp_tools"])
+        self.assertTrue(result["skip_acp"])
+        self.assertEqual(result["acp_route"], "meta-question")
+
     def test_local_tool_failure_falls_back_only_to_selected_acp_route(self):
         self.assertTrue(should_fallback_local_tool_to_acp(True, True, "", "acp", True))
         self.assertFalse(should_fallback_local_tool_to_acp(True, True, "", "lmstudio", True))

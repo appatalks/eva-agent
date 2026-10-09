@@ -683,6 +683,7 @@ def test_model_selector():
     report("cognition_openai_direct_key", "openai_api_key: authOpenAI()" in cognition_source)
     report("cognition_reviewer_token_cap", "Math.min" in cognition_source and "8192" in cognition_source and "max_completion_tokens:" in cognition_source)
     report("provider_completion_truncation_warning", "function reportCompletionTruncation" in model_settings_source and all("reportCompletionTruncation" in source for source in (aig_source, open("core/js/providers/openai.js").read(), open("core/js/providers/copilot.js").read(), open("core/js/providers/lm-studio.js").read())))
+    report("provider_utf8_mojibake_repair", "function repairEvaTextEncoding" in options_source and "repairEvaTextEncoding(content.trim())" in options_source)
     report("lmstudio_completion_token_budget", "max_tokens:" in open("core/js/providers/lm-studio.js").read() and "getModelMaxTokens()" in open("core/js/providers/lm-studio.js").read())
     report("cognition_openai_direct_reviewer", "openai:gpt-6-luna" in cognition_source)
     report("aig_backend_model_info_catalog", all(marker in model_settings_source for marker in ("DIRECT_OPENAI_MODEL_INFO", "Balanced intelligence and cost", "Premium complex reasoning", "Lightweight routing and classification", "updateAIGModelInfo")))
@@ -856,7 +857,7 @@ def test_reasoning_effort_contract():
 
     aig_match = re.search(r'<select id="selAIGBackend"[^>]*>(.*?)</select>', html, re.DOTALL)
     selected_aig = re.search(r'<option value="([^"]+)" selected>', aig_match.group(1)) if aig_match else None
-    report("aig_default_gpt_6_luna", bool(selected_aig and selected_aig.group(1) == "gpt-6-luna"))
+    report("aig_default_si_harness", bool(selected_aig and selected_aig.group(1) == "lmstudio"))
 
     with open("core/js/providers/copilot.js") as f:
         copilot_js = f.read()
@@ -882,7 +883,7 @@ def test_reasoning_effort_contract():
     with open("tools/bridge/core.py") as f:
         bridge_core = f.read()
     report("reasoning_effort_js_default_high", "DEFAULT_REASONING_EFFORT = 'high'" in model_settings_js)
-    report("aig_js_default_gpt_6_luna", "|| 'gpt-6-luna'" in aig_js)
+    report("aig_js_default_si_harness", "|| 'lmstudio'" in aig_js)
     report("cognition_default_gpt_6_luna", "? el.value : 'gpt-6-luna'" in cognition_js)
     report("cognition_default_reviewer_provider_aware", "openai:gpt-6-luna" in cognition_js and "gpt-5.6-terra" in cognition_js and "reviewerModel.indexOf('openai:') !== 0" in cognition_js and "lsSet('cogReviewerModel', reviewerModel)" in cognition_js)
     report("cognition_adaptive_gate", "adaptiveReviewReason(userMessage)" in cognition_js and "reason: 'adaptive:' + adaptiveReason" in cognition_js)
@@ -1973,6 +1974,8 @@ def test_agent_operations_contract():
         sessions = f.read()
     with open("core/js/options.js") as f:
         options = f.read()
+    with open("core/js/memory-inspector.js") as f:
+        memory_inspector = f.read()
     permission_ui = open("core/js/features/permissions/acp.js").read()
     with open("core/js/features/sessions/explorer.js") as f:
         session_ui = f.read()
@@ -2021,6 +2024,43 @@ def test_agent_operations_contract():
     report("agent_operations_keyed_cards", "existing[child.dataset.agentId]" in ui and "updateAgentCard(card, agent)" in ui)
     report("agent_operations_entry_animation_new_only", "agent-card agent-card-enter" in ui and ".agent-card.agent-card-enter" in open("core/style.css").read())
     report("agent_operations_graph_fetch", "data.graph" in ui)
+    report("agent_operations_si_harness_label",
+           "evaDisplayModelLabel" in options and "modelLabel(agent.model)" in ui
+           and "evaDisplayModelLabel(cfg.evaModel)" in cognition
+           and "evaDisplayModelLabel(agent.model)" in sessions)
+    report("agent_operations_memory_topology_review",
+           'id="agentGraphMemoryReview"' in html and "openAtomById(node.memory_id)" in ui
+           and "openAtomById: openAtomById" in memory_inspector
+           and "invalidateGraph" in memory_inspector and "review_required" in bridge)
+    report("agent_operations_owns_memory_navigation",
+           re.search(r'id="evaMemoryBtn"[^>]*hidden', html) is not None
+           and re.search(r'id="lcarsChipMemory"[^>]*hidden', html) is not None
+           and "#evaMemoryBtn[hidden]" in open("core/style.css").read()
+           and "openFromAgents: openFromAgents" in memory_inspector
+           and "window.EvaAgents.open('agents')" in memory_inspector
+           and "closeAgentOperationsForNavigation" not in memory_inspector)
+    report("memory_categories_collapsed_by_default",
+           "state.expandedGroups[group.key] === true" in memory_inspector
+           and "group.atoms.length <= 8" not in memory_inspector
+           and all(marker in html for marker in ("memoryInspectorExpandAll", "memoryInspectorCollapseAll", "memory-inspector-intro")))
+    report("memory_topology_modern_visual",
+           "quadraticCurveTo" in ui and "roundRect" in ui
+           and "prefers-reduced-motion: reduce" in ui
+           and "backdrop-filter: blur(18px)" in open("core/style.css").read()
+           and "border-radius: 18px" in open("core/style.css").read())
+    report("memory_topology_neural_depth_field",
+           "function projectedNode" in ui and "parallaxTargetX" in ui
+           and "confidence * 0.7 + influence * 0.3" in ui
+           and "Neural influence:" in ui
+           and "NEURAL MEMORY FIELD" in html
+           and "DEPTH = CONFIDENCE + INFLUENCE" in html)
+    report("memory_context_editing_contract",
+           'id="memoryAtomContext"' in html and "context: context" in memory_inspector
+           and "recordValue(atom, 'Context')" in memory_inspector
+           and "item.Context" in memory_inspector
+           and "Context" in bridge)
+    report("memory_detail_visible_from_agents",
+           ":not(#memoryInspectorPanel):not(#memoryAtomDetailDialog)" in open("core/style.css").read())
     report("agent_operations_steer_queue", 'task.setdefault("steer_queue", [])' in worker)
     report("agent_operations_spawn_capability", "id: 'agent.spawn_batch'" in cognition)
     report("agent_operations_spawn_endpoint_call", "'/v1/subagent/spawn-batch'" in cognition)

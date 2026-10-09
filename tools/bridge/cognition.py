@@ -65,6 +65,25 @@ def _memory_prompt_data_block(title, records):
     return f"[{title} - UNTRUSTED MEMORY DATA]\n" + _UNTRUSTED_MEMORY_NOTICE + "\n".join(cleaned)
 
 
+def _memory_atom_prompt_text(item, include_relation=True):
+    relation = str(item.get("Relation", "?") or "?")
+    value = str(item.get("Value", "?") or "?")
+    context = str(item.get("Context", "") or "").strip()
+    text = (relation + ": " if include_relation else "") + value
+    return text + (" | Context: " + context if context else "")
+
+
+def _explicit_fact_context(fact):
+    relation = str((fact or {}).get("Relation", "") or "").lower()
+    if relation == "user_location":
+        return "The user explicitly identified this as their location. Use it only for relevant location-dependent personalization, and prefer a later correction if one exists."
+    if relation == "correct_spelling":
+        return "The user explicitly corrected this spelling. Preserve the correction when referring to the person or entity."
+    if relation == "user_children":
+        return "The user explicitly shared this family relationship. Use it naturally only when relevant and avoid unnecessary repetition."
+    return "The user explicitly stated this personal fact. Keep it for relevant personalized recall and defer to any later correction."
+
+
 _LAST_CONVERSATION_RE = re.compile(
     r"\b(?:last|previous|most recent)\s+(?:conversation|converstation|chat|discussion|talk)\b",
     re.IGNORECASE,
@@ -553,6 +572,7 @@ def _persist_explicit_user_facts(user_message, conversation_id=None, turn_id=Non
                         continue
                     memory_model.add_atom({
                         "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
+                        "context": _explicit_fact_context(fact),
                         "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
                         "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
                     }, [{
@@ -585,6 +605,7 @@ def _persist_explicit_user_facts(user_message, conversation_id=None, turn_id=Non
             continue
         memory_model.add_atom({
             "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
+            "context": _explicit_fact_context(fact),
             "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
             "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
         }, [{
@@ -1085,7 +1106,7 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
             scenario_lines.append(f"Summary: {scenario.get('Summary')}")
         context_parts.append(_memory_prompt_data_block("Active Scenario", scenario_lines))
     scenario_atom_lines = [
-        f"{item.get('Entity', '?')} - {item.get('Relation', '?')}: {item.get('Value', '?')}"
+        f"{item.get('Entity', '?')} - {_memory_atom_prompt_text(item)}"
         for item in structured_view["scenario_atoms"]
     ]
     if scenario_atom_lines:
@@ -1129,7 +1150,7 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
     # Active atoms supersede or delete legacy profile values before prompt assembly.
     user_profile = _latest_user_profile_rows(structured_view["user_atoms"])
     if user_profile:
-        profile_lines = [f"- {r.get('Relation','?')}: {r.get('Value','?')}" for r in user_profile]
+        profile_lines = ["- " + _memory_atom_prompt_text(r) for r in user_profile]
         context_parts.append(_memory_prompt_data_block("User Profile", profile_lines))
 
     # Timestamp and skills manifest
@@ -1550,6 +1571,7 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
                 continue
             memory_model.add_atom({
                 "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
+                "context": _explicit_fact_context(fact),
                 "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
                 "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
             }, [{
@@ -1733,6 +1755,10 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
     cluster, db = _get_kusto_config()
     if not cluster or not db:
         return ""
+    memory_atom_columns = {
+        str(column).lower() for column in (_get_table_columns(cluster, db, "MemoryAtoms") or [])
+    }
+    memory_context_projection = ", Context" if "context" in memory_atom_columns else ""
 
     charter = _CORE_IDENTITY_CHARTER
     if _get_table_columns(cluster, db, "CoreIdentity"):
@@ -1787,10 +1813,10 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
                 "MemoryAtoms | summarize arg_max(UpdatedAt, *) by MemoryId "
                 "| where Status =~ 'active' and (isnull(ExpiresAt) or ExpiresAt > now()) "
                 "| join kind=inner (ScenarioMembers | where ScenarioId == '" + scenario_id + "') on MemoryId "
-                "| project Entity, Relation, Value | take 12",
+                "| project Entity, Relation, Value" + memory_context_projection + " | take 12",
             ) or []
             scenario_atom_lines = [
-                f"{item.get('Entity', '?')} - {item.get('Relation', '?')}: {item.get('Value', '?')}"
+                f"{item.get('Entity', '?')} - {_memory_atom_prompt_text(item)}"
                 for item in scenario_atoms
             ]
             if scenario_atom_lines:
@@ -1807,7 +1833,7 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
                 "| where Entity =~ 'User' and Scope =~ 'user' and Status =~ 'active' and Confidence >= 0.5 "
                 "| where isnull(ExpiresAt) or ExpiresAt > now() "
                 "| order by UpdatedAt desc, MemoryId desc | take 100 "
-                "| project Relation, Value, Confidence, UpdatedAt, MemoryId",
+                "| project Relation, Value" + memory_context_projection + ", Confidence, UpdatedAt, MemoryId",
             ) or []
         except Exception:
             structured_user_profile = None
@@ -1861,7 +1887,7 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
         user_profile = structured_user_profile
     user_profile = _latest_user_profile_rows(user_profile)
     if user_profile:
-        profile_lines = [f"{item.get('Relation','?')}: {item.get('Value','?')}" for item in user_profile]
+        profile_lines = [_memory_atom_prompt_text(item) for item in user_profile]
         context_parts.append(_memory_prompt_data_block("User Profile", profile_lines))
 
     if _st.kusto_database_locked:
@@ -2376,6 +2402,7 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
                     continue
                 memory_model.add_atom({
                     "entity": fact["Entity"], "relation": fact["Relation"], "value": fact["Value"],
+                    "context": _explicit_fact_context(fact),
                     "kind": _legacy_kind(fact["Entity"], fact["Relation"]), "trust": "user_confirmed",
                     "scope": "user", "confidence": fact["Confidence"], "source_ref": source_ref,
                 }, [{
@@ -2574,5 +2601,3 @@ def _post_response_reflection(user_message, assistant_response, model_name, conv
                 pass
         print(f"[Cognition] Reflection persistence failed: {exc}")
         return False
-
-

@@ -123,13 +123,36 @@ def _completion_token_limit(value, default=16384):
 def _lmstudio_message_text(content):
     """Return text-only content for strict local chat templates."""
     if isinstance(content, str):
-        return content
+        return _repair_utf8_mojibake(content)
     if isinstance(content, list):
-        return "\n".join(
+        return _repair_utf8_mojibake("\n".join(
             str(part.get("text", "")) for part in content
             if isinstance(part, dict) and part.get("type") == "text"
-        )
-    return str(content or "")
+        ))
+    return _repair_utf8_mojibake(str(content or ""))
+
+
+_MOJIBAKE_HINT_RE = re.compile(r"(?:Ã.|Â.|â[\x80-\xbf]|ð[\x80-\xbf])")
+_LATIN1_RUN_RE = re.compile(r"[\x00-\xff]+")
+
+
+def _repair_utf8_mojibake(value):
+    """Repair UTF-8 bytes decoded as Latin-1 without altering valid Unicode."""
+    text = str(value or "")
+    if not _MOJIBAKE_HINT_RE.search(text):
+        return text
+
+    def repair(match):
+        chunk = match.group(0)
+        if not _MOJIBAKE_HINT_RE.search(chunk):
+            return chunk
+        try:
+            decoded = chunk.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return chunk
+        return decoded if "\ufffd" not in decoded else chunk
+
+    return _LATIN1_RUN_RE.sub(repair, text)
 
 
 def _lmstudio_response_parts(message):
@@ -172,7 +195,7 @@ def _lmstudio_response_parts(message):
         cursor = end + len("</think>")
     content = "".join(visible_parts)
     reasoning = "\n\n".join(dict.fromkeys(reasoning_parts)).strip()
-    return content.strip(), reasoning
+    return _repair_utf8_mojibake(content.strip()), _repair_utf8_mojibake(reasoning)
 
 
 def _lmstudio_stream_deltas(response):
@@ -215,6 +238,17 @@ def _prepared_briefing_response(context, preparing=False, unavailable=None):
     elif unavailable:
         parts.append("Unavailable live sections: " + ", ".join(unavailable) + ".")
     return "\n\n".join(parts)
+
+
+def _is_deferred_briefing_response(value):
+    """Reject local-model promises that leave a briefing turn unfinished."""
+    return bool(re.search(
+        r"\b(?:gathering|fetching|retrieving|checking|preparing)\b.{0,80}\b(?:remaining|live|sections?|data|information)\b"
+        r"|\b(?:i(?:'ll| will)|let me)\s+(?:follow up|search|check|gather|fetch|retrieve|prepare)\b"
+        r"|\bfollow(?:ing)? up (?:shortly|later|once)\b",
+        str(value or ""),
+        re.IGNORECASE | re.DOTALL,
+    ))
 
 
 def _lmstudio_chat_messages(system_prompt, history, user_message, system_additions=None):
@@ -1064,12 +1098,14 @@ def _knowledge_graph_snapshot(rows):
             "id": target_id,
             "label": target_label,
             "full_label": target_value[:240],
+            "context": str(row.get("Context", "") or "")[:500],
             "type": "fact",
             "source_label": source_label,
             "relation": relation.replace("_", " "),
             "confidence": float(row.get("Confidence", 0.0) or 0.0),
             "trust": str(row.get("Trust", "") or ""),
             "memory_id": str(row.get("MemoryId", "") or ""),
+            "review_required": str(row.get("Trust", "") or "") not in {"user_confirmed", "operator_approved"},
             "description": f"{source_label} · {relation.replace('_', ' ')}",
         }
         edges.append({
@@ -1083,17 +1119,17 @@ def _knowledge_graph_snapshot(rows):
 
 
 def _memory_graph_rows(limit=30):
-    """Return confirmed atoms first, then non-duplicate legacy facts for topology."""
+    """Return active atoms for review, then non-duplicate legacy facts for topology."""
     if _resolve_memory_backend() == "sqlite":
         memory = _get_sqlite_mem()
         atom_rows = memory.query(
-            "SELECT Entity, Relation, Value, Confidence, UpdatedAt AS Timestamp, Trust, MemoryId "
-            "FROM MemoryAtoms WHERE Status = 'active' AND Confidence >= 0.6 "
-            "AND Trust IN ('user_confirmed', 'operator_approved') "
-            "ORDER BY UpdatedAt DESC LIMIT ?", (limit,)
+            "SELECT Entity, Relation, Value, Context, Confidence, UpdatedAt AS Timestamp, Trust, MemoryId "
+            "FROM MemoryAtoms WHERE Status = 'active' AND Confidence >= 0.5 "
+            "ORDER BY CASE WHEN Trust IN ('user_confirmed', 'operator_approved') THEN 0 ELSE 1 END, "
+            "UpdatedAt DESC LIMIT ?", (limit,)
         ) or []
         legacy_rows = memory.query(
-            "SELECT Entity, Relation, Value, Confidence, Timestamp, '' AS Trust, '' AS MemoryId FROM Knowledge "
+            "SELECT Entity, Relation, Value, '' AS Context, Confidence, Timestamp, '' AS Trust, '' AS MemoryId FROM Knowledge "
             "WHERE Confidence >= 0.6 AND Relation NOT IN ('mentioned', 'candidate_mentioned', 'recurring_topic') "
             "ORDER BY Timestamp DESC LIMIT ?", (limit * 2,)
         ) or []
@@ -1101,20 +1137,24 @@ def _memory_graph_rows(limit=30):
         cluster, database = _get_kusto_config()
         if not cluster or not database:
             return []
+        memory_atom_columns = {
+            str(column).lower() for column in (_get_table_columns(cluster, database, "MemoryAtoms") or [])
+        }
+        context_projection = "Context" if "context" in memory_atom_columns else "Context=''"
         atom_rows = _kusto_query_direct(
             cluster, database,
             "MemoryAtoms | summarize arg_max(UpdatedAt, *) by MemoryId "
-            "| where Status =~ 'active' and Confidence >= 0.6 "
-            "and Trust in~ ('user_confirmed', 'operator_approved') "
-            f"| order by UpdatedAt desc | take {int(limit)} "
-            "| project Entity, Relation, Value, Confidence, Timestamp=UpdatedAt, Trust, MemoryId",
+            "| where Status =~ 'active' and Confidence >= 0.5 "
+            "| extend ReviewOrder=iif(Trust in~ ('user_confirmed', 'operator_approved'), 0, 1) "
+            f"| order by ReviewOrder asc, UpdatedAt desc | take {int(limit)} "
+            f"| project Entity, Relation, Value, {context_projection}, Confidence, Timestamp=UpdatedAt, Trust, MemoryId",
         ) if _get_table_columns(cluster, database, "MemoryAtoms") else []
         legacy_rows = _kusto_query_direct(
             cluster, database,
             "Knowledge | where Confidence >= 0.6 "
             "and Relation !in~ ('mentioned', 'candidate_mentioned', 'recurring_topic') "
             f"| order by Timestamp desc | take {int(limit) * 2} "
-            "| project Entity, Relation, Value, Confidence, Timestamp, Trust='', MemoryId=''",
+            "| project Entity, Relation, Value, Context='', Confidence, Timestamp, Trust='', MemoryId=''",
         ) or []
 
     rows = []
@@ -5454,6 +5494,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "- Downloadable file: write the file, then end with [[EVA_FILE]] <filename.ext>\n\n"
             "RULES:\n"
             "- Act first, explain second. Do the task — don't list manual steps for the user.\n"
+            "- If the user asks why you behaved a certain way, which tools or skills you used, what instructions you followed, "
+            "or how to name a task, answer those explicit questions first. Mentioning a task name inside a meta-question is not "
+            "a request to run that task.\n"
+            "- Never end with a promise or progress placeholder such as \"gathering the remaining sections\" or \"I'll follow up.\" "
+            "Finish the answer in this turn, or state exactly what is unavailable and why.\n"
             "- Write ONE short sentence announcing what you're about to do before emitting a marker.\n"
             "- Only confirm an action after it actually ran and returned.\n"
             "- Never fabricate news, stock prices, weather, or events. Use [Data Retrieved] or say you don't have it.\n"
@@ -5756,6 +5801,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 not response_text
                 or "[[EVA_BROWSER]]" in response_text
                 or "[[EVA_DESKTOP]]" in response_text
+                or _is_deferred_briefing_response(response_text)
             ):
                 response_text = _prepared_briefing_response(
                     _briefing_context,

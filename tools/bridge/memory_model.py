@@ -144,8 +144,8 @@ class MemoryModel:
                 confidence = max(0.0, min(float(row.get("Confidence", 0.5) or 0.5), 1.0))
                 memory_id = "legacy-atom-" + legacy_id
                 conn.execute(
-                    "INSERT INTO MemoryAtoms (MemoryId, Entity, Relation, Value, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, 'unconfirmed', 'active', ?, '', ?, ?, ?, ?)",
-                    (memory_id, entity, relation, value, kind, scope, confidence, source_ref,
+                    "INSERT INTO MemoryAtoms (MemoryId, Entity, Relation, Value, Context, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, 'unconfirmed', 'active', ?, '', ?, ?, ?, ?)",
+                    (memory_id, entity, relation, value, "Migrated from Eva's earlier Knowledge store; review this record to confirm why it should remain.", kind, scope, confidence, source_ref,
                      _clip(row.get("Timestamp"), 40) or now, now),
                 )
                 conn.execute(
@@ -260,7 +260,7 @@ class MemoryModel:
         source_ref = _clip(record.get("source_ref"), 240)
         row = {
             "MemoryId": memory_id, "Entity": _clip(record.get("entity"), 120), "Relation": _clip(record.get("relation"), 120),
-            "Value": value, "Kind": kind, "Trust": trust, "Status": status, "Scope": scope,
+            "Value": value, "Context": _clip(record.get("context"), 2000), "Kind": kind, "Trust": trust, "Status": status, "Scope": scope,
             "ScopeId": _clip(record.get("scope_id"), 160), "Confidence": confidence, "SourceRef": source_ref,
             "CreatedAt": now, "UpdatedAt": now, "ExpiresAt": _clip(record.get("expires_at"), 40), "SupersedesId": _clip(record.get("supersedes_id"), 80),
         }
@@ -268,7 +268,7 @@ class MemoryModel:
 
         def write(conn):
             conn.execute(
-                "INSERT INTO MemoryAtoms (MemoryId, Entity, Relation, Value, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt, ExpiresAt, SupersedesId) VALUES (:MemoryId, :Entity, :Relation, :Value, :Kind, :Trust, :Status, :Scope, :ScopeId, :Confidence, :SourceRef, :CreatedAt, :UpdatedAt, :ExpiresAt, :SupersedesId)",
+                "INSERT INTO MemoryAtoms (MemoryId, Entity, Relation, Value, Context, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt, ExpiresAt, SupersedesId) VALUES (:MemoryId, :Entity, :Relation, :Value, :Context, :Kind, :Trust, :Status, :Scope, :ScopeId, :Confidence, :SourceRef, :CreatedAt, :UpdatedAt, :ExpiresAt, :SupersedesId)",
                 row,
             )
             for item in evidence or []:
@@ -301,6 +301,7 @@ class MemoryModel:
                 raise ValueError("active memory atom not found")
             replacement.setdefault("entity", source["Entity"])
             replacement.setdefault("relation", source["Relation"])
+            replacement.setdefault("context", source["Context"])
             replacement.setdefault("kind", source["Kind"])
             replacement.setdefault("trust", "user_confirmed")
             replacement.setdefault("scope", source["Scope"])
@@ -316,13 +317,14 @@ class MemoryModel:
             now = _now()
             row = {
                 "MemoryId": _identifier("memory"), "Entity": _clip(replacement.get("entity"), 120),
-                "Relation": _clip(replacement.get("relation"), 120), "Value": value, "Kind": kind,
+                "Relation": _clip(replacement.get("relation"), 120), "Value": value,
+                "Context": _clip(replacement.get("context"), 2000), "Kind": kind,
                 "Trust": trust, "Status": "active", "Scope": scope, "ScopeId": _clip(replacement.get("scope_id"), 160),
                 "Confidence": confidence, "SourceRef": _clip(replacement.get("source_ref"), 240), "CreatedAt": now,
                 "UpdatedAt": now, "ExpiresAt": _clip(replacement.get("expires_at"), 40), "SupersedesId": str(memory_id),
             }
             conn.execute(
-                "INSERT INTO MemoryAtoms (MemoryId, Entity, Relation, Value, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt, ExpiresAt, SupersedesId) VALUES (:MemoryId, :Entity, :Relation, :Value, :Kind, :Trust, :Status, :Scope, :ScopeId, :Confidence, :SourceRef, :CreatedAt, :UpdatedAt, :ExpiresAt, :SupersedesId)",
+                "INSERT INTO MemoryAtoms (MemoryId, Entity, Relation, Value, Context, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt, ExpiresAt, SupersedesId) VALUES (:MemoryId, :Entity, :Relation, :Value, :Context, :Kind, :Trust, :Status, :Scope, :ScopeId, :Confidence, :SourceRef, :CreatedAt, :UpdatedAt, :ExpiresAt, :SupersedesId)",
                 row,
             )
             conn.execute("UPDATE MemoryAtoms SET Status = 'superseded', UpdatedAt = ? WHERE MemoryId = ?", (now, str(memory_id)))
@@ -382,7 +384,7 @@ class MemoryModel:
     def prompt_view(self, session_id, fallback_charter):
         scenario = self.ensure_scenario("session", session_id) if session_id else None
         user_atoms = self.memory.query(
-            "SELECT Relation, Value, Confidence, UpdatedAt, MemoryId FROM MemoryAtoms "
+            "SELECT Relation, Value, Context, Confidence, UpdatedAt, MemoryId FROM MemoryAtoms "
             "WHERE Entity = 'User' COLLATE NOCASE AND Scope = 'user' AND Status = 'active' "
             "AND Confidence >= 0.5 AND (ExpiresAt = '' OR ExpiresAt > ?) "
             "ORDER BY UpdatedAt DESC, MemoryId DESC LIMIT 100", (_now(),)
@@ -402,7 +404,7 @@ class MemoryModel:
         """Return bounded metadata and provenance for the local Memory Inspector."""
         scenario = self.ensure_scenario("session", session_id) if session_id else None
         atoms = self.memory.query(
-            "SELECT MemoryId, Entity, Relation, Value, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt, ExpiresAt, SupersedesId FROM MemoryAtoms ORDER BY UpdatedAt DESC LIMIT 100"
+            "SELECT MemoryId, Entity, Relation, Value, Context, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt, ExpiresAt, SupersedesId FROM MemoryAtoms ORDER BY UpdatedAt DESC LIMIT 100"
         ) or []
         traits = self.memory.query(
             "SELECT TraitId, Trait, Value, Confidence, SourceMemoryIds, Status, Scope, ScopeId, UpdatedAt, ExpiresAt FROM UserPersonaTraits ORDER BY UpdatedAt DESC LIMIT 50"
@@ -433,7 +435,7 @@ class MemoryModel:
     def atom_detail(self, memory_id):
         """Return one atom with its provenance, usages, and revision lineage."""
         atom_rows = self.memory.query(
-            "SELECT MemoryId, Entity, Relation, Value, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt, ExpiresAt, SupersedesId "
+            "SELECT MemoryId, Entity, Relation, Value, Context, Kind, Trust, Status, Scope, ScopeId, Confidence, SourceRef, CreatedAt, UpdatedAt, ExpiresAt, SupersedesId "
             "FROM MemoryAtoms WHERE MemoryId = ? LIMIT 1", (str(memory_id),)
         ) or []
         if not atom_rows:
@@ -615,7 +617,7 @@ class KustoMemoryModel:
     registration in Eva's single local bridge process.
     """
 
-    _ATOM_COLUMNS = ["MemoryId", "Entity", "Relation", "Value", "Kind", "Trust", "Status", "Scope", "ScopeId", "Confidence", "SourceRef", "CreatedAt", "UpdatedAt", "ExpiresAt", "SupersedesId"]
+    _ATOM_COLUMNS = ["MemoryId", "Entity", "Relation", "Value", "Context", "Kind", "Trust", "Status", "Scope", "ScopeId", "Confidence", "SourceRef", "CreatedAt", "UpdatedAt", "ExpiresAt", "SupersedesId"]
     _TRAIT_COLUMNS = ["TraitId", "Trait", "Value", "Confidence", "SourceMemoryIds", "Status", "Scope", "ScopeId", "CreatedAt", "UpdatedAt", "ExpiresAt"]
     _SCENARIO_COLUMNS = ["ScenarioId", "Scope", "ScopeId", "Title", "Summary", "Status", "CreatedAt", "UpdatedAt", "ExpiresAt"]
     _PROPOSAL_COLUMNS = ["ProposalId", "Kind", "Payload", "RiskLevel", "Status", "EvidenceRefs", "CreatedAt", "ReviewedAt", "ReviewedBy"]
@@ -629,6 +631,9 @@ class KustoMemoryModel:
         self.ingest = ingest
         self.last_registration_was_retry = False
         self.conversation_evidence_links_enabled = bool(conversation_evidence_links_enabled)
+
+    def _atom_columns(self):
+        return self._ATOM_COLUMNS
 
     @staticmethod
     def _quote(value):
@@ -673,6 +678,7 @@ class KustoMemoryModel:
                 continue
             self.add_atom({
                 "entity": entity, "relation": relation, "value": row.get("Value", ""), "kind": kind,
+                "context": "Migrated from Eva's earlier Knowledge store; review this record to confirm why it should remain.",
                 "trust": "unconfirmed", "scope": "user" if entity.lower() == "user" else "global",
                 "confidence": float(row.get("Confidence", 0.5) or 0.5), "source_ref": source_ref,
             }, [{"source_type": "legacy_knowledge", "source_ref": source_ref}])
@@ -719,11 +725,11 @@ class KustoMemoryModel:
         now = _revision_now()
         row = {
             "MemoryId": _identifier("memory"), "Entity": _clip(record.get("entity"), 120), "Relation": _clip(record.get("relation"), 120),
-            "Value": value, "Kind": kind, "Trust": trust, "Status": status, "Scope": scope, "ScopeId": _clip(record.get("scope_id"), 160),
+            "Value": value, "Context": _clip(record.get("context"), 2000), "Kind": kind, "Trust": trust, "Status": status, "Scope": scope, "ScopeId": _clip(record.get("scope_id"), 160),
             "Confidence": confidence, "SourceRef": _clip(record.get("source_ref"), 240), "CreatedAt": now, "UpdatedAt": now,
             "ExpiresAt": _clip(record.get("expires_at"), 40), "SupersedesId": _clip(record.get("supersedes_id"), 80),
         }
-        self._write("MemoryAtoms", self._ATOM_COLUMNS, row)
+        self._write("MemoryAtoms", self._atom_columns(), row)
         for item in evidence or []:
             if not isinstance(item, dict):
                 continue
@@ -748,7 +754,7 @@ class KustoMemoryModel:
         if not current or current.get("Status") != "active":
             raise ValueError("active memory atom not found")
         replacement = dict(replacement or {})
-        for source, destination in (("Entity", "entity"), ("Relation", "relation"), ("Kind", "kind"), ("Scope", "scope"), ("ScopeId", "scope_id")):
+        for source, destination in (("Entity", "entity"), ("Relation", "relation"), ("Context", "context"), ("Kind", "kind"), ("Scope", "scope"), ("ScopeId", "scope_id")):
             replacement.setdefault(destination, current.get(source, ""))
         replacement.setdefault("trust", "user_confirmed")
         replacement.setdefault("confidence", 1.0)
@@ -756,7 +762,7 @@ class KustoMemoryModel:
         new_atom = self.add_atom(replacement)
         current["Status"] = "superseded"
         current["UpdatedAt"] = _revision_now()
-        self._write("MemoryAtoms", self._ATOM_COLUMNS, current)
+        self._write("MemoryAtoms", self._atom_columns(), current)
         traits = self._read("UserPersonaTraits | where SourceMemoryIds has " + self._quote(memory_id))
         for trait in traits:
             trait["Status"] = "disabled"
@@ -770,7 +776,7 @@ class KustoMemoryModel:
             return False
         current["Status"] = "deleted"
         current["UpdatedAt"] = _revision_now()
-        self._write("MemoryAtoms", self._ATOM_COLUMNS, current)
+        self._write("MemoryAtoms", self._atom_columns(), current)
         traits = self._read("UserPersonaTraits | where SourceMemoryIds has " + self._quote(memory_id))
         for trait in traits:
             trait["Status"] = "disabled"

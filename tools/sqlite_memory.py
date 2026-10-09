@@ -338,6 +338,7 @@ _SCHEMA = {
             ("Entity", "TEXT DEFAULT ''"),
             ("Relation", "TEXT DEFAULT ''"),
             ("Value", "TEXT NOT NULL"),
+            ("Context", "TEXT DEFAULT ''"),
             ("Kind", "TEXT NOT NULL DEFAULT 'fact'"),
             ("Trust", "TEXT NOT NULL DEFAULT 'unconfirmed'"),
             ("Status", "TEXT NOT NULL DEFAULT 'active'"),
@@ -679,6 +680,7 @@ class SqliteMemory:
         self._migrate_legacy_identity_claims(conn)
         self._migrate_skills_category(conn)
         self._migrate_conversation_provenance(conn)
+        self._migrate_memory_atom_context(conn)
         self._backfill_skills(conn)
 
     def _migrate_legacy_identity_claims(self, conn):
@@ -810,6 +812,25 @@ class SqliteMemory:
                 "INSERT OR IGNORE INTO MemoryMigrations (MigrationId, Details) VALUES (?, ?)",
                 ("conversation-provenance-v1", "Added Conversations.TurnId and backfilled legacy conversation turns"),
             )
+        conn.commit()
+
+    def _migrate_memory_atom_context(self, conn):
+        """Add explanatory memory context to databases created before this field."""
+        if not self.table_exists("MemoryAtoms"):
+            return
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(MemoryAtoms)").fetchall()}
+        if "Context" not in columns:
+            conn.execute("ALTER TABLE MemoryAtoms ADD COLUMN Context TEXT DEFAULT ''")
+        conn.execute(
+            "UPDATE MemoryAtoms SET Context = ? WHERE trim(COALESCE(Context, '')) = '' "
+            "AND (SourceRef LIKE 'conversation:%' OR SourceRef LIKE 'conversation-history:%')",
+            ("Captured from a prior conversation. Review this context and refine when, why, or how Eva should use the memory.",),
+        )
+        conn.execute(
+            "UPDATE MemoryAtoms SET Context = ? WHERE trim(COALESCE(Context, '')) = '' "
+            "AND SourceRef LIKE 'legacy-%'",
+            ("Migrated from Eva's earlier Knowledge store; review this record to confirm why it should remain.",),
+        )
         conn.commit()
 
     def _seed(self, conn, tables=None):

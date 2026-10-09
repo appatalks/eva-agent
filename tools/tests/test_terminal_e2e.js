@@ -395,11 +395,14 @@ async function run() {
   var memoryLoaded = page.waitForResponse(function(response) {
     return response.request().method() === 'GET' && /\/v1\/memory\/inspector(?:\?|$)/.test(response.url());
   });
-  await page.locator('#evaMemoryBtn').click();
+  assert.strictEqual(await page.locator('#evaMemoryBtn').isVisible(), false, 'Standalone Memory navigation should be hidden');
+  await page.locator('#evaAgentsBtn').click();
+  await page.locator('#agentsView').waitFor({ state: 'visible' });
+  await page.locator('#agentGraphMemoryReview').click();
   await page.locator('#memoryInspectorPanel').waitFor({ state: 'visible' });
   await memoryLoaded;
   assert.strictEqual(await page.locator('body').evaluate(function(body) { return body.classList.contains('memory-view-open'); }), true, 'Memory did not open as a main view');
-  assert.strictEqual(await page.locator('#assetsView').isVisible(), false, 'Assets remained layered under Memory');
+  assert.strictEqual(await page.locator('body').evaluate(function(body) { return body.classList.contains('agents-view-open'); }), true, 'Agent Operations closed under Memory Review');
   assert.strictEqual(await page.locator('#memoryInspectorPanel').evaluate(function(panel) {
     const bounds = panel.getBoundingClientRect();
     const sidebar = document.querySelector('#evaSidebar').getBoundingClientRect();
@@ -422,9 +425,9 @@ async function run() {
       return button.scrollWidth > button.clientWidth + 1 || button.scrollHeight > button.clientHeight + 1;
     }).map(function(button) { return button.textContent.trim(); });
   }), [], 'Memory action labels overflow their buttons');
-  await page.locator('#evaMemoryBtn').click();
+  await page.locator('#memoryInspectorClose').click();
   await page.waitForFunction(function() { return document.querySelector('#memoryInspectorPanel').getAttribute('aria-hidden') === 'true'; });
-  assert.strictEqual(await page.locator('body').evaluate(function(body) { return body.classList.contains('memory-view-open'); }), false, 'Memory sidebar button did not close the main view');
+  assert.strictEqual(await page.locator('body').evaluate(function(body) { return !body.classList.contains('memory-view-open') && body.classList.contains('agents-view-open'); }), true, 'Closing Memory Review did not return to Agent Operations');
 
     assert.deepStrictEqual(errors, [], 'Renderer errors: ' + errors.join('\n'));
     console.log('terminal Electron E2E: PASS');

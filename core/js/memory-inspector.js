@@ -2,7 +2,13 @@
 (function () {
   'use strict';
 
-  var state = { data: null, selected: null, detail: null, pendingDeleteId: '' };
+  var state = {
+    data: null,
+    selected: null,
+    detail: null,
+    pendingDeleteId: '',
+    expandedGroups: {}
+  };
 
   function bridge(path, options) {
     if (typeof backgroundBridgeRequest !== 'function') return Promise.reject(new Error('Bridge unavailable'));
@@ -80,7 +86,10 @@
     var details = document.createElement('details');
     details.className = 'memory-atom-group';
     var activeCount = group.atoms.filter(function (atom) { return recordValue(atom, 'Status') === 'active'; }).length;
-    details.open = !!search || kindFilter === group.key || (activeCount > 0 && group.atoms.length <= 8);
+    details.open = !!search || kindFilter === group.key || state.expandedGroups[group.key] === true;
+    details.addEventListener('toggle', function () {
+      state.expandedGroups[group.key] = details.open;
+    });
     var summary = document.createElement('summary');
     var title = document.createElement('span');
     title.className = 'memory-atom-group-title';
@@ -107,6 +116,8 @@
     document.body.classList.remove('memory-atom-detail-open');
     state.detail = null;
     state.pendingDeleteId = '';
+    var removeButton = document.getElementById('memoryAtomDetailRemove');
+    if (removeButton) removeButton.textContent = 'Remove from recall';
   }
 
   function detailLine(container, label, value) {
@@ -209,6 +220,7 @@
     setInputValue('memoryAtomExpiresAt', recordValue(atom, 'ExpiresAt'));
     setInputValue('memoryAtomSourceRef', 'maintainer-correction:' + recordValue(atom, 'MemoryId'));
     setInputValue('memoryAtomValue', recordValue(atom, 'Value'));
+    setInputValue('memoryAtomContext', recordValue(atom, 'Context'));
     var active = recordValue(atom, 'Status') === 'active';
     var deleted = recordValue(atom, 'Status') === 'deleted';
     Array.prototype.forEach.call(form.elements, function (element) {
@@ -217,26 +229,64 @@
     if (stateLabel) stateLabel.textContent = active ? '' : 'This record is ' + formatValue(atom.Status) + '. Correction fields are locked, but it can still be removed from recall history.';
     var removeButton = document.getElementById('memoryAtomDetailRemove');
     if (removeButton) removeButton.disabled = deleted;
+    var saveButton = document.getElementById('memoryAtomDetailSave');
+    if (saveButton) saveButton.textContent = recordValue(atom, 'Trust') === 'unconfirmed' ? 'Confirm and save' : 'Save correction';
   }
 
-  async function openAtom(atom) {
+  function showAtomDialog(atom) {
     var dialog = document.getElementById('memoryAtomDetailDialog');
-    if (!dialog) return;
+    if (!dialog) return false;
     state.selected = atom;
     state.detail = null;
     state.pendingDeleteId = '';
+    var removeButton = document.getElementById('memoryAtomDetailRemove');
+    if (removeButton) removeButton.textContent = 'Remove from recall';
     dialog.setAttribute('aria-hidden', 'false');
     document.body.classList.add('memory-atom-detail-open');
     renderAtomDetail();
+    return true;
+  }
+
+  async function openAtom(atom) {
+    if (!showAtomDialog(atom)) return false;
     try {
       var detail = await bridge('/v1/memory/atoms/' + encodeURIComponent(recordValue(atom, 'MemoryId')), { method: 'GET' });
       if (state.selected === atom) {
         state.detail = detail;
         renderAtomDetail();
       }
+      return true;
     } catch (error) {
       var stateLabel = document.getElementById('memoryAtomDetailState');
       if (stateLabel) stateLabel.textContent = error.message || 'Could not load record provenance.';
+      return false;
+    }
+  }
+
+  async function openAtomById(memoryId) {
+    var id = String(memoryId || '').trim();
+    if (!id) return false;
+    var placeholder = { MemoryId: id, Entity: 'Memory', Relation: 'record', Status: 'loading' };
+    if (!showAtomDialog(placeholder)) return false;
+    var stateLabel = document.getElementById('memoryAtomDetailState');
+    if (stateLabel) stateLabel.textContent = 'Loading memory record...';
+    try {
+      var detail = await bridge('/v1/memory/atoms/' + encodeURIComponent(id), { method: 'GET' });
+      if (recordValue(state.selected, 'MemoryId') !== id) return false;
+      state.selected = detail.atom;
+      state.detail = detail;
+      renderAtomDetail();
+      return true;
+    } catch (error) {
+      if (stateLabel) stateLabel.textContent = error.message || 'Could not load record provenance.';
+      return false;
+    }
+  }
+
+  function synchronizeMemoryViews() {
+    load();
+    if (window.EvaAgents && typeof window.EvaAgents.invalidateGraph === 'function') {
+      window.EvaAgents.invalidateGraph();
     }
   }
 
@@ -246,6 +296,7 @@
     if (!atom || recordValue(atom, 'Status') !== 'active') return;
     var confidence = Number(inputValue('memoryAtomConfidence'));
     var value = inputValue('memoryAtomValue');
+    var context = inputValue('memoryAtomContext');
     if (!value || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
       var stateLabel = document.getElementById('memoryAtomDetailState');
       if (stateLabel) stateLabel.textContent = 'Provide a memory value and a confidence between 0 and 1.';
@@ -257,12 +308,13 @@
         body: JSON.stringify({ replacement: {
           entity: inputValue('memoryAtomEntity'), relation: inputValue('memoryAtomRelation'), kind: inputValue('memoryAtomKind'),
           trust: inputValue('memoryAtomTrust'), scope: inputValue('memoryAtomScope'), scope_id: inputValue('memoryAtomScopeId'),
-          confidence: confidence, expires_at: inputValue('memoryAtomExpiresAt'), source_ref: inputValue('memoryAtomSourceRef'), value: value
+          confidence: confidence, expires_at: inputValue('memoryAtomExpiresAt'), source_ref: inputValue('memoryAtomSourceRef'),
+          value: value, context: context
         } })
       });
       closeAtomDetail();
       status('Memory corrected; the original remains in its audit trail.');
-      load();
+      synchronizeMemoryViews();
     } catch (error) {
       var stateLabel = document.getElementById('memoryAtomDetailState');
       if (stateLabel) stateLabel.textContent = error.message || 'Could not correct memory.';
@@ -285,7 +337,7 @@
       await bridge('/v1/memory/atoms/' + encodeURIComponent(memoryId), { method: 'DELETE' });
       closeAtomDetail();
       status('Memory removed from future recall.');
-      load();
+      synchronizeMemoryViews();
     } catch (error) {
       var label = document.getElementById('memoryAtomDetailState');
       if (label) label.textContent = error.message || 'Could not remove memory.';
@@ -312,7 +364,7 @@
       closeAtomDetail();
       state.data = null;
       status('Fresh memory started. Previous memory was backed up locally.');
-      load();
+      synchronizeMemoryViews();
       return result;
     } catch (error) {
       status(error.message || 'Could not start fresh memory.', true);
@@ -331,7 +383,7 @@
         body: JSON.stringify({ trait: trait, value: value, source_memory_ids: [recordValue(atom, 'MemoryId')] })
       });
       status('Persona preference approved.');
-      load();
+      synchronizeMemoryViews();
     } catch (error) {
       status(error.message || 'Could not approve preference.', true);
     }
@@ -347,7 +399,7 @@
     try {
       await bridge('/v1/memory/growth-proposals/' + encodeURIComponent(recordValue(proposal, 'ProposalId')) + '/' + decision, { method: 'POST' });
       status('Proposal ' + (decision === 'approve' ? 'approved.' : 'rejected.'));
-      load();
+      synchronizeMemoryViews();
     } catch (error) {
       status(error.message || 'Could not review proposal.', true);
     }
@@ -373,6 +425,10 @@
     var value = document.createElement('div');
     value.className = 'memory-inspector-value';
     value.textContent = recordValue(atom, 'Value');
+    var context = document.createElement('div');
+    context.className = 'memory-inspector-context';
+    context.textContent = recordValue(atom, 'Context');
+    context.hidden = !context.textContent;
     var meta = document.createElement('div');
     meta.className = 'memory-inspector-meta';
     meta.append(pill(recordValue(atom, 'Kind', 'fact'), 'kind-' + recordValue(atom, 'Kind', 'fact')));
@@ -393,7 +449,7 @@
       inspect.addEventListener('click', function () { openAtom(atom); });
       actions.appendChild(inspect);
     }
-    card.append(heading, value, meta, actions);
+    card.append(heading, value, context, meta, actions);
     return card;
   }
 
@@ -454,7 +510,7 @@
     var scopeFilter = inputValue('memoryAtomScopeFilter');
     var sort = inputValue('memoryAtomSort') || 'updated';
     var filteredAtoms = allAtoms.filter(function (item) {
-      var text = [item.Entity, item.Relation, item.Value, item.Kind, item.Trust, item.Scope, item.SourceRef, item.MemoryId].join(' ').toLowerCase();
+      var text = [item.Entity, item.Relation, item.Value, item.Context, item.Kind, item.Trust, item.Scope, item.SourceRef, item.MemoryId].join(' ').toLowerCase();
       return (!search || text.indexOf(search) >= 0) && (!statusFilter || recordValue(item, 'Status') === statusFilter) &&
         (!kindFilter || recordValue(item, 'Kind') === kindFilter) && (!scopeFilter || recordValue(item, 'Scope') === scopeFilter);
     });
@@ -494,16 +550,15 @@
     }
   }
 
-  function open(force) {
+  function setAllGroups(open) {
+    var groups = atomGroups((state.data && state.data.atoms) || []);
+    groups.forEach(function (group) { state.expandedGroups[group.key] = open; });
+    render();
+  }
+
+  function showPanel() {
     var panel = document.getElementById('memoryInspectorPanel');
-    if (!panel) return;
-    var shouldOpen = typeof force === 'boolean' ? force : !document.body.classList.contains('memory-view-open');
-    if (!shouldOpen) {
-      document.body.classList.remove('memory-view-open');
-      panel.setAttribute('aria-hidden', 'true');
-      return;
-    }
-    if (typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
+    if (!panel) return false;
     if (typeof closeVoiceView === 'function') closeVoiceView();
     if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();
     if (window.EvaSkills && typeof window.EvaSkills.close === 'function') window.EvaSkills.close();
@@ -512,18 +567,47 @@
     document.body.classList.add('memory-view-open');
     panel.setAttribute('aria-hidden', 'false');
     load();
+    return true;
+  }
+
+  function closePanel() {
+    var panel = document.getElementById('memoryInspectorPanel');
+    document.body.classList.remove('memory-view-open');
+    if (panel) panel.setAttribute('aria-hidden', 'true');
+    closeAtomDetail();
+  }
+
+  function openFromAgents() {
+    if (window.EvaAgents && typeof window.EvaAgents.open === 'function') {
+      window.EvaAgents.open('agents');
+    }
+    return Promise.resolve(showPanel());
+  }
+
+  function open(force) {
+    var isOpen = document.body.classList.contains('memory-view-open');
+    var shouldOpen = typeof force === 'boolean' ? force : !isOpen;
+    if (!shouldOpen) {
+      closePanel();
+      return Promise.resolve(false);
+    }
+    return openFromAgents();
   }
 
   function init() {
     var close = document.getElementById('memoryInspectorClose');
     var refresh = document.getElementById('memoryInspectorRefresh');
     var startFresh = document.getElementById('memoryInspectorStartFresh');
+    var expandAll = document.getElementById('memoryInspectorExpandAll');
+    var collapseAll = document.getElementById('memoryInspectorCollapseAll');
     var detailClose = document.getElementById('memoryAtomDetailClose');
     var detailForm = document.getElementById('memoryAtomDetailForm');
     var detailRemove = document.getElementById('memoryAtomDetailRemove');
     if (close) close.addEventListener('click', function () { open(false); });
     if (refresh) refresh.addEventListener('click', load);
     if (startFresh) startFresh.addEventListener('click', startFreshMemory);
+    if (expandAll) expandAll.addEventListener('click', function () { setAllGroups(true); });
+    if (collapseAll) collapseAll.addEventListener('click', function () { setAllGroups(false); });
     ['memoryAtomSearch', 'memoryAtomStatusFilter', 'memoryAtomKindFilter', 'memoryAtomScopeFilter', 'memoryAtomSort'].forEach(function (id) {
       var control = document.getElementById(id);
       if (control) control.addEventListener(id === 'memoryAtomSearch' ? 'input' : 'change', render);
@@ -537,13 +621,15 @@
   }
 
   window.EvaMemoryInspector = {
-    open: function () { open(true); },
-    close: function () { open(false); },
+    open: openFromAgents,
+    openFromAgents: openFromAgents,
+    close: closePanel,
     toggle: function (event) {
       if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
       open();
     },
-    refresh: load
+    refresh: load,
+    openAtomById: openAtomById
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 }());

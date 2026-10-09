@@ -2,6 +2,7 @@
 
 import re
 
+_MAX_REGEX_INPUT = 4096
 
 _GITHUB_CONTINUATION_RE = re.compile(
     r"^\s*(?:(?:sounds? good|okay|ok|yes|approved?)[,;:]?\s*)?"
@@ -22,7 +23,7 @@ _GITHUB_ISSUE_URL_RE = re.compile(
 def github_continuation_routing_message(messages, user_message, classify_request):
     """Restore a recent GitHub mutation intent only for explicit continuation turns."""
     current = str(user_message or "").strip()
-    if not _GITHUB_CONTINUATION_RE.fullmatch(current):
+    if len(current) > _MAX_REGEX_INPUT or not _GITHUB_CONTINUATION_RE.fullmatch(current):
         return current
     prior_users = []
     skipped_current = False
@@ -46,7 +47,7 @@ def github_continuation_routing_message(messages, user_message, classify_request
 
 def github_mutation_request(message):
     """Return true for an explicit GitHub mutation, not read-only inspection."""
-    text = str(message or "").lower()
+    text = str(message or "")[:_MAX_REGEX_INPUT].lower()
     return bool(
         re.search(r"\b(?:github|github\.com)\b", text)
         and re.search(
@@ -60,7 +61,7 @@ def github_mutation_request(message):
 
 def github_issue_creation_request(message):
     """Return true only for explicit create/submit/publish GitHub issue requests."""
-    text = str(message or "").lower()
+    text = str(message or "")[:_MAX_REGEX_INPUT].lower()
     return bool(
         re.search(r"\b(?:github|github\.com)\b", text)
         and re.search(r"\b(?:create|open|submit|publish|post)\b", text)
@@ -76,7 +77,8 @@ def verified_github_issue_url(value):
 
 def verified_action_status_reply(messages, user_message):
     """Answer terse action-status questions only from the immediately preceding receipt."""
-    if not _ACTION_STATUS_RE.fullmatch(str(user_message or "").strip()):
+    current = str(user_message or "").strip()
+    if len(current) > _MAX_REGEX_INPUT or not _ACTION_STATUS_RE.fullmatch(current):
         return ""
     skipped_current = False
     for message in reversed(messages or []):
@@ -85,7 +87,7 @@ def verified_action_status_reply(messages, user_message):
         content = message.get("content", "")
         if not isinstance(content, str):
             continue
-        if message.get("role") == "user" and not skipped_current and content.strip() == str(user_message or "").strip():
+        if message.get("role") == "user" and not skipped_current and content.strip() == current:
             skipped_current = True
             continue
         if message.get("role") != "assistant":
