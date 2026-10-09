@@ -1,7 +1,8 @@
 # Deprecation And Compatibility Inventory
 
-Status: living inventory. Last reviewed 2026-08-15 against Eva 5.6.2; every row
-below was re-confirmed to have active callers.
+Status: living inventory. Last reviewed 2026-10-09 against commit `8ef3559`
+(development 5.6.12; latest published standalone 5.6.10). Every row below was
+re-confirmed to have active callers or an active deployment obligation.
 
 This inventory records paths that look removable but still have active callers,
 migration obligations, or deployment requirements. No modularization or cleanup

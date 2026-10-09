@@ -1,7 +1,8 @@
 # Protected Memory Plan
 
-Status: local SQLite vault implemented and shipping. Last reviewed 2026-08-15
-against Eva 5.6.2.
+Status: local SQLite vault implemented and shipping. Last reviewed 2026-10-09
+against commit `8ef3559` (development 5.6.12; latest published standalone
+5.6.10). Kusto parity, recovery, and rotation remain roadmap items below.
 
 | Area | State | Evidence |
 | --- | --- | --- |

@@ -68,6 +68,7 @@ Latest published standalone release: `Eva Standalone-5.6.10.AppImage`.
 
 ## Documentation
 
+- **Suggested reading:** [Eva Whitepaper (PDF)](docs/Eva-Whitepaper.pdf) — design inspiration, architecture, trust boundaries, technical analysis, and future direction.
 - [Technical documentation](README-2.md): setup, providers, memory, voice, MCP, workspaces, architecture, and roadmap
 - [standalone/README.md](standalone/README.md): AppImage build and runtime
 - [docs/ai-development-guide.md](docs/ai-development-guide.md): focused development workflow, ownership map, and validation bundles

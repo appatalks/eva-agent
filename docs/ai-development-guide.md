@@ -1,6 +1,7 @@
 # AI Development Guide
 
-Status: living guide. Last reviewed 2026-08-15 against Eva 5.6.2.
+Status: living guide. Last reviewed 2026-10-09 against commit `8ef3559`
+(development 5.6.12; latest published standalone 5.6.10).
 
 Eva is a framework-free browser and Electron application with a local Python
 bridge. Work on one owning boundary at a time. Do not load the full repository
@@ -90,7 +91,7 @@ Before removing a deprecated or fallback path, consult
 | Runtime settings | `core/js/settings/runtime.js` | Data retrieval mode and local diagnostics |
 | Cron settings | `core/js/settings/cron.js` | Recurring-task validation, bridge CRUD, and schedule rendering |
 | Skill auto-learning | `core/js/features/skills/auto-learn.js` | Bounded post-outcome Skill draft extraction |
-| Native Eva control surface | `core/js/harness-control.js` | Allowlisted navigation and actions on Eva's own surfaces; never synthetic input |
+| Native Eva control surface | `core/js/harness-control.js` | Allowlisted navigation and actions on Eva's own surfaces; never synthetic input. The memory destination is Agent Operations > Memory Topology. |
 | Structured memory inspection | `core/js/memory-inspector.js` | Atom, trait, and scenario review plus maintainer reset controls |
 | Internal cognition loop | `core/js/cognition.js`, `tools/bridge/cognition.py` | Optional draft/review agent cycle over `/v1/aig/chat` |
 | In-app dialogs | `core/js/dialogs.js` | Replacement for browser prompts that Electron disables |

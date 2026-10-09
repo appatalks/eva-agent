@@ -1,10 +1,12 @@
 # Eva Memory and Intelligence Improvement Plan
 
 Status: SQLite-first design charter, execution plan, and implementation record.
-Last reviewed: 2026-09-06 against the current Eva 5.6.9 workspace, including
-uncommitted harness improvements. Planned requirements below are not claims of
-shipped behavior or authorization to change installed identity, consent, or cost
-settings.
+Last reviewed: 2026-10-09 against commit `8ef3559` (development 5.6.12;
+latest published standalone 5.6.10). Planned requirements below are not claims
+of shipped behavior or authorization to change installed identity, consent, or
+cost settings. Phase chronology and original dates below are retained; the
+state table is the revalidated implementation boundary, not a declaration that
+the entire plan is complete.
 
 | Phase | State | Evidence |
 | --- | --- | --- |
@@ -41,6 +43,12 @@ reliable end-to-end behavior for every kind of request:
   The inspector can deliberately promote a confirmed preference atom into a
   source-traceable persona trait; correcting or deleting that source atom
   disables the derived trait before the next prompt.
+- Memory atoms now carry a bounded explanatory `Context` field alongside their
+  primary `Value`. The field is additive: the SQLite migration supplies
+  conservative review text for existing rows, preserves source/provenance
+  links, and does not turn migrated or inferred text into trusted prompt
+  instructions. Legacy `Knowledge` remains readable while its one-time
+  projection is attributed as `unconfirmed`.
 - Direct-provider reflection accepts opaque turn IDs. SQLite persists a
   completed turn once even when the reflection request is retried.
 - Auto-learned skills persist as drafts. Extraction alone never counts as a
@@ -209,8 +217,11 @@ read-only view. A restore must not depend on a particular live provider account.
 ## Current Gaps and Next Delivery Order
 
 The 2026-09-06 review found orchestration gaps, not evidence that a stronger model
-alone will fix execution. Foundational phase labels above remain historical
-implementation records; the following end-to-end requirements remain open.
+alone will fix execution. That date is the historical planning boundary; the
+2026-10-09 revalidation above confirms the same delivered/partial/planned
+boundary against the current source. Foundational phase labels above remain
+historical implementation records; the following end-to-end requirements remain
+open.
 No private conversation text, account details, or runtime screenshots belong in
 the regression corpus. Use synthetic examples.
 

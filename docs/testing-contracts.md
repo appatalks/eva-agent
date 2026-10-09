@@ -1,6 +1,7 @@
 # Testing Contracts
 
-Status: living contract. Last reviewed 2026-08-15 against `.github/workflows/eva-ci.yml`.
+Status: living contract. Last reviewed 2026-10-09 against `.github/workflows/eva-ci.yml`
+at commit `8ef3559` (development 5.6.12).
 
 Eva uses focused contracts to preserve behavior while modules move into clearer
 ownership boundaries. A test should protect a user-visible, security-sensitive,

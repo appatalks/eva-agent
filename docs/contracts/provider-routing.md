@@ -1,7 +1,8 @@
 # Provider Routing Contract
 
-Status: living contract. Last reviewed 2026-09-06 against the current Eva 5.6.9
-workspace, including native research integration.
+Status: living contract. Last reviewed 2026-10-09 against commit `8ef3559`
+(development 5.6.12; latest published standalone 5.6.10), including native
+research integration.
 
 Eva has one user-facing chat route: the `#selModel` selector contains only
 `aig`, and `sendData()` calls `aigSend()`. Backend model selection belongs to
@@ -63,7 +64,7 @@ LM Studio lifecycle behavior; this slice has no new curated CI contract.
 | Eva AIG | All normal chat, automatic model choice, memory, tool preflight, and response synthesis | `core/js/providers/aig.js`, `tools/bridge/core.py` |
 | Copilot ACP | Tool-capable Copilot CLI bridge, including direct compatibility callers and MCP access | `core/js/providers/copilot.js`, `tools/bridge/acp_client.py` |
 | OpenAI API | AIG-selected direct responder when available and appropriate | `tools/bridge/core.py` |
-| LM Studio | AIG-selected local responder and local MCP mode | `tools/bridge/core.py`, `tools/bridge/local_mcp.py` |
+| SI Harness / LM Studio | AIG-selected OpenAI-compatible local responder and local MCP mode. `lmstudio` is the stable persisted backend value; **SI Harness** is the user-facing label. | `tools/bridge/core.py`, `tools/bridge/local_mcp.py`, `core/js/providers/lm-studio.js` |
 | GitHub MCP | GitHub repository, issue, pull request, and workflow operations | configured MCP server, not a model provider |
 
 The GitHub PAT is retained only for GitHub MCP configuration and private

@@ -1,14 +1,16 @@
 # Eva Workspaces and Terminal Plan
 
-Status: active plan and implementation record. Last reviewed 2026-08-15 against
-Eva 5.6.2.
+Status: active plan and implementation record. Last reviewed 2026-10-09 against
+commit `8ef3559` (development 5.6.12; latest published standalone 5.6.10).
+Phase chronology is retained; the state table records only the slices verified
+as delivered, partial, or remaining roadmap.
 
 | Phase | State | Evidence |
 | --- | --- | --- |
 | 0. Contracts and safety spike | Delivered | `--eva-workspace-terminal-v1` flag, `tools/bridge/workspaces.py` schema, `node tools/tests/test_workspace_projection.js` |
 | 1. Projects, worktrees, durable runs | Delivered | `projects`, `checkouts`, `coding_runs`, `agent_runs`, `terminal_sessions`, `run_attachments`, `approvals` tables; `python3 tools/tests/test_workspaces.py`, `test_workspaces_e2e.py` |
 | 2. Production terminal | Delivered | `standalone/terminal-broker.js`, `terminal-*` IPC channels, `node tools/tests/test_terminal_broker.js`, `test_terminal_e2e.js` |
-| 3. Coding agents and child runs | Delivered | Workspace agent dispatch, per-agent ACP conversation keys, auto-approval policy, isolated MCP credentials; `node tools/tests/test_workspaces_api.js`, `test_agents_api.js` |
+| 3. Coding agents and child runs | Delivered | Workspace agent dispatch, per-agent ACP conversation keys, the `workspace_auto` policy, isolated MCP credentials, and hard guards for protected paths/out-of-worktree operations; `node tools/tests/test_workspaces_api.js`, `test_agents_api.js` |
 | 4. Review, evidence, and handoff | Partial | Native GitHub pull-request view/merge and merged-branch deletion, workspace GitHub delivery verification, live chat drawer, remediation context. A durable diff/review screen with changed-file navigation and patch export is not built |
 | 5. Eva Field and polish | Planned | No implementation |
 

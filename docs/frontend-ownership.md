@@ -1,6 +1,7 @@
 # Frontend Ownership Map
 
-Status: living map. Last reviewed 2026-08-16 against Eva 5.6.2.
+Status: living map. Last reviewed 2026-10-09 against commit `8ef3559`
+(development 5.6.12; latest published standalone 5.6.10).
 
 This map is the navigation contract for browser work. Read the owner, its
 immediate collaborators, and its focused test before changing a feature. The
@@ -79,7 +80,7 @@ rules below.
 | Voice listener, endpoint, and Voice View | `core/js/features/voice/wake-listener.js`, `endpoint.js`, `view.js` | Wake word, transcript buffering, and the Voice View lifecycle; classic-script globals remain compatible |
 | Workspaces | `core/js/features/workspaces/monitor.js` | Electron preload/main and bridge workspaces are immediate collaborators; owns the run list, live chat drawer, and removal controls |
 | Assets library | `core/js/features/assets/library.js` | Generated and workspace file library |
-| Agent Operations | `core/js/features/agents/operations.js` | Agent cards and memory topology view |
+| Agent Operations | `core/js/features/agents/operations.js` | Agent cards and the **Memory Topology** view reached from Agent Operations |
 | Sessions and profiles | `core/js/features/sessions/explorer.js`, `idb-store.js`, `profiles.js` | Storage contracts are compatibility-sensitive |
 
 ## Migration Rules
