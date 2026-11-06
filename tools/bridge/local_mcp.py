@@ -66,6 +66,35 @@ def _resolve_lmstudio_model(base_url, requested_model="", timeout=3):
             return model_id[:240], ""
     return "", "LM Studio did not report a loaded model"
 
+
+def _si_model_metadata(base_url, model, timeout=3):
+    """Read identity hints only for the selected endpoint model or its alias."""
+    try:
+        request = urllib.request.Request(base_url.rstrip("/") + "/models", method="GET")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        for item in payload.get("data") or []:
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("id")
+            aliases = item.get("aliases")
+            aliases = aliases if isinstance(aliases, list) else []
+            if model_id != model and model not in aliases:
+                continue
+            result = {}
+            for key in ("id", "owned_by"):
+                value = item.get(key)
+                if isinstance(value, str) and value and len(value) <= 200 and all(
+                    character.isascii() and (character.isalnum() or character in "._:/-")
+                    for character in value
+                ):
+                    result[key] = value
+            return result
+    except Exception:
+        pass
+    return {}
+
+
 _MCP_ENV_KEYS = {
     "playwright": set(),
     "azure-mcp-server": {"AZURE_MCP_COLLECT_TELEMETRY"},

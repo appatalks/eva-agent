@@ -869,7 +869,43 @@ def _classify_entity_candidate(entity, user_message):
     if f"i work at {entity_lc}" in normalized_msg or f"i work for {entity_lc}" in normalized_msg:
         return "user_affiliation", 0.8, "explicitly provided by user"
 
-    return "candidate_mentioned", 0.2, "candidate extracted from conversation"
+    return "candidate_mentioned", 0.2, _entity_mention_context(entity, user_message)
+
+
+def _entity_mention_context(entity, user_message):
+    """Keep a bounded source excerpt, not an inferred relationship."""
+    text = _neutralize_memory_text(user_message)
+    match = re.search(r"(?<!\w)" + re.escape(entity) + r"(?!\w)", text, re.IGNORECASE)
+    start = max(0, match.start() - 60) if match else 0
+    excerpt = text[start:start + 165]
+    return "Unverified user mention: " + excerpt
+
+
+_MENTION_RELATIONS = {"mentioned", "candidate_mentioned", "recurring_topic"}
+
+
+def _mention_memory_block(rows, user_message):
+    """Recall mentions only for an explicitly named entity, never as facts."""
+    records = []
+    seen = set()
+    for row in rows or []:
+        entity = str(row.get("Entity") or "").strip()
+        key = entity.casefold()
+        if key in seen or not _validate_entity_candidate(entity)[0]:
+            continue
+        if str(row.get("Relation") or "").casefold() not in _MENTION_RELATIONS:
+            continue
+        if not re.search(r"(?<!\w)" + re.escape(entity) + r"(?!\w)", user_message, re.IGNORECASE):
+            continue
+        seen.add(key)
+        records.append(
+            entity + " - unverified mention, not a confirmed fact: "
+            + str(row.get("Value") or "No source context stored")
+            + " | Source: " + str(row.get("Source") or "unknown")
+        )
+        if len(records) >= 3:
+            break
+    return _memory_prompt_data_block("Memory - Unverified Mentions", records)
 
 
 
@@ -926,34 +962,19 @@ def _load_candidate_history(entity):
 
 
 def _maybe_promote_candidate(entity):
-    """Promote candidate entities after repeated persisted or launch-local mentions."""
+    """Track recurrence without turning repetition into factual confidence."""
     key = (entity or "").strip().lower()
     if not key:
-        return True
+        return None
 
     session_count = _st.cognition_candidate_counts.get(key, 0)
-    prior_mentions, prior_max_conf = _load_candidate_history(entity)
-    total_observations = session_count + prior_mentions
-
-    if prior_max_conf >= 0.6:
-        return {
-            "relation": "recurring_topic",
-            "confidence": min(0.85, prior_max_conf + 0.05),
-            "value": "reinforced by repeated mention",
-            "reason": "prior_high_confidence"
-        }
-    if total_observations >= 3:
-        return {
-            "relation": "recurring_topic",
-            "confidence": 0.75,
-            "value": "reinforced by repeated mention",
-            "reason": "frequency"
-        }
+    prior_mentions, _ = _load_candidate_history(entity)
+    # Launch-local observations are already present in persisted history.
+    total_observations = max(session_count, prior_mentions) + 1
     if total_observations >= 2:
         return {
             "relation": "recurring_topic",
-            "confidence": 0.65,
-            "value": "candidate repeated by user across turns",
+            "confidence": 0.35,
             "reason": "repeat_mention"
         }
     return None
@@ -966,6 +987,7 @@ def _track_candidate_observation(entity):
     if not key:
         return
     _st.cognition_candidate_counts[key] = _st.cognition_candidate_counts.get(key, 0) + 1
+    _st.candidate_history_cache.pop(key, None)
 
 
 
@@ -1160,23 +1182,13 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
     db_label = "local SQLite"
     context_parts.append(
         f"[Current Date & Time] {_today_str} — {_time_str}\n\n"
-        "[Skills]\n"
-        "Active capabilities (the system handles routing automatically):\n"
-        "• data-retrieval: Live stock quotes, financial data, company info\n"
-        "• weather-news: Real-time weather, news, market summaries, space weather\n"
-        "• web-search: Search the web and retrieve current information\n"
-        "• browser-control: [[EVA_BROWSER]]{\"goal\":\"<task>\",\"start_url\":\"<url>\"}[[/EVA_BROWSER]]\n"
-        "• desktop-control: [[EVA_DESKTOP]]{\"goal\":\"<task>\"}[[/EVA_DESKTOP]]\n"
-        "• camera-vision: [[EVA_LOOK]]{\"question\":\"<what to look for>\"}[[/EVA_LOOK]]\n"
-        "• signal-message: [[EVA_SIGNAL]]{\"message\":\"<text>\"}[[/EVA_SIGNAL]]\n"
-        "• image-generation: [Image of <description>] on its own line (up to 3 per response)\n"
-        "• file-creation: Write the file, then [[EVA_FILE]] <filename.ext>\n"
-        "• persistent-memory: Local SQLite. Tables: Knowledge, Conversations, EmotionState,\n"
-        "    MemorySummaries, Reflections, Goals, SelfState, HeuristicsIndex, EmotionBaseline\n"
-        "• cron-scheduling: Recurring tasks (briefings, checks, reminders). Settings > Cron\n"
+        "[Capability Guidance]\n"
+        "The bridge appends [Runtime Capabilities - AUTHORITATIVE] for this turn. "
+        "Use only capabilities marked available there; do not infer availability from this context.\n"
+        "Native Eva actions and verified active Skills take precedence over browser or desktop automation.\n"
         "\n"
         "[Rules]\n"
-        "- Act first, explain second. Emit the marker — don't list steps for the user.\n"
+        "- Act first only when the authoritative runtime capability and its confirmation policy allow it.\n"
         "- Write ONE short sentence before a marker announcing what you're about to do.\n"
         "- Only confirm an action after it actually ran and returned.\n"
         "- Never fabricate headlines, prices, weather, or events not in [Data Retrieved].\n"
@@ -1188,24 +1200,14 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
         "- If no data was retrieved for a live question, say so honestly — don't guess.\n"
         "\n"
         "[Workflow: Browser & Desktop]\n"
-        "When asked to open a site, play a playlist, or do a task in an app:\n"
-        "1. ACT immediately — emit [[EVA_BROWSER]] or [[EVA_DESKTOP]]\n"
-        "2. Do NOT say you cannot open websites or apps\n"
-        "3. Do NOT list manual steps — do the task yourself\n"
+        "Use browser or desktop automation only for an explicit interactive request when no native action or verified Skill applies.\n"
+        "A verified playlist Skill opens its authorized URL through the native harness, not browser automation.\n"
         "\n"
         "[Workflow: Memory]\n"
         "When asked what you know/remember:\n"
         "1. Check [Memory] and [User Profile] facts in this context\n"
         "2. Be specific — cite what you actually remember, not generic statements\n"
-        "\n"
-        "[Workflow: Adaptive Execution]\n"
-        "When asked to do something you are unsure about:\n"
-        "1. Check if a relevant [Active Skill] was loaded — follow its instructions\n"
-        "2. If no skill matched, attempt with your available tools\n"
-        "3. If the first attempt fails, self-correct: try an alternative before giving up\n"
-        "4. NEVER say 'I cannot do that' without first genuinely trying\n"
-        "5. After succeeding at something new, the system auto-learns it as a skill for next time\n"
-        "Your capabilities scale through learned skills — the more you do, the more you can do."
+        "3. Extracted mentions and recurring topics are unverified, not personal facts or inferred relationships."
     )
 
     # Inject live MCP server status so Eva knows what's connected
@@ -1245,7 +1247,7 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
     core_knowledge = mem.query(
         "SELECT Entity, Relation, Value, Confidence FROM Knowledge "
         "WHERE Entity != 'User' COLLATE NOCASE AND Confidence >= 0.6 "
-        "AND (Relation IS NULL OR (Relation != 'mentioned' AND Relation != 'candidate_mentioned')) "
+        "AND (Relation IS NULL OR lower(Relation) NOT IN ('mentioned', 'candidate_mentioned', 'recurring_topic')) "
         "ORDER BY Confidence DESC LIMIT 15"
     )
     corrected_names = _corrected_entity_names(mem=mem)
@@ -1341,6 +1343,8 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
     seen_keys = set()
 
     def _add_hit(rec):
+        if str(rec.get("Relation") or "").casefold() in _MENTION_RELATIONS:
+            return
         key = (str(rec.get('Entity','')).lower(), str(rec.get('Relation','')).lower(),
                str(rec.get('Value','')).lower())
         if key in seen_keys:
@@ -1352,6 +1356,12 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
     if terms:
         # FTS search
         fts_results = mem.fts_search("Knowledge", " ".join(terms), limit=8)
+        mention_block = _mention_memory_block(
+            sorted(fts_results or [], key=lambda row: str(row.get("Timestamp") or ""), reverse=True),
+            user_message,
+        )
+        if mention_block:
+            context_parts.append(mention_block)
         for k in (fts_results or []):
             if k.get("Confidence", 0) >= 0.6 and str(k.get("Entity", "")).casefold() != "user":
                 _add_hit(k)
@@ -1360,7 +1370,7 @@ def _build_memory_context_sqlite(user_message, session_id=None, execution_decisi
         pool = mem.query(
             "SELECT Entity, Relation, Value, Confidence FROM Knowledge "
             "WHERE Entity != 'User' COLLATE NOCASE AND Confidence >= 0.6 AND (Relation IS NULL OR "
-            "(Relation != 'mentioned' AND Relation != 'candidate_mentioned')) "
+            "lower(Relation) NOT IN ('mentioned', 'candidate_mentioned', 'recurring_topic')) "
             f"ORDER BY Confidence DESC LIMIT {_SEMANTIC_POOL_SIZE}"
         ) or []
         if pool:
@@ -1526,7 +1536,7 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
     memory_model = MemoryModel(mem)
     if turn_id and not memory_model.register_turn(turn_id, session_id, model_name):
         return
-    source_id = f"{_st.cognition_launch_id or 'launch'}:{session_id}"
+    source_id = f"{_st.cognition_launch_id or 'launch'}:{session_id}:{turn_id or now}"
 
     # 1. Log conversation
     conv_columns = ["SessionId", "Timestamp", "Role", "Provider", "Model", "Content", "TokenEstimate", "ImageGenerated", "TurnId"]
@@ -1603,7 +1613,6 @@ def _post_response_reflection_sqlite_impl(mem, user_message, assistant_response,
                 if promotion:
                     relation = promotion["relation"]
                     confidence = promotion["confidence"]
-                    value = promotion["value"]
             know_rows.append({
                 "Timestamp": now, "Entity": entity, "Relation": relation,
                 "Value": value[:200], "Confidence": confidence,
@@ -1974,7 +1983,7 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
         "Knowledge "
         "| where Entity !~ 'User' "
         "| where Confidence >= 0.6 "
-        "and (isnull(Relation) or Relation !in~ ('mentioned', 'candidate_mentioned')) "
+        "and (isnull(Relation) or Relation !in~ ('mentioned', 'candidate_mentioned', 'recurring_topic')) "
         "| order by Confidence desc | take 15"
     )
     core_knowledge = _cached_metadata_rows("core", cluster, db, core_query)
@@ -2092,6 +2101,8 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
     seen_keys = set()
 
     def _add_hit(rec):
+        if str(rec.get("Relation") or "").casefold() in _MENTION_RELATIONS:
+            return
         key = (
             str(rec.get('Entity', '')).lower(),
             str(rec.get('Relation', '')).lower(),
@@ -2107,12 +2118,21 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
     if terms:
         safe_terms = [f"'{t.replace(chr(39), chr(39) * 2)}'" for t in sorted(terms)][:24]
         term_list = ", ".join(safe_terms)
+        mention_rows = _kusto_query_direct(
+            cluster, db,
+            "Knowledge | where Relation in~ ('mentioned', 'candidate_mentioned', 'recurring_topic') "
+            f"| where Entity has_any ({term_list}) "
+            "| order by Timestamp desc | take 8 | project Entity, Relation, Value, Source",
+        ) or []
+        mention_block = _mention_memory_block(mention_rows, user_message)
+        if mention_block:
+            context_parts.append(mention_block)
         lexical_query = (
             "Knowledge "
             + user_profile_filter
             + f"| where (Entity has_any ({term_list}) or Relation has_any ({term_list}) "
             f"or Value has_any ({term_list})) and Confidence >= 0.6 "
-            "and (isnull(Relation) or Relation !in~ ('mentioned', 'candidate_mentioned')) "
+            "and (isnull(Relation) or Relation !in~ ('mentioned', 'candidate_mentioned', 'recurring_topic')) "
             "| order by Confidence desc | take 8"
         )
         for k in (_kusto_query_direct(cluster, db, lexical_query) or []):
@@ -2123,7 +2143,7 @@ def _build_memory_context(user_message, session_id=None, execution_decision=None
             "Knowledge "
             + user_profile_filter
             + "| where Confidence >= 0.6 "
-            "and (isnull(Relation) or Relation !in~ ('mentioned', 'candidate_mentioned')) "
+            "and (isnull(Relation) or Relation !in~ ('mentioned', 'candidate_mentioned', 'recurring_topic')) "
             f"| order by Confidence desc | take {_SEMANTIC_POOL_SIZE} "
             "| project Entity, Relation, Value, Confidence"
         )
@@ -2441,7 +2461,6 @@ def _post_response_reflection_impl(user_message, assistant_response, model_name,
                 if promotion:
                     relation = promotion["relation"]
                     confidence = promotion["confidence"]
-                    value = promotion["value"]
             know_rows.append({
                 "Timestamp": now,
                 "Entity": entity,

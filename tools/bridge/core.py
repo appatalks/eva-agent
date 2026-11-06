@@ -64,7 +64,10 @@ from bridge.aig_request import (
 )
 from bridge.aig_preflight import plan_aig_preflight, should_fallback_local_tool_to_acp
 from bridge.http_routes import match_patch_route
-from bridge.capabilities import runtime_capabilities, runtime_capability_prompt_view
+from bridge.capabilities import (
+    runtime_capabilities, runtime_capability_prompt_view,
+    harness_self_assessment_prompt_view, responder_runtime_prompt_view,
+)
 from protected_memory import (
     ProtectedMemoryError,
     ProtectedVault,
@@ -5587,6 +5590,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "- Use the context below naturally as your own knowledge.\n\n"
         )
 
+        eva_system += harness_self_assessment_prompt_view() + "\n"
+
         try:
             from bridge.email_service import capability_summary as _email_capability
             eva_system += _email_capability() + "\n\n"
@@ -5771,6 +5776,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._json_response(502, {"error": {"message": model_error}})
                 return
 
+            eva_system += "\n" + responder_runtime_prompt_view(
+                requested_backend, selected_backend, lms_model,
+                "SI Harness via Eva Direct (OpenAI-compatible API)",
+                si_base_url=lms_base, user_message=user_message,
+            )
             lms_system_additions = []
             # Inject a short capability reminder close to the user message so
             # local models (which struggle with long system prompts) still know
@@ -6040,20 +6050,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 si_model_override if si_copilot_unified else
                 acp_response_model or (_st.acp_client.model if _st.acp_client else "") or "default"
             )
-        eva_system += (
-            f"\n[Runtime - AUTHORITATIVE GROUND TRUTH]\n"
-            f"This block is injected by tools/acp_bridge.py. It overrides any model self-knowledge.\n"
-            f"Requested backend preference: {requested_backend}\n"
-            f"Selected backend: {selected_backend}\n"
-            f"Active responder model: {_runtime_model}\n"
-            f"Routing path: {_route_label}\n"
-            f"Wrapper: Eva AIG via tools/acp_bridge.py\n\n"
-            f"When asked which model you are, what your base model is, your model ID, "
-            f"who made you, or what powers you, you MUST answer using ONLY the values above. "
-            f"Do NOT claim to be Claude, GPT-4o, GPT-4, Opus, Sonnet, Haiku, Gemini, "
-            f"or any other model unless that exact name appears in 'Active responder model' above. "
-            f"If 'Active responder model' is '{_runtime_model}', then your answer is "
-            f"'{_runtime_model}' and nothing else. Do not second-guess this block.\n\n"
+        eva_system += "\n" + responder_runtime_prompt_view(
+            requested_backend, selected_backend, _runtime_model, _route_label,
+            si_base_url=si_base_url if si_copilot_unified else "",
+            user_message=user_message,
         )
         if _request_type == "github-data":
             eva_system += (

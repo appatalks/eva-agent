@@ -24,6 +24,11 @@ while keeping configuration, approvals, and personal data under your control.
 	controls, corrections, bounded
 	last-session recall, and interactive review through Agent Operations'
 	Memory Topology workspace.
+- **Grounded self-assessment:** distinguish unverified, contextual mentions from
+  confirmed facts, and describe feedback, scheduling, and privacy boundaries
+  without mistaking activity counters for evidence of answer quality. Runtime
+  identity separates SI endpoint model aliases from internal compatibility keys
+  and the Direct or Copilot execution path.
 - **Workspace control room:** monitor independent terminals and coding agents for
   the selected workspace, focus a tile, interrupt work, or send new direction.
   Project files stay beside Live and Details tabs. Create local Git workspaces
