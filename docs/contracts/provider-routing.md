@@ -64,12 +64,17 @@ LM Studio lifecycle behavior; this slice has no new curated CI contract.
 | Eva AIG | All normal chat, automatic model choice, memory, tool preflight, and response synthesis | `core/js/providers/aig.js`, `tools/bridge/core.py` |
 | Copilot ACP | Tool-capable Copilot CLI bridge, including direct compatibility callers and MCP access | `core/js/providers/copilot.js`, `tools/bridge/acp_client.py` |
 | OpenAI API | AIG-selected direct responder when available and appropriate | `tools/bridge/core.py` |
-| SI Harness / LM Studio | AIG-selected OpenAI-compatible local responder and local MCP mode. `lmstudio` is the stable persisted backend value; **SI Harness** is the user-facing label. | `tools/bridge/core.py`, `tools/bridge/local_mcp.py`, `core/js/providers/lm-studio.js` |
+| SI Harness / LM Studio | `lmstudio` remains the stable backend value; **Eva Direct** preserves direct completions, while the chat-only **Copilot CLI** option uses request-scoped BYOK ACP against the same validated unauthenticated endpoint/model with an isolated Copilot profile. Adaptive Review is bypassed for this mode to avoid cloud helpers. Workspace and vision paths are unchanged. | `tools/bridge/core.py`, `tools/bridge/acp_client.py`, `tools/bridge/local_mcp.py`, `core/js/providers/lm-studio.js` |
 | GitHub MCP | GitHub repository, issue, pull request, and workflow operations | configured MCP server, not a model provider |
 
 The GitHub PAT is retained only for GitHub MCP configuration and private
 repository imports. The deprecated GitHub-hosted model endpoint, browser
 client, model map, and top-level model values are removed.
+
+Eva's bundled web MCP server accepts both standard `initialize` and modern
+`server/discover` handshakes, so Copilot ACP receives executable search and quote
+schemas rather than only capability descriptions. Safety-policy rejections are
+reported as policy blocks, not as user-initiated cancellation.
 
 ## Capability Awareness
 

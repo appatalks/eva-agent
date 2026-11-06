@@ -894,7 +894,7 @@ def test_reasoning_effort_contract():
     report("reasoning_effort_cli_flag", 'cmd.extend(["--reasoning-effort", self.reasoning_effort])' in acp_client)
     report("reasoning_effort_bridge_validation", "ACP_REASONING_EFFORTS" in bridge_core and "acp_reasoning_effort" in bridge_core)
     report("reasoning_effort_strict_type_validation", "raw_reasoning_effort" in bridge_core and "isinstance(raw_reasoning_effort, str)" in bridge_core)
-    report("reasoning_effort_aig_bridge", "_acquire_acp_client(acp_response_model, reasoning_effort" in bridge_core)
+    report("reasoning_effort_aig_bridge", "with _acquire_acp_client(" in bridge_core and "reasoning_effort or None" in bridge_core)
     report("reasoning_effort_request_local_client", "with _acquire_acp_client" in bridge_core and "selected_client.prompt" in bridge_core)
     report("reasoning_effort_prompt_serialized", "with self.prompt_lock:" in acp_client)
     report("reasoning_effort_client_pinning", "def _pin_acp_client" in acp_client and "def _release_acp_client" in acp_client)

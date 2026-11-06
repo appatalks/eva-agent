@@ -5,6 +5,8 @@ function evaDisplayModelLabel(value) {
   var raw = String(value || '').trim();
   if (!raw) return '';
   if (raw === 'lmstudio' || raw === 'lm-studio') return 'SI Harness';
+  var siCopilot = raw.match(/^aig:si-copilot:(.+)$/);
+  if (siCopilot) return 'SI Harness \u00b7 Copilot CLI \u00b7 ' + siCopilot[1];
   var match = raw.match(/^(?:aig:)?lmstudio:(.+)$/);
   return match ? 'SI Harness \u00b7 ' + match[1] : raw;
 }
@@ -276,6 +278,8 @@ function saveAuthKeys() {
   } else if (lmsModelEl) {
     localStorage.removeItem('aig_lmstudio_model');
   }
+  var siRuntimeEl = document.getElementById('selSIHarnessRuntime');
+  if (siRuntimeEl) localStorage.setItem('aig_si_runtime', siRuntimeEl.value === 'copilot' ? 'copilot' : 'direct');
   syncAIGRuntimePrefs();
   var localVoicesProfileEl = document.getElementById('localVoicesProfile');
   if (localVoicesProfileEl && localVoicesProfileEl.value) {
@@ -378,6 +382,10 @@ function populateAuthFields() {
   if (lmsModelEl) {
     lmsModelEl.value = (typeof getLmStudioModel === 'function') ? getLmStudioModel() : (localStorage.getItem('aig_lmstudio_model') || '');
   }
+  var siRuntimeEl = document.getElementById('selSIHarnessRuntime');
+  if (siRuntimeEl) {
+    siRuntimeEl.value = getSIHarnessRuntime();
+  }
   // Signal fields: prefer localStorage, but if empty, hydrate from the bridge
   // (the bridge persists numbers in alerts.json, which survives AppImage rebuilds).
   var sigSender = document.getElementById('authSignalSender');
@@ -398,6 +406,10 @@ function getLmStudioBaseUrl() {
 function getLmStudioModel() {
   var v = (localStorage.getItem('aig_lmstudio_model') || '').trim();
   return v;
+}
+
+function getSIHarnessRuntime() {
+  return (localStorage.getItem('aig_si_runtime') || 'direct') === 'copilot' ? 'copilot' : 'direct';
 }
 
 function syncAIGRuntimePrefs() {
@@ -1219,6 +1231,18 @@ document.addEventListener('DOMContentLoaded', () => {
       if (typeof onModelSettingsChange === 'function') onModelSettingsChange();
     });
     updateAIGModelInfo();
+  }
+  var siRuntimeSel = document.getElementById('selSIHarnessRuntime');
+  if (siRuntimeSel) {
+    siRuntimeSel.value = getSIHarnessRuntime();
+    siRuntimeSel.addEventListener('change', function () {
+      localStorage.setItem('aig_si_runtime', siRuntimeSel.value === 'copilot' ? 'copilot' : 'direct');
+      if (typeof setStatus === 'function') {
+        setStatus('info', siRuntimeSel.value === 'copilot'
+          ? 'SI Harness runtime: Copilot CLI ACP (endpoint-scoped)'
+          : 'SI Harness runtime: Eva Direct');
+      }
+    });
   }
   var aigPolicySel = document.getElementById('selAIGModelPolicy');
   if (aigPolicySel) {

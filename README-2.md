@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current development version:** Eva 5.6.12 (unreleased). This document describes the matching browser UI,
+> **Current development version:** Eva 5.7.0 (unreleased). This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -19,7 +19,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh --build
 cd standalone
-./dist/'Eva Standalone-5.6.12.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.7.0.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
@@ -162,6 +162,11 @@ produce an actionable runtime receipt.
 
 - Multi-agent AIG with eva and reviewer cognitive pipeline
 - Dual-mode data retrieval: cloud (Copilot CLI + MCP) or local (LM Studio + direct MCP)
+- SI Harness runtime choice: **Eva Direct** preserves the existing direct
+  `/chat/completions` path; **Copilot CLI** uses the same validated SI base URL
+  and model through isolated BYOK ACP with the existing Eva tool-permission
+  policies. The SI-Copilot route is endpoint-scoped, pool-isolated, and fails
+  explicitly rather than falling back to a cloud model.
 - MCP tool access (Kusto, GitHub, Azure, web search) hot-reloadable at runtime
 - Persistent memory via Azure Data Explorer (Kusto) or local SQLite
 - Memory Inspector with searchable traceable records, provenance, associations, and append-only corrections
@@ -454,7 +459,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.6.12)
+  package.json             Electron + electron-builder config (v5.7.0)
 ```
 
 ## Dependencies
@@ -2118,7 +2123,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.6.12.AppImage'
+./dist/'Eva Standalone-5.7.0.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace

@@ -42,6 +42,7 @@ _WEB_FETCH_REDIRECTS = {301, 302, 303, 307, 308}
 TOOLS = [
     {
         "name": "web_search",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "description": (
             "Search the web using DuckDuckGo. Returns a list of results with "
             "titles, URLs, and text snippets. No API key required."
@@ -63,6 +64,7 @@ TOOLS = [
     },
     {
         "name": "web_fetch",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "description": (
             "Fetch a web page and extract its readable text content. "
             "Strips HTML tags, scripts, styles, and returns clean text. "
@@ -85,6 +87,7 @@ TOOLS = [
     },
     {
         "name": "web_search_news",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "description": (
             "Search DuckDuckGo News for recent headlines and articles. "
             "Returns news results with titles, sources, dates, and snippets."
@@ -106,6 +109,7 @@ TOOLS = [
     },
     {
         "name": "weather_current",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "description": "Return verified current conditions and today's forecast for an explicit city or region, preferring the National Weather Service for U.S. locations.",
         "inputSchema": {
             "type": "object",
@@ -120,13 +124,19 @@ TOOLS = [
     },
     {
         "name": "stock_quote",
-        "description": "Retrieve one current stock quote from a local provider or Google Finance for a ticker and optional exchange.",
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "description": (
+            "Retrieve one current stock quote from a local provider or Google Finance. "
+            "Accepts a single U.S. ticker, optionally qualified with NYSE, NASDAQ, "
+            "NYSEAMERICAN/AMEX, or OTC/OTCMKTS (for example LPL, LPL:NYSE, or $LPL stock quote). "
+            "International venues, KRX numeric symbols, and company names are not supported."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "A stock ticker or a request containing one ticker, such as PLG or PLG:NYSEAMERICAN",
+                    "description": "One supported U.S. ticker or a request containing one ticker, such as LPL, LPL:NYSE, or $LPL stock quote",
                 },
             },
             "required": ["query"],
@@ -374,6 +384,9 @@ def _web_fetch_challenge_page(body, text):
 def _stock_request(query):
     """Return a normalized ticker and bounded candidate venue list."""
     text = str(query or "").strip()
+    bare_match = re.fullmatch(r"\$?([A-Za-z]{1,10})", text)
+    if bare_match and bare_match.group(1).upper() not in _STOCK_STOPWORDS:
+        return bare_match.group(1).upper(), _STOCK_DEFAULT_EXCHANGES
     matches = [candidate for candidate in _STOCK_TICKER_RE.finditer(text)
                if candidate.group(1).upper() not in _STOCK_STOPWORDS]
     if not matches:
@@ -1070,6 +1083,16 @@ def handle_request(msg):
     rid = msg.get("id")
     method = msg.get("method", "")
     params = msg.get("params", {})
+
+    if method == "initialize":
+        version = params.get("protocolVersion")
+        supported_versions = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
+        _respond(rid, {
+            "protocolVersion": version if isinstance(version, str) and version in supported_versions else "2025-11-25",
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "eva-web-search", "version": "1.0.0"},
+        })
+        return
 
     if method == "server/discover":
         _respond(rid, {

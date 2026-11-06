@@ -53,6 +53,10 @@ def main():
         "PLG", ("NYSEAMERICAN", "NASDAQ", "NYSE", "OTCMKTS")
     )
     assert web._stock_request("PLG:AMEX") == ("PLG", ("NYSEAMERICAN",))
+    assert web._stock_request("LPL") == ("LPL", ("NYSEAMERICAN", "NASDAQ", "NYSE", "OTCMKTS"))
+    assert web._stock_request("$LPLA") == ("LPLA", ("NYSEAMERICAN", "NASDAQ", "NYSE", "OTCMKTS"))
+    assert web._stock_request("KRX:005930") == ("", ())
+    assert web._stock_request("LG Display") == ("", ())
     assert web._stock_request("Can you give me PLG stock price?") == (
         "PLG", ("NYSEAMERICAN", "NASDAQ", "NYSE", "OTCMKTS")
     )
