@@ -77,6 +77,30 @@ ACP_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "m
 _AIG_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _LMSTUDIO_CONNECT_TIMEOUT_SECONDS = 10
 _LMSTUDIO_READ_TIMEOUT_SECONDS = 900
+_SI_MODEL_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,200}$")
+
+
+def _si_provider_config(base_url, model, max_completion_tokens=16384):
+    """Build isolated Copilot BYOK settings for one SI request."""
+    base_url, error = _validate_lmstudio_base_url(str(base_url or "").strip())
+    if error:
+        raise ValueError(error)
+    model = str(model or "").strip()
+    if not model or not _SI_MODEL_RE.fullmatch(model):
+        raise ValueError("SI Harness model name is required and must be printable")
+    if len(model) > 200:
+        raise ValueError("SI Harness model name is too long")
+    config = {
+        "COPILOT_PROVIDER_BASE_URL": base_url,
+        "COPILOT_PROVIDER_TYPE": "openai",
+        "COPILOT_PROVIDER_WIRE_API": "completions",
+        "COPILOT_MODEL": model,
+        "COPILOT_PROVIDER_MODEL_ID": model,
+        "COPILOT_PROVIDER_WIRE_MODEL": model,
+        "COPILOT_PROVIDER_MAX_OUTPUT_TOKENS": str(max_completion_tokens),
+        "COPILOT_PROVIDER_VISION": "false",
+    }
+    return config
 
 
 def _parse_aig_backend(value):
@@ -5020,6 +5044,35 @@ class BridgeHandler(BaseHTTPRequestHandler):
         reasoning_effort = request["reasoning_effort"]
         acp_auto_approve = request["acp_auto_approve"]
         stream_requested = request["stream_requested"]
+        si_runtime = request["si_runtime"]
+        si_base_url = request["lmstudio_base_url"] or "http://localhost:1234/v1"
+        si_model_override = request["lmstudio_model"]
+        si_copilot_requested = (
+            responder_provider == "acp"
+            and model_for_response == "lmstudio"
+            and si_runtime == "copilot"
+        )
+        si_provider_config = None
+        if si_copilot_requested:
+            try:
+                si_base_url, base_url_error = _validate_lmstudio_base_url(si_base_url)
+                if base_url_error:
+                    raise ValueError(base_url_error)
+                if not si_model_override:
+                    from bridge.local_mcp import _resolve_lmstudio_model
+                    si_model_override, model_error = _resolve_lmstudio_model(
+                        si_base_url, ""
+                    )
+                    if model_error:
+                        raise ValueError(model_error)
+                # The endpoint/model are request-scoped and never become
+                # ambient Copilot configuration or a cloud fallback.
+                si_provider_config = _si_provider_config(
+                    si_base_url, si_model_override, max_completion_tokens
+                )
+            except ValueError as error:
+                self._json_response(400, {"error": {"message": str(error)}})
+                return
         image_b64 = str(data.get("image_b64") or "")
         image_mime = str(data.get("image_mime") or "image/jpeg").lower()
         if image_b64 and (
@@ -5160,6 +5213,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 request_type=_request_type,
             requested_backend=requested_backend,
             selected_backend=selected_backend,
+            si_runtime=si_runtime if requested_backend == "lmstudio" else "",
             policy_mode=_policy_mode,
             policy_reason=_policy_decision.get("reason", ""),
                 error_type=error_type,
@@ -5241,6 +5295,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
             }
             and not (_request_type == "weather-search" and not _weather_location.get("location"))
         )
+        si_copilot_unified = bool(si_copilot_requested and not translation_mode)
+        if si_copilot_unified:
+            # The SI Copilot runtime owns one tool-capable ACP loop.  Do not
+            # run the legacy financial/web preflight first (which would
+            # consume a turn and can leave the final model tool-blind).
+            needs_acp_tools = False
+            _tool_required_request = False
+            _tool_profile = "none" if no_tools else "broad"
+            _acp_route = "si-copilot/unified"
         _deep_reasoning_request = bool(re.search(
             r"\b(?:analy[sz]e|architecture|security|audit|strategy|compare|comparison|evaluate|trade[- ]?offs?|"
             r"reason about|design|consequential|complex)\b", _routing_message, re.IGNORECASE
@@ -5261,8 +5324,23 @@ class BridgeHandler(BaseHTTPRequestHandler):
             deep_reasoning=_deep_reasoning_request,
         )
         selected_backend = str(_policy_decision.get("backend") or requested_backend)
+        if si_copilot_requested:
+            # SI-Copilot is an explicit execution runtime.  Never let the
+            # automatic policy replace it with a cloud responder.
+            selected_backend = "lmstudio"
+            responder_provider = "acp"
+            model_for_response = "lmstudio"
+            _policy_decision = {
+                "provider": "si-copilot",
+                "backend": "lmstudio",
+                "model": si_model_override,
+                "reason": "explicit-si-copilot",
+            }
         if _policy_mode != "pinned" and _policy_decision.get("provider") != "pinned":
             responder_provider, model_for_response = _parse_aig_backend(selected_backend)
+            if si_copilot_requested:
+                responder_provider = "acp"
+                model_for_response = "lmstudio"
         def _audit_policy_selection():
             audit_event(
                 "turn.accepted", turn_id, "started",
@@ -5278,6 +5356,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 policy_mode=_policy_mode,
                 provider=_policy_decision.get("provider"),
                 backend=_policy_decision.get("backend"),
+                si_runtime=si_runtime if si_copilot_requested else "",
                 reason=_policy_decision.get("reason"),
                 requires_tools=needs_acp_tools or _tool_required_request,
             )
@@ -5674,9 +5753,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             eva_system += "\n" + runtime_capability_prompt_view() + "\n"
 
         _responder_t0 = time.perf_counter()
-        if model_for_response == "lmstudio":
-            lms_base = (data.get("lmstudio_base_url") or "").strip()
-            lms_model = (data.get("lmstudio_model") or "").strip()
+        if model_for_response == "lmstudio" and not si_copilot_unified:
+            lms_base = si_base_url
+            lms_model = si_model_override
             if not lms_base:
                 lms_base = "http://localhost:1234/v1"
 
@@ -5945,7 +6024,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         # Note: _st.cognition_enabled is only set at startup when Kusto MCP + token
         # are confirmed, so ACP availability is guaranteed at that point.
         # The alive check is deferred to the actual ACP prompt call.
-        if responder_provider == "acp" and not translation_mode and not native_terminal_plan and not _briefing_request and _st.cognition_enabled and _st.acp_client:
+        if responder_provider == "acp" and not translation_mode and not native_terminal_plan and not _briefing_request and _st.cognition_enabled and (_st.acp_client or si_provider_config):
             if model_for_response not in ("lmstudio",):
                 acp_response_model = model_for_response if model_for_response != "acp" else ""
                 print(f"[AIG] Cognition active: routing directly to ACP")
@@ -5956,8 +6035,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             _route_label = "OpenAI API (direct)"
             _runtime_model = model_for_response
         else:
-            _route_label = "Copilot CLI ACP bridge"
-            _runtime_model = acp_response_model or (_st.acp_client.model if _st.acp_client else "") or "default"
+            _route_label = "SI Harness via Copilot CLI ACP" if si_copilot_unified else "Copilot CLI ACP bridge"
+            _runtime_model = (
+                si_model_override if si_copilot_unified else
+                acp_response_model or (_st.acp_client.model if _st.acp_client else "") or "default"
+            )
         eva_system += (
             f"\n[Runtime - AUTHORITATIVE GROUND TRUTH]\n"
             f"This block is injected by tools/acp_bridge.py. It overrides any model self-knowledge.\n"
@@ -6066,7 +6148,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             # ACP response generation — primary path when cognition is active,
             # fallback path when PAT is unavailable or failed.
             print(f"[AIG] Using ACP for response generation...")
-            if _st.acp_client:
+            if _st.acp_client or si_provider_config:
                 # Include conversation history so follow-up messages have context
                 history_lines = []
                 for msg in messages[-6:]:
@@ -6087,8 +6169,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         full_prompt += "\n\nUser: " + user_message
                 else:
                     full_prompt = eva_system + "\n\nUser: " + user_message
-                with _acquire_acp_client(acp_response_model, reasoning_effort or None,
-                                         tool_profile=_tool_profile if needs_acp_tools else "none") as (response_client, acquire_detail):
+                with _acquire_acp_client(
+                    si_model_override if si_copilot_unified else acp_response_model,
+                    reasoning_effort or None,
+                    tool_profile=_tool_profile if (needs_acp_tools or si_copilot_unified) and not native_research else "none",
+                    no_tools=(no_tools or native_research),
+                    provider_config=si_provider_config,
+                ) as (response_client, acquire_detail):
                     if not response_client:
                         _audit_turn_failed("acp", "acquire", 503)
                         message = "ACP model switch failed: " + str(acquire_detail or "unavailable")
@@ -6132,12 +6219,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
                                 response_text = "The execute action was rejected. No command was run."
                             elif permission_reason == "permission_timeout":
                                 response_text = "The execute approval expired before a valid decision was received. No command was run."
+                            elif permission_reason == "policy_blocked":
+                                response_text = "Eva blocked that action under its safety policy. The blocked action was not run."
                             else:
                                 response_text = "The execute action could not continue because permission resolution was cancelled. No command was run."
                         if acp_result.get("stop_reason") in ("max_tokens", "length"):
                             response_finish_reason = "length"
                         active_model = response_client.model or "acp-default"
-                        model_used = f"aig:{active_model}"
+                        model_used = (
+                            f"aig:si-copilot:{si_model_override}"
+                            if si_copilot_unified else f"aig:{active_model}"
+                        )
                         if acp_model_used and acp_model_used != active_model:
                             model_used += f"+{acp_model_used}"
             else:

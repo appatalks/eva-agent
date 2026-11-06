@@ -27,6 +27,9 @@ auditing, and responder execution remain in `BridgeHandler`.
 - `translation_mode` and terminal planning/candidate requests are internal and
   tool-free.
 - Session/conversation IDs remain trimmed to 120 characters.
+- SI Harness requests carry `si_runtime` plus endpoint/model metadata only; the
+  first chat slice has no SI API-key field or storage. Copilot runtime requests
+  validate the endpoint before model discovery and use request-scoped BYOK ACP.
 
 The focused executable contract is `tools/tests/test_aig_request.py`.
 Do not move memory assembly, ACP preflight, provider selection, streaming,

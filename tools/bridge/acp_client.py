@@ -399,6 +399,55 @@ def _acp_tool_profile_config(mcp_config, profile):
     return {name: cfg for name, cfg in source.items() if name in names}
 
 
+def _provider_config_fingerprint(provider_config):
+    """Hash non-secret BYOK settings; never include endpoint credentials."""
+    config = provider_config if isinstance(provider_config, dict) else {}
+    safe = {}
+    for key, value in sorted(config.items()):
+        if value in (None, ""):
+            continue
+        upper = str(key).upper()
+        if "KEY" in upper or "TOKEN" in upper:
+            # Distinguish credentials for pool isolation without retaining
+            # or emitting the credential itself.
+            safe[str(key)] = "sha256:" + hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+        else:
+            safe[str(key)] = str(value)
+    encoded = json.dumps(safe, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16] if safe else "none"
+
+
+def _acp_runtime_tool_config(profile, provider_config=None, no_tools=False):
+    config = _acp_tool_profile_config(_st.configured_mcp_config, profile)
+    if provider_config and not no_tools and profile in {"broad", "web"}:
+        if not any("web" in name.lower() or "search" in name.lower() for name in config):
+            path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "web_search_mcp.py"
+            )
+            if os.path.isfile(path):
+                config["eva-web-search"] = {"command": sys.executable, "args": [path]}
+    return {} if no_tools else config
+
+
+def _si_isolated_profile():
+    """Create a controlled Copilot profile/workspace for request-scoped BYOK."""
+    root = os.path.join(_cfg.EVA_CONFIG_DIR, "copilot-si-runtime")
+    home = os.path.join(root, "home")
+    cwd = os.path.join(root, "workspace")
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    os.makedirs(cwd, mode=0o700, exist_ok=True)
+    config_path = os.path.join(home, "settings.json")
+    if not os.path.exists(config_path):
+        with open(config_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "autoUpdate": False,
+                "disableAllHooks": True,
+                "customAgents": {"defaultLocalOnly": True},
+            }, handle)
+        os.chmod(config_path, 0o600)
+    return home, cwd
+
+
 def _acp_config_fingerprint(mcp_config):
     """Hash non-secret MCP shape and settings; secret values never enter the hash."""
     safe = []
@@ -417,7 +466,9 @@ class ACPClient:
 
     PROTOCOL_VERSION = 1  # ACP protocol major version
 
-    def __init__(self, copilot_path="copilot", cwd=None, model=None, mcp_config=None, reasoning_effort=None, tool_profile=None, no_tools=False):
+    def __init__(self, copilot_path="copilot", cwd=None, model=None, mcp_config=None,
+                 reasoning_effort=None, tool_profile=None, no_tools=False,
+                 provider_config=None):
         self.copilot_path = copilot_path
         self.cwd = cwd or os.getcwd()
         self.model = model  # None = use CLI default
@@ -426,6 +477,8 @@ class ACPClient:
         self.mcp_config = mcp_config or {}  # MCP servers config dict
         self.tool_profile = _normalize_tool_profile(tool_profile, bool(self.mcp_config))
         self.config_fingerprint = _acp_config_fingerprint(self.mcp_config)
+        self.provider_config = dict(provider_config or {})
+        self.provider_fingerprint = _provider_config_fingerprint(self.provider_config)
         self.process = None
         self._owns_process_group = False
         self._stop_lock = threading.RLock()
@@ -464,9 +517,12 @@ class ACPClient:
                 raise RuntimeError("ACP client startup was interrupted.")
         copilot_executable = self._validated_copilot_executable()
         cmd = [copilot_executable, "--acp", "--stdio"]
+        isolated_si = bool(self.provider_config)
+        if isolated_si:
+            cmd.extend(["--no-custom-instructions", "--disable-client-telemetry", "--disable-builtin-mcps"])
         if self.no_tools:
-            cmd.extend(["--available-tools=", "--disable-builtin-mcps", "--no-custom-instructions"])
-        if self.model:
+            cmd.extend(["--available-tools=__eva_no_tools__", "--disable-builtin-mcps", "--no-custom-instructions"])
+        if self.model and not isolated_si:
             cmd.extend(["--model", self.model])
         if self.reasoning_effort:
             cmd.extend(["--reasoning-effort", self.reasoning_effort])
@@ -480,6 +536,18 @@ class ACPClient:
             os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
             process_env = _safe_child_environment()
             process_env.pop("EVA_BRIDGE_TOKEN", None)
+            if isolated_si:
+                for key in list(process_env):
+                    if key == "COPILOT_MODEL" or key.startswith("COPILOT_PROVIDER_"):
+                        process_env.pop(key, None)
+                copilot_home, isolated_cwd = _si_isolated_profile()
+                process_env["COPILOT_HOME"] = copilot_home
+                self.cwd = isolated_cwd
+            # BYOK provider settings are deliberately per-client.  Do not
+            # inherit or mutate the user's global Copilot environment/config.
+            for key, value in self.provider_config.items():
+                if value not in (None, ""):
+                    process_env[str(key)] = str(value)
             for srv_name, srv_cfg in self.mcp_config.items():
                 for k, v in srv_cfg.get('env', {}).items():
                     # subprocess.Popen env requires all values to be strings
@@ -497,6 +565,7 @@ class ACPClient:
                     stderr=subprocess.PIPE,
                     bufsize=0,
                     env=process_env,
+                    cwd=self.cwd if isolated_si else None,
                     start_new_session=self._owns_process_group,
                     **_hidden_subprocess_options(),
                 )
@@ -854,6 +923,12 @@ class ACPClient:
                 text = content.get("text", "")
                 if not text:
                     return
+                # ACP emits tool-filter diagnostics as assistant text.
+                if self.no_tools and text.startswith((
+                    "Info: Disabled tools:",
+                    'Info: Unknown tool name in the tool allowlist: "__eva_no_tools__"',
+                )):
+                    return
                 session_id = params.get("sessionId") or params.get("session_id")
                 callback = None
                 with self._prompt_state_lock:
@@ -1018,6 +1093,11 @@ class ACPClient:
             elif tool_kind == "execute":
                 block_reason = _workspace_autonomy_block_reason(tool_call, self.cwd)
             if block_reason:
+                with self._prompt_state_lock:
+                    for state in self._active_prompts.values():
+                        if state.get("session_id") == session_id:
+                            state["permission_cancelled"] = True
+                            state["permission_reason"] = "policy_blocked"
                 if reject_option:
                     self._send_response(rpc_id, {
                         "outcome": {"outcome": "selected", "optionId": reject_option["option_id"]}
@@ -1450,13 +1530,16 @@ class ACPClient:
 # ---------------------------------------------------------------------------
 
 
-def _acp_model_key(model, reasoning_effort=None, tool_profile=None, mcp_config=None):
+def _acp_model_key(model, reasoning_effort=None, tool_profile=None, mcp_config=None,
+                   provider_config=None, no_tools=False):
     """Normalize model and reasoning effort into a warm-client pool key."""
     model_key = (model or "").strip() or "__default__"
     effort_key = (reasoning_effort or "").strip() or "__default__"
     profile_key = _normalize_tool_profile(tool_profile, bool(mcp_config))
     fingerprint = _acp_config_fingerprint(mcp_config or {})
-    return f"{model_key}::{effort_key}::{profile_key}::{fingerprint}"
+    provider_fingerprint = _provider_config_fingerprint(provider_config)
+    tools_key = "no-tools" if no_tools else "tools"
+    return f"{model_key}::{effort_key}::{profile_key}::{tools_key}::{fingerprint}::{provider_fingerprint}"
 
 
 
@@ -1475,7 +1558,10 @@ def _acp_pool_register(client):
     reconfigured client) into the pool under its model key. Caller holds the lock."""
     if not client:
         return
-    key = _acp_model_key(client.model, client.reasoning_effort, client.tool_profile, client.mcp_config)
+    key = _acp_model_key(
+        client.model, client.reasoning_effort, client.tool_profile,
+        client.mcp_config, client.provider_config, client.no_tools,
+    )
     _st.acp_pool[key] = client
     _acp_pool_touch(key)
 
@@ -1519,7 +1605,8 @@ def _release_acp_client(client):
         current_key = None
         if _st.acp_client is not None:
             current_key = _acp_model_key(_st.acp_client.model, _st.acp_client.reasoning_effort,
-                                         _st.acp_client.tool_profile, _st.acp_client.mcp_config)
+                                         _st.acp_client.tool_profile, _st.acp_client.mcp_config,
+                                         _st.acp_client.provider_config, _st.acp_client.no_tools)
         _acp_pool_evict_if_needed(current_key)
 
 
@@ -1556,7 +1643,8 @@ def _reset_acp_pool(keep_client):
 
 
 
-def _ensure_acp_model(requested_model, reasoning_effort=None, tool_profile=None):
+def _ensure_acp_model(requested_model, reasoning_effort=None, tool_profile=None,
+                      provider_config=None, no_tools=False):
     """Ensure a warm ACP client for requested_model is selected as _st.acp_client.
 
     Uses a warm pool so switching between the cognition draft model and the
@@ -1567,20 +1655,23 @@ def _ensure_acp_model(requested_model, reasoning_effort=None, tool_profile=None)
     with _st.acp_pool_lock:
         # Seed the pool with the startup singleton on first use.
         if _st.acp_client and _acp_model_key(_st.acp_client.model, _st.acp_client.reasoning_effort,
-                                             _st.acp_client.tool_profile, _st.acp_client.mcp_config) not in _st.acp_pool:
+                                             _st.acp_client.tool_profile, _st.acp_client.mcp_config,
+                                             _st.acp_client.provider_config, _st.acp_client.no_tools) not in _st.acp_pool:
             _acp_pool_register(_st.acp_client)
 
-        if not _st.acp_client and not _st.acp_pool:
+        if not _st.acp_client and not _st.acp_pool and not provider_config:
             return False, "ACP bridge not connected to Copilot"
 
         profile = _normalize_tool_profile(tool_profile, bool(_st.configured_mcp_config))
-        profile_config = _acp_tool_profile_config(_st.configured_mcp_config, profile)
-        key = _acp_model_key(requested_model, reasoning_effort, profile, profile_config)
+        profile_config = _acp_runtime_tool_config(profile, provider_config, no_tools)
+        key = _acp_model_key(requested_model, reasoning_effort, profile, profile_config,
+                             provider_config, no_tools)
 
         # Fast path: a live warm client already exists for this model.
         existing = _st.acp_pool.get(key)
         if existing and existing.alive:
-            _st.acp_client = existing
+            if not provider_config and not no_tools:
+                _st.acp_client = existing
             _acp_pool_touch(key)
             _telemetry_emit("acp_pool", result="hit", model=existing.model or "default",
                             tool_profile=existing.tool_profile, server_count=len(existing.mcp_config),
@@ -1597,6 +1688,16 @@ def _ensure_acp_model(requested_model, reasoning_effort=None, tool_profile=None)
         if template is None:
             # Nothing alive to template from; fall back to the existing pointer.
             template = _st.acp_client
+        if template is None and provider_config:
+            template = ACPClient(
+                copilot_path="copilot",
+                cwd=os.getcwd(),
+                model=requested_model or provider_config.get("COPILOT_MODEL"),
+                mcp_config={},
+                tool_profile=profile,
+                no_tools=no_tools,
+                provider_config=provider_config,
+            )
         if template is None:
             return False, "ACP bridge not connected to Copilot"
 
@@ -1625,6 +1726,8 @@ def _ensure_acp_model(requested_model, reasoning_effort=None, tool_profile=None)
                 mcp_config=_inject_kusto_token(profile_config),
                 reasoning_effort=reasoning_effort,
                 tool_profile=profile,
+                no_tools=no_tools,
+                provider_config=provider_config,
             )
             _warm_t0 = time.perf_counter()
             new_client.start()
@@ -1635,7 +1738,8 @@ def _ensure_acp_model(requested_model, reasoning_effort=None, tool_profile=None)
 
         _st.acp_pool[key] = new_client
         _acp_pool_touch(key)
-        _st.acp_client = new_client
+        if not provider_config and not no_tools:
+            _st.acp_client = new_client
         _acp_pool_evict_if_needed(key)
         _telemetry_emit("acp_pool", result="warm", model=new_client.model or "default",
                 tool_profile=new_client.tool_profile, server_count=len(new_client.mcp_config),
@@ -1645,16 +1749,22 @@ def _ensure_acp_model(requested_model, reasoning_effort=None, tool_profile=None)
 
 
 @contextmanager
-def _acquire_acp_client(requested_model, reasoning_effort=None, tool_profile=None):
+def _acquire_acp_client(requested_model, reasoning_effort=None, tool_profile=None,
+                        provider_config=None, no_tools=False):
     """Atomically select and pin a model/effort client from the warm pool."""
     selected_client = None
     detail = "ACP bridge not connected to Copilot"
     with _st.acp_pool_lock:
         profile = _normalize_tool_profile(tool_profile, bool(_st.configured_mcp_config))
-        switched, detail = _ensure_acp_model(requested_model, reasoning_effort, profile)
+        switched, detail = _ensure_acp_model(
+            requested_model, reasoning_effort, profile, provider_config=provider_config,
+            no_tools=no_tools
+        )
         if switched:
-            profile_config = _acp_tool_profile_config(_st.configured_mcp_config, profile)
-            key = _acp_model_key(requested_model, reasoning_effort, profile, profile_config)
+            profile_config = _acp_runtime_tool_config(profile, provider_config, no_tools)
+            key = _acp_model_key(
+                requested_model, reasoning_effort, profile, profile_config, provider_config, no_tools
+            )
             candidate = _st.acp_pool.get(key)
             if candidate and candidate.alive:
                 candidate.active_requests += 1

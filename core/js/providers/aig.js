@@ -520,7 +520,11 @@ async function aigSend() {
   var isDirectQuoteRequest = !!requestedQuoteSymbol
     && /\b(?:stock|share|ticker|quote|price)\b/i.test(sQuestion)
     && !/\b(?:analy[sz]e|forecast|strategy|compare|valuation|fundamental|thesis)\b/i.test(sQuestion);
-  if (isDirectQuoteRequest && cogDecision.reason !== 'phrase') {
+  var selectedAigBackend = String((document.getElementById('selAIGBackend') || {}).value || '');
+  var siCopilotRuntimeSelected = selectedAigBackend === 'lmstudio'
+    && (typeof getSIHarnessRuntime === 'function')
+    && getSIHarnessRuntime() === 'copilot';
+  if (isDirectQuoteRequest && !siCopilotRuntimeSelected && cogDecision.reason !== 'phrase') {
     cogDecision = { active: false, reason: 'direct-quote' };
   }
   if (briefingRequest) {
@@ -581,7 +585,7 @@ async function aigSend() {
       return;
     }
   }
-  if (isDirectQuoteRequest) {
+  if (isDirectQuoteRequest && !siCopilotRuntimeSelected) {
     var quotePreview = createEvaStreamingBubble(txtOutput);
     updateEvaStreamingStatus(quotePreview, {
       phase: 'thinking',
@@ -605,6 +609,10 @@ async function aigSend() {
     var directQuoteAutoSpeak = document.getElementById('autoSpeak');
     if (directQuoteAutoSpeak && directQuoteAutoSpeak.checked) speakText();
     return;
+  }
+  if (siCopilotRuntimeSelected && cogDecision.active) {
+    cogDecision = { active: false, reason: 'si-copilot-direct-runtime' };
+    setStatus('info', 'SI Copilot runtime selected: adaptive review bypassed; direct BYOK ACP only, no cloud helper.');
   }
   var provisional = createEvaStreamingBubble(txtOutput);
   updateEvaStreamingStatus(provisional, {
@@ -744,6 +752,9 @@ async function aigSend() {
                  ', reviewer=' + cogState.reviewerModel +
                  ', maxCycles=' + cogState.maxCycles + '.';
     }
+    if (siCopilotRuntimeSelected) {
+      cogNote += '\nAdaptive review is bypassed for SI Copilot chat to preserve the selected endpoint. No reviewer model was called.';
+    }
     requestMessages = requestMessages.concat([{ role: 'system', content: cogNote }]);
     existingMessages = existingMessages.concat([{ role: 'system', content: cogNote }]);
     localStorage.setItem(storageKey, JSON.stringify(existingMessages));
@@ -758,7 +769,7 @@ async function aigSend() {
 
     // The selected AIG backend is Eva's primary model. Adaptive review uses a
     // separate reviewer model and must never override this direct responder.
-    var aigModel = (document.getElementById('selAIGBackend') || {}).value || 'lmstudio';
+    var aigModel = selectedAigBackend || 'lmstudio';
     var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel('aig') : 'default';
 
     if (!provisional) {
@@ -783,6 +794,7 @@ async function aigSend() {
         acp_reasoning_effort: reasoningEffort === 'default' ? '' : reasoningEffort,
         lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
         lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
+        si_runtime: (typeof getSIHarnessRuntime === 'function') ? getSIHarnessRuntime() : 'direct',
         image_b64: imageB64,
         image_mime: imageMime,
         research_history: researchHistory,

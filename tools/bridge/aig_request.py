@@ -153,6 +153,9 @@ def normalize_aig_request(
                 break
     if not user_message:
         raise ValueError("No user message provided")
+    si_runtime = str(data.get("si_runtime") or "direct").strip().lower()
+    if si_runtime not in {"direct", "copilot", "eva-direct", "eva", "copilot-cli", "si-copilot"}:
+        raise ValueError("Unsupported SI Harness runtime")
 
     return {
         "messages": messages,
@@ -173,4 +176,7 @@ def normalize_aig_request(
         "reasoning_effort": raw_reasoning_effort,
         "acp_auto_approve": acp_auto_approve,
         "stream_requested": data.get("stream") is True,
+        "si_runtime": "copilot" if si_runtime in {"copilot", "copilot-cli", "si-copilot"} else "direct",
+        "lmstudio_base_url": str(data.get("lmstudio_base_url") or "").strip()[:500],
+        "lmstudio_model": str(data.get("lmstudio_model") or "").strip()[:200],
     }
