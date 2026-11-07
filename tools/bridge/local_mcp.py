@@ -15,7 +15,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
-from bridge.utils import _safe_child_environment
+from bridge.utils import _safe_child_environment, _validate_lmstudio_base_url
 
 _ARTIFACTS_DIR = os.path.join(
     os.path.expanduser(os.environ.get("EVA_CONFIG_DIR", "~/.config/eva-standalone")), "artifacts"
@@ -67,11 +67,22 @@ def _resolve_lmstudio_model(base_url, requested_model="", timeout=3):
     return "", "LM Studio did not report a loaded model"
 
 
+class _MetadataNoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _si_model_metadata(base_url, model, timeout=3):
     """Read identity hints only for the selected endpoint model or its alias."""
     try:
-        request = urllib.request.Request(base_url.rstrip("/") + "/models", method="GET")
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        validated_url, error = _validate_lmstudio_base_url(base_url)
+        if error:
+            return {}
+        request = urllib.request.Request(validated_url + "/models", method="GET")
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _MetadataNoRedirectHandler(),
+        )
+        with opener.open(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
         for item in payload.get("data") or []:
             if not isinstance(item, dict):
