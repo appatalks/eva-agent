@@ -4,7 +4,10 @@
 
   var RESEARCH_MAX_QUERY_LENGTH = 500;
   var RESEARCH_STRATEGIES = { search: true, refine: true, alternate: true };
-  var RESEARCH_FOLLOWUP_RE = /^(?:(?:please\s+)?(?:continue|continue (?:the )?research|keep going|keep researching|go on|carry on|more|find more|what else|dig deeper|go deeper|refine(?: it| this)?|narrow(?: it| this)?(?: down)?|try a different search method|use (?:a )?different search method|use another (?:search|source|method)|another search|different sources?)|go ahead and try a different search method)\s*[.!?]*$/i;
+  var RESEARCH_FOLLOWUP_RE = /^(?:yes[, ]+\s*)?(?:(?:please\s+)?(?:continue|continue (?:the )?research|keep going|keep researching|go on|carry on|more|find more|what else|dig deeper|go deeper|refine(?: it| this)?|narrow(?: it| this)?(?: down)?|try a different search method|use (?:a )?different search method|use another (?:search|source|method)|another search|different sources?)|go ahead and try a different search method)\s*[.!?]*$/i;
+  var NEWS_CONFIRMATION_RE = /^(?:(?:thank\s+you|thanks)(?:\s+\w+)?[,.!\s]+)?(?:(?:can\s+we)\s+)?(?:yes|correct|right|confirmed)[,:\s]+(.+?)\s*[.!?]*$/i;
+  var RESEARCH_STATUS_RE = /^(?:(?:please|can\s+you)\s+)?what\s+(?:did|have)\s+you\s+(?:find|found)(?:\s+so\s+far)?\s*[.!?]*$/i;
+  var ACTION_STATUS_RE = /^(?:have\s+you\s+done\s+it|did\s+you\s+(?:do|finish|complete)\s+it|are\s+you\s+done|what\s+happened)\s*[.!?]*$/i;
   var DIRECT_DEEP_RESEARCH_RE = /\b(?:deep\s+dive|deep\s+research|detailed\s+research|thorough\s+research)\s+(?:on|into|about|for)\s+(.+)/i;
   var RESEARCH_ALTERNATE_RE = /\b(?:different search method|another search|alternate method|different sources?)\b/i;
   var RESEARCH_REFINE_RE = /\b(?:refine|narrow|dig deeper|go deeper|find more|what else|keep going|go on)\b/i;
@@ -29,7 +32,7 @@
   }
 
   function isQuotedResearchCommand(text) {
-    var trigger = /\b(?:research|search\s+the\s+web|web\s+search|look\s+up|investigate|find)\b/i;
+    var trigger = /\b(?:research|search\s+the\s+web|web\s+search|look\s+up|investigate|find|news|headlines?)\b/i;
     var patterns = [/["'][^"'\n]{0,500}["']/g, /`[^`\n]{0,500}`/g, /“[^”\n]{0,500}”/g];
     return patterns.some(function (pattern) {
       var match;
@@ -96,6 +99,8 @@
 
   function directResearchInfo(text) {
     var cleaned = cleanResearchText(text);
+    var news = newsRequestInfo(cleaned);
+    if (news) return news;
     if (!isResearchRequest(cleaned) || isResearchFollowup(cleaned)) return { explicit: false, strategy: 'search', topic: '' };
     var deepDive = DIRECT_DEEP_RESEARCH_RE.exec(cleaned);
     if (deepDive) return { explicit: true, strategy: 'refine', topic: researchTopicCleanup(deepDive[1]) };
@@ -122,6 +127,43 @@
     }
     if (RESEARCH_FOLLOWUP_RE.test(cleaned)) topic = '';
     return { explicit: true, strategy: strategy, topic: topic };
+  }
+
+  function newsRequestInfo(text) {
+    var cleaned = cleanResearchText(text);
+    if (!/\b(?:news|headlines?)\b/i.test(cleaned) || isQuotedResearchCommand(cleaned) ||
+        isExplicitBrowserResearchAction(cleaned) || privateResearchTopic(cleaned)) return null;
+    if (/\b(?:don't|do\s+not|never|stop|cancel|without|buy|sell|price|quote)\b/i.test(cleaned)) return null;
+    if (RESEARCH_OFFLINE_RE.test(cleaned) && !/\b(?:online|web|internet)\b/i.test(cleaned)) return null;
+    if (!/\b(?:latest|recent|current|today|find|get|check|search|show|tell|look)\b/i.test(cleaned)) return null;
+    var match = /\b(?:news|headlines?)\s+(?:(?:on|for|about|regarding)\s+)?(.+)/i.exec(cleaned);
+    return { explicit: true, strategy: 'search', topic: match ? researchTopicCleanup(match[1]) : '', news: true };
+  }
+
+  function newsContextQuery(priorUsers) {
+    var clarifications = [];
+    for (var index = priorUsers.length - 1; index >= 0; index--) {
+      var text = priorUsers[index], origin = newsRequestInfo(text);
+      if (origin) {
+        var topic = origin.topic;
+        if (!topic || privateResearchTopic(topic) || weakResearchTopic(topic)) return '';
+        var words = (topic.toLowerCase().match(/\w+/g) || []).filter(function(word) { return !RESEARCH_STOP_WORDS[word]; });
+        if (clarifications.some(function(item) {
+          return !(item.toLowerCase().match(/\w+/g) || []).some(function(word) { return words.indexOf(word) >= 0; });
+        })) return '';
+        return researchTopicCleanup(topic + (clarifications.length ? '; ' + clarifications.reverse().join('; ') : ''));
+      }
+      if (isResearchFollowup(text) || RESEARCH_STATUS_RE.test(text) || ACTION_STATUS_RE.test(text)) continue;
+      var confirmation = NEWS_CONFIRMATION_RE.exec(text);
+      if (confirmation) {
+        var clarification = researchTopicCleanup(confirmation[1]);
+        if (privateResearchTopic(clarification) || /\b(?:send|delete|open|launch|run|stop|cancel|file|folder|browser)\b/i.test(clarification)) return '';
+        clarifications.push(clarification);
+        continue;
+      }
+      return '';
+    }
+    return '';
   }
 
   function researchMessageText(message) {
@@ -192,6 +234,20 @@
     };
     var priorUsers = researchPriorUsers(messages, request);
     var direct = directResearchInfo(request);
+    if (direct.news && /\b(?:launch|spawn|spin\s+up|start|run|direct|ask)\b[^.!?]{0,60}\b(?:agents?|subagents?)\b/i.test(request)) return plan;
+    var confirmation = isResearchFollowup(request) ? null : NEWS_CONFIRMATION_RE.exec(request);
+    var newsTopic = isResearchFollowup(request) || confirmation ? newsContextQuery(priorUsers) : '';
+    if (newsTopic) {
+      if (confirmation) {
+        newsTopic = newsContextQuery(priorUsers.concat([request]));
+        if (!newsTopic) return plan;
+      }
+      plan.active = true;
+      plan.query = newsTopic;
+      plan.news = true;
+      plan.continuation = true;
+      return plan;
+    }
     if (direct.explicit) {
       var topic = direct.topic;
       if (!topic || weakResearchTopic(topic)) topic = researchContextQuery(priorUsers, true);
@@ -199,6 +255,7 @@
       plan.query = privateResearchTopic(topic) ? '' : String(topic || '').slice(0, RESEARCH_MAX_QUERY_LENGTH);
       plan.strategy = RESEARCH_STRATEGIES[direct.strategy] ? direct.strategy : 'search';
       plan.needs_topic = !plan.query;
+      if (direct.news) plan.news = true;
       return plan;
     }
     if (isResearchFollowup(request)) {

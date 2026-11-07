@@ -35,6 +35,9 @@ while keeping configuration, approvals, and personal data under your control.
   from verified completion, survive in chat context without duplication, and
   report malformed or excess actions. Visual-agent availability checks local
   prerequisites rather than assuming readiness.
+  Public-news follow-ups retain the recent user-specified topic through
+  confirmations and status checks, and run native retrieval before answering
+  rather than relying on a model's promise to search.
 - **Agent Observatory:** an animated starship command bridge, in-place agent
   inspector, and preserved memory-atom view. A shared depth-sorted canvas scene
   places walking crew, consoles, shadows, and lighting in one room rather than

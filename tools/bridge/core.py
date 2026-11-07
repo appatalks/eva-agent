@@ -570,7 +570,7 @@ from bridge.background import (  # noqa: F401
 from bridge.briefing import briefing_prompt_context, briefing_status, briefing_unavailable_sources, start_startup_briefing
 from bridge.audit import audit_event
 from bridge.model_policy import select_model_policy
-from bridge.research import resolve_research_request, retrieve_research, research_prompt, suppress_research_actions
+from bridge.research import resolve_research_request, retrieve_research, research_prompt, finalize_research_answer
 from bridge.telemetry import (  # noqa: F401
     _StdoutTee,
     _log_ring_add,
@@ -5114,7 +5114,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         import re as _re
         _routing_message = _effective_routing_message(user_message, internal, recall_query)
-        if not internal:
+        research_history = data.get("research_history")
+        if isinstance(research_history, list):
+            research_history = [{"role": "user", "content": item[:2000]}
+                                for item in research_history[-6:] if isinstance(item, str)]
+        else:
+            research_history = messages
+        research_plan = resolve_research_request(_routing_message, research_history)
+        if not internal and not research_plan["active"]:
             _routing_message = github_continuation_routing_message(
                 messages, _routing_message, _classify_request_type
             )
@@ -5123,16 +5130,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _request_type = _classify_request_type(msg_lower)
         _fast_route = _classify_fast_route(_routing_message)
         _passive_recall = _is_passive_memory_recall(_routing_message)
-        research_history = data.get("research_history")
-        if isinstance(research_history, list):
-            research_history = [{"role": "user", "content": item[:2000]}
-                                for item in research_history[-6:] if isinstance(item, str)]
-        else:
-            research_history = messages
-        research_plan = resolve_research_request(_routing_message, research_history)
         # Reviewer/planner calls do not gain tools by quoting the research request.
         native_research = bool(research_plan["active"] and not no_tools
-                       and _request_type in {"general", "web-search"})
+                       and (_request_type in {"general", "web-search", "news-search"}
+                            or (research_plan.get("news") and _request_type == "financial-data")))
         research_receipt = None
         if native_research:
             _request_type = "web-search"
@@ -5957,13 +5958,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     response_text
                 )
 
+            if native_research:
+                response_text = finalize_research_answer(response_text, research_receipt)
             if response_text and _st.cognition_enabled and not internal:
                 threading.Thread(target=_post_response_reflection,
                                  args=(user_message, response_text, model_used, conversation_id, turn_id),
                                  daemon=True).start()
 
-            if native_research:
-                response_text = suppress_research_actions(response_text)
             response = {
                 "id": f"aig-{int(time.time())}",
                 "object": "chat.completion",
@@ -6265,7 +6266,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
 
         if native_research:
-            response_text = suppress_research_actions(response_text)
+            response_text = finalize_research_answer(response_text, research_receipt)
 
         # Step 5: Post-response reflection (background)
         if response_text and _st.cognition_enabled and not internal:
