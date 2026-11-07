@@ -192,7 +192,7 @@ SIGNAL_SEND_TIMEOUT = 15
 # ── Entity extraction ──────────────────────────────────────────────
 ENTITY_IGNORE_WORDS = {
     "the", "this", "that", "what", "when", "where", "how", "why", "who", "can", "could",
-    "would", "should", "hello", "please", "thanks", "hey", "eva", "image", "tell", "today",
+    "would", "should", "hello", "please", "thank", "thanks", "hey", "eva", "image", "tell", "today",
     "tomorrow", "yesterday", "time", "date", "reply", "respond", "answer", "exactly",
     "its", "whats", "have", "has", "had", "does", "did", "was", "were", "are", "been",
     "being", "will", "shall", "may", "might", "must", "let", "lets", "also", "just",

@@ -1349,7 +1349,7 @@ def test_sidebar_workflow_contract():
     report("workflow_voice_skill_management", all(value in skills_js for value in ("createSkillFromRequest", "updateSkillByName", "setSkillStatusByName", "deleteSkillByName", "runSkillFromRequest", "openExternalUrlFromSkill", "eva_harness.open_external_url")) and all(value in harness_js for value in ("create_skill", "update_skill", "set_skill_status", "delete_skill", "run_skill", "open_external_url")))
     report("workflow_voice_skill_idempotency", "Reused existing " in skills_js and "_authorizedSkillUrls(skill).indexOf(url)" in skills_js and "created.status" in harness_js and "'create_skill', 'update_skill', 'set_skill_status', 'delete_skill', 'run_skill', 'open_external_url'" in options_js)
     report("workflow_native_harness_voice_manifest", "voiceAwareActions: actions.slice()" in harness_js and "complete native action manifest is available when interpreting typed and voice requests" in harness_js and "awareness never bypasses an action gate" in harness_js)
-    report("workflow_native_harness_marker", "EVA_HARNESS" in options_js and "EvaHarness.execute" in options_js and "browserLaunch = null;" in options_js and "desktopLaunch = null;" in options_js and "EvaHarness.promptContract" in prompts_js and options_js.find("var desktopLaunch = null;") < options_js.find("if (harnessActions.length) {\n    browserLaunch = null;"))
+    report("workflow_native_harness_marker", "EVA_HARNESS" in options_js and "EvaHarness.execute" in options_js and "browserLaunch = null;" in options_js and "desktopLaunch = null;" in options_js and "EvaHarness.promptContract" in prompts_js and options_js.find("var desktopLaunch = null;") < options_js.find("if (harnessRequested) {\n    browserLaunch = null;"))
     report("workflow_native_github_import", "import_github" in harness_js and "repository_url" in harness_js and "EvaWorkspaces.importGitHub" in harness_js and "nativeRoute.action && nativeRoute.action !== 'navigate'" in options_js and "route.action && route.action !== 'navigate'" in voice_js)
     report("workflow_native_terminal_command", "run_terminal_command" in harness_js and "runEvaTerminalCommand" in harness_js and "function runEvaTerminalCommand" in open("core/js/features/sessions/explorer.js").read())
     report("workflow_native_workspace_description", "describe_workspaces" in harness_js and "EvaWorkspaces.describe" in harness_js and "Promise.resolve(EvaWorkspaces.describe())" in harness_js and "await Promise.resolve" in options_js and "Promise.resolve(pendingResult)" in voice_js and "evaTextPromptCancel()" in voice_js)
@@ -1990,7 +1990,7 @@ def test_agent_operations_contract():
                f"missing #{element_id}" if f'id="{element_id}"' not in html else "")
     report("agent_operations_script", re.search(r'src="core/js/features/agents/operations\.js(?:\?[^" ]+)?"', html) is not None)
     report("agent_operations_adaptive_polling",
-           "AGENT_ACTIVE_POLL_MS = 2000" in ui and "AGENT_IDLE_POLL_MS = 20000" in ui
+           "AGENT_ACTIVE_POLL_MS = 2000" in ui and "AGENT_IDLE_POLL_MS = 5000" in ui
             and "function scheduleNextRefresh" in ui and "return Promise.resolve(refresh()).finally(scheduleNextRefresh);" in ui and "setInterval(refresh, 2000)" not in ui
             and "setInterval(function() { if (!state.open) refresh(); }, 15000);" not in ui,
            "Agent Operations must use active/idle timeout polling")
@@ -2087,7 +2087,7 @@ def test_agent_operations_contract():
     report("agent_operations_rich_tooltip", "function graphTooltipText" in ui and "Orchestrates:" in ui and "Receives from:" in ui and "Confidence:" in ui)
     report("agent_operations_live_graph_status", "agentById['agent-' + agent.id]" in ui and "node.status = liveAgent.status" in ui)
     report("agent_operations_done_graph_state", "doneAgent" in ui and "statusLabel(node.status)" in ui)
-    report("agent_operations_model_routing", 'get("model", "")' in bridge and "selected_model = model or template.model" in worker)
+    report("agent_operations_model_routing", 'get("model", "")' in bridge and 'selected_model = model or provider_config.get("COPILOT_MODEL") or template.model' in worker)
     report("agent_operations_no_native_prompt", "prompt(" not in profiles and "prompt(" not in sessions)
     with open("tools/bridge/acp_client.py") as f:
         acp_client = f.read()

@@ -429,6 +429,7 @@ async function main() {
   assert.strictEqual(correctedPullRoute.repository, 'appatalks/eva-agent');
   const correctedImportRoute = harness.resolveNavigationRequest('Import repo Apatox/eva-agent.', { directUser: true });
   assert.strictEqual(correctedImportRoute.repositoryName, 'appatalks/eva-agent');
+  visibleUserMessages = [pullUrl];
   const mergeRoute = harness.resolveNavigationRequest('Merge PR #183 into main.', { directUser: true });
   assert.strictEqual(mergeRoute.action, 'merge_github_pull_request');
   assert.strictEqual(mergeRoute.number, 183);
@@ -453,6 +454,7 @@ async function main() {
   const modelBranchDelete = await harness.execute(branchDeleteRoute, { source: 'model', userRequest: 'Delete the associated branch.' });
   assert.strictEqual(modelBranchDelete.ok, false);
   assert.match(modelBranchDelete.message, /direct user interaction/);
+  visibleUserMessages = [];
   delete localStorage.values.eva_last_github_pull_request;
   localStorage.values.aigMessages = JSON.stringify([{ role: 'assistant', content: 'PR https://github.com/model/selected/pull/999 is merged.' }]);
   branchDeleteRequest = null;
@@ -544,6 +546,7 @@ async function main() {
   assert.strictEqual(directIssueRoute.action, 'run_repository_remediation');
   assert.strictEqual(directIssueRoute.repositoryName, fixtureRepository);
   assert.strictEqual((await harness.execute(directIssueRoute, { source: 'voice', userRequest: directIssueRequest })).ok, true);
+  visibleUserMessages = [directIssueRequest];
   const issueFollowUp = harness.resolveNavigationRequest('I made some updates, please go ahead and submit the issue.', { directUser: true });
   assert.strictEqual(issueFollowUp.action, 'describe_repository_remediation');
   assert.strictEqual(issueFollowUp.runId, '12345678-1234-4123-8123-123456789abc');
@@ -574,6 +577,7 @@ async function main() {
   });
   delete localStorage.values.eva_last_repository_remediation;
   delete localStorage.values.aigMessages;
+  visibleUserMessages = [dependabotUrlRequest];
   const pullRequestFollowUp = harness.resolveNavigationRequest('Please create the PR now.', { directUser: true });
   assert.strictEqual(pullRequestFollowUp.action, 'run_repository_remediation');
   assert.strictEqual(pullRequestFollowUp.repositoryName, fixtureRepository);
@@ -594,9 +598,11 @@ async function main() {
   assert.strictEqual(shortRemediationRoute.action, 'run_repository_remediation');
   assert.strictEqual(shortRemediationRoute.repositoryName, fixtureShortName);
   assert.strictEqual(harness.resolveNavigationRequest('Try to resolve some alerts with ' + fixtureShortName + ' repo.', { directUser: true }).action, 'run_repository_remediation');
+  visibleUserMessages = ['Try to resolve some alerts with ' + fixtureShortName + ' repo.'];
   const retryRemediationRoute = harness.resolveNavigationRequest('Try again please.', { directUser: true });
   assert.strictEqual(retryRemediationRoute.action, 'run_repository_remediation');
   assert.strictEqual(retryRemediationRoute.repositoryName, fixtureShortName);
+  visibleUserMessages = [];
   delete localStorage.values.eva_last_repository_remediation;
   nativeRemediationContext = null;
   localStorage.setItem('aigMessages', JSON.stringify([

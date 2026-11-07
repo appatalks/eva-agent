@@ -51,6 +51,7 @@
   <script src="core/js/features/workspaces/monitor.js?v=5.7.0"></script>
   <script src="core/js/features/workspaces/folders.js?v=5.7.0"></script>
   <script src="core/js/features/workspaces/live.js?v=5.7.0"></script>
+  <script src="core/js/features/agents/bridge-scene.js?v=5.7.0"></script>
   <script src="core/js/features/agents/operations.js?v=5.7.0"></script>
   <script src="core/js/harness-control.js?v=5.7.0"></script>
   <script src="core/js/features/voice/wake-listener.js"></script>
@@ -626,7 +627,7 @@
       <header class="agents-view-header">
         <div>
           <div id="agentsViewKicker" class="agents-kicker">LIVE ORCHESTRATION</div>
-          <h1 id="agentsViewTitle">Agent Operations</h1>
+          <h1 id="agentsViewTitle">Agent Observatory</h1>
         </div>
         <div class="agents-view-actions">
           <span id="agentsUpdatedAt" class="agents-updated">OFFLINE</span>
@@ -637,22 +638,47 @@
       <div class="agents-metrics" aria-label="Agent activity summary">
         <div class="agents-metric"><span>ACTIVE</span><strong id="agentsActiveCount">0</strong></div>
         <div class="agents-metric"><span>CAPACITY</span><strong id="agentsCapacity">0 / 4</strong></div>
-        <div class="agents-metric"><span>MEMORY NODES</span><strong id="agentsNodeCount">0</strong></div>
+        <div class="agents-metric"><span>MEMORY NODES</span><strong id="agentsNodeCount">--</strong></div>
         <div class="agents-metric"><span>BACKGROUND</span><strong id="agentsBackgroundState">IDLE</strong></div>
       </div>
-      <div class="agents-session-area">
-        <div id="agentsGrid" class="agents-grid" aria-live="polite"></div>
-        <aside id="agentDetail" class="agent-detail" aria-hidden="true">
-          <button id="agentDetailClose" class="agents-icon-btn agent-detail-close" type="button" aria-label="Close agent session">&times;</button>
-          <div id="agentDetailContent"></div>
-        </aside>
+      <div class="agent-observatory-toolbar">
+        <div class="agent-observatory-tabs" role="tablist" aria-label="Observatory views">
+          <button id="agentsFloorTab" type="button" role="tab" aria-selected="true" aria-controls="agentsFloor">Command bridge</button>
+          <button id="agentsMemoryTab" type="button" role="tab" aria-selected="false" aria-controls="agentsMemory" tabindex="-1">Memory atoms</button>
+          <button id="agentsCardsTab" type="button" role="tab" aria-selected="false" aria-controls="agentsGrid" tabindex="-1">Session cards</button>
+        </div>
+        <span id="agentsTelemetryState" class="agent-telemetry-state" role="status">Connecting to runtime</span>
       </div>
-      <section class="agent-graph" aria-label="Memory graph topology">
+      <div class="agents-session-area">
+        <div class="agent-observatory-stage">
+          <section id="agentsFloor" class="agent-floor" role="tabpanel" aria-labelledby="agentsFloorTab">
+            <div class="agent-floor-heading">
+              <span class="agents-kicker">EVA / COMMAND BRIDGE</span>
+              <p>Live crew / illustrative movement / select a crew member for status and controls.</p>
+            </div>
+            <div class="bridge-scene">
+              <canvas id="bridgeSceneCanvas" class="bridge-canvas" tabindex="0" aria-label="Shared crew bridge. Drag to pan, use arrow keys to move the camera, plus or minus to zoom, and Home to recenter."></canvas>
+              <div class="bridge-mission-panel">
+                <strong id="bridgeCrewCount">0 DELEGATED SESSIONS</strong>
+                <span id="bridgeMission">Awaiting runtime telemetry</span>
+              </div>
+              <div id="agentsFloorGroups" class="agent-floor-groups"></div>
+              <div class="bridge-camera-controls" aria-label="Bridge camera">
+                <button id="bridgeZoomOut" type="button" aria-label="Zoom out">&minus;</button>
+                <button id="bridgeRecenter" type="button">Recenter</button>
+                <button id="bridgeZoomIn" type="button" aria-label="Zoom in">+</button>
+              </div>
+            </div>
+            <div id="bridgeActivity" class="bridge-activity">Awaiting runtime telemetry.</div>
+            <div class="bridge-credit">Depth compositor adapted from StarNet / Original Eva crew and bridge artwork</div>
+          </section>
+          <div id="agentsGrid" class="agents-grid" role="tabpanel" aria-labelledby="agentsCardsTab" hidden></div>
+      <section id="agentsMemory" class="agent-graph" role="tabpanel" aria-labelledby="agentsMemoryTab" hidden>
         <div class="agent-graph-heading">
           <div>
             <span class="agents-kicker">NEURAL MEMORY FIELD</span>
             <h2>Memory Topology</h2>
-            <p class="agent-graph-guidance">Confidence and relationship influence pull memories forward; weaker associations recede into depth. Move across the field for parallax, or select a structured memory to review it.</p>
+            <p class="agent-graph-guidance">Explore stored memory atoms and relationships. Depth reflects confidence and connectivity, not live retrieval or reasoning. Select a structured memory to review it.</p>
           </div>
           <div class="agent-graph-legend" aria-label="Graph legend">
             <span><i class="legend-entity"></i>Entity</span>
@@ -671,6 +697,12 @@
           <div id="agentGraphTooltip" class="agent-graph-tooltip" aria-hidden="true"></div>
         </div>
       </section>
+        </div>
+        <aside id="agentDetail" class="agent-detail" aria-hidden="true" aria-label="Selected agent inspector">
+          <button id="agentDetailClose" class="agents-icon-btn agent-detail-close" type="button" aria-label="Close agent inspector">&times;</button>
+          <div id="agentDetailContent"></div>
+        </aside>
+      </div>
     </section>
     <div id="textToSynth">
       <!-- Chat Output Area -->

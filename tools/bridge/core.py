@@ -64,7 +64,10 @@ from bridge.aig_request import (
 )
 from bridge.aig_preflight import plan_aig_preflight, should_fallback_local_tool_to_acp
 from bridge.http_routes import match_patch_route
-from bridge.capabilities import runtime_capabilities, runtime_capability_prompt_view
+from bridge.capabilities import (
+    runtime_capabilities, runtime_capability_prompt_view,
+    harness_self_assessment_prompt_view, responder_runtime_prompt_view,
+)
 from protected_memory import (
     ProtectedMemoryError,
     ProtectedVault,
@@ -567,7 +570,7 @@ from bridge.background import (  # noqa: F401
 from bridge.briefing import briefing_prompt_context, briefing_status, briefing_unavailable_sources, start_startup_briefing
 from bridge.audit import audit_event
 from bridge.model_policy import select_model_policy
-from bridge.research import resolve_research_request, retrieve_research, research_prompt, suppress_research_actions
+from bridge.research import resolve_research_request, retrieve_research, research_prompt, finalize_research_answer
 from bridge.telemetry import (  # noqa: F401
     _StdoutTee,
     _log_ring_add,
@@ -4029,6 +4032,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "status": task.get("status", "unknown"),
                     "detail": task.get("prompt", ""),
                     "activity": task.get("activity", ""),
+                    "last_activity_at": task.get("last_activity_at"),
+                    "last_output_at": task.get("last_output_at"),
+                    "received_from": task.get("received_from", []),
+                    "last_handoff_at": task.get("last_handoff_at"),
                     "result": task.get("result"),
                     "started_at": task.get("started_at"),
                     "ended_at": task.get("ended_at"),
@@ -4202,6 +4209,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
         signal_on_complete = bool((data or {}).get("signal_on_complete")) and collaborative
         if signal_on_complete and not self._require_bridge_capability():
             return
+        si_provider_config = None
+        if str((data or {}).get("si_runtime") or "") == "copilot":
+            try:
+                base_url, error = _validate_lmstudio_base_url(
+                    str((data or {}).get("lmstudio_base_url") or "http://localhost:1234/v1")
+                )
+                if error:
+                    raise ValueError(error)
+                selected_model = str((data or {}).get("lmstudio_model") or "").strip()
+                if not selected_model:
+                    from bridge.local_mcp import _resolve_lmstudio_model
+                    selected_model, error = _resolve_lmstudio_model(base_url, "")
+                    if error:
+                        raise ValueError(error)
+                si_provider_config = _si_provider_config(base_url, selected_model)
+            except ValueError as error:
+                self._json_response(400, {"error": {"message": str(error)}})
+                return
         session_id = str((data or {}).get("session_id", "")).strip()[:120]
         workspace_project_id = str((data or {}).get("workspace_project_id", "")).strip()[:120]
         group_id = str((data or {}).get("group_id", "")).strip()[:120] or "group-" + uuid.uuid4().hex[:10]
@@ -4231,6 +4256,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "signal_status": "",
                 "steer_queue": [],
                 "steer_history": [],
+                "_acp_provider_config": dict(si_provider_config or {}),
             })
         if collaborative:
             synthesis = tasks[-1]
@@ -5088,7 +5114,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
         import re as _re
         _routing_message = _effective_routing_message(user_message, internal, recall_query)
-        if not internal:
+        research_history = data.get("research_history")
+        if isinstance(research_history, list):
+            research_history = [{"role": "user", "content": item[:2000]}
+                                for item in research_history[-6:] if isinstance(item, str)]
+        else:
+            research_history = messages
+        research_plan = resolve_research_request(_routing_message, research_history)
+        if not internal and not research_plan["active"]:
             _routing_message = github_continuation_routing_message(
                 messages, _routing_message, _classify_request_type
             )
@@ -5097,16 +5130,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _request_type = _classify_request_type(msg_lower)
         _fast_route = _classify_fast_route(_routing_message)
         _passive_recall = _is_passive_memory_recall(_routing_message)
-        research_history = data.get("research_history")
-        if isinstance(research_history, list):
-            research_history = [{"role": "user", "content": item[:2000]}
-                                for item in research_history[-6:] if isinstance(item, str)]
-        else:
-            research_history = messages
-        research_plan = resolve_research_request(_routing_message, research_history)
         # Reviewer/planner calls do not gain tools by quoting the research request.
         native_research = bool(research_plan["active"] and not no_tools
-                       and _request_type in {"general", "web-search"})
+                       and (_request_type in {"general", "web-search"}
+                            or (research_plan.get("news") and _request_type in {"news-search", "financial-data"})))
         research_receipt = None
         if native_research:
             _request_type = "web-search"
@@ -5587,6 +5614,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "- Use the context below naturally as your own knowledge.\n\n"
         )
 
+        eva_system += harness_self_assessment_prompt_view() + "\n"
+
         try:
             from bridge.email_service import capability_summary as _email_capability
             eva_system += _email_capability() + "\n\n"
@@ -5771,6 +5800,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._json_response(502, {"error": {"message": model_error}})
                 return
 
+            eva_system += "\n" + responder_runtime_prompt_view(
+                requested_backend, selected_backend, lms_model,
+                "SI Harness via Eva Direct (OpenAI-compatible API)",
+                si_base_url=lms_base, user_message=user_message,
+            )
             lms_system_additions = []
             # Inject a short capability reminder close to the user message so
             # local models (which struggle with long system prompts) still know
@@ -5924,13 +5958,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     response_text
                 )
 
+            if native_research:
+                response_text = finalize_research_answer(response_text, research_receipt)
             if response_text and _st.cognition_enabled and not internal:
                 threading.Thread(target=_post_response_reflection,
                                  args=(user_message, response_text, model_used, conversation_id, turn_id),
                                  daemon=True).start()
 
-            if native_research:
-                response_text = suppress_research_actions(response_text)
             response = {
                 "id": f"aig-{int(time.time())}",
                 "object": "chat.completion",
@@ -6040,20 +6074,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 si_model_override if si_copilot_unified else
                 acp_response_model or (_st.acp_client.model if _st.acp_client else "") or "default"
             )
-        eva_system += (
-            f"\n[Runtime - AUTHORITATIVE GROUND TRUTH]\n"
-            f"This block is injected by tools/acp_bridge.py. It overrides any model self-knowledge.\n"
-            f"Requested backend preference: {requested_backend}\n"
-            f"Selected backend: {selected_backend}\n"
-            f"Active responder model: {_runtime_model}\n"
-            f"Routing path: {_route_label}\n"
-            f"Wrapper: Eva AIG via tools/acp_bridge.py\n\n"
-            f"When asked which model you are, what your base model is, your model ID, "
-            f"who made you, or what powers you, you MUST answer using ONLY the values above. "
-            f"Do NOT claim to be Claude, GPT-4o, GPT-4, Opus, Sonnet, Haiku, Gemini, "
-            f"or any other model unless that exact name appears in 'Active responder model' above. "
-            f"If 'Active responder model' is '{_runtime_model}', then your answer is "
-            f"'{_runtime_model}' and nothing else. Do not second-guess this block.\n\n"
+        eva_system += "\n" + responder_runtime_prompt_view(
+            requested_backend, selected_backend, _runtime_model, _route_label,
+            si_base_url=si_base_url if si_copilot_unified else "",
+            user_message=user_message,
         )
         if _request_type == "github-data":
             eva_system += (
@@ -6242,7 +6266,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
 
         if native_research:
-            response_text = suppress_research_actions(response_text)
+            response_text = finalize_research_answer(response_text, research_receipt)
 
         # Step 5: Post-response reflection (background)
         if response_text and _st.cognition_enabled and not internal:

@@ -1932,6 +1932,14 @@ async function sendData() {
           if (nativeRoute.action === 'run_workspace_check' || nativeRoute.action === 'run_repository_remediation' || nativeRoute.action === 'describe_workspace_tools') {
             injectWorkspaceStatusBubble(nativeResult.message, nativeResult.ok ? 'working' : 'error');
           }
+          var directOutcome = evaRememberNativeActionOutcome(
+            protectedRawText, (nativeResult.ok ? '' : 'Native control failed: ') + nativeResult.message, true,
+            [Object.assign({}, nativeResult, {
+              action: nativeRoute.action,
+              target: nativeRoute.repositoryName || nativeRoute.url || nativeRoute.skillName || nativeRoute.projectName || nativeRoute.target
+            })]
+          );
+          if (typeof lastResponse === 'string') lastResponse = directOutcome;
           if (typeof recordConversationTurn === 'function') recordConversationTurn(protectedRawText, nativeResult.message);
           evaAuditEvent('native_action', evaAuditOutcome(nativeResult && nativeResult.data && nativeResult.data.outcome, nativeResult.ok), {
             correlation_id: auditTurnId,
@@ -1967,6 +1975,37 @@ async function sendData() {
   await aigSend();
 }
 
+function evaRememberNativeActionOutcome(userRequest, summary, recordUser, outcomes) {
+  function bounded(value, limit) {
+    return String(value || '').replace(/\[\[/g, '[ [').replace(/\]\]/g, '] ]').slice(0, limit);
+  }
+  var receipt = '[Native action outcome] ' + JSON.stringify({
+    version: 1,
+    turn_id: bounded(window._evaActiveAuditTurnId, 120),
+    results: (outcomes || [{ message: summary }]).slice(0, 6).map(function(item) {
+      var data = item.data || {};
+      return {
+        action: bounded(item.action, 80),
+        target: bounded(data.url || item.target, 2048),
+        outcome: bounded(data.outcome || (item.ok === false ? 'failed' : 'completed'), 40),
+        run_id: bounded(data.runId, 120),
+        verification: bounded(data.verification || 'not-assessed', 40),
+        reason: bounded(data.reason, 80),
+        message: bounded(item.message, 1000)
+      };
+    })
+  });
+  try {
+    var messages = JSON.parse(localStorage.getItem('aigMessages') || '[]');
+    if (Array.isArray(messages)) {
+      if (recordUser) messages.push({ role: 'user', content: String(userRequest || '') });
+      messages.push({ role: 'assistant', content: receipt });
+      localStorage.setItem('aigMessages', JSON.stringify(messages));
+    }
+  } catch (_) {}
+  return receipt;
+}
+
 function evaAuditEvent(event, outcome, fields) {
   var allowedEvents = { 'turn.input': true, 'turn.rendered': true, native_action: true, direct_route: true, terminal_task: true, 'voice.command': true };
   var allowedOutcomes = { started: true, planned: true, completed: true, cancelled: true, failed: true, submitted: true };
@@ -2000,9 +2039,11 @@ function evaCreateAuditTurnId() {
 }
 
 function evaAuditOutcome(outcome, ok) {
+  if (outcome === 'started' || outcome === 'running' || outcome === 'queued') return 'started';
+  if (outcome === 'planned' || outcome === 'pending_confirmation' || outcome === 'awaiting_confirmation') return 'planned';
   if (outcome === 'submitted') return 'submitted';
   if (outcome === 'cancelled') return 'cancelled';
-  if (outcome === 'failed') return 'failed';
+  if (outcome === 'failed' || outcome === 'blocked' || outcome === 'error') return 'failed';
   return ok === false ? 'failed' : 'completed';
 }
 
@@ -3250,31 +3291,103 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
   // browser or desktop agent. A response that contains one takes precedence
   // over visual-agent markers so Eva does not automate her own interface.
   var harnessActions = [];
-  text = text.replace(/\[\[EVA_HARNESS\]\]\s*(\{[\s\S]*?\})\s*(?:\[\[\/EVA_HARNESS\]\])?/g, function(full, json) {
-    try {
-      var action = JSON.parse(json);
-      if (action && typeof action === 'object') harnessActions.push(action);
-    } catch (e) {}
-    return '';
-  });
-  var harnessResults = [];
-  if (harnessActions.length && window.EvaHarness && typeof EvaHarness.execute === 'function') {
-    for (var harnessIndex = 0; harnessIndex < Math.min(harnessActions.length, 3); harnessIndex++) {
-      harnessResults.push(await Promise.resolve(EvaHarness.execute(harnessActions[harnessIndex], {
-        source: 'model',
-        userRequest: renderOptions.nativeRequest || ''
-      })));
+  var harnessRequested = false;
+  var invalidHarnessActions = 0;
+  var harnessMarker = /\[\[EVA_HARNESS\]\]\s*/g;
+  var harnessMatch;
+  var harnessCursor = 0;
+  var harnessText = '';
+  while ((harnessMatch = harnessMarker.exec(text))) {
+    harnessRequested = true;
+    harnessText += text.slice(harnessCursor, harnessMatch.index);
+    var jsonStart = harnessMarker.lastIndex;
+    var jsonEnd = jsonStart;
+    var jsonDepth = 0;
+    var jsonQuoted = false;
+    var jsonEscaped = false;
+    // Delimiters inside JSON strings belong to the payload, not the action protocol.
+    if (text[jsonStart] === '{') {
+      for (; jsonEnd < text.length; jsonEnd++) {
+        var jsonCharacter = text[jsonEnd];
+        if (jsonQuoted) {
+          if (jsonEscaped) jsonEscaped = false;
+          else if (jsonCharacter === '\\') jsonEscaped = true;
+          else if (jsonCharacter === '"') jsonQuoted = false;
+        } else if (jsonCharacter === '"') jsonQuoted = true;
+        else if (jsonCharacter === '{') jsonDepth += 1;
+        else if (jsonCharacter === '}' && --jsonDepth === 0) {
+          jsonEnd += 1;
+          break;
+        }
+      }
     }
-    harnessResults.forEach(function(item, index) {
+    try {
+      var action = JSON.parse(text.slice(jsonStart, jsonEnd));
+      if (!action || typeof action !== 'object' || Array.isArray(action) || typeof action.action !== 'string' || !action.action.trim()) {
+        throw new Error('Invalid native action.');
+      }
+      harnessActions.push(action);
+      harnessCursor = jsonEnd;
+      var closingMarker = text.slice(harnessCursor).match(/^\s*\[\[\/EVA_HARNESS\]\]/);
+      if (closingMarker) harnessCursor += closingMarker[0].length;
+    } catch (e) {
+      invalidHarnessActions += 1;
+      if (text[jsonStart] === '{') {
+        harnessCursor = jsonEnd;
+        var invalidClosingMarker = text.slice(harnessCursor).match(/^\s*\[\[\/EVA_HARNESS\]\]/);
+        if (invalidClosingMarker) harnessCursor += invalidClosingMarker[0].length;
+      } else {
+        var invalidClose = text.indexOf('[[/EVA_HARNESS]]', jsonStart);
+        var nextHarness = text.indexOf('[[EVA_HARNESS]]', jsonStart);
+        harnessCursor = invalidClose >= 0 && (nextHarness < 0 || invalidClose < nextHarness)
+          ? invalidClose + '[[/EVA_HARNESS]]'.length : (nextHarness >= 0 ? nextHarness : text.length);
+      }
+    }
+    harnessMarker.lastIndex = harnessCursor;
+  }
+  text = harnessText + text.slice(harnessCursor);
+  var harnessResults = [];
+  var nativeActionReceipt = '';
+  if (harnessRequested) {
+    for (var harnessIndex = 0; harnessIndex < Math.min(harnessActions.length, 3); harnessIndex++) {
+      var harnessAction = harnessActions[harnessIndex];
+      var harnessResult;
+      try {
+        harnessResult = window.EvaHarness && typeof EvaHarness.execute === 'function'
+          ? await Promise.resolve(EvaHarness.execute(harnessAction, {
+            source: 'model', userRequest: renderOptions.nativeRequest || ''
+          }))
+          : { ok: false, message: 'Native controls are unavailable.', data: { outcome: 'failed', reason: 'unavailable' } };
+        if (!harnessResult || typeof harnessResult.ok !== 'boolean') throw new Error('The native executor returned no valid receipt.');
+      } catch (error) {
+        harnessResult = { ok: false, message: error && error.message || 'Native execution failed.', data: { outcome: 'failed', reason: 'failed' } };
+      }
+      harnessResults.push(Object.assign({}, harnessResult, {
+        action: harnessAction.action,
+        target: harnessAction.repositoryName || harnessAction.url || harnessAction.skillName || harnessAction.projectName || harnessAction.target
+      }));
+    }
+    if (invalidHarnessActions) harnessResults.push({
+      ok: false, action: 'invalid_native_action',
+      message: 'Rejected ' + invalidHarnessActions + ' malformed native action payload(s); they were not executed.',
+      data: { outcome: 'failed', reason: 'failed' }
+    });
+    if (harnessActions.length > 3) harnessResults.push({
+      ok: false, action: 'native_action_limit',
+      message: 'Rejected ' + (harnessActions.length - 3) + ' native action(s) beyond the three-action limit; they were not executed.',
+      data: { outcome: 'failed', reason: 'failed' }
+    });
+    harnessResults.forEach(function(item) {
       evaAuditEvent('native_action', evaAuditOutcome(item && item.data && item.data.outcome, item && item.ok), {
         correlation_id: renderOptions.turnId || window._evaActiveAuditTurnId || '',
-        action: harnessActions[index] && harnessActions[index].action || '',
+        action: item.action || '',
         label: item && item.label || '',
         reason: item && item.data && item.data.reason || ''
       });
     });
     text = text.replace(/\n{3,}/g, '\n\n').trim();
     var harnessSummary = harnessResults.map(function(item) { return item.ok ? item.message : 'Native control failed: ' + item.message; }).join(' ');
+    if (harnessSummary) nativeActionReceipt = evaRememberNativeActionOutcome(renderOptions.nativeRequest, harnessSummary, false, harnessResults);
     if (harnessSummary) text = (text ? text + '\n\n' : '') + '_' + harnessSummary + '_';
   }
 
@@ -3348,7 +3461,7 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     text = text.replace(/\n{3,}/g, '\n\n').trim();
   }
 
-  if (harnessActions.length) {
+  if (harnessRequested) {
     browserLaunch = null;
     desktopLaunch = null;
     text = text.replace(/_Opening the (?:browser|desktop) agent…_\s*/g, '');
@@ -3726,6 +3839,7 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     response_chars: content.length
   });
   if (typeof saveCurrentSession === 'function') saveCurrentSession();
+  return { nativeActionReceipt: nativeActionReceipt };
 }
 
 /**

@@ -165,6 +165,11 @@ def _subagent_dependency_context(task_id, timeout=300):
                         f"[{dependency.get('label', dependency.get('id', 'Agent'))}]\n"
                         f"{str(dependency.get('result') or '')[:4000]}"
                     )
+                task["received_from"] = [
+                    {"id": item.get("id", ""), "label": item.get("label") or "Agent"}
+                    for item in dependencies
+                ]
+                task["last_handoff_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 return "\n\n".join(sections)
         time.sleep(0.25)
     raise RuntimeError("timed out waiting for dependency tasks")
@@ -443,16 +448,21 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
             from bridge.acp_client import ACPClient
             with _st.acp_pool_lock:
                 template = _st.acp_client
-                if not template or not template.alive:
+                provider_config = dict(task.get("_acp_provider_config") or getattr(template, "provider_config", {}) or {})
+                if (not template or not template.alive) and not provider_config:
                     raise RuntimeError("ACP not available")
-                selected_model = model or template.model
-                assigned_cwd = str(task.get("_cwd") or template.cwd)
+                selected_model = model or provider_config.get("COPILOT_MODEL") or template.model
+                assigned_cwd = str(task.get("_cwd") or (template.cwd if template else os.getcwd()))
+                if provider_config and model:
+                    for key in ("COPILOT_MODEL", "COPILOT_PROVIDER_MODEL_ID", "COPILOT_PROVIDER_WIRE_MODEL"):
+                        provider_config[key] = model
                 client = ACPClient(
-                    copilot_path=template.copilot_path,
+                    copilot_path=template.copilot_path if template else "copilot",
                     cwd=assigned_cwd,
                     model=selected_model,
-                    mcp_config=_subagent_mcp_config(template, task),
-                    reasoning_effort=template.reasoning_effort,
+                    mcp_config=_subagent_mcp_config(template, task) if template else dict(task.get("_workspace_mcp_config") or {}),
+                    reasoning_effort=template.reasoning_effort if template else None,
+                    provider_config=provider_config,
                 )
         if task.get("coding_run_id"):
             client.workspace_run_id = task["coding_run_id"]

@@ -111,6 +111,28 @@ configured in Settings > Auth; Docker is not required. Local MCP servers that do
 support Eva's modern discovery extension can use standard MCP `2025-06-18`
 initialization.
 
+**Runtime identity and memory grounding.** The responder context distinguishes
+the selected backend, model identifier/alias, and actual transport. An alias such
+as `local-model` is not evidence of the underlying architecture. Optional local
+model metadata is matched to the selected model; its endpoint is validated,
+redirects are disabled, and environment proxies are bypassed. Mention counts
+and recurring-topic labels remain unverified context, not confirmed profile
+facts or relationships. Sources:
+[`responder_runtime_prompt_view`](tools/bridge/capabilities.py),
+[`_si_model_metadata`](tools/bridge/local_mcp.py), and
+[`memory prompt assembly`](tools/bridge/cognition.py).
+
+**Action receipts.** Native action results distinguish acceptance, verified
+completion, and failure. Conversational promises do not establish execution.
+Receipt correlation prevents duplicate output; malformed markers and excess
+actions are rejected rather than silently treated as success. Playlist actions
+retain direct-user authorization, while generic retry wording binds only to
+the immediate relevant context instead of resurrecting a stale repository
+objective. Visual-agent readiness reports actual prerequisites rather than
+assuming availability. Sources: [`core/js/harness-control.js`](core/js/harness-control.js),
+[`core/js/options.js`](core/js/options.js), and
+[`tools/bridge/aig_request.py`](tools/bridge/aig_request.py).
+
 **Native research (bounded first slice).** Explicit online research requests use
 configured `web_search` and `web_fetch` MCP tools before response synthesis. The
 bridge performs one search (up to five results) and reads at most two public pages;
@@ -125,6 +147,28 @@ news-oriented search tool, or reports that the alternative is unavailable. An
 unrelated intervening request breaks continuation. Missing or potentially private
 topics require clarification before any search. No new MCP service is registered;
 an already configured web service may be started and stopped for the request.
+
+**Public-news follow-ups.** News requests use `web_search_news` directly.
+`Yes please continue` and `please continue` retain the recent user-specified
+news topic through narrow ticker/company confirmations and action-status
+questions. Both requested subjects are retained; a confirmation must share
+a subject token with the original request. Only the latest six user turns
+are considered. Unrelated requests, cancellation, private topics, and
+assistant-only promises cannot establish or revive a search topic.
+Explicit agent-launch requests retain the batch-launch path; their subsequent
+news follow-ups can retrieve sources without relaunching those agents.
+
+The browser and bridge independently resolve the plan. The bridge resolves
+research before generic GitHub continuation routing, so a valid news
+continuation cannot revive an older repository mutation. Native retrieval runs
+before synthesis, including on direct LM Studio turns. A short model response
+that merely promises to search is replaced with the actual retrieved source
+list; unavailable retrieval returns a truthful failure without another model
+call. This is a bounded news/research continuation mechanism, not a general
+promise scheduler or durable task-resumption system.
+Implementation: [`core/js/request-routing.js`](core/js/request-routing.js),
+[`tools/bridge/research.py`](tools/bridge/research.py), and
+[`BridgeHandler._aig_chat`](tools/bridge/core.py).
 
 Results distinguish page excerpts from search snippets, include retrieval timestamps
 and source URLs, and remain untrusted source data. Failed page reads preserve snippets
@@ -1314,17 +1358,60 @@ Local webcam face and motion detection.
 ### Agent Operations View
 
 The **Agents** sidebar destination replaces the chat workspace with a live
-operations scorecard. On screens narrower than 600 px, the Eva theme hides its
+Agent Observatory: **Command bridge**, **Memory atoms**, and **Session cards**
+tabs, plus an in-place inspector. On screens narrower than 600 px, the Eva theme hides its
 sidebar and exposes the same destination through a compact grid button. The view
-is implemented by `core/js/features/agents/operations.js`, with structure in `index.html` and styles
-in `core/style.css`.
+is implemented by [`operations.js`](core/js/features/agents/operations.js) and
+[`bridge-scene.js`](core/js/features/agents/bridge-scene.js), with structure in
+[`index.html`](index.html) and styles in [`core/style.css`](core/style.css).
 
-The client polls `GET /v1/agents/overview` every two seconds while the view is
-open and every 15 seconds while it is closed so the sidebar count remains
-current. The memory graph is included at most every 30 seconds; intervening
-requests fetch only lightweight agent/background status and retain the prior
-graph client-side. Closing the view cancels its fast polling and animation
-frame. Opening Voice View closes Agent Operations and vice versa.
+The client polls `GET /v1/agents/overview` every two seconds while open with
+active work, and every five seconds while open and idle. Closing the view
+cancels its polling and animation. Memory topology is requested on its tab
+or an explicit graph refresh, and is otherwise cached for at least 30 seconds.
+Intervening requests use `include_graph=0` and retain the prior graph
+client-side. A failed request or snapshot older than ten seconds marks
+telemetry stale, freezes reported crew activity, and disables mutations.
+Opening Voice View closes Agent Operations and vice versa.
+
+#### Shared command-bridge scene
+
+`EvaBridgeScene.update(agents, {stale, selectedId})` maintains crew bodies keyed
+by real runtime IDs; `setActive()` controls one approximately 30 FPS animation
+loop. Original canvas geometry, crew, shadows, consoles, and ambient lighting
+share a perspective room with stable Y-depth ordering. Walking and status-based
+positions are illustrative, not evidence of tools, progress, or conversation.
+Only fresh `running` sessions perform working gestures. Eva's small ambient
+movements are decorative; empty consoles are not hidden agents.
+
+Camera controls support pointer-drag pan, arrow keys, plus/minus zoom, and Home
+to recenter. Zoom is bounded to 0.8-2.4; initial framing is 1.1 on desktop and
+1.65 below 600 px. Reduced motion renders static updates. Closing the view,
+switching away from the bridge, or hiding the document pauses the animation.
+Transparent keyboard-accessible crew buttons track drawn positions and open
+the inspector. Scoped CSS preserves transparency under Eva and LCARS themes,
+including hover and selection, without changing ordinary buttons.
+
+#### Evidence-backed crew bubbles
+
+Small, translucent bubbles show **Activity**, **Output**, or **Handoff**, never
+private reasoning. The worker's ACP `agent_message_chunk` callback updates
+bounded public output and `last_output_at`; its lifecycle callback updates
+coarse `activity` and `last_activity_at`. After upstream tasks finish,
+`_subagent_dependency_context()` records `received_from` and `last_handoff_at`
+when it assembles their labeled outputs for the synthesis prompt.
+Those fields are projected into the authenticated overview.
+
+The renderer selects the newest reported event, displays at most 110 characters
+as plain text, and expires it after ten seconds. Unchanged polling does not
+renew a bubble. At most two non-overlapping bubbles appear; the selected crew
+member has priority. Completed/inactive sessions and stale snapshots suppress
+them. A handoff means recorded upstream output consumption, not a fabricated
+agent-to-agent dialogue stream. Process-local task telemetry is not a durable
+conversation transcript.
+Sources: [`_subagent_worker` and `_subagent_dependency_context`](tools/bridge/utils.py),
+[`ACPClient._handle_session_update`](tools/bridge/acp_client.py), and
+[`BridgeHandler._agents_overview`](tools/bridge/core.py).
 
 Cards are keyed by task ID and updated in place. Polling changes only the text,
 status classes, and controls that changed; it does not recreate the card grid or
@@ -1348,10 +1435,12 @@ subagent-only `capacity` of four:
 | `desktop` | `tools/desktop_agent.py` run registry | goal/subgoal, step, active run state, result/error |
 | `background` | latest `BackgroundActivity` state | job type, status, notes, start/end time |
 
-Each square card has a stable runtime ID and displays kind, state, elapsed time,
-objective, and step where available. Selecting an unlinked card opens its live
-session detail pane. If a subagent was spawned with a `session_id`, selecting it
-loads that saved chat through the existing IndexedDB session manager.
+Each session card has a stable runtime ID and displays kind, state, elapsed time,
+objective, and step where available. Selecting a card or crew member opens its
+live inspector without navigating away. **Open linked chat** explicitly loads
+an available saved chat through the existing IndexedDB session manager.
+Supported steering and stop controls validate agent-specific bridge receipts;
+an accepted stop is not reported as completed until the runtime confirms it.
 
 Subagent detail includes a steering input. `POST /v1/subagent/steer` behaves as
 follows:
@@ -1390,8 +1479,29 @@ block, this deterministic guard discards any unsupported success narrative and
 creates one to four real tasks through the same capability. The rendered reply
 contains only bridge-accepted task IDs.
 
+Conversational delegation such as `direct three agents to discuss` also
+activates this guard, including the SI Copilot direct-response path that bypasses
+adaptive review. Negated instructions and how-to questions do not launch tasks.
+Fresh objectives do not replay the globally saved previous batch. Accepted
+batches require the expected count of nonempty, unique task IDs and produce a
+privacy-safe `native_action` acceptance audit.
+
+SI Copilot batch requests capture the configured local endpoint/model and attach
+private per-task `_acp_provider_config`. Workers prefer these explicit settings
+to the ambient ACP client and do not mutate the primary configuration or
+fallback to a cloud responder on local failure. Workspace-scoped SI clients
+retain the validated checkout while using an isolated Copilot home; ordinary
+SI chat retains its isolated workspace. These private settings are omitted
+from public task payloads.
+Sources: [`Cognition.ensureAgentLaunch`](core/js/cognition.js),
+[`aigSend`](core/js/providers/aig.js),
+[`BridgeHandler._subagent_spawn_batch`](tools/bridge/core.py),
+[`_subagent_worker`](tools/bridge/utils.py), and
+[`ACPClient.start`](tools/bridge/acp_client.py).
+
 For requests containing collaboration language such as `work together`,
-`relay`, or `handoff`, the last task becomes a synthesis agent. It is created
+`relay`, `handoff`, `discuss`, or `talk to each other`, the last task becomes a
+synthesis agent. It is created
 immediately in `waiting` state with `depends_on` references to the upstream
 tasks. Once all prerequisites are `done`, the bridge injects their labeled
 outputs into the synthesis prompt and transitions it to `running`. The topology
@@ -2184,6 +2294,7 @@ their runtime.
 
 | Project or standard | What Eva is studying or adapting | Current status |
 |---|---|---|
+| [StarNet](https://github.com/androoAGI/starnet) | Shared-scene composition, arrivals, grounded crew rendering, and stable depth ordering. | The small depth-ordering helper is adapted from pinned MIT-licensed code; Eva's scene/crew artwork and movement implementation are original. No StarNet sprites, artwork, fonts, branding, or runtime engine are bundled. |
 | Lieutenant Commander Data / *Star Trek: The Next Generation* | Curiosity, precision, ethical judgment, candid uncertainty, and care in understanding people. | Aspirational identity material only; Eva is independently implemented, does not imitate a character, and claims no fictional abilities. |
 | TencentDB Agent Memory | Layered memory concepts: evidence, atoms, scenarios, persona traits, and progressive disclosure. | Architecture reference only; Eva retains its local-first SQLite/Kusto design and does not adopt TencentDB's deployment stack. |
 | [Traycer](https://github.com/traycerai/traycer) | Durable agent identity separate from PTY scrollback, terminal stream replay/backpressure, worktree ownership facts, typed evidence, and capability-based A2A handoffs. | Durable run identity, bounded PTY replay, worktree ownership, and stable monitor IDs are implemented; collaboration canvas and cross-device sync remain deferred. |
@@ -2196,6 +2307,23 @@ their runtime.
 | [Aider](https://github.com/Aider-AI/aider) | Repository-map context, test/lint feedback loops, diffs, and undo-oriented Git workflow. | Workflow inspiration; isolated worktrees and focused validation are implemented, while commits remain explicit future review actions. |
 | [SWE-agent](https://github.com/SWE-agent/SWE-agent) | Issue-to-patch trajectories and coding-agent evaluation methodology. | Evaluation reference, not a desktop runtime. |
 | [Model Context Protocol](https://modelcontextprotocol.io/specification/2026-07-28) | Tool/resource boundaries, capability negotiation, cancellation, consent, and stateless modern stdio protocol design. | Eva supports legacy and modern local stdio tool servers; remote HTTP, OAuth, MRTR continuations, Tasks, Resources, Prompts, and Apps remain separate work. |
+
+### StarNet source and license citations
+
+The adapted `sortedItems()` helper comes from
+[`frontend/app/worldrenderer.js`, lines 65-69](https://github.com/androoAGI/starnet/blob/74fcd5040ba0eb93c8f9fa07b2d0a9fcfddd1475/frontend/app/worldrenderer.js#L65-L69)
+at immutable revision `74fcd5040ba0eb93c8f9fa07b2d0a9fcfddd1475`.
+It preserves insertion order for equal-depth entries. Eva uses its own finite
+scene coordinates, original canvas geometry, and independent movement logic.
+The complete upstream MIT notice, copyright 2026 Andrew Sims, is retained in
+[`bridge-scene.js`](core/js/features/agents/bridge-scene.js).
+
+Upstream references:
+[MIT license](https://github.com/androoAGI/starnet/blob/74fcd5040ba0eb93c8f9fa07b2d0a9fcfddd1475/LICENSE) and
+[`NOTICE.md`, "StarNet's own name and artwork"](https://github.com/androoAGI/starnet/blob/74fcd5040ba0eb93c8f9fa07b2d0a9fcfddd1475/NOTICE.md).
+The code license does not grant rights to StarNet's name, logo, artwork, sprites,
+or brand identity. Eva does not redistribute those assets or imply endorsement.
+The bridge is an original starship-inspired scene, not licensed Star Trek art.
 
 ### Runtime, Protocol, and Test Foundations
 

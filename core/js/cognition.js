@@ -102,8 +102,7 @@
     /\brun\s+(the\s+)?(eva|reviewer)\b/i,
     /\brun\s+(the\s+)?(cognitive\s+)?(chain|pipeline)\b/i,
     /\bengage\s+cognition\b/i,
-    /\bcognition\s*:\s*on\b/i,
-    /\b(?:launch|spawn|spin\s+up|kick\s+off|start|run)\b[^.!?]{0,50}\b(?:agents?|subagents?)\b/i
+    /\bcognition\s*:\s*on\b/i
   ];
 
   function detectTrigger(text) {
@@ -207,15 +206,19 @@
 
   function _agentLaunchIntent(text) {
     var source = String(text || '');
+    if (/\b(?:do\s+not|don't|never)\s+(?:launch|spawn|spin\s+up|start|run|direct|assign|ask|have|get|bring|assemble|convene)\b/i.test(source) ||
+        /^\s*(?:how\s+(?:do|can|would|could)\s+(?:i|we)|explain\s+how)\b/i.test(source)) return false;
     return /\b(?:launch|spawn|spin\s+up|kick\s+off|start|run)\b[^.!?]{0,60}\b(?:agents?|subagents?)\b/i.test(source) ||
            /\b(?:try|test|retry|repeat|redo|rerun|do)\b[^.!?]{0,80}\b(?:multi[- ]agent(?:ic)?|agentic|agents?|subagents?)\b/i.test(source) ||
+           /\b(?:direct|assign|ask|have|get|bring|assemble|convene)\s+(?:(?:the|your)\s+)?(?:(?:[1-4]|one|two|three|four|some|multiple|several)\s+)?(?:background\s+)?(?:agents?|subagents?)\s+(?:to\b|together\b)/i.test(source) ||
            /\b(?:multi[- ]agent(?:ic)?|agentic)\b[^.!?]{0,60}\b(?:turn|session|workflow|test|again)\b/i.test(source);
   }
 
   function _agentRepeatIntent(text) {
     var source = String(text || '');
-    return /\b(?:repeat|rerun|run|start|try|do)\b[^.!?]{0,60}\b(?:agents?|subagents?|batch|agent\s+(?:batch|run|workflow))\b/i.test(source) ||
-           /\b(?:repeat|rerun|run)\s+(?:the\s+)?(?:last|previous|those)\s+(?:agents?|subagents?|agent\s+(?:batch|run|workflow)|batch)\b/i.test(source);
+    if (!_agentLaunchIntent(source)) return false;
+    return /\b(?:repeat|rerun|retry|redo)\s+(?:the\s+)?(?:agents?|subagents?|batch)\s*[.!?]*$/i.test(source) ||
+           /\b(?:repeat|rerun|run|start|try|do)\s+(?:the\s+)?(?:last|previous|same|those)\s+(?:agents?|subagents?|batch|agent\s+(?:batch|run|workflow))\b/i.test(source);
   }
 
   function _loadLastAgentBatch() {
@@ -237,7 +240,7 @@
   }
 
   function _agentCollaborationIntent(text) {
-    return /\b(?:work\s+together|collaborat|coordinat|relay|handoff|hand-off|relate\s+to\s+each\s+other|build\s+on)\b/i.test(String(text || ''));
+    return /\b(?:work\s+together|collaborat\w*|coordinat\w*|relay|handoff|hand-off|relate\s+to\s+each\s+other|build\s+on|talk\s+to\s+each\s+other|discuss|discussion|debate)\b/i.test(String(text || ''));
   }
 
   function _agentSignalIntent(text) {
@@ -640,6 +643,8 @@
       var sessionId = (typeof _activeSessionId === 'function') ? (_activeSessionId() || '') : '';
       var workspaceProjectId = (window.EvaWorkspaces && typeof window.EvaWorkspaces.currentProjectId === 'function')
         ? window.EvaWorkspaces.currentProjectId() : '';
+      var siCopilot = getDefaultModel() === 'lmstudio'
+        && typeof getSIHarnessRuntime === 'function' && getSIHarnessRuntime() === 'copilot';
       var baseUrl = bridgeUrl().replace(/\/+$/, '');
       var preparedTasks = [];
       for (var i = 0; i < tasks.length; i++) {
@@ -668,15 +673,26 @@
           workspace_project_id: workspaceProjectId,
           group_id: groupId,
           collaborative: collaborative,
-          signal_on_complete: signalOnComplete
+          signal_on_complete: signalOnComplete,
+          si_runtime: siCopilot ? 'copilot' : 'direct',
+          lmstudio_base_url: siCopilot && typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
+          lmstudio_model: siCopilot && typeof getLmStudioModel === 'function' ? getLmStudioModel() : ''
         })
       });
       var payload = await response.json().catch(function() { return {}; });
-      if (!response.ok || !Array.isArray(payload.tasks) || payload.tasks.length !== preparedTasks.length) {
+      if (!response.ok || !Array.isArray(payload.tasks) || payload.tasks.length !== preparedTasks.length ||
+          !payload.tasks.every(function(task) { return task && typeof task.id === 'string' && task.id.trim(); }) ||
+          new Set(payload.tasks.map(function(task) { return task.id; })).size !== payload.tasks.length) {
         throw new Error(payload.error && payload.error.message ? payload.error.message : 'batch launch failed (HTTP ' + response.status + ')');
       }
       var accepted = payload.tasks;
       _saveLastAgentBatch(preparedTasks, !!payload.collaborative);
+      if (typeof evaAuditEvent === 'function') {
+        evaAuditEvent('native_action', 'accepted', {
+          correlation_id: context.turnId || window._evaActiveAuditTurnId || '',
+          action: 'agent.spawn_batch', label: 'Agent batch', count: accepted.length
+        });
+      }
       if (accepted.length && typeof EvaAgents !== 'undefined') {
         if (EvaAgents.invalidateGraph) EvaAgents.invalidateGraph();
         if (EvaAgents.open) EvaAgents.open();
@@ -746,8 +762,8 @@
     }
     var acceptedCount = (result.tasks || []).length;
     var statusLine = result.collaborative
-      ? 'The synthesis agent is waiting for the upstream results; dependency edges are visible in Memory Topology.'
-      : 'The accepted agents are running independently.';
+      ? 'The discussion shares a task group. The final agent waits for upstream outputs before synthesizing them.'
+      : 'The tasks were accepted independently. Current states and outputs are visible on the command bridge.';
     if (result.deferred_signal) statusLine += ' Signal delivery is queued until synthesis completes.';
     return {
       content: 'Started ' + acceptedCount + ' agent' + (acceptedCount === 1 ? '' : 's') + '.\n\n' + statusLine,

@@ -67,6 +67,14 @@ LM Studio lifecycle behavior; this slice has no new curated CI contract.
 | SI Harness / LM Studio | `lmstudio` remains the stable backend value; **Eva Direct** preserves direct completions, while the chat-only **Copilot CLI** option uses request-scoped BYOK ACP against the same validated unauthenticated endpoint/model with an isolated Copilot profile. Adaptive Review is bypassed for this mode to avoid cloud helpers. Workspace and vision paths are unchanged. | `tools/bridge/core.py`, `tools/bridge/acp_client.py`, `tools/bridge/local_mcp.py`, `core/js/providers/lm-studio.js` |
 | GitHub MCP | GitHub repository, issue, pull request, and workflow operations | configured MCP server, not a model provider |
 
+SI runtime identity reports **SI Harness**, the selected model request identifier,
+and the Direct or Copilot execution path separately. The persisted `lmstudio` key
+is a compatibility identifier, not evidence that LM Studio serves the endpoint.
+For backend/model questions, the bridge may read matching `/models` metadata;
+`owned_by` is a provider-declared hint, not verified model identity. A generic
+alias does not establish the underlying architecture or weights. Metadata lookup
+failure never changes routing or triggers a cloud fallback.
+
 The GitHub PAT is retained only for GitHub MCP configuration and private
 repository imports. The deprecated GitHub-hosted model endpoint, browser
 client, model map, and top-level model values are removed.

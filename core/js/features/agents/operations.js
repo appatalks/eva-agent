@@ -2,7 +2,8 @@
 
 var EvaAgents = (function() {
   var AGENT_ACTIVE_POLL_MS = 2000;
-  var AGENT_IDLE_POLL_MS = 20000;
+  var AGENT_IDLE_POLL_MS = 5000;
+  var AGENT_STALE_MS = 10000;
   var state = {
     open: false,
     data: null,
@@ -23,6 +24,11 @@ var EvaAgents = (function() {
     refreshController: null,
     refreshSequence: 0,
     graphFetchedAt: 0,
+    view: 'floor',
+    lastSyncAt: 0,
+    telemetryError: '',
+    clockTimer: null,
+    actionBusy: {},
     parallaxX: 0,
     parallaxY: 0,
     parallaxTargetX: 0,
@@ -35,11 +41,78 @@ var EvaAgents = (function() {
   }
 
   function isActive(status) {
-    return ['starting', 'waiting', 'running', 'steering', 'cancelling', 'finalizing', 'awaiting_confirmation', 'awaiting_input'].indexOf(status) !== -1;
+    return ['starting', 'waiting', 'running', 'steering', 'cancelling', 'finalizing', 'awaiting_confirmation', 'awaiting_input'].indexOf(String(status || '').toLowerCase()) !== -1;
   }
 
   function statusLabel(status) {
-    return String(status || 'unknown').replace(/_/g, ' ').toUpperCase();
+    var labels = {
+      online: 'CONNECTED', local_only: 'LOCAL MODE', running: 'WORKING',
+      waiting: 'WAITING', steering: 'DIRECTION QUEUED', finalizing: 'FINALIZING',
+      cancelling: 'STOPPING', awaiting_confirmation: 'NEEDS APPROVAL',
+      awaiting_input: 'NEEDS INPUT', done: 'FINISHED', error: 'FAILED'
+    };
+    return labels[status] || String(status || 'unknown').replace(/_/g, ' ').toUpperCase();
+  }
+
+  function telemetryStale() {
+    return !state.lastSyncAt || !!state.telemetryError || Date.now() - state.lastSyncAt > AGENT_STALE_MS;
+  }
+
+  function agentStatus(agent) {
+    return (telemetryStale() ? 'LAST REPORTED: ' : '') + statusLabel(agent.status);
+  }
+
+  function element(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function setView(view) {
+    state.view = ['floor', 'memory', 'cards'].indexOf(view) === -1 ? 'floor' : view;
+    var views = { floor: ['agentsFloorTab', 'agentsFloor'], memory: ['agentsMemoryTab', 'agentsMemory'], cards: ['agentsCardsTab', 'agentsGrid'] };
+    Object.keys(views).forEach(function(key) {
+      var tab = document.getElementById(views[key][0]);
+      var panel = document.getElementById(views[key][1]);
+      if (tab) {
+        tab.setAttribute('aria-selected', String(key === state.view));
+        tab.tabIndex = key === state.view ? 0 : -1;
+      }
+      if (panel) panel.hidden = key !== state.view;
+    });
+    try { localStorage.setItem('evaAgentObservatoryView', state.view); } catch (_) {}
+    if (typeof EvaBridgeScene !== 'undefined') EvaBridgeScene.setActive(state.open && state.view === 'floor');
+    if (state.open && state.view === 'memory') {
+      startGraph();
+      if (state.data) render();
+    } else stopGraph();
+  }
+
+  function updateTelemetry() {
+    var stale = telemetryStale();
+    var view = document.getElementById('agentsView');
+    if (view) view.dataset.stale = String(stale);
+    setText('agentsTelemetryState', state.telemetryError
+      ? 'Disconnected: showing last snapshot. Controls paused.'
+      : (stale ? 'Awaiting fresh telemetry. Controls paused.' : 'Synced ' + Math.max(0, Math.floor((Date.now() - state.lastSyncAt) / 1000)) + 's ago'));
+    if (stale) setText('agentsUpdatedAt', state.telemetryError ? 'BRIDGE OFFLINE' : 'STALE SNAPSHOT');
+    return stale;
+  }
+
+  function tick() {
+    if (!state.open) return;
+    updateTelemetry();
+    var agents = state.data && state.data.agents || [];
+    renderFloor(agents);
+    agents.forEach(function(agent) {
+      var card = Array.prototype.find.call(document.querySelectorAll('.agent-card'), function(item) {
+        return item.dataset.agentId === agent.id;
+      });
+      if (card) updateAgentCard(card, agent);
+    });
+    if (state.selectedId) renderDetail(state.selectedId);
+    state.clockTimer = setTimeout(tick, 1000);
   }
 
   function kindLabel(kind) {
@@ -53,7 +126,7 @@ var EvaAgents = (function() {
 
   function elapsed(agent) {
     var start = Date.parse(agent.started_at || '');
-    var end = Date.parse(agent.ended_at || '') || Date.now();
+    var end = Date.parse(agent.ended_at || '') || (telemetryStale() ? state.lastSyncAt : Date.now());
     if (!start) return '--';
     var seconds = Math.max(0, Math.round((end - start) / 1000));
     if (seconds < 60) return seconds + 's';
@@ -74,7 +147,7 @@ var EvaAgents = (function() {
     if (agentsButton) agentsButton.classList.toggle('active', !workspace && state.open);
     if (workspaceButton) workspaceButton.classList.toggle('active', workspace && state.open);
     if (kicker) kicker.textContent = workspace ? 'RUNNING AGENTIC SESSIONS' : 'LIVE ORCHESTRATION';
-    if (title) title.textContent = workspace ? 'Workspace' : 'Agent Operations';
+    if (title) title.textContent = workspace ? 'Workspace' : 'Agent Observatory';
   }
 
   function open(entry) {
@@ -93,7 +166,8 @@ var EvaAgents = (function() {
     var view = document.getElementById('agentsView');
     if (view) view.setAttribute('aria-hidden', 'false');
     var refreshPromise = refreshAndSchedule();
-    startGraph();
+    setView(state.view);
+    tick();
     return refreshPromise;
   }
 
@@ -108,10 +182,13 @@ var EvaAgents = (function() {
     if (workspaceButton) workspaceButton.classList.remove('active');
     if (state.pollTimer) clearTimeout(state.pollTimer);
     state.pollTimer = null;
+    if (state.clockTimer) clearTimeout(state.clockTimer);
+    state.clockTimer = null;
     state.refreshSequence++;
     if (state.refreshController) state.refreshController.abort();
     state.refreshController = null;
     stopGraph();
+    if (typeof EvaBridgeScene !== 'undefined') EvaBridgeScene.setActive(false);
   }
 
   function nextPollDelay() {
@@ -140,32 +217,45 @@ var EvaAgents = (function() {
   async function refresh(forceGraph) {
     var sequence = ++state.refreshSequence;
     if (state.refreshController) state.refreshController.abort();
-    state.refreshController = new AbortController();
+    var controller = new AbortController();
+    state.refreshController = controller;
+    var timedOut = false;
+    var timeout = setTimeout(function() { timedOut = true; controller.abort(); }, 8000);
     try {
-      var includeGraph = forceGraph === true || !state.data || !state.data.graph || Date.now() - state.graphFetchedAt >= 30000;
+      var includeGraph = forceGraph === true || (state.view === 'memory' && (!state.data || !state.data.graph || Date.now() - state.graphFetchedAt >= 30000));
       var sessionId = typeof ensureActiveSessionId === 'function' ? ensureActiveSessionId() : '';
-      var response = await fetch(bridgeUrl() + '/v1/agents/overview?include_graph=' + (includeGraph ? '1' : '0') + '&session_id=' + encodeURIComponent(sessionId), { signal: state.refreshController.signal });
+      var response = await fetch(bridgeUrl() + '/v1/agents/overview?include_graph=' + (includeGraph ? '1' : '0') + '&session_id=' + encodeURIComponent(sessionId), { signal: controller.signal });
       if (!response.ok) throw new Error('Bridge returned ' + response.status);
       var data = await response.json();
       if (sequence !== state.refreshSequence) return;
+      if (!data || !Array.isArray(data.agents)) throw new Error('Runtime returned no agent snapshot.');
       if (data.graph) state.graphFetchedAt = Date.now();
       else if (state.data && state.data.graph) data.graph = state.data.graph;
       state.data = data;
+      state.lastSyncAt = Date.now();
+      state.telemetryError = '';
       render();
     } catch (error) {
-      if (error && error.name === 'AbortError') return;
+      if (sequence !== state.refreshSequence) return;
+      if (error && error.name === 'AbortError' && !timedOut) return;
       renderUnavailable(error.message || String(error));
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
   function renderUnavailable(message) {
+    state.telemetryError = message;
+    updateTelemetry();
+    renderFloor(state.data && state.data.agents || []);
+    if (state.selectedId) renderDetail(state.selectedId);
     var grid = document.getElementById('agentsGrid');
     var updated = document.getElementById('agentsUpdatedAt');
     if (updated) updated.textContent = 'BRIDGE OFFLINE';
     if (grid && !grid.children.length) {
       var empty = document.createElement('div');
       empty.className = 'agents-empty';
-      empty.textContent = message;
+      empty.textContent = 'Agent runtime unavailable. ' + message;
       grid.appendChild(empty);
     }
   }
@@ -185,23 +275,113 @@ var EvaAgents = (function() {
     });
     setText('agentsActiveCount', data.active_total || 0);
     setText('agentsCapacity', (data.subagents_active || 0) + ' / ' + (data.capacity || 4));
-    setText('agentsNodeCount', (graph.nodes || []).length);
+    setText('agentsNodeCount', data.graph ? (graph.nodes || []).length : '--');
     setText('agentGraphEdgeCount', (graph.edges || []).length + ' relations');
     setText('agentsBackgroundState', data.background && data.background.running ? 'ONLINE' : 'IDLE');
     setText('agentsUpdatedAt', 'SYNC ' + new Date(data.generated_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+    updateTelemetry();
     var badge = document.getElementById('evaAgentsBadge');
     if (badge) {
       badge.textContent = data.active_total || 0;
       badge.classList.toggle('active', (data.active_total || 0) > 0);
     }
     renderCards(agents);
+    renderFloor(agents);
     updateGraph(graph.nodes || [], graph.edges || []);
+    if (state.selectedId && !agents.some(function(agent) { return agent.id === state.selectedId; })) closeDetail();
     if (state.selectedId) renderDetail(state.selectedId);
   }
 
   function setText(id, value) {
     var element = document.getElementById(id);
     if (element) element.textContent = value;
+  }
+
+  function updateCrewBubble(station, agent, stale) {
+    var events = [];
+    if (agent.activity) events.push({ kind: 'Activity', text: agent.activity, at: Date.parse(agent.last_activity_at) || 0 });
+    if (typeof agent.result === 'string' && agent.result.trim() && agent.last_output_at) {
+      events.push({ kind: 'Output', text: agent.result.trim().slice(-600), at: Date.parse(agent.last_output_at) || 0 });
+    }
+    if (Array.isArray(agent.received_from) && agent.received_from.length && agent.last_handoff_at) {
+      events.push({ kind: 'Handoff', text: 'Received outputs from ' + agent.received_from.map(function(source) {
+        return String(source.label || 'Agent');
+      }).join(', '), at: Date.parse(agent.last_handoff_at) || 0 });
+    }
+    events.sort(function(a, b) { return b.at - a.at; });
+    var event = events[0];
+    var bubble = station.querySelector('.bridge-crew-bubble');
+    if (!event || !isActive(agent.status) || stale) {
+      station._bubbleUntil = 0;
+      bubble.hidden = true;
+      return;
+    }
+    var text = String(event.text).replace(/\s+/g, ' ').trim();
+    var signature = JSON.stringify([event.kind, text, event.at]);
+    if (signature !== station._bubbleSignature) {
+      station._bubbleSignature = signature;
+      station._bubbleUntil = Math.min(Date.now(), event.at || Date.now()) + 10000;
+      bubble.textContent = event.kind + ': ' + (text.length > 110 ? text.slice(0, 107) + '...' : text);
+      bubble.dataset.kind = event.kind.toLowerCase();
+    }
+    bubble.hidden = !(station._bubbleUntil > Date.now());
+  }
+
+  function renderFloor(agents) {
+    var floor = document.getElementById('agentsFloorGroups');
+    if (!floor) return;
+    var stale = telemetryStale();
+    var crew = agents.filter(function(agent) { return agent.kind !== 'eva'; });
+    var activeCrew = crew.filter(function(agent) { return isActive(agent.status); });
+    setText('bridgeCrewCount', crew.length + ' DELEGATED SESSION' + (crew.length === 1 ? '' : 'S'));
+    setText('bridgeMission', stale ? 'Telemetry unavailable / last reported crew' :
+      (activeCrew.length ? activeCrew.length + ' active / select a station to inspect' : 'Standing by / no active delegated tasks'));
+    setText('bridgeActivity', stale ? 'Activity indicators paused until telemetry returns.' :
+      (activeCrew.length ? activeCrew.map(function(agent) {
+        return (agent.label || 'Agent') + ': ' + (agent.activity || statusLabel(agent.status));
+      }).join('  /  ') : (agents.some(function(agent) { return agent.kind === 'eva'; })
+        ? 'Eva is present on the bridge. Empty consoles are unassigned, not hidden agents.' : 'No agent sessions reported. Empty consoles are unassigned.')));
+    var existingStations = {};
+    Array.prototype.forEach.call(floor.querySelectorAll('.agent-workstation'), function(node) {
+      existingStations[node.dataset.agentId] = node;
+    });
+    var empty = floor.querySelector('.agents-empty');
+    if (!agents.length) {
+      if (!empty) {
+        empty = element('p', 'agents-empty');
+        floor.appendChild(empty);
+      }
+      empty.textContent = state.telemetryError ? 'Runtime unavailable. No sessions can be verified.' : 'No agent sessions reported.';
+    } else if (empty) empty.remove();
+    agents.forEach(function(agent, stationIndex) {
+      var station = existingStations[agent.id];
+      if (!station) {
+        station = element('button', 'agent-workstation');
+        station.type = 'button';
+        station.dataset.agentId = agent.id;
+        var meta = element('span', 'bridge-agent-meta');
+        meta.append(element('span', 'agent-station-activity'), element('span', 'agent-station-duration'));
+        var bubble = element('span', 'bridge-crew-bubble');
+        bubble.hidden = true;
+        station.append(element('strong', 'agent-station-label'), element('span', 'agent-station-status'), meta, bubble);
+        station.addEventListener('click', function(event) { openAgentDetail(event.currentTarget._agent); });
+      }
+      station._agent = agent;
+      station.dataset.status = String(agent.status || 'unknown');
+      station.dataset.kind = agent.kind || 'unknown';
+      station.dataset.motion = !stale && agent.status === 'running' ? 'working' : 'still';
+      station.setAttribute('aria-pressed', String(state.selectedId === agent.id));
+      station.setAttribute('aria-label', 'Inspect ' + (agent.label || 'agent') + ': ' + agentStatus(agent));
+      station.querySelector('.agent-station-label').textContent = agent.label || 'Agent session';
+      station.querySelector('.agent-station-status').textContent = agentStatus(agent);
+      station.querySelector('.agent-station-activity').textContent = agent.activity || agent.detail || 'No activity reported.';
+      station.querySelector('.agent-station-duration').textContent = (agent.kind === 'eva' ? 'SESSION UPTIME ' : 'ELAPSED ') + elapsed(agent);
+      updateCrewBubble(station, agent, stale);
+      if (floor.children[stationIndex] !== station) floor.insertBefore(station, floor.children[stationIndex] || null);
+      delete existingStations[agent.id];
+    });
+    Object.keys(existingStations).forEach(function(key) { existingStations[key].remove(); });
+    if (typeof EvaBridgeScene !== 'undefined') EvaBridgeScene.update(agents, { stale: stale, selectedId: state.selectedId });
   }
 
   function renderCards(agents) {
@@ -212,7 +392,7 @@ var EvaAgents = (function() {
       grid.replaceChildren();
       var empty = document.createElement('div');
       empty.className = 'agents-empty';
-      empty.innerHTML = '<strong>NO AGENT SESSIONS</strong><span>Runtime is ready.</span>';
+      empty.innerHTML = '<strong>NO AGENT SESSIONS</strong><span>No sessions reported in this snapshot.</span>';
       grid.appendChild(empty);
       return;
     }
@@ -255,12 +435,12 @@ var EvaAgents = (function() {
     card.addEventListener('animationend', function() { card.classList.remove('agent-card-enter'); }, { once: true });
     card.addEventListener('click', function(event) {
       if (event.target.closest('.agent-card-dismiss')) return;
-      openAgentSession(card._agent);
+      openAgentDetail(card._agent);
     });
     card.addEventListener('keydown', function(event) {
       if ((event.key === 'Enter' || event.key === ' ') && !event.target.closest('.agent-card-dismiss')) {
         event.preventDefault();
-        openAgentSession(card._agent);
+        openAgentDetail(card._agent);
       }
     });
     card.querySelector('[data-field="dismiss"]').addEventListener('click', function(event) {
@@ -277,8 +457,9 @@ var EvaAgents = (function() {
     });
     card.classList.add('status-' + String(agent.status || 'unknown').replace(/[^a-z_]/g, ''));
     card.setAttribute('aria-label', 'Open ' + (agent.label || 'agent') + ' session');
+    card.setAttribute('aria-pressed', String(state.selectedId === agent.id));
     card.querySelector('[data-field="kind"]').textContent = kindLabel(agent.kind);
-    card.querySelector('[data-field="status"]').textContent = statusLabel(agent.status);
+    card.querySelector('[data-field="status"]').textContent = agentStatus(agent);
     card.querySelector('[data-field="title"]').textContent = agent.label || 'Agent session';
     var model = card.querySelector('[data-field="model"]');
     model.textContent = modelLabel(agent.model);
@@ -292,6 +473,7 @@ var EvaAgents = (function() {
     card.querySelector('[data-field="identifier"]').textContent = agent.step ? 'STEP ' + agent.step : agent.id;
     var dismiss = card.querySelector('[data-field="dismiss"]');
     dismiss.hidden = agent.kind !== 'subagent' || ['done', 'error', 'cancelled'].indexOf(agent.status) === -1;
+    dismiss.disabled = telemetryStale();
     dismiss.setAttribute('aria-label', 'Dismiss ' + (agent.label || 'agent'));
   }
 
@@ -317,6 +499,8 @@ var EvaAgents = (function() {
   }
 
   function openAgentSession(agent) {
+    agent = (state.data && state.data.agents || []).find(function(item) { return item.id === agent.id; });
+    if (!agent) return;
     if (agent.session_id && typeof loadSession === 'function') {
       Promise.resolve(loadSession(agent.session_id)).then(function(loaded) {
         if (loaded) close();
@@ -328,8 +512,11 @@ var EvaAgents = (function() {
   }
 
   function openAgentDetail(agent, message) {
+    if (!agent) return;
     state.selectedId = agent.id;
     renderDetail(agent.id);
+    renderFloor(state.data && state.data.agents || []);
+    resizeCanvas();
     if (message) {
       var content = document.getElementById('agentDetailContent');
       var notice = document.createElement('p');
@@ -340,7 +527,7 @@ var EvaAgents = (function() {
   }
 
   function detailStatusText(agent) {
-    return statusLabel(agent.status) + '  ' + elapsed(agent) + (agent.model ? '  ' + modelLabel(agent.model) : '') +
+    return agentStatus(agent) + '  ' + elapsed(agent) + (agent.model ? '  ' + modelLabel(agent.model) : '') +
       (agent.signal_status ? '  SIGNAL ' + String(agent.signal_status).toUpperCase() : '');
   }
 
@@ -348,11 +535,31 @@ var EvaAgents = (function() {
     var status = content.querySelector('[data-agent-detail-status]');
     var activity = content.querySelector('[data-agent-detail-activity]');
     var result = content.querySelector('[data-agent-detail-result]');
+    var objective = content.querySelector('[data-agent-detail-objective]');
     if (!status || !activity || !result) return false;
     status.className = 'agent-detail-status status-' + agent.status;
     status.textContent = detailStatusText(agent);
-    activity.textContent = agent.activity || (isActive(agent.status) ? 'Working...' : 'No activity reported.');
-    result.textContent = agent.result || (isActive(agent.status) ? 'Agent is working...' : 'No output reported.');
+    activity.textContent = agent.activity || 'No activity reported.';
+    result.textContent = agent.result || 'No output reported.';
+    if (objective) objective.textContent = agent.detail || 'No objective detail reported.';
+    var title = content.querySelector('h2');
+    if (title) title.textContent = agent.label || 'Agent session';
+    var steerInput = content.querySelector('#agentSteerInput');
+    var steerButton = content.querySelector('.agent-steer-form button');
+    var busy = state.actionBusy[agent.id];
+    var blocked = telemetryStale() || busy || ['finalizing', 'cancelling'].indexOf(agent.status) !== -1;
+    if (steerInput) steerInput.disabled = !!blocked;
+    if (steerButton) {
+      steerButton.disabled = !!blocked;
+      steerButton.textContent = busy ? 'SENDING...' : (isActive(agent.status) ? 'SEND DIRECTION' : 'RESUME WITH DIRECTION');
+    }
+    var interrupt = content.querySelector('.agent-interrupt');
+    if (interrupt) {
+      interrupt.hidden = !agent.coding_run_id || !window.evaStandalone || typeof window.evaStandalone.workspaceAgentControl !== 'function';
+      interrupt.disabled = telemetryStale() || !!busy || ['starting', 'waiting', 'running', 'steering'].indexOf(agent.status) === -1;
+    }
+    var session = content.querySelector('.agent-session-link');
+    if (session) session.hidden = !agent.session_id || typeof loadSession !== 'function';
     return true;
   }
 
@@ -380,20 +587,96 @@ var EvaAgents = (function() {
     var promptLabel = document.createElement('h3');
     promptLabel.textContent = 'CURRENT OBJECTIVE';
     var prompt = document.createElement('p');
+    prompt.dataset.agentDetailObjective = 'true';
     prompt.textContent = agent.detail || 'No objective detail reported.';
     var activityLabel = document.createElement('h3');
     activityLabel.textContent = 'LATEST ACTIVITY';
     var activity = document.createElement('p');
     activity.dataset.agentDetailActivity = 'true';
-    activity.textContent = agent.activity || (isActive(agent.status) ? 'Working...' : 'No activity reported.');
+    activity.textContent = agent.activity || 'No activity reported.';
     var resultLabel = document.createElement('h3');
     resultLabel.textContent = 'LATEST OUTPUT';
     var result = document.createElement('pre');
     result.dataset.agentDetailResult = 'true';
-    result.textContent = agent.result || (isActive(agent.status) ? 'Agent is working...' : 'No output reported.');
+    result.textContent = agent.result || 'No output reported.';
     content.append(kicker, title, status, promptLabel, prompt, activityLabel, activity, resultLabel, result);
     if (agent.kind === 'subagent') content.appendChild(buildSteerForm(agent));
+    var actions = element('div', 'agent-inspector-actions');
+    var session = element('button', 'agent-session-link', 'Open linked chat');
+    session.type = 'button';
+    session.addEventListener('click', function() { openAgentSession(agent); });
+    actions.appendChild(session);
+    if (agent.kind === 'subagent') {
+      var interrupt = element('button', 'agent-interrupt', 'Interrupt this agent');
+      interrupt.type = 'button';
+      interrupt.addEventListener('click', function() { controlAgent(agent.id, 'stop'); });
+      actions.appendChild(interrupt);
+    }
+    content.appendChild(actions);
+    var dependencies = element('div', 'agent-dependencies');
+    (agent.depends_on || []).forEach(function(id) {
+      var dependency = agents.find(function(item) { return item.id === id; });
+      var link = element('button', 'agent-dependency-link', 'Depends on: ' + (dependency && dependency.label || id));
+      link.type = 'button';
+      link.disabled = !dependency;
+      if (dependency) link.addEventListener('click', function() { openAgentDetail(dependency); });
+      dependencies.appendChild(link);
+    });
+    content.appendChild(dependencies);
+    var feedback = element('p', 'agent-inspector-feedback');
+    feedback.setAttribute('role', 'status');
+    content.appendChild(feedback);
+    updateDetail(agent, content);
     panel.setAttribute('aria-hidden', 'false');
+  }
+
+  async function controlAgent(agentId, action, instruction) {
+    var agent = (state.data && state.data.agents || []).find(function(item) { return item.id === agentId; });
+    if (!agent || telemetryStale() || state.actionBusy[agentId]) return false;
+    if (agent.kind !== 'subagent' || ['finalizing', 'cancelling'].indexOf(agent.status) !== -1) return false;
+    if (action === 'stop' && (!agent.coding_run_id || ['starting', 'waiting', 'running', 'steering'].indexOf(agent.status) === -1)) return false;
+    if (action === 'steer' && (!String(instruction || '').trim() || String(instruction).length > 2000)) return false;
+    var content = document.getElementById('agentDetailContent');
+    state.actionBusy[agentId] = true;
+    var pendingFeedback = content && content.dataset.agentId === agentId && content.querySelector('.agent-inspector-feedback');
+    if (pendingFeedback) {
+      pendingFeedback.dataset.error = 'false';
+      pendingFeedback.textContent = action === 'stop' ? 'Requesting interruption...' : 'Sending direction...';
+    }
+    if (state.selectedId === agentId) renderDetail(agentId);
+    try {
+      var receipt;
+      if (agent.coding_run_id && window.evaStandalone && typeof window.evaStandalone.workspaceAgentControl === 'function') {
+        receipt = await window.evaStandalone.workspaceAgentControl(agent.coding_run_id, action, instruction || '');
+      } else if (action === 'steer') {
+        var response = await fetch(bridgeUrl() + '/v1/subagent/steer', {
+          method: 'POST',
+          headers: typeof getBridgeCapabilityHeaders === 'function' ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: agentId, instruction: instruction })
+        });
+        receipt = await response.json().catch(function() { return {}; });
+        if (!response.ok) throw new Error(receipt.error && receipt.error.message || 'Steering failed (' + response.status + ')');
+      } else throw new Error('This agent does not support interruption here.');
+      if (!receipt || !receipt.task || receipt.task.id !== agentId) throw new Error('The runtime did not confirm this agent action.');
+      var feedback = content && content.dataset.agentId === agentId && content.querySelector('.agent-inspector-feedback');
+      if (feedback) {
+        feedback.dataset.error = 'false';
+        feedback.textContent = action === 'stop' ? 'Interruption accepted. Waiting for the reported stop.' :
+          (receipt.queued ? 'Direction queued for this agent.' : 'Agent resumed with the accepted direction.');
+      }
+      await refresh();
+      return true;
+    } catch (error) {
+      var notice = content && content.dataset.agentId === agentId && content.querySelector('.agent-inspector-feedback');
+      if (notice) {
+        notice.dataset.error = 'true';
+        notice.textContent = error.message || String(error);
+      }
+      return false;
+    } finally {
+      delete state.actionBusy[agentId];
+      if (state.selectedId === agentId) renderDetail(agentId);
+    }
   }
 
   function buildSteerForm(agent) {
@@ -417,25 +700,7 @@ var EvaAgents = (function() {
       event.preventDefault();
       var instruction = input.value.trim();
       if (!instruction) return;
-      button.disabled = true;
-      try {
-        if (agent.coding_run_id && window.evaStandalone && typeof window.evaStandalone.workspaceAgentControl === 'function') {
-          await window.evaStandalone.workspaceAgentControl(agent.coding_run_id, 'steer', instruction);
-        } else {
-          var response = await fetch(bridgeUrl() + '/v1/subagent/steer', {
-            method: 'POST',
-            headers: typeof getBridgeCapabilityHeaders === 'function' ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: agent.id, instruction: instruction })
-          });
-          if (!response.ok) throw new Error('Steering failed (' + response.status + ')');
-        }
-        input.value = '';
-        await refresh();
-      } catch (error) {
-        if (typeof setStatus === 'function') setStatus('error', error.message || String(error));
-      } finally {
-        button.disabled = false;
-      }
+      if (await controlAgent(agent.id, 'steer', instruction)) input.value = '';
     };
     return form;
   }
@@ -444,6 +709,8 @@ var EvaAgents = (function() {
     state.selectedId = '';
     var panel = document.getElementById('agentDetail');
     if (panel) panel.setAttribute('aria-hidden', 'true');
+    renderFloor(state.data && state.data.agents || []);
+    resizeCanvas();
   }
 
   function graphUnit(value) {
@@ -685,18 +952,6 @@ var EvaAgents = (function() {
         context.fillStyle = focused ? 'rgba(197,255,246,0.88)' : 'rgba(104,235,215,0.24)';
         context.fill();
       }
-      if (!reducedMotion && (!target.status || isActive(target.status))) {
-        var progress = ((time * 0.00008) + index * 0.173) % 1;
-        var inverse = 1 - progress;
-        context.beginPath();
-        context.arc(
-          inverse * inverse * sx + 2 * inverse * progress * controlX + progress * progress * tx,
-          inverse * inverse * sy + 2 * inverse * progress * controlY + progress * progress * ty,
-          1.5, 0, Math.PI * 2
-        );
-        context.fillStyle = dependency ? 'rgba(205,188,255,0.88)' : 'rgba(150,255,238,0.78)';
-        context.fill();
-      }
       if (focused && edge.label) {
         context.font = '600 9px monospace';
         context.fillStyle = 'rgba(224,255,248,0.78)';
@@ -713,7 +968,8 @@ var EvaAgents = (function() {
       var core = node.type === 'core';
       var doneAgent = agent && node.status === 'done';
       var radius = (core ? 12 : (entity ? 7 : (agent ? 9 : 5))) * (0.72 + node.depth * 0.42);
-      var pulse = reducedMotion ? 1 : 1 + Math.sin(time * 0.0014 + index) * 0.1;
+      var pulse = reducedMotion || (agent && (telemetryStale() || node.status !== 'running'))
+        ? 1 : 1 + Math.sin(time * 0.0014 + index) * 0.1;
       var color = core ? '#ffcb82' : (entity ? '#c4a0ff' : (doneAgent ? '#76ead9' : (agent ? '#68a2ff' : (node.review_required ? '#ffbd66' : '#68ebd7'))));
       var haloColor = core ? 'rgba(255,203,130,0.28)' : (entity ? 'rgba(196,160,255,0.28)' : (agent ? 'rgba(104,162,255,0.28)' : 'rgba(104,235,215,0.28)'));
       context.globalAlpha = node.renderAlpha;
@@ -875,7 +1131,7 @@ var EvaAgents = (function() {
     var lines = [node.label || node.id];
     if (node.type === 'core') lines.push('Eva cognitive root · orchestrates agent sessions');
     else if (node.type === 'agent') {
-      lines.push('Agent session · ' + statusLabel(node.status));
+      lines.push('Agent session · ' + agentStatus(node));
       lines.push('Model: ' + (node.model || 'default'));
       if (node.result) lines.push('Latest: ' + String(node.result).replace(/\s+/g, ' ').slice(0, 150));
     } else if (node.type === 'fact') {
@@ -917,6 +1173,7 @@ var EvaAgents = (function() {
   }
 
   function startGraph() {
+    if (!state.open || state.view !== 'memory') return;
     resizeCanvas();
     bindGraphEvents();
     window.addEventListener('resize', resizeCanvas);
@@ -934,6 +1191,26 @@ var EvaAgents = (function() {
     var closeButton = document.getElementById('agentsCloseBtn');
     var detailClose = document.getElementById('agentDetailClose');
     var memoryReviewButton = document.getElementById('agentGraphMemoryReview');
+    try { state.view = localStorage.getItem('evaAgentObservatoryView') || 'floor'; } catch (_) {}
+    setView(state.view);
+    var tabIds = ['agentsFloorTab', 'agentsMemoryTab', 'agentsCardsTab'];
+    var viewNames = ['floor', 'memory', 'cards'];
+    tabIds.forEach(function(id, index) {
+      var tab = document.getElementById(id);
+      if (!tab) return;
+      tab.addEventListener('click', function() { setView(viewNames[index]); refresh(state.view === 'memory'); });
+      tab.addEventListener('keydown', function(event) {
+        var next;
+        if (event.key === 'ArrowRight') next = (index + 1) % 3;
+        else if (event.key === 'ArrowLeft') next = (index + 2) % 3;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = 2;
+        else return;
+        event.preventDefault();
+        document.getElementById(tabIds[next]).click();
+        document.getElementById(tabIds[next]).focus();
+      });
+    });
     if (refreshButton) refreshButton.addEventListener('click', function() { refresh(true); });
     if (closeButton) closeButton.addEventListener('click', close);
     if (detailClose) detailClose.addEventListener('click', closeDetail);

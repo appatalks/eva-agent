@@ -216,25 +216,41 @@ var EvaHarness = (function() {
     return null;
   }
 
-  function recentRemediationContext() {
-    try {
-      var messages = JSON.parse(localStorage.getItem('aigMessages') || '[]');
-      if (!Array.isArray(messages)) return null;
-      for (var index = messages.length - 1; index >= 0; index--) {
-        var message = messages[index] || {};
-        if (message.role !== 'user' || typeof message.content !== 'string') continue;
-        var route = repositoryRemediationRoute(message.content);
-        if (route) return { repositoryName: route.repositoryName, objective: route.objective };
-      }
-    } catch (_) {}
+  function previousUserRequest(currentRequest) {
+    var current = String(currentRequest || '').trim();
     try {
       var bubbles = document.querySelectorAll('.chat-bubble.user-bubble');
-      for (var bubbleIndex = bubbles.length - 1; bubbleIndex >= 0; bubbleIndex--) {
-        var visibleRoute = repositoryRemediationRoute(String(bubbles[bubbleIndex].textContent || '').replace(/^\s*You:\s*/i, ''));
-        if (visibleRoute) return { repositoryName: visibleRoute.repositoryName, objective: visibleRoute.objective };
+      var skipCurrent = true;
+      for (var index = bubbles.length - 1; index >= 0; index--) {
+        var text = String(bubbles[index].textContent || '').replace(/^\s*You:\s*/i, '').trim();
+        if (!text) continue;
+        if (skipCurrent && text === current) {
+          skipCurrent = false;
+          continue;
+        }
+        return text;
       }
     } catch (_) {}
-    return null;
+    try {
+      var messages = JSON.parse(localStorage.getItem('aigMessages') || '[]');
+      if (!Array.isArray(messages)) return '';
+      var skipStoredCurrent = true;
+      for (var messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
+        var message = messages[messageIndex] || {};
+        if (message.role !== 'user') continue;
+        if (typeof message.content !== 'string') return '';
+        if (skipStoredCurrent && message.content.trim() === current) {
+          skipStoredCurrent = false;
+          continue;
+        }
+        return message.content.trim();
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  function immediateRemediationContext(currentRequest) {
+    return repositoryRemediationRoute(previousUserRequest(currentRequest).replace(/^(?:(?:hi|hello|hey)\s+)?eva\s*[,!.:-]*\s*/i, ''));
   }
 
   function pullRequestReference(value) {
@@ -276,7 +292,10 @@ var EvaHarness = (function() {
     var direct = pullRequestReference(rawPhrase);
     if (direct && direct.repository) return direct;
     var saved = savedPullRequestContext();
-    if (saved && (!direct || saved.number === direct.number)) return saved;
+    var previous = pullRequestReference(previousUserRequest(rawPhrase));
+    if (saved && previous && saved.number === previous.number &&
+        (!previous.repository || previous.repository.toLowerCase() === saved.repository.toLowerCase()) &&
+        (!direct || saved.number === direct.number)) return saved;
     if (direct) return direct;
     return null;
   }
@@ -308,6 +327,12 @@ var EvaHarness = (function() {
       }
     } catch (_) {}
     if (!lastRemediation) lastRemediation = nativeRemediationContext();
+    var immediateRemediation = immediateRemediationContext(rawPhrase);
+    if (!lastRemediation || !immediateRemediation ||
+        lastRemediation.repositoryName.toLowerCase() !== immediateRemediation.repositoryName.toLowerCase() ||
+        lastRemediation.objective !== immediateRemediation.objective) {
+      lastRemediation = immediateRemediation;
+    }
     var directPullRequest = pullRequestReference(rawPhrase);
     if (directPullRequest && !/\bmerge\b/i.test(rawPhrase)) {
       return {
@@ -365,7 +390,10 @@ var EvaHarness = (function() {
         return { action: 'open_external_url', target: 'skills', label: 'Open External URL', url: externalUrl.replace(/[),.;!?]+$/g, ''), userRequest: rawPhrase };
       }
       var runNamedSkill = /^(?:please\s+)?(?:run|use|execute)\s+(?:the\s+)?skill\s+.+/i.test(rawPhrase);
-      var runMediaSkill = /^(?:(?:please|go\s+ahead(?:\s+and)?|okay|ok|yes)[,\s]+)*(?:open|play|watch|listen\s+to|launch)\s+(?:my|the)\s+.+?\b(?:playlist|station|stream|channel)\b(?:[\s,]+[A-Za-z0-9_.-]+){0,4}[.!?]*$/i.test(rawPhrase);
+      var mediaPhrase = rawPhrase
+        .replace(/^(?:(?:very\s+)?good|great|thanks|thank\s+you|okay|ok)[.!]\s*/i, '')
+        .replace(/^(?:now[,\s]+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?/i, '');
+      var runMediaSkill = /^(?:(?:please|go\s+ahead(?:\s+and)?|okay|ok|yes)[,\s]+)*(?:open|play|watch|listen\s+to|launch)\s+(?:my|the)\s+.+?\b(?:playlist|station|stream|channel)\b(?:[\s,]+[A-Za-z0-9_.-]+){0,4}[.!?]*$/i.test(mediaPhrase);
       if (runNamedSkill || runMediaSkill) {
         if (runNamedSkill && !runMediaSkill && !/https:\/\/[^\s<>"']+/i.test(rawPhrase)) return null;
         return { action: 'run_skill', target: 'skills', label: 'Run Skill', requestText: rawPhrase };
@@ -403,7 +431,7 @@ var EvaHarness = (function() {
     if (directUser) {
       var pullRequestFollowUp = /\b(?:create|open|raise|submit|publish)\b[\s\S]{0,32}\b(?:pull\s+request|pr)\b|\b(?:create|open|raise|submit|publish)\s+(?:it|that|the)\b[\s\S]{0,16}\bpr\b/i.test(rawPhrase);
       if (pullRequestFollowUp) {
-        var pullRequestRemediation = lastRemediation || recentRemediationContext();
+        var pullRequestRemediation = lastRemediation;
         if (pullRequestRemediation) {
           return {
             action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Pull Request',
@@ -428,7 +456,7 @@ var EvaHarness = (function() {
       }
       var workspaceContinuation = /\b(?:continue|resume|proceed)\b[\s\S]{0,96}\b(?:workspace|work|task|pull\s+request|pr)\b/i.test(rawPhrase);
       if (workspaceContinuation) {
-        var continuedRemediation = lastRemediation || recentRemediationContext();
+        var continuedRemediation = immediateRemediationContext(rawPhrase);
         if (continuedRemediation) {
           return {
             action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Remediation',
@@ -457,7 +485,7 @@ var EvaHarness = (function() {
         };
       }
       if (/\b(?:try|retry|rerun|resume|continue)\s+(?:again|it|that|the\s+(?:task|work|remediation))\b/i.test(rawPhrase)) {
-        var retryRemediation = lastRemediation || recentRemediationContext();
+        var retryRemediation = immediateRemediationContext(rawPhrase);
         if (retryRemediation) {
           return {
             action: 'run_repository_remediation', target: 'workspaces', label: 'Repository Remediation',
@@ -876,7 +904,7 @@ var EvaHarness = (function() {
       if (!window.EvaSkills || typeof EvaSkills.runFromRequest !== 'function') return Promise.resolve(result(false, 'run_skill', 'Native Skill execution is unavailable.'));
       var runRequest = context.source === 'model' ? String(context.userRequest || '') : String(request.requestText || '');
       return Promise.resolve(EvaSkills.runFromRequest(runRequest)).then(function(message) {
-        return result(true, 'run_skill', message, { outcome: 'completed' });
+        return result(true, 'run_skill', message, { outcome: 'started', verification: 'unverified' });
       }).catch(function(error) {
         return result(false, 'run_skill', error && error.message ? error.message : 'Skill execution failed.', { outcome: 'failed', reason: failureReason(error) });
       });
@@ -907,7 +935,7 @@ var EvaHarness = (function() {
       if (!window.EvaSkills || typeof EvaSkills.openExternalUrl !== 'function') return Promise.resolve(result(false, 'open_external_url', 'Native external URL opening is unavailable.'));
       var externalRequest = String(context.userRequest || request.userRequest || '');
       return Promise.resolve(EvaSkills.openExternalUrl(request.url, request.skillName, externalRequest)).then(function(message) {
-        return result(true, 'open_external_url', message, { outcome: 'completed', url: String(request.url || '') });
+        return result(true, 'open_external_url', message, { outcome: 'started', verification: 'unverified', url: String(request.url || '') });
       }).catch(function(error) {
         return result(false, 'open_external_url', error && error.message ? error.message : 'External URL opening failed.', { outcome: 'failed', reason: failureReason(error) });
       });
