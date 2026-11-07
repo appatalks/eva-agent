@@ -29,6 +29,12 @@ while keeping configuration, approvals, and personal data under your control.
   without mistaking activity counters for evidence of answer quality. Runtime
   identity separates SI endpoint model aliases from internal compatibility keys
   and the Direct or Copilot execution path.
+- **Intent-bound native actions:** conversational playlist requests use approved
+  Skills; retries, repository follow-ups, and implicit PR targets stay bound to
+  the preceding request. Structured action receipts distinguish browser handoffs
+  from verified completion, survive in chat context without duplication, and
+  report malformed or excess actions. Visual-agent availability checks local
+  prerequisites rather than assuming readiness.
 - **Workspace control room:** monitor independent terminals and coding agents for
   the selected workspace, focus a tile, interrupt work, or send new direction.
   Project files stay beside Live and Details tabs. Create local Git workspaces

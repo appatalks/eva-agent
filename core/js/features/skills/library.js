@@ -717,7 +717,7 @@ async function openExternalUrlFromSkill(url, skillName, userRequest) {
     }
   }
   window.open(target, '_blank', 'noopener');
-  return 'Opened ' + target;
+  return 'Requested browser handoff for ' + target + '. Browser opening and playback are not verified.';
 }
 
 async function toggleSkill(id, status) {

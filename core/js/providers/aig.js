@@ -5,6 +5,17 @@
 
 var _aigLmStudioHealth = { baseUrl: '', checkedAt: 0, available: false };
 
+function aigRememberResponse(content, rendered) {
+  var receipt = rendered && rendered.nativeActionReceipt || '';
+  lastResponse = content + (receipt ? '\n\n' + receipt : '');
+  var messages = JSON.parse(localStorage.getItem('aigMessages') || '[]');
+  var previous = messages[messages.length - 1];
+  if (receipt && previous && previous.role === 'assistant' && previous.content === receipt) messages.pop();
+  messages.push({ role: 'assistant', content: lastResponse.replace(/\n/g, ' ') });
+  localStorage.setItem('aigMessages', JSON.stringify(messages));
+  if (typeof saveCurrentSession === 'function') saveCurrentSession();
+}
+
 function readAigQuestionInput(element) {
   return String(element && (element.innerText || element.textContent) || '').replace(/\u00a0/g, ' ');
 }
@@ -350,16 +361,17 @@ async function aigSend() {
 
   // Build messages payload
   var storageKey = 'aigMessages';
-  if (!localStorage.getItem(storageKey)) {
+  var existingMessages = JSON.parse(localStorage.getItem(storageKey) || '[]');
+  if (!existingMessages.some(function(message) { return message.role === 'system'; })) {
     var sysPrompt = (typeof getSystemPrompt === 'function') ? getSystemPrompt() : '';
-    var initMessages = [
-      { role: 'system', content: sysPrompt + ' When you are asked to show an image, instead describe the image with [Image of <Description>]. ' + (typeof dateContents !== 'undefined' ? dateContents : '') }
-    ];
-    localStorage.setItem(storageKey, JSON.stringify(initMessages));
+    existingMessages.unshift({
+      role: 'system', content: sysPrompt + ' When you are asked to show an image, instead describe the image with [Image of <Description>]. ' + (typeof dateContents !== 'undefined' ? dateContents : '')
+    });
   }
 
   var newMessages = [];
-  if (lastResponse) {
+  var previousMessage = existingMessages[existingMessages.length - 1];
+  if (lastResponse && !(previousMessage && previousMessage.role === 'assistant' && previousMessage.content === lastResponse.replace(/\n/g, ' '))) {
     newMessages.push({ role: 'assistant', content: lastResponse.replace(/\n/g, ' ') });
   }
   newMessages.push(imageB64 ? {
@@ -384,7 +396,6 @@ async function aigSend() {
     newMessages.push({ role: 'user', content: "Today's " + solarContents + " " + sQuestion });
   }
 
-  var existingMessages = JSON.parse(localStorage.getItem(storageKey)) || [];
   var requestMessages = existingMessages.concat(newMessages);
   var currentHarnessContract = (window.EvaHarness && typeof EvaHarness.promptContract === 'function')
     ? EvaHarness.promptContract() : '';
@@ -672,7 +683,7 @@ async function aigSend() {
       cognitionFinalizing = true;
       removeEvaStreamingBubble(provisional);
       provisional = null;
-      await renderEvaResponse(cogContent, txtOutput, {
+      var renderedCognition = await renderEvaResponse(cogContent, txtOutput, {
         signalAuthorized: !deferredSignal && !!(signalContext && signalContext.authorized),
         signalMessage: deferredSignal ? '' : (signalContext ? signalContext.message : ''),
         signalRequest: sQuestion,
@@ -688,7 +699,7 @@ async function aigSend() {
         } catch (_) {}
       }
       if (cogContent) {
-        lastResponse = cogContent;
+        aigRememberResponse(cogContent, renderedCognition);
         masterOutput += txtOutput.innerText + '\n';
         localStorage.setItem('masterOutput', masterOutput);
       }
@@ -832,7 +843,7 @@ async function aigSend() {
     var modelUsed = data.model || 'aig';
 
     // Render response
-    await renderEvaResponse(content, txtOutput, {
+    var renderedResponse = await renderEvaResponse(content, txtOutput, {
       signalAuthorized: !!(signalContext && signalContext.authorized),
       signalMessage: signalContext ? signalContext.message : '',
       signalRequest: sQuestion,
@@ -844,7 +855,7 @@ async function aigSend() {
     });
 
     if (content) {
-      lastResponse = content;
+      aigRememberResponse(content, renderedResponse);
       var outputWithoutTags = txtOutput.innerText + '\n';
       masterOutput += outputWithoutTags;
       localStorage.setItem('masterOutput', masterOutput);
