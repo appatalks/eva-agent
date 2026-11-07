@@ -237,7 +237,6 @@ function saveAuthKeys() {
   var map = {
     'authOpenAI': 'OPENAI_API_KEY',
     'authGitHub': 'GITHUB_PAT',
-    'authGemini': 'GOOGLE_GL_KEY',
   };
   Object.keys(map).forEach(function(fieldId) {
     var el = document.getElementById(fieldId);
@@ -255,6 +254,8 @@ function saveAuthKeys() {
       var field = document.getElementById(fieldId);
       if (field && field.value.trim()) encryptedValues[map[fieldId]] = field.value.trim();
     });
+    var legacyGeminiKey = getAuthKey('GOOGLE_GL_KEY');
+    if (legacyGeminiKey) encryptedValues.GOOGLE_GL_KEY = legacyGeminiKey;
     window.evaStandalone.authSave(encryptedValues).catch(function() {});
   }
   // Save ACP Bridge URL separately
@@ -359,7 +360,6 @@ function populateAuthFields() {
   var map = {
     'authOpenAI': 'OPENAI_API_KEY',
     'authGitHub': 'GITHUB_PAT',
-    'authGemini': 'GOOGLE_GL_KEY',
   };
   Object.keys(map).forEach(function(fieldId) {
     var el = document.getElementById(fieldId);
@@ -1474,6 +1474,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (activeTab) activeTab.focus();
       });
     } else if (!open && wasOpen) {
+      if (window.EvaSignalSettings) EvaSignalSettings.close();
       var focusTarget = settingsReturnFocus;
       if (!focusTarget || focusTarget.getClientRects().length === 0 || typeof focusTarget.focus !== 'function') {
         focusTarget = document.getElementById('evaInputSettings');
@@ -1512,6 +1513,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (target === 'goals' && typeof loadGoals === 'function') loadGoals(false);
     if (target === 'background' && typeof loadBackgroundData === 'function') loadBackgroundData(false);
     if (target === 'email' && window.EvaEmailSettings) EvaEmailSettings.refresh();
+    if (target === 'auth' && window.EvaSignalSettings) EvaSignalSettings.refresh();
+    else if (window.EvaSignalSettings) EvaSignalSettings.close();
     return activeTab;
   }
 
@@ -1653,6 +1656,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // Init auth, system prompt, and model settings
   loadAuthOverrides();
   populateAuthFields();
+  var shellAutonomy = document.getElementById('taskShellAutonomy');
+  if (shellAutonomy) {
+    shellAutonomy.checked = typeof getEvaTaskShellAutonomy === 'function' && getEvaTaskShellAutonomy();
+    shellAutonomy.addEventListener('change', function() {
+      localStorage.setItem('evaTaskShellAutonomy', shellAutonomy.checked ? 'true' : 'false');
+    });
+  }
   refreshLocalVoicesProfiles();
   var ttsEngine = document.getElementById('selEngine');
   if (ttsEngine) ttsEngine.addEventListener('change', function() { syncLocalVoicesEngine(false); });

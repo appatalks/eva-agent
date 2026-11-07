@@ -115,6 +115,36 @@ function contextualStockSymbol(text, messages) {
   return '';
 }
 
+function requestedStockSymbols(text, messages) {
+  var value = String(text || '').slice(0, 1000).trim();
+  if (/\b(?:do\s+not|don't|never|cancel|send|email|signal|post|create|delete|agents?|subagents?|news|research|analy[sz]e|forecast|strategy|compare|valuation|fundamental|thesis)\b/i.test(value)) return [];
+  var end = value.length;
+  while (end && '.!?'.indexOf(value.charAt(end - 1)) >= 0) end--;
+  var words = value.slice(0, end).split(/\s+/);
+  var lower = words.map(function(word) { return word.toLowerCase(); });
+  var cursor = lower[0] === 'please' ? 1 : (['can', 'could', 'would'].indexOf(lower[0]) >= 0 && ['you', 'we'].indexOf(lower[1]) >= 0 ? 2 : 0);
+  if (lower.slice(cursor, cursor + 3).join(' ') === 'try again to') cursor += 3;
+  var command = lower[cursor];
+  if (command === 'look' && lower[cursor + 1] === 'up') cursor += 2;
+  else if (['check', 'get', 'show'].indexOf(command) >= 0) cursor++;
+  else cursor = -1;
+  if (cursor >= 0) {
+    while (['the', 'latest', 'current', 'live', 'stock', 'stocks', 'quote', 'quotes', 'price', 'prices', 'for'].indexOf(lower[cursor]) >= 0) cursor++;
+    var parts = words.slice(cursor).join(' ').replace(/,/g, '/').replace(/\band\b/gi, '/').split('/').map(function(part) { return part.trim(); });
+    var excluded = { API: true, URL: true, HTTP: true, JSON: true, CSV: true, PDF: true, MCP: true, ACP: true, CLI: true, UI: true, AI: true, GPU: true, CPU: true };
+    var tickerContext = parts.length > 1 || /\b(?:stock|share|ticker|quote|price)\b/i.test(value) ||
+      (parts[0] && (parts[0].charAt(0) === '$' || /^[A-Z][A-Z0-9.-]{0,14}$/.test(parts[0])));
+    if (tickerContext && parts.length >= 1 && parts.length <= 4 && parts.every(function(part) {
+      return /^\$?[A-Z][A-Z0-9.-]{0,14}$/i.test(part) && !excluded[part.replace(/^\$/, '').toUpperCase()];
+    })) {
+      return parts.map(function(part) { return part.replace(/^\$/, '').toUpperCase(); }).filter(function(symbol, index, all) { return all.indexOf(symbol) === index; });
+    }
+  }
+  if (!/\b(?:stock|share|ticker|quote|price)\b/i.test(value)) return [];
+  var single = contextualStockSymbol(value, messages);
+  return single ? [single] : [];
+}
+
 function pendingEmailCommand(text) {
   var normalized = String(text || '').toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
   if (/^(?:cancel|cancel it|cancel the email|do not send|don t send)$/.test(normalized)) return 'cancel';
@@ -216,24 +246,30 @@ function formatBriefingQuote(quote, requestedSymbol) {
   } else {
     lines.push('- Analysis: The verified receipt does not include a prior-close comparison or broader historical data.');
   }
+  lines.push('- Source: ' + String(quote.source || 'Verified quote provider') +
+    (quote.retrieved_at ? ' / retrieved ' + String(quote.retrieved_at) : ''));
   return lines.join('\n');
 }
 
-async function fetchBriefingQuote(bridgeUrl, userMessage, sessionId, resolvedSymbol) {
+async function fetchBriefingQuote(bridgeUrl, userMessage, sessionId, resolvedSymbol, turnId) {
   var symbol = resolvedSymbol || requestedStockSymbol(userMessage);
   if (!symbol) return { content: '', available: false };
   try {
     var quoteRequest = '$' + symbol + ' stock quote';
-    var url = bridgeUrl.replace(/\/+$/, '') + '/v1/data/retrieve?message=' + encodeURIComponent(quoteRequest) + '&session_id=' + encodeURIComponent(sessionId || '');
+    var url = bridgeUrl.replace(/\/+$/, '') + '/v1/data/retrieve?native_quote=1&message=' + encodeURIComponent(quoteRequest) + '&session_id=' + encodeURIComponent(sessionId || '') + '&turn_id=' + encodeURIComponent(turnId || '');
     var response = await fetch(url, {
       headers: (typeof getBridgeCapabilityHeaders === 'function') ? getBridgeCapabilityHeaders() : {},
       signal: AbortSignal.timeout(25000)
     });
     var body = await response.json().catch(function () { return {}; });
+    if (!response.ok && body.error && body.error.code === 'quote_provider_error') {
+      return { content: '### Requested quote\n\n_The native quote provider failed unexpectedly for ' + symbol + '. No quote was verified._', available: false };
+    }
     var receipt = {};
     try { receipt = JSON.parse(String(body.data || '')); } catch (_) {}
     var quote = receipt.stock_quote || {};
-    return { content: formatBriefingQuote(quote, symbol), available: typeof quote.price === 'number' };
+    var available = response.ok && quote.symbol === symbol && Number.isFinite(quote.price) && quote.price > 0;
+    return { content: formatBriefingQuote(available ? quote : {}, symbol), available: available };
   } catch (_) {
     return { content: formatBriefingQuote({}, symbol), available: false };
   }
@@ -331,6 +367,15 @@ function aigLmStudioAvailable() {
 }
 
 async function aigSend() {
+  var activity = window.EvaAgents && typeof EvaAgents.beginPrimaryTurn === 'function' ? EvaAgents.beginPrimaryTurn() : null;
+  try {
+    return await aigSendRequest();
+  } finally {
+    if (activity !== null) EvaAgents.endPrimaryTurn(activity);
+  }
+}
+
+async function aigSendRequest() {
   var txtMsg = document.getElementById('txtMsg');
   var txtOutput = document.getElementById('txtOutput');
   var pendingImageData = window._evaPendingImageData || '';
@@ -527,15 +572,14 @@ async function aigSend() {
   var cogDecision = (typeof Cognition !== 'undefined' && Cognition.shouldRun)
                       ? Cognition.shouldRun(sQuestion)
                       : { active: false, reason: null };
-  var requestedQuoteSymbol = contextualStockSymbol(sQuestion, existingMessages);
-  var isDirectQuoteRequest = !!requestedQuoteSymbol
-    && /\b(?:stock|share|ticker|quote|price)\b/i.test(sQuestion)
-    && !/\b(?:analy[sz]e|forecast|strategy|compare|valuation|fundamental|thesis)\b/i.test(sQuestion);
+  var requestedQuoteSymbols = requestedStockSymbols(sQuestion, existingMessages);
+  var requestedQuoteSymbol = requestedQuoteSymbols[0] || '';
+  var isDirectQuoteRequest = requestedQuoteSymbols.length > 0;
   var selectedAigBackend = String((document.getElementById('selAIGBackend') || {}).value || '');
   var siCopilotRuntimeSelected = selectedAigBackend === 'lmstudio'
     && (typeof getSIHarnessRuntime === 'function')
     && getSIHarnessRuntime() === 'copilot';
-  if (isDirectQuoteRequest && !siCopilotRuntimeSelected && cogDecision.reason !== 'phrase') {
+  if (isDirectQuoteRequest && cogDecision.reason !== 'phrase') {
     cogDecision = { active: false, reason: 'direct-quote' };
   }
   if (briefingRequest) {
@@ -596,13 +640,17 @@ async function aigSend() {
       return;
     }
   }
-  if (isDirectQuoteRequest && !siCopilotRuntimeSelected) {
+  if (isDirectQuoteRequest) {
     var quotePreview = createEvaStreamingBubble(txtOutput);
     updateEvaStreamingStatus(quotePreview, {
       phase: 'thinking',
       text: 'Eva is retrieving live data...'
     }, txtOutput);
-    var directQuote = await fetchBriefingQuote(bridgeUrl, sQuestion, sessionId, requestedQuoteSymbol);
+    var quoteResults = await Promise.all(requestedQuoteSymbols.map(function(symbol) {
+      return fetchBriefingQuote(bridgeUrl, sQuestion, sessionId, symbol, turnId);
+    }));
+    var directQuote = { content: quoteResults.map(function(result) { return result.content; }).join('\n\n'),
+      available: quoteResults.every(function(result) { return result.available; }) };
     removeEvaStreamingBubble(quotePreview);
     await renderEvaResponse(directQuote.content, txtOutput, {
       nativeRequest: sQuestion,
@@ -615,8 +663,8 @@ async function aigSend() {
     masterOutput += txtOutput.innerText + '\n';
     localStorage.setItem('masterOutput', masterOutput);
     setStatus(directQuote.available ? 'info' : 'warn', directQuote.available
-      ? 'Eva verified the current ' + requestedQuoteSymbol + ' quote.'
-      : 'Eva could not verify the current ' + requestedQuoteSymbol + ' quote.');
+      ? 'Eva verified the requested quote' + (requestedQuoteSymbols.length > 1 ? 's.' : '.')
+      : 'One or more requested quotes could not be verified.');
     var directQuoteAutoSpeak = document.getElementById('autoSpeak');
     if (directQuoteAutoSpeak && directQuoteAutoSpeak.checked) speakText();
     return;

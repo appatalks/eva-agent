@@ -38,6 +38,15 @@ while keeping configuration, approvals, and personal data under your control.
   Public-news follow-ups retain the recent user-specified topic through
   confirmations and status checks, and run native retrieval before answering
   rather than relying on a model's promise to search.
+  Delegated shell tasks use task-scoped planning: ordinary approved commands
+  can submit automatically, high-risk commands require confirmation, and model
+  command payloads are never executed blindly.
+- **Visible responder activity and benchmarking:** Eva's bridge avatar reflects
+  actual pending chat requests. Explicit local tokens/s benchmarks use a bounded
+  provider call and reported token usage, not shell scripts or word-count guesses.
+- **Model-independent stock checks:** single/pair quote requests and scheduled
+  market snapshots use verified native quote receipts, not model-written tool
+  calls or GitHub/Copilot authentication. Unavailable symbols are explicit.
 - **Agent Observatory:** an animated starship command bridge, in-place agent
   inspector, and preserved memory-atom view. A shared depth-sorted canvas scene
   places walking crew, consoles, shadows, and lighting in one room rather than
@@ -51,6 +60,13 @@ while keeping configuration, approvals, and personal data under your control.
   Subtle, transient crew bubbles show reported activity, streamed public output,
   and recorded upstream-output handoffs (at most two at once), never private
   reasoning or invented conversations.
+  Workspaces now lives in its own Observatory tab with the same coding controls.
+  A local Mission log checklist preserves final debriefs across restarts before
+  eligible finished crew are dismissed; active dependencies and a one-minute
+  reuse window are protected.
+- **Signal account linking:** Settings > Accounts provides a Link Signal button,
+  an in-panel QR code, completion status, cancellation, and fresh codes after
+  expiry. Existing recipients and prior local account files are preserved.
 - **Workspace control room:** monitor independent terminals and coding agents for
   the selected workspace, focus a tile, interrupt work, or send new direction.
   Project files stay beside Live and Details tabs. Create local Git workspaces
@@ -68,7 +84,7 @@ eva
 Eva is also added to the system application menu. On first launch, select **Eva (AIG)**
 for the integrated routing, memory, and tool experience.
 
-Current development version: **5.7.0** (`Eva Standalone-5.7.0.AppImage`, unreleased).
+Current development version: **5.7.1** (`Eva Standalone-5.7.1.AppImage`, unreleased).
 Latest published standalone release: `Eva Standalone-5.6.10.AppImage`.
 
 ## Preview
