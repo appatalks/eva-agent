@@ -21,7 +21,7 @@ _MAX_SOURCE_SNIPPET = 1_200
 _MAX_SOURCE_CONTENT = 8_000
 _RESEARCH_STRATEGIES = {"search", "refine", "alternate"}
 _FOLLOWUP_WORDS = re.compile(
-    r"^(?:yes[, ]+\s*)?(?:(?:please|go ahead and)\s+)?(?:continue|continue (?:the )?research|keep going|keep researching|go on|carry on|more|find more|what else|"
+    r"^(?:(?:please|go ahead and)\s+)?(?:continue|continue (?:the )?research|keep going|keep researching|go on|carry on|more|find more|what else|"
     r"dig deeper|go deeper|refine(?: it| this)?|narrow(?: it| this)?(?: down)?|"
     r"try a different search method|use (?:a )?different search method|"
     r"use another (?:search|source|method)|another search|different sources?|"
@@ -51,10 +51,6 @@ _RESEARCH_STATUS_FOLLOWUP = re.compile(
 _ACTION_STATUS_FOLLOWUP = re.compile(
     r"^(?:have\s+you\s+done\s+it|did\s+you\s+(?:do|finish|complete)\s+it|"
     r"are\s+you\s+done|what\s+happened)\s*[.!?]*$", re.I,
-)
-_NEWS_CONFIRMATION = re.compile(
-    r"^(?:(?:thank\s+you|thanks)(?:\s+\w+)?[,.!\s]+)?"
-    r"(?:(?:can\s+we)\s+)?(?:yes|correct|right|confirmed)[,:\s]+(.+?)\s*[.!?]*$", re.I,
 )
 _RECENT_PUBLIC_RENAMING_CLAIM = re.compile(
     r"\b(?:recently|today|yesterday|this\s+week|last\s+week|just)\b[\s\S]{0,280}"
@@ -196,7 +192,7 @@ def is_research_request(text):
         return True
     if _DIRECT_DEEP_RESEARCH.search(cleaned):
         return True
-    if _FOLLOWUP_WORDS.fullmatch(cleaned) or _DEEP_RESEARCH_FOLLOWUP.fullmatch(cleaned):
+    if is_research_followup(cleaned):
         return True
     return bool(re.search(
         r"\b(?:deep\s+dive\s+online\s+research|online\s+research\s+(?:on|about|into|for)|"
@@ -211,6 +207,9 @@ def is_research_followup(text):
     cleaned = _clean_text(text)
     if not cleaned or re.search(r"\b(?:stop|cancel|never\s+mind|forget\s+it)\b", cleaned, re.I):
         return False
+    cleaned = " ".join(cleaned.split())
+    if cleaned.casefold().startswith(("yes ", "yes, ")):
+        cleaned = cleaned.partition(" ")[2]
     return bool(_FOLLOWUP_WORDS.fullmatch(cleaned) or _DEEP_RESEARCH_FOLLOWUP.fullmatch(cleaned))
 
 
@@ -245,8 +244,26 @@ def _news_request_info(text):
     if not re.search(r"\b(?:latest|recent|current|today|find|get|check|search|show|tell|look)\b", cleaned, re.I):
         return None
     match = re.search(r"\b(?:news|headlines?)\s+(?:(?:on|for|about|regarding)\s+)?(.+)", cleaned, re.I)
-    topic = _topic_cleanup(match.group(1)) if match else ""
+    if not match:
+        return None
+    topic = _topic_cleanup(match.group(1))
     return {"explicit": True, "strategy": "search", "topic": topic, "news": True}
+
+
+def _news_confirmation(text):
+    words = _clean_text(text).rstrip(".!?").split()
+    keywords = {"yes", "correct", "right", "confirmed"}
+    lower = [word.casefold().strip(",.!:") for word in words]
+    prefix = 2 if lower[:2] == ["thank", "you"] else (1 if lower[:1] == ["thanks"] else 0)
+    if prefix:
+        words, lower = words[prefix:], lower[prefix:]
+        if lower and lower[0] not in keywords | {"can"}:
+            words, lower = words[1:], lower[1:]
+    if lower[:2] == ["can", "we"]:
+        words, lower = words[2:], lower[2:]
+    if len(words) < 2 or lower[0] not in keywords:
+        return ""
+    return _topic_cleanup(" ".join(words[1:]))
 
 
 def _news_context_query(prior_users):
@@ -263,9 +280,9 @@ def _news_context_query(prior_users):
             return _topic_cleanup(topic + ("; " + "; ".join(reversed(clarifications)) if clarifications else ""))
         if is_research_followup(text) or _RESEARCH_STATUS_FOLLOWUP.fullmatch(text) or _ACTION_STATUS_FOLLOWUP.fullmatch(text):
             continue
-        confirmation = _NEWS_CONFIRMATION.fullmatch(text)
+        confirmation = _news_confirmation(text)
         if confirmation:
-            clarification = _topic_cleanup(confirmation.group(1))
+            clarification = confirmation
             if _private_topic(clarification) or re.search(
                 r"\b(?:send|delete|open|launch|run|stop|cancel|file|folder|browser)\b", clarification, re.I
             ):
@@ -402,7 +419,7 @@ def resolve_research_request(user_message, messages):
         r"\b(?:launch|spawn|spin\s+up|start|run|direct|ask)\b[^.!?]{0,60}\b(?:agents?|subagents?)\b", request, re.I
     ):
         return plan
-    confirmation = _NEWS_CONFIRMATION.fullmatch(request) if not is_research_followup(request) else None
+    confirmation = _news_confirmation(request) if not is_research_followup(request) else ""
     news_topic = _news_context_query(prior_users) if (
         is_research_followup(request) or confirmation
     ) else ""

@@ -4,8 +4,7 @@
 
   var RESEARCH_MAX_QUERY_LENGTH = 500;
   var RESEARCH_STRATEGIES = { search: true, refine: true, alternate: true };
-  var RESEARCH_FOLLOWUP_RE = /^(?:yes[, ]+\s*)?(?:(?:please\s+)?(?:continue|continue (?:the )?research|keep going|keep researching|go on|carry on|more|find more|what else|dig deeper|go deeper|refine(?: it| this)?|narrow(?: it| this)?(?: down)?|try a different search method|use (?:a )?different search method|use another (?:search|source|method)|another search|different sources?)|go ahead and try a different search method)\s*[.!?]*$/i;
-  var NEWS_CONFIRMATION_RE = /^(?:(?:thank\s+you|thanks)(?:\s+\w+)?[,.!\s]+)?(?:(?:can\s+we)\s+)?(?:yes|correct|right|confirmed)[,:\s]+(.+?)\s*[.!?]*$/i;
+  var RESEARCH_FOLLOWUP_RE = /^(?:(?:please\s+)?(?:continue|continue (?:the )?research|keep going|keep researching|go on|carry on|more|find more|what else|dig deeper|go deeper|refine(?: it| this)?|narrow(?: it| this)?(?: down)?|try a different search method|use (?:a )?different search method|use another (?:search|source|method)|another search|different sources?)|go ahead and try a different search method)\s*[.!?]*$/i;
   var RESEARCH_STATUS_RE = /^(?:(?:please|can\s+you)\s+)?what\s+(?:did|have)\s+you\s+(?:find|found)(?:\s+so\s+far)?\s*[.!?]*$/i;
   var ACTION_STATUS_RE = /^(?:have\s+you\s+done\s+it|did\s+you\s+(?:do|finish|complete)\s+it|are\s+you\s+done|what\s+happened)\s*[.!?]*$/i;
   var DIRECT_DEEP_RESEARCH_RE = /\b(?:deep\s+dive|deep\s+research|detailed\s+research|thorough\s+research)\s+(?:on|into|about|for)\s+(.+)/i;
@@ -76,6 +75,8 @@
   function isResearchFollowup(text) {
     var cleaned = cleanResearchText(text);
     if (!cleaned || /\b(?:stop|cancel|never\s+mind|forget\s+it)\b/i.test(cleaned)) return false;
+    cleaned = cleaned.replace(/\s+/g, ' ');
+    if (/^yes,? /i.test(cleaned)) cleaned = cleaned.slice(cleaned.indexOf(' ') + 1);
     return RESEARCH_FOLLOWUP_RE.test(cleaned);
   }
 
@@ -137,7 +138,32 @@
     if (RESEARCH_OFFLINE_RE.test(cleaned) && !/\b(?:online|web|internet)\b/i.test(cleaned)) return null;
     if (!/\b(?:latest|recent|current|today|find|get|check|search|show|tell|look)\b/i.test(cleaned)) return null;
     var match = /\b(?:news|headlines?)\s+(?:(?:on|for|about|regarding)\s+)?(.+)/i.exec(cleaned);
-    return { explicit: true, strategy: 'search', topic: match ? researchTopicCleanup(match[1]) : '', news: true };
+    return match ? { explicit: true, strategy: 'search', topic: researchTopicCleanup(match[1]), news: true } : null;
+  }
+
+  function newsConfirmation(text) {
+    var cleaned = cleanResearchText(text);
+    var limit = cleaned.length;
+    while (limit && '.!?'.indexOf(cleaned.charAt(limit - 1)) >= 0) limit--;
+    var words = cleaned.slice(0, limit).split(/\s+/);
+    var lower = words.map(function(word) {
+      var start = 0, end = word.length;
+      while (start < end && ',.!:'.indexOf(word.charAt(start)) >= 0) start++;
+      while (end > start && ',.!:'.indexOf(word.charAt(end - 1)) >= 0) end--;
+      return word.slice(start, end).toLowerCase();
+    });
+    var keywords = ['yes', 'correct', 'right', 'confirmed'];
+    var prefix = lower[0] === 'thank' && lower[1] === 'you' ? 2 : (lower[0] === 'thanks' ? 1 : 0);
+    if (prefix) {
+      words = words.slice(prefix); lower = lower.slice(prefix);
+      if (lower.length && keywords.indexOf(lower[0]) < 0 && lower[0] !== 'can') {
+        words = words.slice(1); lower = lower.slice(1);
+      }
+    }
+    if (lower[0] === 'can' && lower[1] === 'we') {
+      words = words.slice(2); lower = lower.slice(2);
+    }
+    return words.length >= 2 && keywords.indexOf(lower[0]) >= 0 ? researchTopicCleanup(words.slice(1).join(' ')) : '';
   }
 
   function newsContextQuery(priorUsers) {
@@ -154,9 +180,9 @@
         return researchTopicCleanup(topic + (clarifications.length ? '; ' + clarifications.reverse().join('; ') : ''));
       }
       if (isResearchFollowup(text) || RESEARCH_STATUS_RE.test(text) || ACTION_STATUS_RE.test(text)) continue;
-      var confirmation = NEWS_CONFIRMATION_RE.exec(text);
+      var confirmation = newsConfirmation(text);
       if (confirmation) {
-        var clarification = researchTopicCleanup(confirmation[1]);
+        var clarification = confirmation;
         if (privateResearchTopic(clarification) || /\b(?:send|delete|open|launch|run|stop|cancel|file|folder|browser)\b/i.test(clarification)) return '';
         clarifications.push(clarification);
         continue;
@@ -235,7 +261,7 @@
     var priorUsers = researchPriorUsers(messages, request);
     var direct = directResearchInfo(request);
     if (direct.news && /\b(?:launch|spawn|spin\s+up|start|run|direct|ask)\b[^.!?]{0,60}\b(?:agents?|subagents?)\b/i.test(request)) return plan;
-    var confirmation = isResearchFollowup(request) ? null : NEWS_CONFIRMATION_RE.exec(request);
+    var confirmation = isResearchFollowup(request) ? '' : newsConfirmation(request);
     var newsTopic = isResearchFollowup(request) || confirmation ? newsContextQuery(priorUsers) : '';
     if (newsTopic) {
       if (confirmation) {

@@ -5132,8 +5132,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _passive_recall = _is_passive_memory_recall(_routing_message)
         # Reviewer/planner calls do not gain tools by quoting the research request.
         native_research = bool(research_plan["active"] and not no_tools
-                       and (_request_type in {"general", "web-search", "news-search"}
-                            or (research_plan.get("news") and _request_type == "financial-data")))
+                       and (_request_type in {"general", "web-search"}
+                            or (research_plan.get("news") and _request_type in {"news-search", "financial-data"})))
         research_receipt = None
         if native_research:
             _request_type = "web-search"
