@@ -149,6 +149,9 @@ entries directly. It does not ask the responder to write tool-call syntax.
 [`market_data.stock_quote`](tools/bridge/market_data.py) adapter before the
 ambient ACP retrieval path. Each attempt emits a privacy-safe
 `quote.retrieval` audit event correlated to the requesting turn.
+Expected provider/network outages yield unavailable receipts. Unexpected provider
+defects emit a privacy-safe failure audit and an HTTP error instead of being
+misreported as ordinary quote unavailability.
 
 The scheduled `market_snapshot` job also uses these native receipts rather
 than `_bg_agent_prompt` or the ambient Copilot model. Partial snapshots retain

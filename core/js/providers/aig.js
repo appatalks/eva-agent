@@ -262,6 +262,9 @@ async function fetchBriefingQuote(bridgeUrl, userMessage, sessionId, resolvedSym
       signal: AbortSignal.timeout(25000)
     });
     var body = await response.json().catch(function () { return {}; });
+    if (!response.ok && body.error && body.error.code === 'quote_provider_error') {
+      return { content: '### Requested quote\n\n_The native quote provider failed unexpectedly for ' + symbol + '. No quote was verified._', available: false };
+    }
     var receipt = {};
     try { receipt = JSON.parse(String(body.data || '')); } catch (_) {}
     var quote = receipt.stock_quote || {};

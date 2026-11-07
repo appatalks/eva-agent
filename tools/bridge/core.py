@@ -6764,8 +6764,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"data": "", "model": "", "retrieved": False, "mode": "local" if _st.local_mode else "cloud"})
             return
         if params.get("native_quote", ["0"])[0] == "1":
-            from bridge.market_data import stock_quote
-            quote = stock_quote(user_message)
+            from bridge.market_data import QuoteProviderError, stock_quote
+            try:
+                quote = stock_quote(user_message)
+            except QuoteProviderError:
+                audit_event("quote.retrieval", str(params.get("turn_id", [""])[0])[:120],
+                            "failed", error_type="quote_provider_error", backend="native")
+                self._json_response(502, {"error": {
+                    "code": "quote_provider_error",
+                    "message": "The native quote provider failed unexpectedly. No quote was verified.",
+                }})
+                return
             audit_event("quote.retrieval", str(params.get("turn_id", [""])[0])[:120],
                         "completed" if "price" in quote else "unavailable",
                         source_count=1 if "price" in quote else 0, backend="native")

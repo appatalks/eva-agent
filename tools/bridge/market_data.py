@@ -2,6 +2,13 @@
 
 import math
 import re
+import subprocess
+
+from bridge.audit import audit_event
+
+
+class QuoteProviderError(RuntimeError):
+    """An unexpected provider defect, distinct from an unavailable quote."""
 
 
 def stock_quote(query):
@@ -11,8 +18,11 @@ def stock_quote(query):
         return {"error": "quote_invalid_ticker"}
     try:
         value = google_stock_quote(str(query or "")[:500])
-    except Exception:
+    except (OSError, ValueError, subprocess.SubprocessError):
         return {"symbol": symbol, "error": "quote_unavailable"}
+    except Exception as error:
+        audit_event("quote.provider", outcome="failed", error_type=type(error).__name__)
+        raise QuoteProviderError("The native quote provider failed unexpectedly.") from error
     price = value.get("price") if isinstance(value, dict) else None
     valid = (
         isinstance(value, dict) and not value.get("error") and value.get("symbol") == symbol
