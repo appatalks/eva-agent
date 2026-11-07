@@ -1990,7 +1990,7 @@ def test_agent_operations_contract():
                f"missing #{element_id}" if f'id="{element_id}"' not in html else "")
     report("agent_operations_script", re.search(r'src="core/js/features/agents/operations\.js(?:\?[^" ]+)?"', html) is not None)
     report("agent_operations_adaptive_polling",
-           "AGENT_ACTIVE_POLL_MS = 2000" in ui and "AGENT_IDLE_POLL_MS = 20000" in ui
+           "AGENT_ACTIVE_POLL_MS = 2000" in ui and "AGENT_IDLE_POLL_MS = 5000" in ui
             and "function scheduleNextRefresh" in ui and "return Promise.resolve(refresh()).finally(scheduleNextRefresh);" in ui and "setInterval(refresh, 2000)" not in ui
             and "setInterval(function() { if (!state.open) refresh(); }, 15000);" not in ui,
            "Agent Operations must use active/idle timeout polling")

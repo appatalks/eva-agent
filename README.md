@@ -35,6 +35,10 @@ while keeping configuration, approvals, and personal data under your control.
   from verified completion, survive in chat context without duplication, and
   report malformed or excess actions. Visual-agent availability checks local
   prerequisites rather than assuming readiness.
+- **Agent Observatory:** a live workstation floor, in-place agent inspector, and
+  preserved memory-atom view. Reported runtime activity drives animation; stale
+  snapshots freeze activity and pause controls. Inspect dependencies, open linked
+  chats, and steer or interrupt supported agents without leaving the floor.
 - **Workspace control room:** monitor independent terminals and coding agents for
   the selected workspace, focus a tile, interrupt work, or send new direction.
   Project files stay beside Live and Details tabs. Create local Git workspaces

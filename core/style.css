@@ -812,7 +812,7 @@ body.agents-view-open.agent-workspace-open #evaWorkspacesBtn { background: rgba(
 body.agents-view-open .agents-view {
   position: relative;
   display: grid;
-  grid-template-rows: auto auto minmax(180px, 1fr) minmax(260px, 44%);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
@@ -1275,6 +1275,7 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
 }
 .agents-view-header,
 .agents-metrics,
+.agent-observatory-toolbar,
 .agents-session-area,
 .agent-graph { position: relative; z-index: 6; }
 .agents-view-header {
@@ -1388,9 +1389,11 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
 .agent-status i { width: 6px; height: 6px; border-radius: 50%; background: #78938f; }
 .agent-card.status-running .agent-status i,
 .agent-card.status-starting .agent-status i,
-.agent-card.status-waiting .agent-status i,
 .agent-card.status-finalizing .agent-status i,
 .agent-card.status-steering .agent-status i { background: #4adec7; box-shadow: 0 0 10px #4adec7; animation: agentPulse 1.2s infinite; }
+.agent-card.status-waiting .agent-status i,
+.agent-card.status-awaiting_confirmation .agent-status i,
+.agent-card.status-awaiting_input .agent-status i { background: #ffbe5c; }
 .agent-card.status-error .agent-status i { background: #ff6b6b; }
 .agent-card.status-done .agent-status i { background: #ffbe5c; }
 .agent-card-title { margin-top: auto; color: #f3fffd; font-size: 15px; line-height: 1.2; overflow-wrap: anywhere; }
@@ -1419,6 +1422,65 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
 .agent-detail .agent-detail-notice { margin: 0 44px 12px 0; padding: 7px 9px; border-left: 2px solid #ffbe5c; color: #ffcf85; background: rgba(255,190,92,0.06); }
 .agent-detail pre { max-height: 180px; margin: 0; padding: 12px; overflow: auto; border-left: 2px solid #ffbe5c; background: rgba(255,190,92,0.045); color: #c9e9e5; white-space: pre-wrap; font: 11px/1.55 monospace; }
 .agent-detail-status { color: #4adec7; font: 10px monospace; }
+.agent-observatory-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 18px; border-bottom: 1px solid rgba(74,222,199,0.13); }
+.agent-observatory-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-observatory-tabs button,
+.agent-inspector-actions button,
+.agent-dependency-link { padding: 8px 12px; border: 1px solid rgba(74,222,199,0.24); border-radius: 5px; background: #0b201d; color: #b8ddd6; font: 600 11px monospace; cursor: pointer; }
+.agent-observatory-tabs button[aria-selected="true"] { background: #183d35; border-color: #4adec7; color: #c8fff2; }
+.agent-observatory-tabs button:focus-visible,
+.agent-workstation:focus-visible,
+.agent-card:focus-visible,
+.agent-inspector-actions button:focus-visible,
+.agent-dependency-link:focus-visible { outline: 2px solid #ffbe5c; outline-offset: 3px; }
+.agent-telemetry-state { color: #8db6aa; font: 10px/1.5 monospace; }
+.agents-view[data-stale="true"] .agent-telemetry-state,
+.agents-view[data-stale="true"] .agents-updated { color: #ffcf85; }
+.agent-observatory-stage { position: relative; z-index: 0; display: flex; min-width: 0; min-height: 0; overflow: hidden; }
+.agent-observatory-stage > [role="tabpanel"] { flex: 1; min-width: 0; }
+.agent-observatory-stage > [hidden] { display: none !important; }
+.agent-floor { padding: 18px; overflow: auto; background: radial-gradient(ellipse at 45% 0%, rgba(74,222,199,0.06), transparent 65%); }
+.agent-floor-heading p { max-width: 760px; margin: 6px 0 18px; color: #91b8ac; font: 11px/1.6 monospace; }
+.agent-floor-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); align-items: start; gap: 18px; }
+.agent-floor-room { border: 1px solid rgba(74,222,199,0.2); border-radius: 12px; background: rgba(8,24,21,0.88); overflow: hidden; }
+.agent-floor-room-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid rgba(74,222,199,0.13); color: #a9d2c4; font: 600 10px monospace; letter-spacing: 0.08em; }
+.agent-floor-room-stations { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; padding: 16px; background-image: linear-gradient(rgba(74,222,199,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(74,222,199,0.025) 1px, transparent 1px); background-size: 24px 24px; }
+.agent-workstation { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; min-width: 0; padding: 14px 12px; border: 1px solid rgba(74,222,199,0.14); border-radius: 9px; background: rgba(11,30,26,0.88); color: #e5fff6; cursor: pointer; text-align: center; }
+.agent-workstation:hover,
+.agent-workstation[aria-pressed="true"],
+.agent-card[aria-pressed="true"] { border-color: #7ee1b6; background-color: #16392f; }
+.agent-workstation[data-status="awaiting_confirmation"],
+.agent-workstation[data-status="awaiting_input"] { border-color: #ffbe5c; }
+.agent-workstation[data-status="error"] { border-color: #d88080; }
+.agent-station-scene { position: relative; display: block; width: 132px; height: 92px; }
+.agent-station-desk { position: absolute; bottom: 8px; left: 10px; width: 112px; height: 16px; border: 1px solid #477768; border-radius: 3px; background: #244f43; box-shadow: 0 7px 0 #16352c; }
+.agent-station-monitor { position: absolute; right: 14px; top: 14px; width: 46px; height: 36px; border: 3px solid #42685f; border-radius: 5px; background: #10271f; box-shadow: 0 6px 0 -2px #42685f; }
+.agent-station-monitor::after { content: ''; display: block; width: 24px; height: 3px; margin: 8px 5px; background: #648779; box-shadow: 0 7px 0 #4a685b, 0 14px 0 #345345; }
+.agent-station-avatar { position: absolute; bottom: 30px; left: 18px; width: 38px; height: 35px; border-radius: 12px 12px 5px 5px; background: var(--agent-color, #64baa2); box-shadow: inset 0 -7px 0 rgba(0,0,0,0.2); }
+.agent-station-avatar::before { content: ''; position: absolute; top: -22px; left: 6px; width: 26px; height: 26px; border: 2px solid var(--agent-color, #64baa2); border-radius: 10px; background: #18372e; box-sizing: border-box; }
+.agent-station-avatar::after { content: ''; position: absolute; top: -12px; left: 12px; width: 4px; height: 4px; background: #d1ffef; box-shadow: 11px 0 0 #d1ffef; }
+.agent-workstation[data-motion="working"] .agent-station-monitor::after { background: #96edc4; animation: agentMonitorWork 1.6s ease-in-out infinite; }
+.agent-workstation[data-motion="working"] .agent-station-avatar { animation: agentStationWork 2.4s ease-in-out infinite; }
+.agent-station-label { max-width: 100%; overflow-wrap: anywhere; font: 600 13px/1.35 monospace; }
+.agent-station-status { color: #91d2b7; font: 600 10px monospace; }
+.agent-station-activity { display: -webkit-box; min-height: 32px; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: #8eb3a5; font: 10px/1.5 monospace; overflow-wrap: anywhere; }
+.agent-station-duration { color: #729b8e; font: 10px monospace; }
+.agent-inspector-actions,
+.agent-dependencies { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.agent-inspector-actions button:disabled,
+.agent-steer-form button:disabled,
+.agent-steer-form input:disabled,
+.agent-card-dismiss:disabled { opacity: 0.45; cursor: not-allowed; }
+.agent-inspector-actions .agent-interrupt { border-color: #a86f62; color: #efb5a4; }
+.agent-inspector-actions button[hidden] { display: none; }
+.agent-detail .agent-inspector-feedback { margin-top: 12px; color: #c7e3cc; }
+.agent-inspector-feedback[data-error="true"] { color: #ffb2a3; }
+.agents-view[data-stale="true"] .agent-status i { animation: none; box-shadow: none; background: #aa9d7d; }
+@keyframes agentStationWork { 50% { transform: translateY(-2px); } }
+@keyframes agentMonitorWork { 50% { opacity: 0.55; } }
+@media (prefers-reduced-motion: reduce) {
+  .agent-station-avatar, .agent-station-monitor::after, .agent-card.agent-card-enter, .agent-status i { animation: none !important; }
+}
 .agent-steer-form > div { display: flex; gap: 6px; }
 .agent-steer-form input { min-width: 0; flex: 1; padding: 9px 10px; border: 1px solid rgba(74,222,199,0.24); border-radius: 3px; outline: none; background: #0a1917; color: #eafffc; }
 .agent-steer-form input:focus { border-color: #4adec7; }
@@ -1492,7 +1554,7 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
   body.agents-view-open .agents-mobile-btn { display: none; }
 }
 @media (max-width: 760px) {
-  body.agents-view-open .agents-view { grid-template-rows: auto auto minmax(180px, 1fr) minmax(220px, 40%); }
+  body.agents-view-open .agents-view { grid-template-rows: auto auto auto minmax(0, 1fr); }
   .agents-view-header { padding: 12px 14px 9px; }
   .agents-view-header h1 { font-size: 19px; }
   .agents-updated { display: none; }
@@ -1501,6 +1563,10 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
   .agents-grid { grid-template-columns: repeat(2, minmax(130px, 1fr)); grid-auto-rows: minmax(130px, 1fr); padding: 10px; }
   .agent-card { padding: 10px; }
   .agent-detail { position: absolute; inset: 0; z-index: 4; width: auto; border-left: 0; }
+  .agent-observatory-toolbar { align-items: flex-start; flex-direction: column; padding: 10px; gap: 7px; }
+  .agent-floor { padding: 10px; }
+  .agent-floor-room-stations { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); padding: 10px; gap: 10px; }
+  .agent-graph-heading { flex-wrap: wrap; }
   .agent-graph-heading { padding: 8px 12px 5px; }
   .agent-graph-legend span:not(:last-child) { display: none; }
   body.workspace-workbench-open .workspace-workbench { grid-template-rows: auto auto auto minmax(0, 1fr); }
