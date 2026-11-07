@@ -27,6 +27,7 @@ var EvaAgents = (function() {
     view: 'floor',
     lastSyncAt: 0,
     telemetryError: '',
+    reportsSequence: 0,
     clockTimer: null,
     actionBusy: {},
     parallaxX: 0,
@@ -70,8 +71,9 @@ var EvaAgents = (function() {
   }
 
   function setView(view) {
-    state.view = ['floor', 'memory', 'cards'].indexOf(view) === -1 ? 'floor' : view;
-    var views = { floor: ['agentsFloorTab', 'agentsFloor'], memory: ['agentsMemoryTab', 'agentsMemory'], cards: ['agentsCardsTab', 'agentsGrid'] };
+    state.view = ['floor', 'memory', 'cards', 'workspaces', 'reports'].indexOf(view) === -1 ? 'floor' : view;
+    var views = { floor: ['agentsFloorTab', 'agentsFloor'], memory: ['agentsMemoryTab', 'agentsMemory'], cards: ['agentsCardsTab', 'agentsGrid'],
+      workspaces: ['agentsWorkspacesTab', 'agentsWorkspaces'], reports: ['agentsReportsTab', 'agentsReports'] };
     Object.keys(views).forEach(function(key) {
       var tab = document.getElementById(views[key][0]);
       var panel = document.getElementById(views[key][1]);
@@ -82,6 +84,14 @@ var EvaAgents = (function() {
       if (panel) panel.hidden = key !== state.view;
     });
     try { localStorage.setItem('evaAgentObservatoryView', state.view); } catch (_) {}
+    var fullWidth = state.view === 'workspaces' || state.view === 'reports';
+    if (fullWidth) closeDetail();
+    document.getElementById('agentsView').dataset.view = state.view;
+    if (window.EvaWorkspaces && state.open) {
+      if (state.view === 'workspaces') window.EvaWorkspaces.openWorkbench(true);
+      else window.EvaWorkspaces.closeWorkbench(true);
+    }
+    if (state.open && state.view === 'reports') refreshReports();
     if (typeof EvaBridgeScene !== 'undefined') EvaBridgeScene.setActive(state.open && state.view === 'floor');
     if (state.open && state.view === 'memory') {
       startGraph();
@@ -135,19 +145,17 @@ var EvaAgents = (function() {
   }
 
   function setEntry(entry) {
-    state.entry = entry === 'workspace' ? 'workspace' : 'agents';
-    var workspace = state.entry === 'workspace';
-    document.body.classList.toggle('agent-workspace-open', workspace);
+    state.entry = 'agents';
     var view = document.getElementById('agentsView');
     var agentsButton = document.getElementById('evaAgentsBtn');
-    var workspaceButton = document.getElementById('evaWorkspacesBtn');
+    var lcarsButton = document.getElementById('lcarsAgentsBtn');
     var kicker = document.getElementById('agentsViewKicker');
     var title = document.getElementById('agentsViewTitle');
-    if (view) view.setAttribute('aria-label', workspace ? 'Agentic sessions workspace' : 'Agent operations');
-    if (agentsButton) agentsButton.classList.toggle('active', !workspace && state.open);
-    if (workspaceButton) workspaceButton.classList.toggle('active', workspace && state.open);
-    if (kicker) kicker.textContent = workspace ? 'RUNNING AGENTIC SESSIONS' : 'LIVE ORCHESTRATION';
-    if (title) title.textContent = workspace ? 'Workspace' : 'Agent Observatory';
+    if (view) view.setAttribute('aria-label', 'Agent Observatory');
+    if (agentsButton) agentsButton.classList.toggle('active', state.open);
+    if (lcarsButton) lcarsButton.classList.toggle('active', state.open);
+    if (kicker) kicker.textContent = 'LIVE ORCHESTRATION';
+    if (title) title.textContent = 'Agent Observatory';
   }
 
   function open(entry) {
@@ -156,7 +164,7 @@ var EvaAgents = (function() {
       return refresh(true);
     }
     if (typeof closeVoiceView === 'function' && typeof _vv !== 'undefined' && _vv.open) closeVoiceView();
-    if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench();
+    if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench(true);
     if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();
     if (window.EvaSkills && typeof window.EvaSkills.close === 'function') window.EvaSkills.close();
     closeSidePanels();
@@ -173,13 +181,15 @@ var EvaAgents = (function() {
 
   function close() {
     state.open = false;
+    state.reportsSequence++;
+    if (window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') window.EvaWorkspaces.closeWorkbench(true);
     document.body.classList.remove('agents-view-open', 'agent-workspace-open');
     var view = document.getElementById('agentsView');
     var button = document.getElementById('evaAgentsBtn');
-    var workspaceButton = document.getElementById('evaWorkspacesBtn');
+    var lcarsButton = document.getElementById('lcarsAgentsBtn');
     if (view) view.setAttribute('aria-hidden', 'true');
     if (button) button.classList.remove('active');
-    if (workspaceButton) workspaceButton.classList.remove('active');
+    if (lcarsButton) lcarsButton.classList.remove('active');
     if (state.pollTimer) clearTimeout(state.pollTimer);
     state.pollTimer = null;
     if (state.clockTimer) clearTimeout(state.clockTimer);
@@ -211,7 +221,75 @@ var EvaAgents = (function() {
   }
 
   function openWorkspace() {
-    return open('workspace');
+    return openWorkspaces();
+  }
+
+  function openWorkspaces() {
+    var ready = open();
+    setView('workspaces');
+    return ready;
+  }
+
+  async function refreshReports() {
+    var sequence = ++state.reportsSequence;
+    try {
+      var response = await fetch(bridgeUrl() + '/v1/agents/reports', { signal: AbortSignal.timeout(8000) });
+      if (!response.ok) throw new Error('Report archive returned ' + response.status);
+      var payload = await response.json();
+      if (sequence !== state.reportsSequence) return;
+      if (!Array.isArray(payload.reports)) throw new Error('Invalid report archive.');
+      var host = document.getElementById('missionLogReports');
+      var existing = {};
+      host.querySelectorAll('[data-report-id]').forEach(function(node) { existing[node.dataset.reportId] = node; });
+      payload.reports.forEach(function(report, index) {
+        var card = existing[report.id];
+        if (!card) {
+          card = element('article', 'mission-log-report');
+          card.dataset.reportId = report.id;
+          var label = element('label', 'mission-log-check');
+          var check = element('input', '');
+          check.type = 'checkbox';
+          check.setAttribute('aria-label', 'Mark report reviewed: ' + report.label);
+          label.append(check, element('strong', '', report.label));
+          var detail = element('details', '');
+          detail.append(element('summary', '', 'Read debrief'), element('pre', 'mission-log-body', report.report || 'No report text was returned.'));
+          card.append(label, element('p', 'mission-log-meta', statusLabel(report.status) + ' / ' + new Date(report.ended_at).toLocaleString()), detail);
+          check.addEventListener('change', async function() {
+            var requested = check.checked;
+            check.disabled = true;
+            try {
+              var saved = await fetch(bridgeUrl() + '/v1/agents/reports/review', {
+                method: 'POST',
+                headers: typeof getBridgeCapabilityHeaders === 'function' ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: report.id, reviewed: requested }),
+                signal: AbortSignal.timeout(8000)
+              });
+              var receipt = await saved.json();
+              if (!saved.ok || receipt.id !== report.id || receipt.reviewed !== requested) throw new Error('Checklist update was not confirmed.');
+              state.reportsSequence++;
+              card.dataset.reviewed = String(requested);
+              setText('missionLogStatus', requested ? 'Report marked reviewed. Original debrief retained.' : 'Report returned to your checklist.');
+            } catch (error) {
+              check.checked = !requested;
+              setText('missionLogStatus', error.message || 'Checklist update failed.');
+            } finally { check.disabled = false; }
+          });
+        }
+        var checkbox = card.querySelector('input');
+        if (!checkbox.disabled) {
+          checkbox.checked = report.reviewed === true;
+          card.dataset.reviewed = String(report.reviewed === true);
+        }
+        if (host.children[index] !== card) host.insertBefore(card, host.children[index] || null);
+        delete existing[report.id];
+      });
+      Object.keys(existing).forEach(function(id) { existing[id].remove(); });
+      setText('missionLogStatus', payload.reports.length
+        ? 'Latest ' + payload.reports.length + ' debriefs / locally preserved across restarts.'
+        : 'No debriefs yet. Finished reports will appear here automatically.');
+    } catch (error) {
+      if (sequence === state.reportsSequence) setText('missionLogStatus', 'Archive unavailable. Last loaded reports retained. ' + error.message);
+    }
   }
 
   async function refresh(forceGraph) {
@@ -235,6 +313,7 @@ var EvaAgents = (function() {
       state.lastSyncAt = Date.now();
       state.telemetryError = '';
       render();
+      if (state.open && state.view === 'reports') refreshReports();
     } catch (error) {
       if (sequence !== state.refreshSequence) return;
       if (error && error.name === 'AbortError' && !timedOut) return;
@@ -1191,20 +1270,23 @@ var EvaAgents = (function() {
     var closeButton = document.getElementById('agentsCloseBtn');
     var detailClose = document.getElementById('agentDetailClose');
     var memoryReviewButton = document.getElementById('agentGraphMemoryReview');
+    var workbench = document.getElementById('workspaceWorkbench');
+    var workspacesHost = document.getElementById('agentsWorkspaces');
+    if (workbench && workspacesHost) workspacesHost.appendChild(workbench);
     try { state.view = localStorage.getItem('evaAgentObservatoryView') || 'floor'; } catch (_) {}
     setView(state.view);
-    var tabIds = ['agentsFloorTab', 'agentsMemoryTab', 'agentsCardsTab'];
-    var viewNames = ['floor', 'memory', 'cards'];
+    var tabIds = ['agentsFloorTab', 'agentsMemoryTab', 'agentsCardsTab', 'agentsWorkspacesTab', 'agentsReportsTab'];
+    var viewNames = ['floor', 'memory', 'cards', 'workspaces', 'reports'];
     tabIds.forEach(function(id, index) {
       var tab = document.getElementById(id);
       if (!tab) return;
       tab.addEventListener('click', function() { setView(viewNames[index]); refresh(state.view === 'memory'); });
       tab.addEventListener('keydown', function(event) {
         var next;
-        if (event.key === 'ArrowRight') next = (index + 1) % 3;
-        else if (event.key === 'ArrowLeft') next = (index + 2) % 3;
+        if (event.key === 'ArrowRight') next = (index + 1) % tabIds.length;
+        else if (event.key === 'ArrowLeft') next = (index + tabIds.length - 1) % tabIds.length;
         else if (event.key === 'Home') next = 0;
-        else if (event.key === 'End') next = 2;
+        else if (event.key === 'End') next = tabIds.length - 1;
         else return;
         event.preventDefault();
         document.getElementById(tabIds[next]).click();
@@ -1258,6 +1340,7 @@ var EvaAgents = (function() {
   return {
     open: open,
     openWorkspace: openWorkspace,
+    openWorkspaces: openWorkspaces,
     close: close,
     toggle: toggle,
     refresh: refresh,

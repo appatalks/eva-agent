@@ -1314,7 +1314,7 @@ def test_sidebar_workflow_contract():
     report("workflow_new_session_on_launch", "startFreshSessionOnLaunch();\n\n  // Migrate saved sessions" in sessions_js and "function startFreshSessionOnLaunch()" in sessions_js)
     report("workflow_startup_matches_new_chat", "typeof restoreEvaWelcome === 'function'" in sessions_js and "opens a fresh chat on launch" in voice_view_js)
     report("workflow_side_panels_click_outside", "function closeSidePanels" in sessions_js and "EVA_SIDE_PANEL_IDS" in sessions_js and "document.addEventListener('click'" in sessions_js)
-    report("workflow_workspace_navigation", "function closeAgentOperationsForNavigation" in sessions_js and "#evaAgentsBtn, #evaWorkspacesBtn" in sessions_js and 'id="evaAgentsBtn"' in html and 'id="lcarsWorkspacesBtn"' in html and "EvaAgents.open()" in html and "EvaWorkspaces.openWorkbench()" in html and "!target.closest('#lcarsWorkspacesBtn')" in sessions_js)
+    report("workflow_workspace_navigation", "function closeAgentOperationsForNavigation" in sessions_js and "target.closest('#evaAgentsBtn')) return" in sessions_js and "target.closest('#lcarsAgentsBtn')) return" in sessions_js and 'id="evaAgentsBtn"' in html and 'id="lcarsAgentsBtn"' in html and 'id="evaWorkspacesBtn"' not in html and 'id="lcarsWorkspacesBtn"' not in html and 'id="agentsWorkspacesTab"' in html and "EvaAgents.open()" in html)
     report("workflow_skill_edit_patch", "function editSkill" in skills_js and "editingId ? 'PATCH' : 'POST'" in skills_js)
     report("workflow_voice_skill_url_authorization", "Only credential-free HTTPS URLs can be opened" in skills_js and "not authorized by the named active skill" in skills_js and "explicit user request" in skills_js and "window.open(target, '_blank', 'noopener')" in skills_js)
     report("workflow_skills_main_view", "_buildSkillsWorkspace" in skills_js and "skills-view-open" in skills_js and "window.EvaSkills" in skills_js and "body.skills-view-open" in open("core/style.css").read())
@@ -2408,7 +2408,9 @@ def test_agent_operations_behavior():
             },
         }
         bridge_utils._push_notification = lambda *args, **kwargs: None
-        bridge_utils._subagent_worker("live-output", "show progress", "Live output")
+        from unittest.mock import patch
+        with patch("bridge.mission_log.save_report", return_value="synthetic-report"):
+            bridge_utils._subagent_worker("live-output", "show progress", "Live output")
         live_task = bridge_utils._st.subagent_tasks["live-output"]
         report(
             "agent_operations_live_output",
@@ -2449,11 +2451,13 @@ def test_agent_operations_behavior():
         "active": {"id": "active", "status": "running"},
         "upstream": {"id": "upstream", "status": "done"},
         "synthesis": {"id": "synthesis", "status": "waiting", "depends_on": ["upstream"]},
-        "finished": {"id": "finished", "status": "done"},
+        "finished": {"id": "finished", "status": "done", "ended_at": "2026-01-01T00:00:00Z"},
     }
     active_dismissed, active_reason = bridge_core._dismiss_subagent_task("active")
     upstream_dismissed, upstream_reason = bridge_core._dismiss_subagent_task("upstream")
-    finished_dismissed, finished_reason = bridge_core._dismiss_subagent_task("finished")
+    from unittest.mock import patch
+    with patch("bridge.mission_log.save_report", return_value="synthetic-report"):
+        finished_dismissed, finished_reason = bridge_core._dismiss_subagent_task("finished")
     report(
         "agent_operations_active_dismiss_blocked",
         not active_dismissed and active_reason == "active" and "active" in bridge_core._st.subagent_tasks,

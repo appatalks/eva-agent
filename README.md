@@ -51,6 +51,13 @@ while keeping configuration, approvals, and personal data under your control.
   Subtle, transient crew bubbles show reported activity, streamed public output,
   and recorded upstream-output handoffs (at most two at once), never private
   reasoning or invented conversations.
+  Workspaces now lives in its own Observatory tab with the same coding controls.
+  A local Mission log checklist preserves final debriefs across restarts before
+  eligible finished crew are dismissed; active dependencies and a one-minute
+  reuse window are protected.
+- **Signal account linking:** Settings > Accounts provides a Link Signal button,
+  an in-panel QR code, completion status, cancellation, and fresh codes after
+  expiry. Existing recipients and prior local account files are preserved.
 - **Workspace control room:** monitor independent terminals and coding agents for
   the selected workspace, focus a tile, interrupt work, or send new direction.
   Project files stay beside Live and Details tabs. Create local Git workspaces

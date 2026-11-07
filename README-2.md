@@ -548,11 +548,40 @@ standalone/
 | Local speech runtime (optional) | Chatterbox English + Multilingual V3 TTS, Faster Whisper STT | `./install.sh --voice-deps` |
 
 ### API Keys
+Signal authentication is a device-linking flow, not an API key. In
+**Settings > Accounts**, choose **Link Signal** and scan its QR from the
+phone's Signal **Settings > Linked devices**. Completion saves the linked
+sender and preserves the saved recipient; an unset recipient defaults to the
+linked account. Unsaved recipient input is not overwritten in the renderer.
+The bridge host needs `signal-cli` and `qrencode`; the installer checks both.
+
+`POST /v1/signal/link` starts or returns the current bounded attempt.
+`GET /v1/signal/link` polls its safe lifecycle snapshot; pending snapshots
+contain an in-memory PNG data URL, never a raw provisioning URI.
+`POST /v1/signal/link/cancel` requires the exact attempt ID.
+All three require loopback binding and the native bridge capability; responses
+are `no-store`. A single worker owns the provisioning process, with a
+150-second deadline, cancellation, and bridge-shutdown cleanup. Closing
+Settings or leaving Accounts clears the QR and cancels an attempt initiated
+by that pane. Reopening can observe an existing attempt without creating one.
+
+Each link uses a new mode-0700 profile below the installed configuration
+directory's `signal-profiles/`. After the CLI confirms completion, a
+mode-0600 `signal-profile.json` atomically selects that profile for subsequent
+sends. Old profiles/default CLI accounts are not deleted or unregistered.
+Provisioning URI/QR data are never written to logs, conversation history,
+browser storage, or QR files; persistent Signal credentials are owned by
+signal-cli within the protected profile. Failed linking leaves prior account
+files intact and does not send a test message automatically.
+Sources: [`signal_link.py`](tools/bridge/signal_link.py),
+[`Signal Settings UI`](core/js/settings/signal.js), and
+[`signal-cli LinkCommand`](https://github.com/AsamK/signal-cli/blob/master/src/main/java/org/asamk/signal/commands/LinkCommand.java).
+
 | Key | Used by | Get it from |
 |---|---|---|
 | `OPENAI_API_KEY` | Direct OpenAI Eva backends, OpenAI models, image generation, TTS/transcription, embeddings | [platform.openai.com](https://platform.openai.com/api-keys) |
 | `GITHUB_PAT` | GitHub MCP and private workspace imports | [github.com/settings/tokens](https://github.com/settings/tokens) (private imports need repository Contents: Read access. Fine-grained tokens must include the repository; classic tokens need `repo`. Alternatively, Workspaces can launch native `gh auth login --web` device-code authorization; that credential stays in GitHub CLI storage.) |
-| `GOOGLE_GL_KEY` | Google Gemini | [aistudio.google.com](https://aistudio.google.com/apikey) |
+| `GOOGLE_GL_KEY` | Legacy Gemini compatibility only; no Accounts input. Existing credentials remain preserved. | [aistudio.google.com](https://aistudio.google.com/apikey) |
 | AWS credentials | Amazon Polly TTS | [AWS IAM Console](https://console.aws.amazon.com/iam/) |
 | None | LM Studio (local mode) | Free, runs locally |
 
@@ -1358,7 +1387,8 @@ Local webcam face and motion detection.
 ### Agent Operations View
 
 The **Agents** sidebar destination replaces the chat workspace with a live
-Agent Observatory: **Command bridge**, **Memory atoms**, and **Session cards**
+Agent Observatory: **Command bridge**, **Memory atoms**, **Session cards**,
+**Workspaces**, and **Mission log**
 tabs, plus an in-place inspector. On screens narrower than 600 px, the Eva theme hides its
 sidebar and exposes the same destination through a compact grid button. The view
 is implemented by [`operations.js`](core/js/features/agents/operations.js) and
@@ -1498,6 +1528,46 @@ Sources: [`Cognition.ensureAgentLaunch`](core/js/cognition.js),
 [`BridgeHandler._subagent_spawn_batch`](tools/bridge/core.py),
 [`_subagent_worker`](tools/bridge/utils.py), and
 [`ACPClient.start`](tools/bridge/acp_client.py).
+
+#### Workspaces tab and durable debrief checklist
+
+The Workspaces tab hosts the existing `workspaceWorkbench` DOM subtree rather
+than duplicating its projects, runs, terminals, files, or chat drawer. Existing
+Workspaces sidebar links are removed in both Eva and LCARS themes; Agents is
+the single navigation entry. Programmatic Workspaces navigation opens its
+Observatory tab. Sidebar events from Agents do not close the embedded workbench
+after the button's own open handler runs.
+Tab transitions suspend the workbench view and restore moved chat/input nodes;
+they do not stop coding runs. Workspace close returns to chat through the
+Observatory lifecycle. Keyboard tab navigation covers all five tabs.
+
+Worker completion writes a bounded public report (up to 64,000 characters) to
+`mission-log.sqlite3` in the installed Eva configuration directory. This local
+SQLite archive is independent of the ephemeral agent registry. Each completion
+is keyed by agent ID and end timestamp, so retries/reuse produce distinct
+debriefs and repeated collection does not duplicate them. No private provider
+configuration or task prompt is stored. The database is created with mode 0600.
+
+On status refresh, eligible `done`, `error`, or `cancelled` subagents are
+automatically dismissed after a one-minute minimum reuse window. Active workers
+and upstream tasks required by active dependents are retained. Collection
+revalidates the terminal state/end timestamp under the registry lock and commits
+the report before removing the task. A failed archive write keeps the task.
+Manual dismissal uses the same save-before-remove boundary. Coding runs,
+worktrees, changes, and chat histories are not deleted.
+
+`GET /v1/agents/reports` returns the latest 100 stored reports; older reports
+remain in SQLite. `POST /v1/agents/reports/review` takes `{id, reviewed}` and
+returns an exact checklist receipt. Both routes use the existing private-route
+authorization. Checkmarks mean the user reviewed a report, not that the agent's
+claims or changes passed verification. Report text is rendered as plain text,
+not executable HTML or model instructions. Unavailable storage leaves the
+last-loaded checklist visible.
+Sources: [`tools/bridge/mission_log.py`](tools/bridge/mission_log.py),
+[`_collect_finished_subagents` and report endpoints](tools/bridge/core.py),
+[`worker finalization`](tools/bridge/utils.py),
+[`Observatory tabs and checklist`](core/js/features/agents/operations.js), and
+[`embedded workbench lifecycle`](core/js/features/workspaces/monitor.js).
 
 For requests containing collaboration language such as `work together`,
 `relay`, `handoff`, `discuss`, or `talk to each other`, the last task becomes a

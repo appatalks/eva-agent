@@ -802,13 +802,15 @@ body.eva-standalone #settingsMenu {
 .workspace-workbench { display: none; }
 .assets-view { display: none; }
 .skills-view { display: none; }
-body.agents-view-open #idContainer > :not(#agentsView):not(#memoryInspectorPanel):not(#memoryAtomDetailDialog) { display: none !important; }
+body.agents-view-open #idContainer > :not(#agentsView):not(#memoryInspectorPanel):not(#memoryAtomDetailDialog):not(#workspaceContextMenu):not(#textToSynth) { display: none !important; }
+body.agents-view-open #textToSynth { display: contents !important; }
+body.agents-view-open #textToSynth > :not(#evaTextPrompt):not(#workspaceFolderPicker):not(#evaActionConfirm) { display: none !important; }
 body.agents-view-open #idContainer { max-width: none; width: 100%; }
 body.agents-view-open .eva-status-footer,
 body.agents-view-open .eva-disclaimer,
 body.agents-view-open .cog-badge { display: none !important; }
-body.agents-view-open:not(.agent-workspace-open) #evaAgentsBtn { background: rgba(74,222,199,0.1); color: #8ffff0; }
-body.agents-view-open.agent-workspace-open #evaWorkspacesBtn { background: rgba(74,222,199,0.1); color: #8ffff0; }
+body.agents-view-open #evaAgentsBtn,
+body.agents-view-open #lcarsAgentsBtn { background: rgba(74,222,199,0.1); color: #8ffff0; }
 body.agents-view-open .agents-view {
   position: relative;
   display: grid;
@@ -825,14 +827,13 @@ body.agents-view-open .agents-view {
   background-size: 32px 32px, 32px 32px, auto, auto;
   overflow: hidden;
 }
-body.workspace-workbench-open #idContainer > :not(#workspaceWorkbench):not(#textToSynth):not(#workspaceContextMenu) { display: none !important; }
+body.workspace-workbench-open #idContainer > :not(#workspaceWorkbench):not(#textToSynth):not(#agentsView):not(#workspaceContextMenu) { display: none !important; }
 body.workspace-workbench-open #textToSynth { display: contents !important; }
 body.workspace-workbench-open #textToSynth > :not(#evaTextPrompt):not(#workspaceFolderPicker):not(#evaActionConfirm) { display: none !important; }
 body.workspace-workbench-open #idContainer { max-width: none; width: 100%; }
 body.workspace-workbench-open .eva-status-footer,
 body.workspace-workbench-open .eva-disclaimer,
 body.workspace-workbench-open .cog-badge { display: none !important; }
-body.workspace-workbench-open #evaWorkspacesBtn { background: rgba(120,220,232,0.12); color: #bdf8ff; }
 body.workspace-workbench-open .workspace-workbench {
   position: relative;
   display: grid;
@@ -1439,6 +1440,27 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
 .agent-observatory-stage { position: relative; z-index: 0; display: flex; min-width: 0; min-height: 0; overflow: hidden; }
 .agent-observatory-stage > [role="tabpanel"] { flex: 1; min-width: 0; }
 .agent-observatory-stage > [hidden] { display: none !important; }
+.agents-workspaces { display: flex; min-height: 0; }
+.agents-workspaces #workspaceWorkbench { height: 100%; min-width: 0; }
+.agents-view[data-view="workspaces"] .agent-detail,
+.agents-view[data-view="reports"] .agent-detail { display: none; }
+.agents-view[data-view="workspaces"] .agents-session-area,
+.agents-view[data-view="reports"] .agents-session-area { grid-template-columns: minmax(0, 1fr); }
+.agents-reports { padding: 18px; overflow: auto; background: linear-gradient(135deg, #18323433, transparent 60%); }
+.mission-log-heading h2 { color: #dfecd3; font: 22px monospace; margin: 8px 0; }
+.mission-log-heading p, .mission-log-status { color: #9bb9b0; font: 11px/1.6 monospace; max-width: 850px; }
+.mission-log-reports { display: grid; gap: 12px; }
+.mission-log-report { padding: 14px 18px; border: 1px solid #92c6b533; border-left: 3px solid #c7b77d; background: #0b211ecc; border-radius: 4px; }
+.mission-log-check { display: flex; align-items: center; gap: 10px; color: #e4edcc; font: 13px monospace; }
+.mission-log-meta { color: #92b4a7; font: 10px monospace; }
+.mission-log-report summary { cursor: pointer; color: #b4d4c4; font: 11px monospace; padding: 5px 0; }
+.mission-log-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #d1e2d7; font: 12px/1.6 monospace; }
+.mission-log-report[data-reviewed="true"] { border-left-color: #68baa6; }
+.mission-log-report[data-reviewed="true"] .mission-log-check strong { color: #9cbaad; }
+.signal-link-panel { margin: 12px 0 18px; padding: 12px; border: 1px solid rgba(120,220,232,0.2); border-radius: 6px; }
+.signal-link-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.signal-link-qr { display: block; width: min(280px, 100%); height: auto; margin: 12px auto; padding: 8px; background: #fff; image-rendering: pixelated; }
+.signal-link-qr[hidden], #signalLinkCancelBtn[hidden] { display: none; }
 .agent-floor { padding: 18px; overflow: auto; background: radial-gradient(ellipse at 45% 0%, rgba(74,222,199,0.06), transparent 65%); }
 .agent-floor-heading p { max-width: 760px; margin: 6px 0 18px; color: #91b8ac; font: 11px/1.6 monospace; }
 .bridge-scene { position: relative; flex: 1 0 420px; min-height: 420px; overflow: hidden; isolation: isolate; background: #070f1d; border: 1px solid #40556c; border-radius: 8px; }

@@ -390,7 +390,10 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
         task = _st.subagent_tasks.get(task_id)
         if not task:
             return
+        task["_worker_running"] = True
+        task.pop("_completed_report", None)
     client = None
+    result_text = ""
 
     def release_client():
         nonlocal client
@@ -629,6 +632,20 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
             _push_notification(f"Subagent failed: {label}", str(e)[:300], channel="chat")
         except Exception as notify_error:
             print(f"[Subagent] Failure notification failed for {task_id}: {notify_error}")
+    finally:
+        from bridge.mission_log import save_report
+        with _st.subagent_lock:
+            snapshot = dict(task)
+            if snapshot.get("status") == "done":
+                task["_completed_report"] = (result_text or snapshot.get("result") or "")[:64000]
+                snapshot["_completed_report"] = task["_completed_report"]
+            try:
+                report_id = save_report(snapshot)
+                if report_id:
+                    task["_report_id"] = report_id
+            except Exception:
+                task["_report_save_failed"] = True
+            task["_worker_running"] = False
 
 
 

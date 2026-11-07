@@ -29,32 +29,54 @@ _SIGNAL_SEND_TIMEOUT = _cfg.SIGNAL_SEND_TIMEOUT
 
 
 def _signal_send(message):
-    """Send a text message via signal-cli. Returns True on success.
-    Reads sender/recipient from alerts settings (UI), falling back to env vars."""
-    settings = _load_alerts().get("settings", {})
-    sender = settings.get("signal_sender") or _SIGNAL_SENDER
-    recipient = settings.get("signal_recipient") or _SIGNAL_RECIPIENT
-    if not sender or not recipient:
-        print("[Signal] Skipped: no sender or recipient configured", file=sys.stderr)
-        return False
+    """Compatibility boolean for background and delegated delivery callers."""
+    return _signal_send_result(message)["ok"]
+
+
+def _signal_send_result(message):
+    """Return a safe delivery receipt, never CLI account data or message bodies."""
+    def failure(code, detail):
+        print("[Signal] Delivery failed: " + code, file=sys.stderr)
+        return {"ok": False, "code": code, "message": detail}
+
     try:
+        from bridge.signal_link import active_config
+        with _st.alerts_lock:
+            settings = _load_alerts().get("settings", {})
+            sender = settings.get("signal_sender") or _SIGNAL_SENDER
+            recipient = settings.get("signal_recipient") or _SIGNAL_RECIPIENT
+            profile = active_config()
+        if not sender or not recipient:
+            return failure("not_configured", "Set both Signal sender and recipient in Settings > Accounts.")
+        command = [_SIGNAL_CLI_PATH]
+        if profile:
+            command.extend(["--config", profile])
         subprocess.run(
-            [_SIGNAL_CLI_PATH, "-u", sender, "send",
-             "-m", message, recipient],
+            command + ["-u", sender, "send", "-m", message, recipient],
             capture_output=True, text=True, timeout=_SIGNAL_SEND_TIMEOUT,
             check=True,
         )
-        print(f"[Signal] Sent to {recipient[:4]}...")
-        return True
+        print("[Signal] Delivery completed.")
+        return {"ok": True, "code": "sent", "message": ""}
     except FileNotFoundError:
-        print(f"[Signal] signal-cli not found at: {_SIGNAL_CLI_PATH}", file=sys.stderr)
-        return False
+        return failure("cli_missing", "signal-cli is unavailable on the bridge host.")
     except subprocess.TimeoutExpired:
-        print("[Signal] Send timed out", file=sys.stderr)
-        return False
+        return failure("timeout", "Signal delivery timed out and is unconfirmed. Check your phone before retrying to avoid duplicates.")
     except subprocess.CalledProcessError as exc:
-        print(f"[Signal] Send failed: {exc.stderr[:200] if exc.stderr else exc}", file=sys.stderr)
-        return False
+        detail = str(exc.stderr or "")[:8000].lower()
+        if "authorization failed" in detail or "authorizationfailedexception" in detail:
+            return failure("authorization_failed", "Signal rejected the sender account authorization. Check or relink signal-cli in your phone's Signal Settings > Linked devices, then try again.")
+        if "not registered" in detail or "unregistered" in detail:
+            return failure("account_unavailable", "The configured Signal sender is not registered or linked on this bridge host.")
+        if "captcha" in detail or "proofrequired" in detail:
+            return failure("challenge_required", "Signal requires an account verification challenge. Resolve it in signal-cli before retrying.")
+        if "rate limit" in detail or "ratelimit" in detail or "[429]" in detail:
+            return failure("rate_limited", "Signal temporarily rate-limited delivery. Wait before retrying.")
+        return failure("delivery_failed", "signal-cli could not deliver the message. No successful delivery was confirmed.")
+    except OSError:
+        return failure("cli_unavailable", "signal-cli could not start on the bridge host.")
+    except (ValueError, KeyError):
+        return failure("account_unavailable", "The saved Signal setup is unavailable. Use Link Signal in Settings > Accounts.")
 
 
 def _alerts_default_doc():

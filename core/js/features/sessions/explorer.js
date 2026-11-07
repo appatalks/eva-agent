@@ -655,7 +655,7 @@ function toggleSessionPanel() {
 }
 
 var EVA_SIDE_PANEL_IDS = ['sessionPanel', 'skillsPanel', 'memoryInspectorPanel', 'assetsPanel', 'workspacePanel', 'terminalPanel', 'profilePanel'];
-var EVA_SIDE_PANEL_TRIGGER_IDS = ['evaChatsBtn', 'sidebarSessionsBtn', 'evaSkillsBtn', 'evaMemoryBtn', 'lcarsMemoryBtn', 'evaAssetsBtn', 'evaWorkspacesBtn', 'evaTerminalBtn', 'evaUserBtn'];
+var EVA_SIDE_PANEL_TRIGGER_IDS = ['evaChatsBtn', 'sidebarSessionsBtn', 'evaSkillsBtn', 'evaMemoryBtn', 'lcarsMemoryBtn', 'evaAssetsBtn', 'evaTerminalBtn', 'evaUserBtn'];
 
 function closeSidePanels(exceptId) {
   EVA_SIDE_PANEL_IDS.forEach(function(id) {
@@ -730,15 +730,15 @@ function initSessions() {
   var termExpand = document.getElementById('terminalPanelExpand');
   if (termExpand) termExpand.addEventListener('click', toggleTerminalWidth);
 
-  // Agent Operations and Workspace are full views. Any other sidebar destination
-  // must first reveal the normal workspace so its panel/view is visible.
+  // Workspaces is part of Agents; its own sidebar click must not close the embedded tab.
   var evaSidebar = document.getElementById('evaSidebar');
   if (evaSidebar) evaSidebar.addEventListener('click', function(event) {
     var target = event.target;
-    if (target && target.closest && !target.closest('#evaAgentsBtn, #evaWorkspacesBtn')) {
+    if (target && target.closest && target.closest('#evaAgentsBtn')) return;
+    if (target && target.closest) {
       closeAgentOperationsForNavigation();
     }
-    if (target && target.closest && !target.closest('#evaWorkspacesBtn') && !target.closest('#evaTerminalBtn') && window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {
+    if (target && target.closest && !target.closest('#evaTerminalBtn') && window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {
       window.EvaWorkspaces.closeWorkbench();
     }
     if (target && target.closest && !target.closest('#evaAssetsBtn') && window.EvaAssets && typeof window.EvaAssets.close === 'function') {
@@ -751,10 +751,11 @@ function initSessions() {
   var lcarsSidebar = document.getElementById('lcarsSidebar');
   if (lcarsSidebar) lcarsSidebar.addEventListener('click', function(event) {
     var target = event.target;
-    if (target && target.closest && !target.closest('#lcarsAgentsBtn, #lcarsWorkspacesBtn')) {
+    if (target && target.closest && target.closest('#lcarsAgentsBtn')) return;
+    if (target && target.closest) {
       closeAgentOperationsForNavigation();
     }
-    if (target && target.closest && !target.closest('#lcarsWorkspacesBtn') && window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {
+    if (target && target.closest && window.EvaWorkspaces && typeof window.EvaWorkspaces.closeWorkbench === 'function') {
       window.EvaWorkspaces.closeWorkbench();
     }
     if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();

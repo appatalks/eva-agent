@@ -596,6 +596,7 @@ from bridge.alerts import (  # noqa: F401
     _notify_enqueue,
     _notify_mark_seen,
     _signal_send,
+    _signal_send_result,
 )
 from bridge.cron import (  # noqa: F401
     _load_cron_tasks,
@@ -1035,13 +1036,15 @@ def _select_agent_payload(items, limit=30):
     return pinned_items + active_items + inactive_items[:remaining]
 
 
-def _dismiss_subagent_task(task_id):
+def _dismiss_subagent_task(task_id, expected_ended_at=None):
     """Remove a terminal task unless an active task still depends on it."""
     with _st.subagent_lock:
         task = _st.subagent_tasks.get(task_id)
         if not task:
             return False, "not_found"
-        if task.get("status") not in ("done", "error", "cancelled"):
+        if task.get("status") not in ("done", "error", "cancelled") or task.get("_worker_running"):
+            return False, "active"
+        if expected_ended_at is not None and task.get("ended_at") != expected_ended_at:
             return False, "active"
         dependent = next(
             (
@@ -1053,13 +1056,39 @@ def _dismiss_subagent_task(task_id):
         )
         if dependent:
             return False, "dependency"
+        from bridge.mission_log import save_report
+        try:
+            if not save_report(task):
+                return False, "report_unavailable"
+        except (OSError, sqlite3.Error):
+            return False, "report_unavailable"
         _st.subagent_tasks.pop(task_id, None)
         return True, ""
+
+
+def _collect_finished_subagents():
+    """Allow a minute for reuse, preserving upstream results until consumers finish."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    with _st.subagent_lock:
+        eligible = []
+        for task in _st.subagent_tasks.values():
+            if task.get("status") not in {"done", "error", "cancelled"} or task.get("_worker_running"):
+                continue
+            try:
+                ended = datetime.datetime.fromisoformat(str(task.get("ended_at") or "").replace("Z", "+00:00"))
+                if (now - ended).total_seconds() >= 60:
+                    eligible.append((task["id"], task["ended_at"]))
+            except (ValueError, TypeError):
+                continue
+    for task_id, ended_at in eligible:
+        _dismiss_subagent_task(task_id, ended_at)
 
 
 def _prepare_subagent_steer(task, instruction):
     """Mutate a task for an accepted steering request; return None at capacity."""
     task_is_active = task.get("status") in _SUBAGENT_ACTIVE_STATUSES
+    if not task_is_active and task.get("_worker_running"):
+        return None
     if not task_is_active and _subagent_active_count() >= _SUBAGENT_MAX:
         return None
     task.setdefault("steer_queue", [])
@@ -1568,6 +1597,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._subagent_status()
         elif parsed_path == "/v1/agents/overview":
             self._agents_overview()
+        elif parsed_path == "/v1/agents/reports":
+            self._agent_reports()
+        elif parsed_path == "/v1/signal/link":
+            self._signal_link_status()
         elif parsed_path == "/v1/telemetry":
             self._telemetry_report()
         elif parsed_path == "/v1/logs":
@@ -1717,6 +1750,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._subagent_steer()
         elif parsed_path == "/v1/subagent/cancel":
             self._subagent_cancel()
+        elif parsed_path == "/v1/agents/reports/review":
+            self._agent_report_review()
         elif parsed_path == "/v1/browser/run":
             self._browser_run()
         elif parsed_path == "/v1/desktop/run":
@@ -1761,6 +1796,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._alerts_settings_update()
         elif parsed_path == "/v1/signal/send":
             self._signal_send_request()
+        elif parsed_path == "/v1/signal/link":
+            self._signal_link_start()
+        elif parsed_path == "/v1/signal/link/cancel":
+            self._signal_link_cancel()
         elif parsed_path == "/v1/email/accounts":
             self._email_accounts_update()
         elif parsed_path == "/v1/email/account":
@@ -4001,6 +4040,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "agent overview restricted to loopback"}})
             return
+        _collect_finished_subagents()
         params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         active_session_id = str((params.get("session_id") or [""])[0])[:120]
         active_model = getattr(_st.acp_client, "model", "") if _st.acp_client else ""
@@ -4136,6 +4176,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if graph is not None:
             payload["graph"] = graph
         self._json_response(200, payload)
+
+    def _agent_reports(self):
+        from bridge.mission_log import list_reports
+        try:
+            self._json_response(200, {"reports": list_reports()})
+        except (OSError, sqlite3.Error):
+            self._json_response(503, {"error": {"message": "Mission log storage is unavailable. Reports were not dismissed."}})
+
+    def _agent_report_review(self):
+        from bridge.mission_log import review_report
+        data, error = self._read_json_body()
+        if error or not isinstance(data, dict) or not isinstance(data.get("reviewed"), bool):
+            self._json_response(400, {"error": {"message": "A report id and reviewed boolean are required."}})
+            return
+        report_id = data.get("id")
+        if not isinstance(report_id, str) or not re.fullmatch(r"[a-f0-9]{32}", report_id):
+            self._json_response(400, {"error": {"message": "Invalid report id."}})
+            return
+        try:
+            if not review_report(report_id, data["reviewed"]):
+                self._json_response(404, {"error": {"message": "Report not found."}})
+                return
+            self._json_response(200, {"id": report_id, "reviewed": data["reviewed"]})
+        except (OSError, sqlite3.Error):
+            self._json_response(503, {"error": {"message": "Mission log could not save this checklist change."}})
 
     def _subagent_spawn(self):
         """Spawn an isolated subagent that runs a prompt concurrently."""
@@ -4420,6 +4485,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(404, {"error": {"message": "subagent task not found"}})
         elif reason == "dependency":
             self._json_response(409, {"error": {"message": "task is still required by an active dependent agent"}})
+        elif reason == "report_unavailable":
+            self._json_response(503, {"error": {"message": "Report storage is unavailable. The agent was kept."}})
         else:
             self._json_response(409, {"error": {"message": "only completed, failed, or cancelled tasks can be dismissed"}})
 
@@ -4676,10 +4743,49 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if len(message) > 4000:
             self._json_response(400, {"error": {"message": "message must be 4000 characters or fewer"}})
             return
-        if not _signal_send(message):
-            self._json_response(502, {"error": {"message": "signal-cli could not deliver the message"}})
+        receipt = _signal_send_result(message)
+        audit_event("signal.delivery", outcome="completed" if receipt["ok"] else "failed",
+                    error_type="" if receipt["ok"] else receipt["code"])
+        if not receipt["ok"]:
+            self._json_response(502, {"error": {"message": receipt["message"], "code": receipt["code"]}})
             return
         self._json_response(200, {"status": "sent"})
+
+    def _signal_link_status(self):
+        from bridge import signal_link
+        if not self._signal_link_allowed():
+            return
+        self._json_response(200, signal_link.status())
+
+    def _signal_link_allowed(self):
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "Signal linking is restricted to loopback."}})
+            return False
+        return self._require_bridge_capability()
+
+    def _signal_link_start(self):
+        from bridge import signal_link
+        if not self._signal_link_allowed():
+            return
+        try:
+            self._json_response(202, signal_link.start())
+        except ValueError as error:
+            self._json_response(503, {"error": {"message": str(error)}})
+
+    def _signal_link_cancel(self):
+        from bridge import signal_link
+        if not self._signal_link_allowed():
+            return
+        data, error = self._read_json_body()
+        identifier = data.get("id") if isinstance(data, dict) else None
+        if error or not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{32}", identifier):
+            self._json_response(400, {"error": {"message": "A linking attempt id is required."}})
+            return
+        receipt = signal_link.cancel(identifier)
+        if receipt is None:
+            self._json_response(409, {"error": {"message": "This linking attempt is no longer current."}})
+            return
+        self._json_response(200, receipt)
 
     # ── Email ──────────────────────────────────────────────────────────
     def _email_body(self):
@@ -7875,6 +7981,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_response(status)
             self._cors_headers()
             self.send_header("Content-Type", "application/json")
+            if urllib.parse.urlparse(getattr(self, "path", "")).path.startswith("/v1/signal/link"):
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Pragma", "no-cache")
             self.send_header("Content-Length", str(len(body)))
             if self.close_connection:
                 self.send_header("Connection", "close")
@@ -8166,6 +8275,8 @@ def main():
     except KeyboardInterrupt:
         print("\n[Bridge] Shutting down...")
     finally:
+        from bridge import signal_link
+        signal_link.stop()
         with _st.subagent_lock:
             _st.acp_shutdown.set()
             active_tasks = [task for task in _st.subagent_tasks.values() if task.get("status") in _SUBAGENT_ACTIVE_STATUSES]
