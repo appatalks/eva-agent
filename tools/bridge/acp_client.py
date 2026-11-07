@@ -542,7 +542,8 @@ class ACPClient:
                         process_env.pop(key, None)
                 copilot_home, isolated_cwd = _si_isolated_profile()
                 process_env["COPILOT_HOME"] = copilot_home
-                self.cwd = isolated_cwd
+                if not getattr(self, "workspace_run_id", ""):
+                    self.cwd = isolated_cwd
             # BYOK provider settings are deliberately per-client.  Do not
             # inherit or mutate the user's global Copilot environment/config.
             for key, value in self.provider_config.items():

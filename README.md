@@ -35,10 +35,16 @@ while keeping configuration, approvals, and personal data under your control.
   from verified completion, survive in chat context without duplication, and
   report malformed or excess actions. Visual-agent availability checks local
   prerequisites rather than assuming readiness.
-- **Agent Observatory:** a live workstation floor, in-place agent inspector, and
-  preserved memory-atom view. Reported runtime activity drives animation; stale
-  snapshots freeze activity and pause controls. Inspect dependencies, open linked
-  chats, and steer or interrupt supported agents without leaving the floor.
+- **Agent Observatory:** an animated starship command bridge, in-place agent
+  inspector, and preserved memory-atom view. A shared depth-sorted canvas scene
+  places walking crew, consoles, shadows, and lighting in one room rather than
+  separate tiles. The compositor adapts MIT-licensed StarNet code with retained
+  attribution; all crew and bridge artwork is original Eva artwork. Movement is
+  illustrative; only fresh reported running sessions perform working gestures.
+  Stale snapshots pause agent activity and controls. Conversational delegation
+  also launches real discussion batches from SI Copilot direct chat while
+  preserving its configured endpoint. Inspect dependencies, open linked chats,
+  and steer or interrupt supported agents without leaving the bridge.
 - **Workspace control room:** monitor independent terminals and coding agents for
   the selected workspace, focus a tile, interrupt work, or send new direction.
   Project files stay beside Live and Details tabs. Create local Git workspaces

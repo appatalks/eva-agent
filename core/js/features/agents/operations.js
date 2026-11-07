@@ -82,6 +82,7 @@ var EvaAgents = (function() {
       if (panel) panel.hidden = key !== state.view;
     });
     try { localStorage.setItem('evaAgentObservatoryView', state.view); } catch (_) {}
+    if (typeof EvaBridgeScene !== 'undefined') EvaBridgeScene.setActive(state.open && state.view === 'floor');
     if (state.open && state.view === 'memory') {
       startGraph();
       if (state.data) render();
@@ -187,6 +188,7 @@ var EvaAgents = (function() {
     if (state.refreshController) state.refreshController.abort();
     state.refreshController = null;
     stopGraph();
+    if (typeof EvaBridgeScene !== 'undefined') EvaBridgeScene.setActive(false);
   }
 
   function nextPollDelay() {
@@ -299,19 +301,19 @@ var EvaAgents = (function() {
     var floor = document.getElementById('agentsFloorGroups');
     if (!floor) return;
     var stale = telemetryStale();
+    var crew = agents.filter(function(agent) { return agent.kind !== 'eva'; });
+    var activeCrew = crew.filter(function(agent) { return isActive(agent.status); });
+    setText('bridgeCrewCount', crew.length + ' DELEGATED SESSION' + (crew.length === 1 ? '' : 'S'));
+    setText('bridgeMission', stale ? 'Telemetry unavailable / last reported crew' :
+      (activeCrew.length ? activeCrew.length + ' active / select a station to inspect' : 'Standing by / no active delegated tasks'));
+    setText('bridgeActivity', stale ? 'Activity indicators paused until telemetry returns.' :
+      (activeCrew.length ? activeCrew.map(function(agent) {
+        return (agent.label || 'Agent') + ': ' + (agent.activity || statusLabel(agent.status));
+      }).join('  /  ') : (agents.some(function(agent) { return agent.kind === 'eva'; })
+        ? 'Eva is present on the bridge. Empty consoles are unassigned, not hidden agents.' : 'No agent sessions reported. Empty consoles are unassigned.')));
     var existingStations = {};
     Array.prototype.forEach.call(floor.querySelectorAll('.agent-workstation'), function(node) {
       existingStations[node.dataset.agentId] = node;
-    });
-    var existingRooms = {};
-    Array.prototype.forEach.call(floor.querySelectorAll('.agent-floor-room'), function(node) {
-      existingRooms[node.dataset.groupId] = node;
-    });
-    var rooms = {};
-    agents.forEach(function(agent) {
-      var key = agent.coding_run_id ? 'run:' + agent.coding_run_id : (agent.group_id || 'kind:' + agent.kind);
-      if (!rooms[key]) rooms[key] = [];
-      rooms[key].push(agent);
     });
     var empty = floor.querySelector('.agents-empty');
     if (!agents.length) {
@@ -321,50 +323,32 @@ var EvaAgents = (function() {
       }
       empty.textContent = state.telemetryError ? 'Runtime unavailable. No sessions can be verified.' : 'No agent sessions reported.';
     } else if (empty) empty.remove();
-    Object.keys(rooms).forEach(function(key, roomIndex) {
-      var room = existingRooms[key];
-      if (!room) {
-        room = element('section', 'agent-floor-room');
-        room.dataset.groupId = key;
-        var heading = element('header', 'agent-floor-room-heading');
-        heading.append(element('span', '', key.indexOf('run:') === 0 ? 'CODING RUN ' + key.slice(4, 12) :
-          (key === 'eva-core' ? 'EVA / ORCHESTRATION' : (key.indexOf('kind:') === 0 ? kindLabel(key.slice(5)) : 'TASK GROUP ' + key.slice(0, 8)))));
-        heading.append(element('span', 'agent-room-count'));
-        room.append(heading, element('div', 'agent-floor-room-stations'));
+    agents.forEach(function(agent, stationIndex) {
+      var station = existingStations[agent.id];
+      if (!station) {
+        station = element('button', 'agent-workstation');
+        station.type = 'button';
+        station.dataset.agentId = agent.id;
+        var meta = element('span', 'bridge-agent-meta');
+        meta.append(element('span', 'agent-station-activity'), element('span', 'agent-station-duration'));
+        station.append(element('strong', 'agent-station-label'), element('span', 'agent-station-status'), meta);
+        station.addEventListener('click', function(event) { openAgentDetail(event.currentTarget._agent); });
       }
-      room.querySelector('.agent-room-count').textContent = rooms[key].length + ' SESSION' + (rooms[key].length === 1 ? '' : 'S');
-      var stations = room.querySelector('.agent-floor-room-stations');
-      rooms[key].forEach(function(agent, stationIndex) {
-        var station = existingStations[agent.id];
-        if (!station) {
-          station = element('button', 'agent-workstation');
-          station.type = 'button';
-          station.dataset.agentId = agent.id;
-          var scene = element('span', 'agent-station-scene');
-          scene.setAttribute('aria-hidden', 'true');
-          scene.append(element('span', 'agent-station-monitor'), element('span', 'agent-station-avatar'), element('span', 'agent-station-desk'));
-          station.append(scene, element('strong', 'agent-station-label'), element('span', 'agent-station-status'),
-            element('span', 'agent-station-activity'), element('span', 'agent-station-duration'));
-          station.addEventListener('click', function(event) { openAgentDetail(event.currentTarget._agent); });
-        }
-        station._agent = agent;
-        station.style.setProperty('--agent-color', ['#64baa2', '#9d9ae4', '#d0af73', '#80b7d8'][Math.floor(graphUnit(agent.id) * 4)]);
-        station.dataset.status = String(agent.status || 'unknown');
-        station.dataset.motion = !stale && agent.status === 'running' ? 'working' : 'still';
-        station.setAttribute('aria-pressed', String(state.selectedId === agent.id));
-        station.setAttribute('aria-label', 'Inspect ' + (agent.label || 'agent') + ': ' + agentStatus(agent));
-        station.querySelector('.agent-station-label').textContent = agent.label || 'Agent session';
-        station.querySelector('.agent-station-status').textContent = agentStatus(agent);
-        station.querySelector('.agent-station-activity').textContent = agent.activity || agent.detail || 'No activity reported.';
-        station.querySelector('.agent-station-duration').textContent = (agent.kind === 'eva' ? 'SESSION UPTIME ' : 'ELAPSED ') + elapsed(agent);
-        if (stations.children[stationIndex] !== station) stations.insertBefore(station, stations.children[stationIndex] || null);
-        delete existingStations[agent.id];
-      });
-      if (floor.children[roomIndex] !== room) floor.insertBefore(room, floor.children[roomIndex] || null);
-      delete existingRooms[key];
+      station._agent = agent;
+      station.dataset.status = String(agent.status || 'unknown');
+      station.dataset.kind = agent.kind || 'unknown';
+      station.dataset.motion = !stale && agent.status === 'running' ? 'working' : 'still';
+      station.setAttribute('aria-pressed', String(state.selectedId === agent.id));
+      station.setAttribute('aria-label', 'Inspect ' + (agent.label || 'agent') + ': ' + agentStatus(agent));
+      station.querySelector('.agent-station-label').textContent = agent.label || 'Agent session';
+      station.querySelector('.agent-station-status').textContent = agentStatus(agent);
+      station.querySelector('.agent-station-activity').textContent = agent.activity || agent.detail || 'No activity reported.';
+      station.querySelector('.agent-station-duration').textContent = (agent.kind === 'eva' ? 'SESSION UPTIME ' : 'ELAPSED ') + elapsed(agent);
+      if (floor.children[stationIndex] !== station) floor.insertBefore(station, floor.children[stationIndex] || null);
+      delete existingStations[agent.id];
     });
     Object.keys(existingStations).forEach(function(key) { existingStations[key].remove(); });
-    Object.keys(existingRooms).forEach(function(key) { existingRooms[key].remove(); });
+    if (typeof EvaBridgeScene !== 'undefined') EvaBridgeScene.update(agents, { stale: stale, selectedId: state.selectedId });
   }
 
   function renderCards(agents) {

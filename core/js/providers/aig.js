@@ -841,11 +841,22 @@ async function aigSend() {
     var responseMessage = (data.choices && data.choices[0] && data.choices[0].message) || {};
     var reasoningContent = responseMessage.reasoning_content || '';
     var modelUsed = data.model || 'aig';
+    var directDeferredSignal = false;
+    if (typeof Cognition !== 'undefined' && Cognition.ensureAgentLaunch) {
+      var directLaunch = await Cognition.ensureAgentLaunch({
+        userMessage: sQuestion,
+        content: content,
+        actions: [],
+        nativeResearch: nativeResearch
+      });
+      content = directLaunch.content;
+      directDeferredSignal = !!directLaunch.deferredSignal;
+    }
 
     // Render response
     var renderedResponse = await renderEvaResponse(content, txtOutput, {
-      signalAuthorized: !!(signalContext && signalContext.authorized),
-      signalMessage: signalContext ? signalContext.message : '',
+      signalAuthorized: !directDeferredSignal && !!(signalContext && signalContext.authorized),
+      signalMessage: directDeferredSignal ? '' : (signalContext ? signalContext.message : ''),
       signalRequest: sQuestion,
       nativeRequest: sQuestion,
       nativeResearch: nativeResearch,

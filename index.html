@@ -51,6 +51,7 @@
   <script src="core/js/features/workspaces/monitor.js?v=5.7.0"></script>
   <script src="core/js/features/workspaces/folders.js?v=5.7.0"></script>
   <script src="core/js/features/workspaces/live.js?v=5.7.0"></script>
+  <script src="core/js/features/agents/bridge-scene.js?v=5.7.0"></script>
   <script src="core/js/features/agents/operations.js?v=5.7.0"></script>
   <script src="core/js/harness-control.js?v=5.7.0"></script>
   <script src="core/js/features/voice/wake-listener.js"></script>
@@ -642,7 +643,7 @@
       </div>
       <div class="agent-observatory-toolbar">
         <div class="agent-observatory-tabs" role="tablist" aria-label="Observatory views">
-          <button id="agentsFloorTab" type="button" role="tab" aria-selected="true" aria-controls="agentsFloor">Live floor</button>
+          <button id="agentsFloorTab" type="button" role="tab" aria-selected="true" aria-controls="agentsFloor">Command bridge</button>
           <button id="agentsMemoryTab" type="button" role="tab" aria-selected="false" aria-controls="agentsMemory" tabindex="-1">Memory atoms</button>
           <button id="agentsCardsTab" type="button" role="tab" aria-selected="false" aria-controls="agentsGrid" tabindex="-1">Session cards</button>
         </div>
@@ -652,10 +653,24 @@
         <div class="agent-observatory-stage">
           <section id="agentsFloor" class="agent-floor" role="tabpanel" aria-labelledby="agentsFloorTab">
             <div class="agent-floor-heading">
-              <span class="agents-kicker">RUNTIME WORKSTATIONS</span>
-              <p>Each station is a reported agent session. Select one to inspect or steer it. Animation indicates a reported running state, not measured progress.</p>
+              <span class="agents-kicker">EVA / COMMAND BRIDGE</span>
+              <p>Live crew / illustrative movement / select a crew member for status and controls.</p>
             </div>
-            <div id="agentsFloorGroups" class="agent-floor-groups"></div>
+            <div class="bridge-scene">
+              <canvas id="bridgeSceneCanvas" class="bridge-canvas" tabindex="0" aria-label="Shared crew bridge. Drag to pan, use arrow keys to move the camera, plus or minus to zoom, and Home to recenter."></canvas>
+              <div class="bridge-mission-panel">
+                <strong id="bridgeCrewCount">0 DELEGATED SESSIONS</strong>
+                <span id="bridgeMission">Awaiting runtime telemetry</span>
+              </div>
+              <div id="agentsFloorGroups" class="agent-floor-groups"></div>
+              <div class="bridge-camera-controls" aria-label="Bridge camera">
+                <button id="bridgeZoomOut" type="button" aria-label="Zoom out">&minus;</button>
+                <button id="bridgeRecenter" type="button">Recenter</button>
+                <button id="bridgeZoomIn" type="button" aria-label="Zoom in">+</button>
+              </div>
+            </div>
+            <div id="bridgeActivity" class="bridge-activity">Awaiting runtime telemetry.</div>
+            <div class="bridge-credit">Depth compositor adapted from StarNet / Original Eva crew and bridge artwork</div>
           </section>
           <div id="agentsGrid" class="agents-grid" role="tabpanel" aria-labelledby="agentsCardsTab" hidden></div>
       <section id="agentsMemory" class="agent-graph" role="tabpanel" aria-labelledby="agentsMemoryTab" hidden>

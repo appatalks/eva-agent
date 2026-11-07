@@ -2087,7 +2087,7 @@ def test_agent_operations_contract():
     report("agent_operations_rich_tooltip", "function graphTooltipText" in ui and "Orchestrates:" in ui and "Receives from:" in ui and "Confidence:" in ui)
     report("agent_operations_live_graph_status", "agentById['agent-' + agent.id]" in ui and "node.status = liveAgent.status" in ui)
     report("agent_operations_done_graph_state", "doneAgent" in ui and "statusLabel(node.status)" in ui)
-    report("agent_operations_model_routing", 'get("model", "")' in bridge and "selected_model = model or template.model" in worker)
+    report("agent_operations_model_routing", 'get("model", "")' in bridge and 'selected_model = model or provider_config.get("COPILOT_MODEL") or template.model' in worker)
     report("agent_operations_no_native_prompt", "prompt(" not in profiles and "prompt(" not in sessions)
     with open("tools/bridge/acp_client.py") as f:
         acp_client = f.read()

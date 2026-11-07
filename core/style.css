@@ -1441,30 +1441,32 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
 .agent-observatory-stage > [hidden] { display: none !important; }
 .agent-floor { padding: 18px; overflow: auto; background: radial-gradient(ellipse at 45% 0%, rgba(74,222,199,0.06), transparent 65%); }
 .agent-floor-heading p { max-width: 760px; margin: 6px 0 18px; color: #91b8ac; font: 11px/1.6 monospace; }
-.agent-floor-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); align-items: start; gap: 18px; }
-.agent-floor-room { border: 1px solid rgba(74,222,199,0.2); border-radius: 12px; background: rgba(8,24,21,0.88); overflow: hidden; }
-.agent-floor-room-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid rgba(74,222,199,0.13); color: #a9d2c4; font: 600 10px monospace; letter-spacing: 0.08em; }
-.agent-floor-room-stations { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; padding: 16px; background-image: linear-gradient(rgba(74,222,199,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(74,222,199,0.025) 1px, transparent 1px); background-size: 24px 24px; }
-.agent-workstation { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; min-width: 0; padding: 14px 12px; border: 1px solid rgba(74,222,199,0.14); border-radius: 9px; background: rgba(11,30,26,0.88); color: #e5fff6; cursor: pointer; text-align: center; }
-.agent-workstation:hover,
-.agent-workstation[aria-pressed="true"],
+.bridge-scene { position: relative; flex: 1 0 420px; min-height: 420px; overflow: hidden; isolation: isolate; background: #070f1d; border: 1px solid #40556c; border-radius: 8px; }
+.bridge-canvas { display: block; width: 100%; height: 100%; min-height: 420px; touch-action: none; cursor: grab; }
+.bridge-canvas:active { cursor: grabbing; }
+.bridge-canvas:focus-visible { outline: 2px solid #ffbe5c; outline-offset: -3px; }
+.bridge-mission-panel { position: absolute; top: 12px; left: 16px; right: 16px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px; pointer-events: none; color: #a8bed6; font: 9px/1.4 monospace; }
+.bridge-mission-panel strong { color: #f7c794; }
+.bridge-camera-controls { position: absolute; right: 12px; bottom: 12px; z-index: 1000; display: flex; gap: 4px; }
+.bridge-camera-controls button { min-width: 32px; min-height: 32px; padding: 5px 9px; border: 1px solid #60788f; border-radius: 4px; background: #101d2de8; color: #c5d8e5; cursor: pointer; font: 11px monospace; }
+.bridge-camera-controls button:focus-visible { outline: 2px solid #ffbe5c; }
+.bridge-credit { color: #617d96; font: 8px/1.5 monospace; padding: 0 4px 6px; }
+.agent-floor { display: flex; flex-direction: column; min-height: 0; }
+.bridge-activity { padding: 12px 4px; color: #9fb8ce; font: 10px/1.6 monospace; overflow-wrap: anywhere; }
+.agent-floor-groups { position: absolute; inset: 0; pointer-events: none; }
+.agent-floor-groups .agents-empty { position: absolute; bottom: 18px; left: 18px; max-width: 65%; padding: 0; color: #a6bfd1; font: 10px monospace; }
+.agent-workstation { position: absolute; width: 110px; height: 86px; padding: 0; transform: translate(-50%, -64px); border: 0; background: transparent; color: #e5fff6; cursor: pointer; text-align: center; pointer-events: auto; }
+body #agentsFloorGroups .agent-workstation { background: transparent; border: 0; box-shadow: none; padding: 0; margin: 0; color: #e5fff6; transition: none; }
+body #agentsFloorGroups .agent-workstation:hover,
+body #agentsFloorGroups .agent-workstation[aria-pressed="true"] { background: transparent; color: #ffd294; }
 .agent-card[aria-pressed="true"] { border-color: #7ee1b6; background-color: #16392f; }
-.agent-workstation[data-status="awaiting_confirmation"],
-.agent-workstation[data-status="awaiting_input"] { border-color: #ffbe5c; }
-.agent-workstation[data-status="error"] { border-color: #d88080; }
-.agent-station-scene { position: relative; display: block; width: 132px; height: 92px; }
-.agent-station-desk { position: absolute; bottom: 8px; left: 10px; width: 112px; height: 16px; border: 1px solid #477768; border-radius: 3px; background: #244f43; box-shadow: 0 7px 0 #16352c; }
-.agent-station-monitor { position: absolute; right: 14px; top: 14px; width: 46px; height: 36px; border: 3px solid #42685f; border-radius: 5px; background: #10271f; box-shadow: 0 6px 0 -2px #42685f; }
-.agent-station-monitor::after { content: ''; display: block; width: 24px; height: 3px; margin: 8px 5px; background: #648779; box-shadow: 0 7px 0 #4a685b, 0 14px 0 #345345; }
-.agent-station-avatar { position: absolute; bottom: 30px; left: 18px; width: 38px; height: 35px; border-radius: 12px 12px 5px 5px; background: var(--agent-color, #64baa2); box-shadow: inset 0 -7px 0 rgba(0,0,0,0.2); }
-.agent-station-avatar::before { content: ''; position: absolute; top: -22px; left: 6px; width: 26px; height: 26px; border: 2px solid var(--agent-color, #64baa2); border-radius: 10px; background: #18372e; box-sizing: border-box; }
-.agent-station-avatar::after { content: ''; position: absolute; top: -12px; left: 12px; width: 4px; height: 4px; background: #d1ffef; box-shadow: 11px 0 0 #d1ffef; }
-.agent-workstation[data-motion="working"] .agent-station-monitor::after { background: #96edc4; animation: agentMonitorWork 1.6s ease-in-out infinite; }
-.agent-workstation[data-motion="working"] .agent-station-avatar { animation: agentStationWork 2.4s ease-in-out infinite; }
-.agent-station-label { max-width: 100%; overflow-wrap: anywhere; font: 600 13px/1.35 monospace; }
-.agent-station-status { color: #91d2b7; font: 600 10px monospace; }
-.agent-station-activity { display: -webkit-box; min-height: 32px; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: #8eb3a5; font: 10px/1.5 monospace; overflow-wrap: anywhere; }
-.agent-station-duration { color: #729b8e; font: 10px monospace; }
+.agent-station-label { position: absolute; bottom: 13px; left: 0; right: 0; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 1px 3px #000, 1px 0 3px #000; font: 600 10px/1.4 monospace; }
+.agent-station-status { position: absolute; bottom: 1px; left: 0; right: 0; color: #aad5ce; text-shadow: 0 1px 3px #000; font: 8px monospace; }
+.agent-workstation[data-status="waiting"] .agent-station-status,
+.agent-workstation[data-status="awaiting_confirmation"] .agent-station-status,
+.agent-workstation[data-status="awaiting_input"] .agent-station-status { color: #ffce89; }
+.agent-workstation[data-status="error"] .agent-station-status { color: #ff9a9a; }
+.bridge-agent-meta { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .agent-inspector-actions,
 .agent-dependencies { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .agent-inspector-actions button:disabled,
@@ -1476,10 +1478,16 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
 .agent-detail .agent-inspector-feedback { margin-top: 12px; color: #c7e3cc; }
 .agent-inspector-feedback[data-error="true"] { color: #ffb2a3; }
 .agents-view[data-stale="true"] .agent-status i { animation: none; box-shadow: none; background: #aa9d7d; }
-@keyframes agentStationWork { 50% { transform: translateY(-2px); } }
-@keyframes agentMonitorWork { 50% { opacity: 0.55; } }
+@media (max-width: 760px) {
+  .bridge-scene { flex-basis: 380px; min-height: 380px; }
+  .bridge-canvas { min-height: 380px; }
+  .bridge-mission-panel { font-size: 8px; }
+  .agent-workstation { width: 80px; height: 64px; transform: translate(-50%, -42px); }
+  .agent-station-label { font-size: 8px; }
+  .agent-station-status { font-size: 7px; }
+}
 @media (prefers-reduced-motion: reduce) {
-  .agent-station-avatar, .agent-station-monitor::after, .agent-card.agent-card-enter, .agent-status i { animation: none !important; }
+  .agent-card.agent-card-enter, .agent-status i { animation: none !important; }
 }
 .agent-steer-form > div { display: flex; gap: 6px; }
 .agent-steer-form input { min-width: 0; flex: 1; padding: 9px 10px; border: 1px solid rgba(74,222,199,0.24); border-radius: 3px; outline: none; background: #0a1917; color: #eafffc; }

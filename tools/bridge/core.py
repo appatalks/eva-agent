@@ -4205,6 +4205,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
         signal_on_complete = bool((data or {}).get("signal_on_complete")) and collaborative
         if signal_on_complete and not self._require_bridge_capability():
             return
+        si_provider_config = None
+        if str((data or {}).get("si_runtime") or "") == "copilot":
+            try:
+                base_url, error = _validate_lmstudio_base_url(
+                    str((data or {}).get("lmstudio_base_url") or "http://localhost:1234/v1")
+                )
+                if error:
+                    raise ValueError(error)
+                selected_model = str((data or {}).get("lmstudio_model") or "").strip()
+                if not selected_model:
+                    from bridge.local_mcp import _resolve_lmstudio_model
+                    selected_model, error = _resolve_lmstudio_model(base_url, "")
+                    if error:
+                        raise ValueError(error)
+                si_provider_config = _si_provider_config(base_url, selected_model)
+            except ValueError as error:
+                self._json_response(400, {"error": {"message": str(error)}})
+                return
         session_id = str((data or {}).get("session_id", "")).strip()[:120]
         workspace_project_id = str((data or {}).get("workspace_project_id", "")).strip()[:120]
         group_id = str((data or {}).get("group_id", "")).strip()[:120] or "group-" + uuid.uuid4().hex[:10]
@@ -4234,6 +4252,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "signal_status": "",
                 "steer_queue": [],
                 "steer_history": [],
+                "_acp_provider_config": dict(si_provider_config or {}),
             })
         if collaborative:
             synthesis = tasks[-1]
