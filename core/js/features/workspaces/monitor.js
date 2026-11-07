@@ -1687,8 +1687,11 @@ var EvaWorkspaces = (function() {
     }
   }
 
-  function openWorkbench() {
-    if (typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
+  function openWorkbench(embedded) {
+    if (embedded !== true && window.EvaAgents && typeof window.EvaAgents.openWorkspaces === 'function') {
+      return window.EvaAgents.openWorkspaces();
+    }
+    if (embedded !== true && typeof closeAgentOperationsForNavigation === 'function') closeAgentOperationsForNavigation();
     if (window.EvaAssets && typeof window.EvaAssets.close === 'function') window.EvaAssets.close();
     if (window.EvaSkills && typeof window.EvaSkills.close === 'function') window.EvaSkills.close();
     if (typeof closeSidePanels === 'function') closeSidePanels();
@@ -1706,7 +1709,12 @@ var EvaWorkspaces = (function() {
     renderWorkbench();
   }
 
-  function closeWorkbench() {
+  function closeWorkbench(preserveObservatory) {
+    if (preserveObservatory !== true && state.workbenchOpen && window.EvaAgents &&
+        document.getElementById('workspaceWorkbench') && document.getElementById('workspaceWorkbench').closest('#agentsView')) {
+      window.EvaAgents.close();
+      return;
+    }
     dismissWorkspaceContextMenu();
     setChatDrawerOpen(false, false);
     restoreChatNodes();

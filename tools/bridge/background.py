@@ -3,6 +3,7 @@
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import threading
@@ -936,14 +937,26 @@ def _job_market_snapshot(ctx):
     tickers = _bg_watched_tickers(goal_rows)
     if not tickers:
         return [], "no watched tickers"
-    prompt = (
-        "Background task (no user is present). Provide a concise daily market snapshot for these ticker symbols: "
-        + ", ".join(tickers) + ". For each symbol give the latest price, daily change percent, and volume if you can. "
-        "Two short lines per symbol at most. If a symbol is unknown, say so. Plain text only."
-    )
-    text, error = _bg_agent_prompt(prompt, ctx, timeout=120)
-    if text is None:
-        return [], "agent: " + error
+    from bridge.market_data import stock_quote
+    lines = []
+    verified = 0
+    deadline = time.monotonic() + 120
+    for symbol in tickers:
+        if ctx.get("trigger") != "manual" and time.time() - _st.last_user_activity_ts < 120:
+            return [], "user active"
+        quote = stock_quote("$" + symbol + " stock quote") if time.monotonic() < deadline else {}
+        if "price" not in quote:
+            lines.append(symbol + ": verified quote unavailable.")
+            continue
+        verified += 1
+        line = symbol + ": " + str(quote["currency"]) + " " + str(quote["price"])
+        change = quote.get("change_percent")
+        if isinstance(change, (int, float)) and not isinstance(change, bool) and math.isfinite(change):
+            line += " (" + format(change, "+.2f") + "%)"
+        lines.append(line + " / " + str(quote["source"])[:40])
+    if not verified:
+        return [], "native quotes unavailable; no market snapshot saved"
+    text = "\n".join(lines)
     summary = ("Market snapshot for " + ", ".join(tickers) + ":\n" + text)[:800]
     payload = {"Period": period, "Summary": summary, "Timestamp": ctx["now_iso"]}
     return [{

@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current development version:** Eva 5.7.0 (unreleased). This document describes the matching browser UI,
+> **Current development version:** Eva 5.7.1 (unreleased). This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -19,7 +19,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh --build
 cd standalone
-./dist/'Eva Standalone-5.7.0.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.7.1.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
@@ -83,6 +83,40 @@ files and are normalized before Eva uses them.
 
 ### Runtime Behavior and Trust Boundaries
 
+**Task-scoped shell authority.** General settings includes a shell-autonomy
+control. A model terminal marker is only a proposal: the harness binds it to
+the captured user task and replans from that task rather than executing the
+model's command payload. Approved ordinary inspection commands and simple
+relative directory/file creation may submit automatically. High-risk or
+uncertain commands require an exact-command confirmation; disabling autonomy
+requires confirmation even for otherwise approved planned commands.
+Cancelled commands do not execute. Expansion/composed shell syntax and
+wildcard, parent-path, or absolute-path deletion plans are refused.
+The local planner does not fall back to OpenAI on failure.
+Submission is not a verified task-completion receipt.
+Sources: [`harness-control.js`](core/js/harness-control.js) and
+[`terminal planner and command policy`](core/js/features/sessions/explorer.js).
+
+**Primary activity and throughput.** Eva's crew avatar is no longer permanently
+idle while Chat is processing. The renderer tracks pending AIG sends, including
+adaptive-review/native-action handling, and the bridge tracks external AIG and
+benchmark requests. Both clear their activity in `finally`; concurrent turns
+retain independent records. The view displays coarse request activity, not
+private reasoning or an invented progress percentage. Stale-telemetry rules
+still apply.
+
+An explicit tokens/s benchmark uses `benchmark_runtime` and the private
+loopback `POST /v1/runtime/benchmark` endpoint, not a generated terminal script.
+It requests one local completion capped at 128 tokens with a fixed neutral
+prompt. Tokens/s is provider-reported completion tokens divided by total
+provider request time, including queueing, prefill, and transport. It is not
+engine-only decode speed or full AIG/harness throughput. Missing usage yields
+an unavailable measurement rather than a word-count estimate. The request
+does not include the user's conversation or private task content.
+Sources: [`benchmark.py`](tools/bridge/benchmark.py),
+[`bridge request lifecycle`](tools/bridge/core.py), and
+[`primary crew activity`](core/js/features/agents/operations.js).
+
 **Durable memory.** Eva uses local SQLite by default. The Memory view exposes record
 provenance, associations, history, and corrections before records are changed or
 removed from recall. Explicit user-stated facts recognized by the deterministic
@@ -105,6 +139,26 @@ when weather is unavailable.
 loopback provider first, then the local `ticker.sh` Yahoo Finance tool, followed by the
 bounded Google Finance fallback. Eva reports an unavailable quote instead of asking a
 model to infer a current price.
+
+Quote-only requests, including narrow checks such as `check EXA/EXB`, execute
+native retrieval even when SI Copilot is selected. The browser resolves up to
+four explicit symbols, requests one receipt per symbol, validates the returned
+symbol/finite positive price, and renders verified results or unavailable
+entries directly. It does not ask the responder to write tool-call syntax.
+`GET /v1/data/retrieve?native_quote=1` handles explicit quote requests through the shared
+[`market_data.stock_quote`](tools/bridge/market_data.py) adapter before the
+ambient ACP retrieval path. Each attempt emits a privacy-safe
+`quote.retrieval` audit event correlated to the requesting turn.
+
+The scheduled `market_snapshot` job also uses these native receipts rather
+than `_bg_agent_prompt` or the ambient Copilot model. Partial snapshots retain
+explicit unavailable-symbol entries; if no quote is verified, no successful
+snapshot is saved. Its watched-symbol list, schedule, and activity gating
+remain unchanged. Other model-driven background jobs retain their existing
+runtime behavior; this change does not make every background task local.
+Sources: [`aigSend` and quote rendering](core/js/providers/aig.js),
+[`native data endpoint`](tools/bridge/core.py), and
+[`_job_market_snapshot`](tools/bridge/background.py).
 
 **MCP compatibility.** GitHub MCP uses GitHub's hosted HTTPS service and the GitHub PAT
 configured in Settings > Auth; Docker is not required. Local MCP servers that do not
@@ -503,7 +557,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.7.0)
+  package.json             Electron + electron-builder config (v5.7.1)
 ```
 
 ## Dependencies
@@ -548,11 +602,40 @@ standalone/
 | Local speech runtime (optional) | Chatterbox English + Multilingual V3 TTS, Faster Whisper STT | `./install.sh --voice-deps` |
 
 ### API Keys
+Signal authentication is a device-linking flow, not an API key. In
+**Settings > Accounts**, choose **Link Signal** and scan its QR from the
+phone's Signal **Settings > Linked devices**. Completion saves the linked
+sender and preserves the saved recipient; an unset recipient defaults to the
+linked account. Unsaved recipient input is not overwritten in the renderer.
+The bridge host needs `signal-cli` and `qrencode`; the installer checks both.
+
+`POST /v1/signal/link` starts or returns the current bounded attempt.
+`GET /v1/signal/link` polls its safe lifecycle snapshot; pending snapshots
+contain an in-memory PNG data URL, never a raw provisioning URI.
+`POST /v1/signal/link/cancel` requires the exact attempt ID.
+All three require loopback binding and the native bridge capability; responses
+are `no-store`. A single worker owns the provisioning process, with a
+150-second deadline, cancellation, and bridge-shutdown cleanup. Closing
+Settings or leaving Accounts clears the QR and cancels an attempt initiated
+by that pane. Reopening can observe an existing attempt without creating one.
+
+Each link uses a new mode-0700 profile below the installed configuration
+directory's `signal-profiles/`. After the CLI confirms completion, a
+mode-0600 `signal-profile.json` atomically selects that profile for subsequent
+sends. Old profiles/default CLI accounts are not deleted or unregistered.
+Provisioning URI/QR data are never written to logs, conversation history,
+browser storage, or QR files; persistent Signal credentials are owned by
+signal-cli within the protected profile. Failed linking leaves prior account
+files intact and does not send a test message automatically.
+Sources: [`signal_link.py`](tools/bridge/signal_link.py),
+[`Signal Settings UI`](core/js/settings/signal.js), and
+[`signal-cli LinkCommand`](https://github.com/AsamK/signal-cli/blob/master/src/main/java/org/asamk/signal/commands/LinkCommand.java).
+
 | Key | Used by | Get it from |
 |---|---|---|
 | `OPENAI_API_KEY` | Direct OpenAI Eva backends, OpenAI models, image generation, TTS/transcription, embeddings | [platform.openai.com](https://platform.openai.com/api-keys) |
 | `GITHUB_PAT` | GitHub MCP and private workspace imports | [github.com/settings/tokens](https://github.com/settings/tokens) (private imports need repository Contents: Read access. Fine-grained tokens must include the repository; classic tokens need `repo`. Alternatively, Workspaces can launch native `gh auth login --web` device-code authorization; that credential stays in GitHub CLI storage.) |
-| `GOOGLE_GL_KEY` | Google Gemini | [aistudio.google.com](https://aistudio.google.com/apikey) |
+| `GOOGLE_GL_KEY` | Legacy Gemini compatibility only; no Accounts input. Existing credentials remain preserved. | [aistudio.google.com](https://aistudio.google.com/apikey) |
 | AWS credentials | Amazon Polly TTS | [AWS IAM Console](https://console.aws.amazon.com/iam/) |
 | None | LM Studio (local mode) | Free, runs locally |
 
@@ -1358,7 +1441,8 @@ Local webcam face and motion detection.
 ### Agent Operations View
 
 The **Agents** sidebar destination replaces the chat workspace with a live
-Agent Observatory: **Command bridge**, **Memory atoms**, and **Session cards**
+Agent Observatory: **Command bridge**, **Memory atoms**, **Session cards**,
+**Workspaces**, and **Mission log**
 tabs, plus an in-place inspector. On screens narrower than 600 px, the Eva theme hides its
 sidebar and exposes the same destination through a compact grid button. The view
 is implemented by [`operations.js`](core/js/features/agents/operations.js) and
@@ -1498,6 +1582,46 @@ Sources: [`Cognition.ensureAgentLaunch`](core/js/cognition.js),
 [`BridgeHandler._subagent_spawn_batch`](tools/bridge/core.py),
 [`_subagent_worker`](tools/bridge/utils.py), and
 [`ACPClient.start`](tools/bridge/acp_client.py).
+
+#### Workspaces tab and durable debrief checklist
+
+The Workspaces tab hosts the existing `workspaceWorkbench` DOM subtree rather
+than duplicating its projects, runs, terminals, files, or chat drawer. Existing
+Workspaces sidebar links are removed in both Eva and LCARS themes; Agents is
+the single navigation entry. Programmatic Workspaces navigation opens its
+Observatory tab. Sidebar events from Agents do not close the embedded workbench
+after the button's own open handler runs.
+Tab transitions suspend the workbench view and restore moved chat/input nodes;
+they do not stop coding runs. Workspace close returns to chat through the
+Observatory lifecycle. Keyboard tab navigation covers all five tabs.
+
+Worker completion writes a bounded public report (up to 64,000 characters) to
+`mission-log.sqlite3` in the installed Eva configuration directory. This local
+SQLite archive is independent of the ephemeral agent registry. Each completion
+is keyed by agent ID and end timestamp, so retries/reuse produce distinct
+debriefs and repeated collection does not duplicate them. No private provider
+configuration or task prompt is stored. The database is created with mode 0600.
+
+On status refresh, eligible `done`, `error`, or `cancelled` subagents are
+automatically dismissed after a one-minute minimum reuse window. Active workers
+and upstream tasks required by active dependents are retained. Collection
+revalidates the terminal state/end timestamp under the registry lock and commits
+the report before removing the task. A failed archive write keeps the task.
+Manual dismissal uses the same save-before-remove boundary. Coding runs,
+worktrees, changes, and chat histories are not deleted.
+
+`GET /v1/agents/reports` returns the latest 100 stored reports; older reports
+remain in SQLite. `POST /v1/agents/reports/review` takes `{id, reviewed}` and
+returns an exact checklist receipt. Both routes use the existing private-route
+authorization. Checkmarks mean the user reviewed a report, not that the agent's
+claims or changes passed verification. Report text is rendered as plain text,
+not executable HTML or model instructions. Unavailable storage leaves the
+last-loaded checklist visible.
+Sources: [`tools/bridge/mission_log.py`](tools/bridge/mission_log.py),
+[`_collect_finished_subagents` and report endpoints](tools/bridge/core.py),
+[`worker finalization`](tools/bridge/utils.py),
+[`Observatory tabs and checklist`](core/js/features/agents/operations.js), and
+[`embedded workbench lifecycle`](core/js/features/workspaces/monitor.js).
 
 For requests containing collaboration language such as `work together`,
 `relay`, `handoff`, `discuss`, or `talk to each other`, the last task becomes a
@@ -2233,7 +2357,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.7.0.AppImage'
+./dist/'Eva Standalone-5.7.1.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace

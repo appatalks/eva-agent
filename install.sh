@@ -371,6 +371,7 @@ register_dependencies() {
   fi
 
   hr; info "Signal notifications (optional)"; hr
+  need_sys qrencode "Signal device-linking QR encoder" qrencode qrencode qrencode qrencode qrencode
   local SIGNAL_CLI_VERSION="0.14.5"
   if have_cmd signal-cli; then
     local scver; scver="$(signal-cli --version 2>/dev/null | awk '{print $NF}')"
