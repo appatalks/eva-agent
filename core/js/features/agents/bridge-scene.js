@@ -215,6 +215,14 @@ var EvaBridgeScene = (function() {
       widget.style.left = (state.width / 2 + (x - 480) * scale + state.panX) + 'px';
       widget.style.top = (state.height / 2 + (y - 270) * scale + state.panY) + 'px';
       widget.style.zIndex = String(Math.round(y));
+      widget.style.setProperty('--bubble-rise', Math.max(4, 60 * scale - (state.width < 760 ? 42 : 64) + 4) + 'px');
+      var bubble = widget.querySelector('.bridge-crew-bubble');
+      if (bubble) {
+        bubble.hidden = state.stale || !state.bubbleIds.has(body.id);
+        var center = state.width / 2 + (x - 480) * scale + state.panX;
+        var safeCenter = Math.max(85, Math.min(state.width - 85, center));
+        bubble.style.left = (widget.offsetWidth / 2 + safeCenter - center) + 'px';
+      }
       widget.dataset.pose = walking ? 'walking' : (working ? 'working' : 'resting');
       widget.dataset.sceneX = x.toFixed(2); widget.dataset.sceneY = y.toFixed(2);
     }
@@ -233,6 +241,18 @@ var EvaBridgeScene = (function() {
     ctx.translate(state.width / 2 + state.panX, state.height / 2 + state.panY);
     ctx.scale(scale, scale); ctx.translate(-480, -270);
     drawRoom(time);
+    var speaking = Array.from(state.bodies.values()).map(function(body) {
+      var widget = document.querySelector('#agentsFloorGroups [data-agent-id="' + CSS.escape(body.id) + '"]');
+      return { id: body.id, x: body.x, y: body.y, until: widget && widget._bubbleUntil || 0 };
+    }).filter(function(item) { return item.until > Date.now(); });
+    speaking.sort(function(a, b) { return (b.id === state.selected) - (a.id === state.selected) || b.until - a.until; });
+    var visibleBubbles = [];
+    speaking.forEach(function(item) {
+      if (visibleBubbles.length < 2 && !visibleBubbles.some(function(other) {
+        return Math.abs(item.x - other.x) * scale < 170 && Math.abs(item.y - other.y) * scale < 65;
+      })) visibleBubbles.push(item);
+    });
+    state.bubbleIds = new Set(visibleBubbles.map(function(item) { return item.id; }));
     var items = [];
     berths.forEach(function(berth, index) {
       var working = !state.stale && Array.from(state.bodies.values()).some(function(body) {

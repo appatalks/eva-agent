@@ -45,6 +45,9 @@ while keeping configuration, approvals, and personal data under your control.
   also launches real discussion batches from SI Copilot direct chat while
   preserving its configured endpoint. Inspect dependencies, open linked chats,
   and steer or interrupt supported agents without leaving the bridge.
+  Subtle, transient crew bubbles show reported activity, streamed public output,
+  and recorded upstream-output handoffs (at most two at once), never private
+  reasoning or invented conversations.
 - **Workspace control room:** monitor independent terminals and coding agents for
   the selected workspace, focus a tile, interrupt work, or send new direction.
   Project files stay beside Live and Details tabs. Create local Git workspaces

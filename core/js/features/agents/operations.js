@@ -297,6 +297,36 @@ var EvaAgents = (function() {
     if (element) element.textContent = value;
   }
 
+  function updateCrewBubble(station, agent, stale) {
+    var events = [];
+    if (agent.activity) events.push({ kind: 'Activity', text: agent.activity, at: Date.parse(agent.last_activity_at) || 0 });
+    if (typeof agent.result === 'string' && agent.result.trim() && agent.last_output_at) {
+      events.push({ kind: 'Output', text: agent.result.trim().slice(-600), at: Date.parse(agent.last_output_at) || 0 });
+    }
+    if (Array.isArray(agent.received_from) && agent.received_from.length && agent.last_handoff_at) {
+      events.push({ kind: 'Handoff', text: 'Received outputs from ' + agent.received_from.map(function(source) {
+        return String(source.label || 'Agent');
+      }).join(', '), at: Date.parse(agent.last_handoff_at) || 0 });
+    }
+    events.sort(function(a, b) { return b.at - a.at; });
+    var event = events[0];
+    var bubble = station.querySelector('.bridge-crew-bubble');
+    if (!event || !isActive(agent.status) || stale) {
+      station._bubbleUntil = 0;
+      bubble.hidden = true;
+      return;
+    }
+    var text = String(event.text).replace(/\s+/g, ' ').trim();
+    var signature = JSON.stringify([event.kind, text, event.at]);
+    if (signature !== station._bubbleSignature) {
+      station._bubbleSignature = signature;
+      station._bubbleUntil = Math.min(Date.now(), event.at || Date.now()) + 10000;
+      bubble.textContent = event.kind + ': ' + (text.length > 110 ? text.slice(0, 107) + '...' : text);
+      bubble.dataset.kind = event.kind.toLowerCase();
+    }
+    bubble.hidden = !(station._bubbleUntil > Date.now());
+  }
+
   function renderFloor(agents) {
     var floor = document.getElementById('agentsFloorGroups');
     if (!floor) return;
@@ -331,7 +361,9 @@ var EvaAgents = (function() {
         station.dataset.agentId = agent.id;
         var meta = element('span', 'bridge-agent-meta');
         meta.append(element('span', 'agent-station-activity'), element('span', 'agent-station-duration'));
-        station.append(element('strong', 'agent-station-label'), element('span', 'agent-station-status'), meta);
+        var bubble = element('span', 'bridge-crew-bubble');
+        bubble.hidden = true;
+        station.append(element('strong', 'agent-station-label'), element('span', 'agent-station-status'), meta, bubble);
         station.addEventListener('click', function(event) { openAgentDetail(event.currentTarget._agent); });
       }
       station._agent = agent;
@@ -344,6 +376,7 @@ var EvaAgents = (function() {
       station.querySelector('.agent-station-status').textContent = agentStatus(agent);
       station.querySelector('.agent-station-activity').textContent = agent.activity || agent.detail || 'No activity reported.';
       station.querySelector('.agent-station-duration').textContent = (agent.kind === 'eva' ? 'SESSION UPTIME ' : 'ELAPSED ') + elapsed(agent);
+      updateCrewBubble(station, agent, stale);
       if (floor.children[stationIndex] !== station) floor.insertBefore(station, floor.children[stationIndex] || null);
       delete existingStations[agent.id];
     });

@@ -1467,6 +1467,9 @@ body #agentsFloorGroups .agent-workstation[aria-pressed="true"] { background: tr
 .agent-workstation[data-status="awaiting_input"] .agent-station-status { color: #ffce89; }
 .agent-workstation[data-status="error"] .agent-station-status { color: #ff9a9a; }
 .bridge-agent-meta { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.bridge-crew-bubble { position: absolute; bottom: calc(100% + var(--bubble-rise, 4px)); left: 50%; transform: translateX(-50%); width: max-content; max-width: 150px; padding: 4px 7px; border: 1px solid #8baec32b; border-radius: 8px; background: #0a172b99; color: #c9dce6; font: 9px/1.4 monospace; text-align: left; overflow-wrap: anywhere; pointer-events: none; }
+.bridge-crew-bubble[hidden] { display: none; }
+.bridge-crew-bubble[data-kind="handoff"] { color: #a9e6ce; border-color: #7fcdb944; }
 .agent-inspector-actions,
 .agent-dependencies { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .agent-inspector-actions button:disabled,

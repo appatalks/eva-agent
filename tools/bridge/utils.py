@@ -165,6 +165,11 @@ def _subagent_dependency_context(task_id, timeout=300):
                         f"[{dependency.get('label', dependency.get('id', 'Agent'))}]\n"
                         f"{str(dependency.get('result') or '')[:4000]}"
                     )
+                task["received_from"] = [
+                    {"id": item.get("id", ""), "label": item.get("label") or "Agent"}
+                    for item in dependencies
+                ]
+                task["last_handoff_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 return "\n\n".join(sections)
         time.sleep(0.25)
     raise RuntimeError("timed out waiting for dependency tasks")
