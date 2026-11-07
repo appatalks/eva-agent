@@ -25,7 +25,8 @@
   },
   "overrides": {
     "@xmldom/xmldom": "0.8.15",
-    "fast-uri": "3.1.7"
+    "fast-uri": "3.1.9",
+    "minimatch@>=7.0.0 <11.0.1": "11.0.1"
   },
   "_comment": "Electron files stay in standalone/. electron-builder copies the parent web UI and bridge with extraResources into resources/app.",
   "build": {
