@@ -6709,6 +6709,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not user_message:
             self._json_response(200, {"data": "", "model": "", "retrieved": False, "mode": "local" if _st.local_mode else "cloud"})
             return
+        if params.get("native_quote", ["0"])[0] == "1":
+            from bridge.market_data import stock_quote
+            quote = stock_quote(user_message)
+            audit_event("quote.retrieval", str(params.get("turn_id", [""])[0])[:120],
+                        "completed" if "price" in quote else "unavailable",
+                        source_count=1 if "price" in quote else 0, backend="native")
+            self._json_response(200, {
+                "data": json.dumps({"stock_quote": quote}), "model": "native-stock-quote",
+                "retrieved": "price" in quote, "mode": "native",
+            })
+            return
         data, model = self._retrieve_acp_data_for(user_message, conversation_id)
         self._json_response(200, {
             "data": data,

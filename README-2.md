@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current development version:** Eva 5.7.0 (unreleased). This document describes the matching browser UI,
+> **Current development version:** Eva 5.7.1 (unreleased). This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -19,7 +19,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh --build
 cd standalone
-./dist/'Eva Standalone-5.7.0.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.7.1.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
@@ -105,6 +105,26 @@ when weather is unavailable.
 loopback provider first, then the local `ticker.sh` Yahoo Finance tool, followed by the
 bounded Google Finance fallback. Eva reports an unavailable quote instead of asking a
 model to infer a current price.
+
+Quote-only requests, including narrow checks such as `check EXA/EXB`, execute
+native retrieval even when SI Copilot is selected. The browser resolves up to
+four explicit symbols, requests one receipt per symbol, validates the returned
+symbol/finite positive price, and renders verified results or unavailable
+entries directly. It does not ask the responder to write tool-call syntax.
+`GET /v1/data/retrieve?native_quote=1` handles explicit quote requests through the shared
+[`market_data.stock_quote`](tools/bridge/market_data.py) adapter before the
+ambient ACP retrieval path. Each attempt emits a privacy-safe
+`quote.retrieval` audit event correlated to the requesting turn.
+
+The scheduled `market_snapshot` job also uses these native receipts rather
+than `_bg_agent_prompt` or the ambient Copilot model. Partial snapshots retain
+explicit unavailable-symbol entries; if no quote is verified, no successful
+snapshot is saved. Its watched-symbol list, schedule, and activity gating
+remain unchanged. Other model-driven background jobs retain their existing
+runtime behavior; this change does not make every background task local.
+Sources: [`aigSend` and quote rendering](core/js/providers/aig.js),
+[`native data endpoint`](tools/bridge/core.py), and
+[`_job_market_snapshot`](tools/bridge/background.py).
 
 **MCP compatibility.** GitHub MCP uses GitHub's hosted HTTPS service and the GitHub PAT
 configured in Settings > Auth; Docker is not required. Local MCP servers that do not
@@ -503,7 +523,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.7.0)
+  package.json             Electron + electron-builder config (v5.7.1)
 ```
 
 ## Dependencies
@@ -2303,7 +2323,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.7.0.AppImage'
+./dist/'Eva Standalone-5.7.1.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace

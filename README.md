@@ -38,6 +38,9 @@ while keeping configuration, approvals, and personal data under your control.
   Public-news follow-ups retain the recent user-specified topic through
   confirmations and status checks, and run native retrieval before answering
   rather than relying on a model's promise to search.
+- **Model-independent stock checks:** single/pair quote requests and scheduled
+  market snapshots use verified native quote receipts, not model-written tool
+  calls or GitHub/Copilot authentication. Unavailable symbols are explicit.
 - **Agent Observatory:** an animated starship command bridge, in-place agent
   inspector, and preserved memory-atom view. A shared depth-sorted canvas scene
   places walking crew, consoles, shadows, and lighting in one room rather than
@@ -75,7 +78,7 @@ eva
 Eva is also added to the system application menu. On first launch, select **Eva (AIG)**
 for the integrated routing, memory, and tool experience.
 
-Current development version: **5.7.0** (`Eva Standalone-5.7.0.AppImage`, unreleased).
+Current development version: **5.7.1** (`Eva Standalone-5.7.1.AppImage`, unreleased).
 Latest published standalone release: `Eva Standalone-5.6.10.AppImage`.
 
 ## Preview
