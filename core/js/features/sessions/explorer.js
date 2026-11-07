@@ -1087,7 +1087,7 @@ function runEvaTerminalCommand(command, submit) {
 function evaPlannedTerminalCommandIsSafe(command) {
   var text = String(command || '').trim();
   if (!text || /[\r\n\0;|&><`$\\]/.test(text)) return false;
-  if (/(?:^|[/\s])(?:\.env(?:\.[A-Za-z0-9_.-]+)?|\.ssh|\.aws|\.azure|\.npmrc|\.pypirc|\.netrc|\.git-credentials)(?:[/\s]|$)|\b(?:config\.json|config\.local\.(?:js|json)|auth\.enc(?:\.json)?|id_rsa|id_ed25519|kubeconfig|service-account|hosts\.yml|token|credential|password|secret)\b/i.test(text)) return false;
+  if (/(?:^|[/\s=])(?:\.env(?:\.[A-Za-z0-9_.-]+)?|\.ssh|\.aws|\.azure|\.npmrc|\.pypirc|\.netrc|\.git-credentials)(?:[/\s]|$)|\b(?:config\.json|config\.local\.(?:js|json)|auth\.enc(?:\.json)?|id_rsa|id_ed25519|kubeconfig|service-account|hosts\.yml|token|credential|password|secret)\b/i.test(text)) return false;
   if (!/^[A-Za-z0-9_.:/=+,-]+(?:\s+[A-Za-z0-9_.:/=+,-]+)*$/.test(text)) return false;
   var parts = text.split(/\s+/);
   var commandName = parts[0];
@@ -1100,11 +1100,22 @@ function evaPlannedTerminalCommandIsSafe(command) {
   if (commandName === 'pwd') return argumentsList.every(function(argument) { return argument === '-L' || argument === '-P'; });
   if (commandName === 'ls') return argumentsList.every(function(argument) { return !argument.startsWith('-') || /^-[aAlh1dF]+$/.test(argument); });
   if (commandName === 'df') return argumentsList.every(function(argument) { return /^-[hHTiPk]+$/.test(argument); });
+  if (commandName === 'uname') return argumentsList.every(function(argument) { return /^-[asrvmnpo]+$/.test(argument); });
+  if (commandName === 'free') return argumentsList.every(function(argument) { return /^-[hbkmgtw]+$/.test(argument); });
+  if (commandName === 'uptime') return argumentsList.every(function(argument) { return argument === '-p' || argument === '-s'; });
+  if (commandName === 'lscpu' || commandName === 'sensors') return argumentsList.length === 0;
+  if (commandName === 'mkdir' || commandName === 'touch') return argumentsList.length > 0 && argumentsList.every(function(argument) { return !argument.startsWith('-') || (commandName === 'mkdir' && argument === '-p'); });
   if (commandName === 'git') {
     if (!argumentsList.length || ['status', 'diff', 'log', 'show', 'rev-parse'].indexOf(argumentsList[0]) < 0) return false;
     return !argumentsList.slice(1).some(function(argument) { return argument === '-c' || argument.indexOf('-c=') === 0 || /--(?:output|ext-diff|textconv|exec-path|config-env|no-index)/.test(argument); });
   }
+  if (commandName === 'rg' && argumentsList.some(function(argument) { return /^--(?:pre|hostname-bin|hidden|no-ignore)(?:[=-]|$)/.test(argument); })) return false;
   return ['rg', 'grep', 'cat', 'head', 'tail', 'wc'].indexOf(commandName) >= 0;
+}
+
+function getEvaTaskShellAutonomy() {
+  try { return localStorage.getItem('evaTaskShellAutonomy') !== 'false'; }
+  catch (_) { return false; }
 }
 
 async function planEvaTerminalTask(objective, submit, allowDecline) {
@@ -1146,7 +1157,7 @@ async function planEvaTerminalTask(objective, submit, allowDecline) {
     };
     response = await requestTerminalPlan(selectedPlannerModel);
     var payload = await response.json().catch(function() { return {}; });
-    if (!response.ok && plannerOpenAIKey && String(selectedPlannerModel).indexOf('openai:') !== 0) {
+    if (!response.ok && plannerOpenAIKey && selectedPlannerModel !== 'lmstudio' && String(selectedPlannerModel).indexOf('openai:') !== 0) {
       response = await requestTerminalPlan('openai:gpt-5-mini');
       payload = await response.json().catch(function() { return {}; });
     }
@@ -1169,15 +1180,31 @@ async function planEvaTerminalTask(objective, submit, allowDecline) {
       return { declined: true, submitted: false, reviewRequired: false };
     }
     if (!command || /[\r\n\0]/.test(command) || command.length > 8192) throw new Error('Terminal planner did not return one valid command line.');
+    if (submit !== false && (/[;|&><`$\\]/.test(command) ||
+        /\b(?:eval|exec)\b/i.test(command) ||
+        (/\b(?:rm|rmdir|del|erase)\b/i.test(command) && (/[*?[\]{}"']/.test(command) || command.split(/\s+/).some(function(part) { return part.charAt(0) === '/' || part.charAt(0) === '~' || part === '.' || part === '..' || part.indexOf('../') >= 0; }))))) {
+      throw new Error('The planned command uses shell expansion/composition or targets a broad directory. No command was executed.');
+    }
     var plannedSafe = evaPlannedTerminalCommandIsSafe(command);
-    var shouldSubmit = submit !== false && plannedSafe;
+    var shouldSubmit = submit !== false && plannedSafe && getEvaTaskShellAutonomy();
+    if (submit !== false && !shouldSubmit) {
+      if (typeof evaConfirmAction !== 'function') throw new Error('This command needs explicit confirmation, but the confirmation dialog is unavailable.');
+      var approved = await evaConfirmAction({
+        title: 'Approve task command',
+        warning: 'This command may change or remove files, access sensitive settings, elevate privileges, or run scripts. Review it before allowing execution.',
+        details: 'Task: ' + task + '\nCommand: ' + command,
+        approveLabel: 'Run command'
+      });
+      if (!approved) return { submitted: false, cancelled: true, reviewRequired: true };
+      shouldSubmit = true;
+    }
     if (typeof evaAuditEvent === 'function') evaAuditEvent('terminal_task', 'planned', {
       correlation_id: turnId,
       action: shouldSubmit ? 'run' : 'type',
       response_chars: command.length
     });
     await runEvaTerminalCommand(command, shouldSubmit);
-    return { submitted: shouldSubmit, reviewRequired: submit !== false && !plannedSafe };
+    return { submitted: shouldSubmit, reviewRequired: submit !== false && !shouldSubmit };
   } catch (error) {
     if (typeof evaAuditEvent === 'function') evaAuditEvent('terminal_task', 'failed', {
       correlation_id: turnId,

@@ -1656,6 +1656,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // Init auth, system prompt, and model settings
   loadAuthOverrides();
   populateAuthFields();
+  var shellAutonomy = document.getElementById('taskShellAutonomy');
+  if (shellAutonomy) {
+    shellAutonomy.checked = typeof getEvaTaskShellAutonomy === 'function' && getEvaTaskShellAutonomy();
+    shellAutonomy.addEventListener('change', function() {
+      localStorage.setItem('evaTaskShellAutonomy', shellAutonomy.checked ? 'true' : 'false');
+    });
+  }
   refreshLocalVoicesProfiles();
   var ttsEngine = document.getElementById('selEngine');
   if (ttsEngine) ttsEngine.addEventListener('change', function() { syncLocalVoicesEngine(false); });

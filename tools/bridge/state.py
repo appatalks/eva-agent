@@ -23,6 +23,8 @@ acp_pool = {}               # model_key -> ACPClient
 acp_pool_order = []         # model_key list, LRU first
 acp_pool_lock = threading.RLock()
 configured_mcp_config = {}  # full sanitized runtime selection; clients receive profiles
+primary_requests = {}
+primary_request_lock = threading.Lock()
 
 # ── Kusto auth ──────────────────────────────────────────────────────
 kusto_token_cache = None    # Cached Kusto access token

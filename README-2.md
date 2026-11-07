@@ -83,6 +83,40 @@ files and are normalized before Eva uses them.
 
 ### Runtime Behavior and Trust Boundaries
 
+**Task-scoped shell authority.** General settings includes a shell-autonomy
+control. A model terminal marker is only a proposal: the harness binds it to
+the captured user task and replans from that task rather than executing the
+model's command payload. Approved ordinary inspection commands and simple
+relative directory/file creation may submit automatically. High-risk or
+uncertain commands require an exact-command confirmation; disabling autonomy
+requires confirmation even for otherwise approved planned commands.
+Cancelled commands do not execute. Expansion/composed shell syntax and
+wildcard, parent-path, or absolute-path deletion plans are refused.
+The local planner does not fall back to OpenAI on failure.
+Submission is not a verified task-completion receipt.
+Sources: [`harness-control.js`](core/js/harness-control.js) and
+[`terminal planner and command policy`](core/js/features/sessions/explorer.js).
+
+**Primary activity and throughput.** Eva's crew avatar is no longer permanently
+idle while Chat is processing. The renderer tracks pending AIG sends, including
+adaptive-review/native-action handling, and the bridge tracks external AIG and
+benchmark requests. Both clear their activity in `finally`; concurrent turns
+retain independent records. The view displays coarse request activity, not
+private reasoning or an invented progress percentage. Stale-telemetry rules
+still apply.
+
+An explicit tokens/s benchmark uses `benchmark_runtime` and the private
+loopback `POST /v1/runtime/benchmark` endpoint, not a generated terminal script.
+It requests one local completion capped at 128 tokens with a fixed neutral
+prompt. Tokens/s is provider-reported completion tokens divided by total
+provider request time, including queueing, prefill, and transport. It is not
+engine-only decode speed or full AIG/harness throughput. Missing usage yields
+an unavailable measurement rather than a word-count estimate. The request
+does not include the user's conversation or private task content.
+Sources: [`benchmark.py`](tools/bridge/benchmark.py),
+[`bridge request lifecycle`](tools/bridge/core.py), and
+[`primary crew activity`](core/js/features/agents/operations.js).
+
 **Durable memory.** Eva uses local SQLite by default. The Memory view exposes record
 provenance, associations, history, and corrections before records are changed or
 removed from recall. Explicit user-stated facts recognized by the deterministic

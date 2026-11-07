@@ -28,6 +28,8 @@ var EvaAgents = (function() {
     lastSyncAt: 0,
     telemetryError: '',
     reportsSequence: 0,
+    primaryTurns: new Map(),
+    primaryTurnSequence: 0,
     clockTimer: null,
     actionBusy: {},
     parallaxX: 0,
@@ -113,7 +115,7 @@ var EvaAgents = (function() {
   function tick() {
     if (!state.open) return;
     updateTelemetry();
-    var agents = state.data && state.data.agents || [];
+    var agents = primaryAgentView(state.data && state.data.agents || []);
     renderFloor(agents);
     agents.forEach(function(agent) {
       var card = Array.prototype.find.call(document.querySelectorAll('.agent-card'), function(item) {
@@ -341,7 +343,7 @@ var EvaAgents = (function() {
 
   function render() {
     var data = state.data || {};
-    var agents = data.agents || [];
+    var agents = primaryAgentView(data.agents || []);
     var graph = data.graph || { nodes: [], edges: [] };
     var agentById = {};
     agents.forEach(function(agent) { agentById['agent-' + agent.id] = agent; });
@@ -352,7 +354,8 @@ var EvaAgents = (function() {
       node.model = liveAgent.model || node.model || 'default';
       node.result = liveAgent.result || '';
     });
-    setText('agentsActiveCount', data.active_total || 0);
+    var localPrimary = state.primaryTurns.size > 0 && !(data.agents || []).some(function(agent) { return agent.kind === 'eva' && isActive(agent.status); });
+    setText('agentsActiveCount', (data.active_total || 0) + (localPrimary ? 1 : 0));
     setText('agentsCapacity', (data.subagents_active || 0) + ' / ' + (data.capacity || 4));
     setText('agentsNodeCount', data.graph ? (graph.nodes || []).length : '--');
     setText('agentGraphEdgeCount', (graph.edges || []).length + ' relations');
@@ -361,8 +364,8 @@ var EvaAgents = (function() {
     updateTelemetry();
     var badge = document.getElementById('evaAgentsBadge');
     if (badge) {
-      badge.textContent = data.active_total || 0;
-      badge.classList.toggle('active', (data.active_total || 0) > 0);
+      badge.textContent = (data.active_total || 0) + (localPrimary ? 1 : 0);
+      badge.classList.toggle('active', (data.active_total || 0) + (localPrimary ? 1 : 0) > 0);
     }
     renderCards(agents);
     renderFloor(agents);
@@ -407,6 +410,7 @@ var EvaAgents = (function() {
   }
 
   function renderFloor(agents) {
+    agents = primaryAgentView(agents);
     var floor = document.getElementById('agentsFloorGroups');
     if (!floor) return;
     var stale = telemetryStale();
@@ -643,7 +647,7 @@ var EvaAgents = (function() {
   }
 
   function renderDetail(agentId) {
-    var agents = (state.data && state.data.agents) || [];
+    var agents = primaryAgentView((state.data && state.data.agents) || []);
     var agent = agents.filter(function(item) { return item.id === agentId; })[0];
     var panel = document.getElementById('agentDetail');
     var content = document.getElementById('agentDetailContent');
@@ -1317,6 +1321,34 @@ var EvaAgents = (function() {
     });
   }
 
+  function primaryAgentView(agents) {
+    if (!state.primaryTurns.size) return agents;
+    var activity = Array.from(state.primaryTurns.values()).at(-1);
+    return agents.map(function(agent) {
+      return agent.kind === 'eva' ? Object.assign({}, agent, {
+        status: 'running', activity: 'Processing current chat request',
+        last_activity_at: activity.started_at, model: activity.model || agent.model
+      }) : agent;
+    });
+  }
+
+  function beginPrimaryTurn() {
+    var identifier = ++state.primaryTurnSequence;
+    var backend = String((document.getElementById('selAIGBackend') || {}).value || '');
+    state.primaryTurns.set(identifier, {
+      started_at: new Date().toISOString(),
+      model: backend === 'lmstudio' && typeof getLmStudioModel === 'function' ? getLmStudioModel() : backend
+    });
+    if (state.data) render();
+    return identifier;
+  }
+
+  function endPrimaryTurn(identifier) {
+    state.primaryTurns.delete(identifier);
+    if (state.data) render();
+    if (state.open) refresh();
+  }
+
   document.addEventListener('DOMContentLoaded', init);
   function invalidateGraph() {
     state.graphFetchedAt = 0;
@@ -1326,7 +1358,7 @@ var EvaAgents = (function() {
   async function describe() {
     await refresh();
     var data = state.data || {};
-    var agents = Array.isArray(data.agents) ? data.agents : [];
+    var agents = primaryAgentView(Array.isArray(data.agents) ? data.agents : []);
     var active = agents.filter(function(agent) { return isActive(agent.status); });
     if (!agents.length) return 'There are no active or recent agent sessions right now.';
     var labels = active.slice(0, 6).map(function(agent) {
@@ -1339,6 +1371,8 @@ var EvaAgents = (function() {
 
   return {
     open: open,
+    beginPrimaryTurn: beginPrimaryTurn,
+    endPrimaryTurn: endPrimaryTurn,
     openWorkspace: openWorkspace,
     openWorkspaces: openWorkspaces,
     close: close,

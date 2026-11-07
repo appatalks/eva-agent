@@ -364,6 +364,15 @@ function aigLmStudioAvailable() {
 }
 
 async function aigSend() {
+  var activity = window.EvaAgents && typeof EvaAgents.beginPrimaryTurn === 'function' ? EvaAgents.beginPrimaryTurn() : null;
+  try {
+    return await aigSendRequest();
+  } finally {
+    if (activity !== null) EvaAgents.endPrimaryTurn(activity);
+  }
+}
+
+async function aigSendRequest() {
   var txtMsg = document.getElementById('txtMsg');
   var txtOutput = document.getElementById('txtOutput');
   var pendingImageData = window._evaPendingImageData || '';

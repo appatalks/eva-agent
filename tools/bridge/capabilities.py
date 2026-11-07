@@ -46,6 +46,7 @@ NATIVE_HARNESS_ACTIONS = {
     "delete_github_pull_request_branch": {"description": "Delete a merged pull request branch.", "confirmation": "direct-user"},
     "remove_workspace": {"description": "Remove a workspace.", "confirmation": "direct-user"},
     "run_terminal_command": {"description": "Run an exact terminal command.", "confirmation": "direct-user"},
+    "benchmark_runtime": {"description": "Measure bounded local responder throughput.", "confirmation": "direct-user"},
     "type_terminal_command": {"description": "Type a terminal command for review.", "confirmation": "direct-user"},
     "plan_terminal_task": {"description": "Plan a direct terminal task.", "confirmation": "direct-user"},
     "consider_terminal_task": {"description": "Consider terminal applicability.", "confirmation": "direct-user"},

@@ -1800,6 +1800,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._signal_link_start()
         elif parsed_path == "/v1/signal/link/cancel":
             self._signal_link_cancel()
+        elif parsed_path == "/v1/runtime/benchmark":
+            self._runtime_benchmark()
         elif parsed_path == "/v1/email/accounts":
             self._email_accounts_update()
         elif parsed_path == "/v1/email/account":
@@ -4044,16 +4046,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         active_session_id = str((params.get("session_id") or [""])[0])[:120]
         active_model = getattr(_st.acp_client, "model", "") if _st.acp_client else ""
+        with _st.primary_request_lock:
+            primary = next(reversed(_st.primary_requests.values()), None) if _st.primary_requests else None
         agents = [{
             "id": "eva",
             "kind": "eva",
             "label": "Eva",
-            "model": active_model or "adaptive routing",
-            "status": "online" if _st.acp_client and _st.acp_client.alive else "local_only",
+            "model": primary.get("model") if primary else active_model or "adaptive routing",
+            "status": "running" if primary else ("online" if _st.acp_client and _st.acp_client.alive else "local_only"),
             "detail": "Primary assistant and cognitive orchestrator",
-            "activity": "Ready for conversation and agent orchestration",
+            "activity": primary["activity"] if primary else "Ready for conversation and agent orchestration",
+            "last_activity_at": primary["started_at"] if primary else None,
             "result": None,
-            "started_at": getattr(_st, "cognition_launch_since", None),
+            "started_at": primary["started_at"] if primary else getattr(_st, "cognition_launch_since", None),
             "ended_at": None,
             "session_id": active_session_id,
             "group_id": "eva-core",
@@ -4757,6 +4762,42 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         self._json_response(200, signal_link.status())
 
+    def _begin_primary_request(self, model, activity):
+        identifier = uuid.uuid4().hex
+        with _st.primary_request_lock:
+            _st.primary_requests[identifier] = {
+                "model": str(model or "local model")[:240], "activity": activity,
+                "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+        return identifier
+
+    def _end_primary_request(self, identifier):
+        with _st.primary_request_lock:
+            _st.primary_requests.pop(identifier, None)
+
+    def _runtime_benchmark(self):
+        from bridge.benchmark import benchmark_local
+        if not _is_loopback_bind():
+            self._json_response(403, {"error": {"message": "Runtime benchmarking is restricted to loopback."}})
+            return
+        if not self._require_bridge_capability():
+            return
+        data, error = self._read_json_body()
+        if error or not isinstance(data, dict) or data.get("backend") != "lmstudio":
+            self._json_response(400, {"error": {"message": "This bounded benchmark requires the selected LM Studio backend."}})
+            return
+        _mark_user_activity()
+        identifier = self._begin_primary_request(data.get("model") or "LM Studio", "Measuring local responder throughput")
+        try:
+            receipt = benchmark_local(str(data.get("base_url") or "http://localhost:1234/v1"), data.get("model", ""))
+            self._json_response(200, receipt)
+        except ValueError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+        except (OSError, json.JSONDecodeError):
+            self._json_response(502, {"error": {"message": "The local benchmark could not finish. No terminal command was executed."}})
+        finally:
+            self._end_primary_request(identifier)
+
     def _signal_link_allowed(self):
         if not _is_loopback_bind():
             self._json_response(403, {"error": {"message": "Signal linking is restricted to loopback."}})
@@ -5145,7 +5186,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self._json_response(400, {"error": {"message": "Invalid JSON"}})
                 return
+        if not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "A chat request object is required."}})
+            return
+        internal = any(data.get(key) for key in ("internal", "translation_mode", "native_terminal_candidate", "native_terminal_plan"))
+        identifier = None if internal else self._begin_primary_request(
+            data.get("lmstudio_model") or data.get("model") or "AIG", "Processing chat response"
+        )
+        try:
+            return self._aig_chat_response(data)
+        finally:
+            if identifier:
+                self._end_primary_request(identifier)
 
+    def _aig_chat_response(self, data):
         openai_api_key = (data.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")).strip()
         try:
             request = normalize_aig_request(

@@ -107,7 +107,8 @@ var EvaHarness = (function() {
     { id: 'merge_github_pull_request', description: 'Verify and merge a pull request through authenticated gh only after a direct user request and typed MERGE confirmation.' },
     { id: 'delete_github_pull_request_branch', description: 'Delete only the verified head branch of a merged pull request after an explicit direct user request.' },
     { id: 'remove_workspace', description: 'Remove a named workspace only after a direct user request.' },
-    { id: 'run_terminal_command', description: 'Submit an exact terminal command only after a direct user request.' },
+    { id: 'run_terminal_command', description: 'Submit an exact user command or replan a delegated task, with high-risk command confirmation.' },
+    { id: 'benchmark_runtime', description: 'Run a bounded local responder tokens/s benchmark after an explicit request, without a shell command.' },
     { id: 'type_terminal_command', description: 'Type an exact terminal command for review only after a direct user request.' },
     { id: 'plan_terminal_task', description: 'Plan and submit a direct user-requested terminal task.' },
     { id: 'consider_terminal_task', description: 'Consider a direct user request for terminal applicability.' },
@@ -308,6 +309,11 @@ var EvaHarness = (function() {
     }
     var phrase = rawPhrase.toLowerCase();
     var directUser = !!(options && options.directUser);
+    if (directUser && /^(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:benchmark|measure)\b/i.test(rawPhrase) &&
+        /\b(?:tokens?\s*(?:per\s+second|\/\s*s)|tok\s*\/\s*s|throughput)\b/i.test(rawPhrase) &&
+        !/\b(?:do\s+not|don't|never|explain|how\s+(?:can|do|would))\b/i.test(rawPhrase)) {
+      return { action: 'benchmark_runtime', target: 'agent_operations', label: 'Runtime Benchmark' };
+    }
     var skillAigRequest = directUser && (
       /^(?:please\s+)?(?:use|run|execute)\s+(?:my\s+|the\s+)?(?:skill\s+)?[^.!?]+\bskill\b/i.test(rawPhrase) ||
       /\b(?:check|inspect|review)\b[\s\S]{0,64}\bskills?\b[\s\S]{0,64}\b(?:use|run|execute)\b/i.test(rawPhrase)
@@ -719,6 +725,13 @@ var EvaHarness = (function() {
     var userRepositoryUrl = githubRepositoryUrl(context.userRequest);
     var requestedRepositoryUrl = String(request.repositoryUrl || request.repository_url || '').trim();
     var userNativeRoute = resolveNavigationRequest(context.userRequest || '', { directUser: true });
+    var delegatedTask = String(context.userRequest || '').trim().replace(/^(?:(?:hi|hello|hey)\s+)?eva\s*[,!.:-]*\s*/i, '');
+    var modelTerminalTask = ['run_terminal_command', 'plan_terminal_task', 'consider_terminal_task'].indexOf(action) >= 0 && typeof getEvaTaskShellAutonomy === 'function' &&
+      delegatedTask.length <= 2000 &&
+      (/^(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:check|inspect|benchmark|measure|fix|build|test|run|create|set\s+up|install|diagnose|find|clean|remove|delete|move|copy|organize|repair|update)\b/i.test(delegatedTask) ||
+       (userNativeRoute && ['plan_terminal_task', 'consider_terminal_task'].indexOf(userNativeRoute.action) >= 0)) &&
+      !/\b(?:do\s+not|don't|never)\b/i.test(delegatedTask);
+    var modelBenchmark = action === 'benchmark_runtime' && userNativeRoute && userNativeRoute.action === action;
     var modelImport = action === 'import_github' &&
       userNativeRoute && userNativeRoute.action === 'import_github' &&
       !!userRepositoryUrl && isExactGitHubRepositoryUrl(requestedRepositoryUrl) && userRepositoryUrl === requestedRepositoryUrl;
@@ -757,8 +770,36 @@ var EvaHarness = (function() {
       (action === 'delete_skill' && String(request.skillName || '').toLowerCase() === String(userNativeRoute.skillName || '').toLowerCase()) ||
       action === 'run_skill'
     );
-    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceApply && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation && !modelBoundedSkill && !modelEmailPrepare) {
+    if (context.source === 'model' && !modelAllowed[action] && !modelImport && !modelGitHubAuthorization && !modelWorkspaceMcp && !modelWorkspaceRetry && !modelWorkspaceApply && !modelWorkspaceRemoval && !modelRepositoryRemediation && !modelSkillMutation && !modelBoundedSkill && !modelEmailPrepare && !modelTerminalTask && !modelBenchmark) {
       return result(false, action, 'This native action requires direct user interaction.');
+    }
+    if (context.source === 'model' && modelTerminalTask) {
+      if (typeof planEvaTerminalTask !== 'function') return Promise.resolve(result(false, action, 'Task-scoped terminal planning is unavailable.'));
+      return Promise.resolve(planEvaTerminalTask(context.userRequest, true, true)).then(function(planned) {
+        if (planned.declined || planned.cancelled) return result(false, action, planned.cancelled ? 'Command cancelled. Nothing was executed.' : 'No task-relevant terminal command was selected.');
+        return result(true, action, planned.submitted ? 'Task-scoped command submitted to the terminal.' : 'Command typed in the terminal for review.', { outcome: 'submitted', reviewRequired: !!planned.reviewRequired });
+      }).catch(function(error) { return result(false, action, error.message || 'Task-scoped command planning failed.'); });
+    }
+    if (action === 'benchmark_runtime') {
+      var backend = String((document.getElementById('selAIGBackend') || {}).value || '');
+      if (backend !== 'lmstudio') return Promise.resolve(result(false, action, 'The bounded tokens/s benchmark currently supports the selected LM Studio responder only.'));
+      var benchmarkBridge = typeof getACPBridgeUrl === 'function' ? getACPBridgeUrl() : 'http://localhost:8888';
+      return fetch(benchmarkBridge.replace(/\/+$/, '') + '/v1/runtime/benchmark', {
+        method: 'POST',
+        headers: typeof getBridgeCapabilityHeaders === 'function' ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ backend: backend,
+          base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
+          model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '' }),
+        signal: AbortSignal.timeout(65000)
+      }).then(async function(response) {
+        var receipt = await response.json();
+        if (!response.ok) throw new Error(receipt.error && receipt.error.message || 'Benchmark failed.');
+        if (receipt.status !== 'measured') return result(true, action, receipt.message || 'No reliable tokens/s measurement was returned.', { outcome: 'completed' });
+        if (!Number.isFinite(receipt.tokens_per_second) || !Number.isFinite(receipt.elapsed_seconds) || !Number.isInteger(receipt.completion_tokens)) throw new Error('Invalid benchmark receipt.');
+        return result(true, action, 'Local responder benchmark: **' + receipt.tokens_per_second + ' tokens/s** (' +
+          receipt.completion_tokens + ' provider-reported completion tokens in ' + receipt.elapsed_seconds + 's).\n\n' + receipt.scope,
+          { outcome: 'completed' });
+      }).catch(function(error) { return result(false, action, error.message || 'Benchmark failed. No terminal command ran.'); });
     }
     if (action === 'navigate') return navigate(request.target);
     if (action === 'refresh') return refresh(request.target);
@@ -1182,6 +1223,7 @@ var EvaHarness = (function() {
     if (action === 'plan_terminal_task') {
       if (typeof planEvaTerminalTask !== 'function') return Promise.resolve(result(false, 'plan_terminal_task', 'Native terminal task planning is unavailable.'));
       return Promise.resolve(planEvaTerminalTask(request.objective, request.submit !== false)).then(function(planned) {
+        if (planned && planned.cancelled) return result(false, 'plan_terminal_task', 'Command cancelled. Nothing was executed.', { outcome: 'cancelled' });
         var submitted = planned && planned.submitted === true;
         return result(true, 'plan_terminal_task', submitted ? 'Planned command submitted to the terminal.' : 'Planned command typed in the terminal for review.', { outcome: 'submitted', reviewRequired: !!(planned && planned.reviewRequired) });
       }).catch(function(error) {
@@ -1191,6 +1233,7 @@ var EvaHarness = (function() {
     if (action === 'consider_terminal_task') {
       if (typeof planEvaTerminalTask !== 'function') return Promise.resolve(result(false, 'consider_terminal_task', 'Native terminal task planning is unavailable.'));
       return Promise.resolve(planEvaTerminalTask(request.objective, request.submit !== false, true)).then(function(planned) {
+        if (planned && planned.cancelled) return result(false, 'consider_terminal_task', 'Command cancelled. Nothing was executed.', { outcome: 'cancelled' });
         if (planned && planned.declined === true) {
           return result(true, 'consider_terminal_task', 'This request does not need a terminal command.', { outcome: 'completed', declined: true });
         }
@@ -1347,6 +1390,11 @@ var EvaHarness = (function() {
       if (schema.open) contract += '\nCURRENT NATIVE FORM: ' + JSON.stringify(schema);
     }
     contract += '\nWhen the user explicitly asks to apply or merge coding-run changes back to the local source/original folder, use [[EVA_HARNESS]]{"action":"apply_workspace_run","runId":"<optional explicitly requested run id>"}[[/EVA_HARNESS]]. This commits reviewed run edits and fast-forwards the captured source branch; it never performs a remote push. It fails on source edits, divergence, running agents, changed previews, or credential material. Do not initiate this action merely because a model thinks the run is done. A per-run Apply to source when done opt-in is separate explicit authorization for automatic completion-time integration.';
+    contract = contract.replace(
+      'Terminal commands execute only from a direct user request and cannot be initiated by a model marker.',
+      'Exact user commands require direct instruction. For a delegated task, model markers are proposals only: the harness replans from the captured user request and applies command risk confirmation.'
+    );
+    contract += '\nUse benchmark_runtime for an explicitly requested local tokens/s benchmark, not a terminal command. Task-scoped shell autonomy runs approved ordinary commands automatically; high-risk planned commands need confirmation. Never propose shell execution for greetings, quoted instructions, or unrelated work.';
     return contract;
   }
 

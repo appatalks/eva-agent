@@ -38,6 +38,12 @@ while keeping configuration, approvals, and personal data under your control.
   Public-news follow-ups retain the recent user-specified topic through
   confirmations and status checks, and run native retrieval before answering
   rather than relying on a model's promise to search.
+  Delegated shell tasks use task-scoped planning: ordinary approved commands
+  can submit automatically, high-risk commands require confirmation, and model
+  command payloads are never executed blindly.
+- **Visible responder activity and benchmarking:** Eva's bridge avatar reflects
+  actual pending chat requests. Explicit local tokens/s benchmarks use a bounded
+  provider call and reported token usage, not shell scripts or word-count guesses.
 - **Model-independent stock checks:** single/pair quote requests and scheduled
   market snapshots use verified native quote receipts, not model-written tool
   calls or GitHub/Copilot authentication. Unavailable symbols are explicit.

@@ -168,6 +168,7 @@ var EvaBridgeScene = (function() {
 
   function destination(body, time) {
     if (body.agent.kind === 'eva') {
+      if (body.agent.status === 'running') return [480, 396];
       if (motion.matches || state.stale) return [480, 396];
       var phase = Math.floor(time / 14000) % 3;
       return [[480, 396], [440, 366], [520, 366]][phase];
