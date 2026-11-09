@@ -1,6 +1,7 @@
 // Standalone ACP permission polling, rendering, and one-time decisions.
 var _acpPermissionState = {
   shown: {},
+  bubbles: {},
   polling: false,
   idleIntervalMs: 300000,
   requestIntervalMs: 30000,
@@ -77,7 +78,19 @@ function _renderACPPermission(permission) {
   actions.appendChild(rejectButton);
   bubble.appendChild(actions);
   output.appendChild(bubble);
+  _acpPermissionState.bubbles[permission.id] = bubble;
   output.scrollTop = output.scrollHeight;
+}
+
+function _pruneACPPermissionBubbles(permissions) {
+  var active = {};
+  permissions.forEach(function(permission) { if (permission && permission.id) active[permission.id] = true; });
+  Object.keys(_acpPermissionState.bubbles).forEach(function(id) {
+    if (active[id]) return;
+    var bubble = _acpPermissionState.bubbles[id];
+    if (bubble && bubble.parentNode) bubble.parentNode.removeChild(bubble);
+    delete _acpPermissionState.bubbles[id];
+  });
 }
 
 function pollACPPermissions() {
@@ -88,6 +101,7 @@ function pollACPPermissions() {
     .then(function(data) {
       var permissions = data && Array.isArray(data.permissions) ? data.permissions : [];
       _acpPermissionState.pending = permissions.length > 0;
+      _pruneACPPermissionBubbles(permissions);
       if (permissions.length) {
         _acpPermissionState.activeUntil = Math.max(_acpPermissionState.activeUntil, Date.now() + 60000);
       }

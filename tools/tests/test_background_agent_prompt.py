@@ -16,17 +16,22 @@ class _Client:
 
 
 class _ProfiledClient:
-    def prompt(self, prompt, timeout=0):
-        assert prompt == "Current facts"
+    def prompt(self, prompt, timeout=0, conversation_id=None, permission_mode="interactive"):
+        assert prompt.endswith("\n\nCurrent facts")
+        assert "web search and fetch tools directly" in prompt
         assert timeout == 12
+        assert conversation_id == "eva-background"
+        assert permission_mode == "background_auto"
         return {"text": "Retrieved facts"}
 
 
 def main():
     previous_client = state.acp_client
     previous_activity = state.last_user_activity_ts
+    previous_auto = state.bg_auto_actions
     state.acp_client = _Client()
     state.last_user_activity_ts = 0
+    state.bg_auto_actions = True
     captured = []
 
     @contextlib.contextmanager
@@ -43,6 +48,7 @@ def main():
     finally:
         state.acp_client = previous_client
         state.last_user_activity_ts = previous_activity
+        state.bg_auto_actions = previous_auto
     print("background agent prompt tests: PASS")
 
 

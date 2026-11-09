@@ -183,12 +183,15 @@ def _cron_execute_task(task_id, prompt, label):
     if not _st.acp_client or not _st.acp_client.alive:
         raise RuntimeError("ACP is unavailable.")
     result = _st.acp_client.prompt(
-        f"[Scheduled task: {label}] {prompt}", conversation_id="cron:" + str(task_id)
+        f"[Scheduled task: {label}] {prompt}", conversation_id="cron:" + str(task_id),
+        permission_mode="background_auto" if _st.bg_auto_actions else "interactive",
     )
     if not isinstance(result, dict) or result.get("error"):
         raise RuntimeError("The scheduled prompt failed.")
     if result.get("permission_cancelled"):
-        raise RuntimeError("A required permission was not approved.")
+        if result.get("permission_reason") == "policy_blocked":
+            raise RuntimeError("A scheduled action was blocked by the autonomy policy.")
+        raise RuntimeError("The scheduled action was interrupted or not authorized.")
     if result.get("stop_reason", "end_turn") != "end_turn":
         raise RuntimeError("The scheduled prompt ended before completing its response.")
     text = str(result.get("text") or "").strip()

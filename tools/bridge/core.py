@@ -2636,7 +2636,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             self._json_response(400, {"error": {"message": "Request body must be an object"}})
             return
-        unknown = sorted(set(data.keys()) - {"enabled", "intervalSeconds", "runNow", "jobs"})
+        unknown = sorted(set(data.keys()) - {"enabled", "intervalSeconds", "runNow", "jobs", "autoActions"})
         if unknown:
             self._json_response(400, {"error": {"message": "Unsupported field(s): " + ", ".join(unknown)}})
             return
@@ -2664,6 +2664,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._json_response(400, {"error": {"message": "enabled must be a boolean"}})
                 return
             requested_enabled = bool(data.get("enabled"))
+
+        requested_auto_actions = _st.bg_auto_actions
+        if "autoActions" in data:
+            if not isinstance(data.get("autoActions"), bool):
+                self._json_response(400, {"error": {"message": "autoActions must be a boolean"}})
+                return
+            requested_auto_actions = data["autoActions"]
+            if (requested_auto_actions or requested_auto_actions != _st.bg_auto_actions) and not self._require_bridge_capability():
+                return
 
         requested_interval = _st.bg_loop_interval_seconds
         if "intervalSeconds" in data:
@@ -2698,13 +2707,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if requested_jobs is not None:
             new_jobs.update(requested_jobs)
         try:
-            _save_background_settings(requested_enabled, requested_interval, new_jobs)
+            with _st.bg_auto_actions_lock:
+                _save_background_settings(requested_enabled, requested_interval, new_jobs, requested_auto_actions)
+                _st.bg_loop_enabled = requested_enabled
+                _st.bg_auto_actions = requested_auto_actions
+                _st.bg_loop_interval_seconds = requested_interval
+                _BG_JOBS_ENABLED.update(new_jobs)
         except OSError:
             self._json_response(500, {"error": {"message": "Could not save background settings."}})
             return
-        _st.bg_loop_enabled = requested_enabled
-        _st.bg_loop_interval_seconds = requested_interval
-        _BG_JOBS_ENABLED.update(new_jobs)
         if _st.bg_loop_enabled:
             if not _start_bg_loop():
                 _st.bg_last_error = "background loop could not start"
