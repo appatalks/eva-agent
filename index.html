@@ -1320,6 +1320,11 @@
             <input type="checkbox" id="backgroundEnabled">
             <strong>Enable background loop</strong>
           </label>
+          <label class="background-toggle-row">
+            <input type="checkbox" id="backgroundAutoActions">
+            <strong>Automatically decide supported background actions</strong>
+          </label>
+          <p class="auth-note">Allows classified local reads and GitHub issue/PR actions without chat prompts. Unclassified, destructive, privileged, mailbox, and protected-path actions are rejected. This is not an OS sandbox.</p>
           <div class="auth-field">
             <label for="backgroundIntervalSeconds">Interval seconds:</label>
             <input type="number" id="backgroundIntervalSeconds" min="900" max="86400" step="300" value="7200">

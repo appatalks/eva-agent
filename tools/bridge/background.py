@@ -68,8 +68,10 @@ _BACKGROUND_SETTINGS_PATH = os.path.join(_cfg.EVA_CONFIG_DIR, "background_settin
 _BACKGROUND_SETTINGS_LOCK = threading.RLock()
 
 
-def _save_background_settings(enabled, interval, jobs):
-    settings = {"enabled": enabled, "intervalSeconds": interval, "jobs": jobs}
+def _save_background_settings(enabled, interval, jobs, auto_actions=None):
+    if auto_actions is None:
+        auto_actions = _st.bg_auto_actions
+    settings = {"enabled": enabled, "intervalSeconds": interval, "jobs": jobs, "autoActions": auto_actions}
     with _BACKGROUND_SETTINGS_LOCK:
         os.makedirs(os.path.dirname(_BACKGROUND_SETTINGS_PATH), mode=0o700, exist_ok=True)
         fd, path = tempfile.mkstemp(prefix=".background-settings-", dir=os.path.dirname(_BACKGROUND_SETTINGS_PATH))
@@ -90,23 +92,30 @@ def _load_background_settings():
             with open(_BACKGROUND_SETTINGS_PATH, encoding="utf-8") as file:
                 settings = json.load(file)
         except FileNotFoundError:
+            _st.bg_auto_actions = False
             return
         except (OSError, ValueError):
             _st.bg_loop_enabled = False
+            _st.bg_auto_actions = False
             return
         if not isinstance(settings, dict):
             _st.bg_loop_enabled = False
+            _st.bg_auto_actions = False
             return
         enabled = settings.get("enabled")
         interval = settings.get("intervalSeconds")
         jobs = settings.get("jobs")
+        auto_actions = settings.get("autoActions", False)
         if (not isinstance(enabled, bool) or isinstance(interval, bool)
                 or not isinstance(interval, int) or not 900 <= interval <= 86400
                 or not isinstance(jobs, dict)
-                or any(not isinstance(value, bool) for value in jobs.values())):
+                or any(not isinstance(value, bool) for value in jobs.values())
+                or not isinstance(auto_actions, bool)):
             _st.bg_loop_enabled = False
+            _st.bg_auto_actions = False
             return
         _st.bg_loop_enabled = enabled
+        _st.bg_auto_actions = auto_actions
         _st.bg_loop_interval_seconds = interval
         for name, value in jobs.items():
             if name in _BG_JOBS_ENABLED:
@@ -175,6 +184,7 @@ def _background_status_dict():
     running = bool(_st.bg_loop_thread and _st.bg_loop_thread.is_alive())
     return {
         "enabled": _st.bg_loop_enabled,
+        "autoActions": _st.bg_auto_actions,
         "intervalSeconds": _st.bg_loop_interval_seconds,
         "lastTick": _st.bg_last_tick_iso,
         "lastError": _st.bg_last_error,
@@ -665,12 +675,30 @@ def _bg_agent_prompt(prompt_text, ctx, timeout=120):
     try:
         from bridge.acp_client import _acquire_acp_client
         with _acquire_acp_client(_st.acp_client.model or "", tool_profile="web") as (client, detail):
-            result = client.prompt(prompt_text, timeout=timeout) if client else {"error": detail}
+            auto_actions = _st.bg_auto_actions
+            task_prompt = prompt_text
+            if auto_actions:
+                task_prompt = (
+                    "For unattended research, use the available web search and fetch tools directly. "
+                    "Do not request interactive approval or use shell commands to retrieve sources. "
+                    "Report unavailable sources honestly.\n\n" + prompt_text
+                )
+            result = client.prompt(
+                task_prompt,
+                timeout=timeout, conversation_id="eva-background",
+                permission_mode="background_auto" if auto_actions else "interactive",
+            ) if client else {"error": detail}
     except Exception as agent_error:
         return None, "agent error: " + str(agent_error)[:200]
     if isinstance(result, dict):
         if result.get("error"):
             return None, "agent error: " + str(result.get("error"))[:200]
+        if result.get("permission_cancelled"):
+            return None, ("background action blocked by autonomy policy"
+                          if result.get("permission_reason") == "policy_blocked"
+                          else "background action interrupted or not authorized")
+        if result.get("stop_reason", "end_turn") != "end_turn":
+            return None, "background agent did not complete"
         text = str(result.get("text", "") or "").strip()
         if not text:
             return None, "agent returned no text"

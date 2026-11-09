@@ -38,8 +38,10 @@ function renderBackgroundStatus() {
   statusEl.setAttribute('data-status', lastError === 'none' ? 'info' : 'warn');
 
   var enabledEl = document.getElementById('backgroundEnabled');
+  var autoActionsEl = document.getElementById('backgroundAutoActions');
   var intervalEl = document.getElementById('backgroundIntervalSeconds');
   if (enabledEl) enabledEl.checked = !!status.enabled;
+  if (autoActionsEl) autoActionsEl.checked = !!status.autoActions;
   if (intervalEl && status.intervalSeconds) intervalEl.value = String(status.intervalSeconds);
 
   if (status.jobs && typeof status.jobs === 'object') {
@@ -242,6 +244,7 @@ async function loadBackgroundData(quiet) {
 
 function readBackgroundControls(runNow) {
   var enabledEl = document.getElementById('backgroundEnabled');
+  var autoActionsEl = document.getElementById('backgroundAutoActions');
   var intervalEl = document.getElementById('backgroundIntervalSeconds');
   var intervalValue = intervalEl ? parseInt(intervalEl.value, 10) : 7200;
   if (!Number.isInteger(intervalValue) || intervalValue < 900 || intervalValue > 86400) {
@@ -252,14 +255,14 @@ function readBackgroundControls(runNow) {
   Array.prototype.forEach.call(jobInputs, function(input) {
     jobs[input.getAttribute('data-job')] = !!input.checked;
   });
-  return {
-    body: {
+  var body = {
       enabled: enabledEl ? !!enabledEl.checked : true,
       intervalSeconds: intervalValue,
       jobs: jobs,
       runNow: !!runNow
-    }
   };
+  if (autoActionsEl) body.autoActions = !!autoActionsEl.checked;
+  return { body: body };
 }
 
 async function saveBackgroundControls(runNow) {
@@ -273,6 +276,8 @@ async function saveBackgroundControls(runNow) {
     setStatus('error', _backgroundState.error);
     return;
   }
+  if (controls.body.autoActions && !(_backgroundState.status && _backgroundState.status.autoActions) &&
+      !confirm('Allow supported background jobs to perform classified local reads and GitHub issue/PR actions without asking? Unsafe or unclassified actions are rejected; this is not an OS sandbox.')) return;
   if (saveButton) saveButton.disabled = true;
   if (runButton) runButton.disabled = true;
   if (jobsSaveButton) jobsSaveButton.disabled = true;

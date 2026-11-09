@@ -2219,6 +2219,17 @@ Background enablement, interval, and job selections are stored under the runtime
 configuration directory and restored on restart. An unreadable or invalid saved
 configuration disables the loop rather than silently enabling jobs.
 
+When enabled in Background settings, research and scheduled ACP tasks use a
+noninteractive autonomy policy:
+routine tool calls and explicitly classified local inspection or GitHub actions
+can proceed once, while destructive, privileged, protected-path, mailbox, and
+unclassified execution is rejected without creating a chat approval card. A
+blocked or interrupted request is reported as unsuccessful, not as completed
+work. This policy is not an operating-system sandbox; general interactive chat
+and the separate file-only goal runner retain their own permission boundaries.
+This option defaults off, can be revoked in Settings, and applies to subsequent
+permission requests even during an active background prompt.
+
 **Job types (13 total):**
 
 | Job | Description |

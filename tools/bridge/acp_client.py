@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import uuid
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -80,6 +81,25 @@ _MAIL_PATH_RE = re.compile(
     r"/(?:me|users/[^/\s\"]+)/(?:messages|mailfolders|sendmail|mailboxsettings)\b",
     re.IGNORECASE,
 )
+_BACKGROUND_MAIL_INTENT_RE = re.compile(
+    r"\b(?:send|read|fetch|list|search)\s+(?:(?:an?|the)\s+)?(?:e[- ]?mail|mailbox|messages?)\b",
+    re.IGNORECASE,
+)
+_BACKGROUND_DESTRUCTIVE_TOOL_RE = re.compile(
+    r"(?:^|[_./:-])(?:delete|remove|destroy|purge|wipe|erase|uninstall|shutdown|reboot|terminate)"
+    r"(?:$|[_./:\s-])",
+    re.IGNORECASE,
+)
+_BACKGROUND_PROTECTED_PATH_RE = re.compile(
+    r"(?:^|[/\s=:])(?:\.git(?:[/\s]|$)|memory\.db(?:$|[-.\s/]))", re.IGNORECASE
+)
+_BACKGROUND_WEB_SCHEMAS = {
+    "web_search": ({"query"}, {"query", "max_results"}),
+    "web_search_news": ({"query"}, {"query", "max_results"}),
+    "web_fetch": ({"url"}, {"url", "max_length", "method"}),
+    "weather_current": ({"location"}, {"location"}),
+    "stock_quote": ({"query"}, {"query"}),
+}
 
 
 def _mail_scoped_tool_call(tool_call):
@@ -362,6 +382,165 @@ def _workspace_autonomy_block_reason(tool_call, cwd=None):
             argument == "--hard" or argument.startswith("--force") for argument in arguments
         ):
             return "destructive_execution"
+    return ""
+
+
+def _background_autonomy_block_reason(tool_call, cwd=None):
+    """Allow transparent commands while rejecting opaque or destructive execution."""
+    reason = _workspace_autonomy_block_reason(tool_call, cwd)
+    if reason:
+        return reason
+    command = _tool_call_command(tool_call)
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        return "opaque_execution"
+    if any(_workspace_argument_is_protected(part.lstrip(":@")) for part in parts):
+        return "protected_path"
+    if any(_BACKGROUND_PROTECTED_PATH_RE.search(part) for part in parts):
+        return "protected_path"
+    if parts and parts[0] == "ls" and any(
+        _background_path_is_protected(part, cwd) for part in parts[1:] if not part.startswith("-")
+    ):
+        return "protected_path"
+    if _workspace_read_only_execute(tool_call, cwd):
+        return ""
+    if _background_safe_local_read(parts, cwd):
+        return ""
+    allowed_gh = {
+        ("issue", "list"), ("issue", "view"), ("issue", "create"), ("issue", "comment"),
+        ("pr", "list"), ("pr", "view"), ("pr", "create"), ("pr", "comment"),
+        ("repo", "view"), ("search", "issues"), ("search", "prs"),
+    }
+    if len(parts) < 3 or parts[0] != "gh" or tuple(parts[1:3]) not in allowed_gh:
+        return "unclassified_execution"
+    if any(arg.split("=", 1)[0] in _GH_FILE_OPTIONS for arg in parts[3:]):
+        return "unclassified_execution"
+    if any(arg in {"--web", "-w", "--editor", "-e"} or arg.startswith("--web=") for arg in parts[3:]):
+        return "interactive_execution"
+    from workspace_diff_guard import scan_text
+    if scan_text(command, "background-command"):
+        return "protected_content"
+    return ""
+
+
+def _background_path_is_protected(target, cwd):
+    root = os.path.realpath(cwd or os.getcwd())
+    candidate = os.path.abspath(os.path.join(root, target))
+    if (_workspace_argument_is_protected(target) or _BACKGROUND_PROTECTED_PATH_RE.search(target)
+            or _workspace_argument_is_protected(candidate) or _BACKGROUND_PROTECTED_PATH_RE.search(candidate)):
+        return True
+    try:
+        relative = os.path.relpath(candidate, root)
+    except ValueError:
+        return True
+    current = root
+    for part in relative.split(os.sep):
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            return True
+    return False
+
+
+def _background_safe_local_read(parts, cwd):
+    if not parts or parts[0] not in {"cat", "head", "tail", "wc"}:
+        return False
+    flags = {
+        "cat": {"-n", "-b", "-s", "--number", "--number-nonblank", "--squeeze-blank"},
+        "head": set(),
+        "tail": set(),
+        "wc": {"-l", "-w", "-c", "-m", "-L", "--lines", "--words", "--bytes", "--chars"},
+    }
+    files = 0
+    index = 1
+    while index < len(parts):
+        part = parts[index]
+        if part == "-n" and parts[0] in {"head", "tail"}:
+            index += 1
+            if index >= len(parts) or len(parts[index]) > 4 or not parts[index].isdigit() or int(parts[index]) > 2000:
+                return False
+        elif part.startswith("--lines=") and parts[0] in {"head", "tail"}:
+            count = part.partition("=")[2]
+            if len(count) > 4 or not count.isdigit() or int(count) > 2000:
+                return False
+        elif part.startswith("-"):
+            if part not in flags[parts[0]]:
+                return False
+        else:
+            if not _workspace_local_path(part, cwd) or _background_path_is_protected(part, cwd):
+                return False
+            files += 1
+        index += 1
+    return files > 0
+
+
+def _background_protected_targets(tool_call, cwd=None):
+    return any(
+        _background_path_is_protected(target, cwd)
+        for target in _workspace_edit_targets(tool_call)
+    )
+
+
+def _background_decode_url_component(value):
+    for _ in range(4):
+        if re.search(r"%(?![0-9A-Fa-f]{2})", value):
+            raise ValueError("Invalid URL encoding")
+        decoded = urllib.parse.unquote(value, errors="strict")
+        if decoded == value:
+            return value
+        value = decoded
+    if "%" in value:
+        raise ValueError("Ambiguous URL encoding")
+    return value
+
+
+def _background_remote_block_reason(tool_call):
+    raw = tool_call.get("rawInput")
+    if not isinstance(raw, dict):
+        return "opaque_remote_action"
+    name = ""
+    for field in ("name", "title"):
+        value = str(tool_call.get(field) or "").lower().strip()
+        for candidate in sorted(_BACKGROUND_WEB_SCHEMAS, key=len, reverse=True):
+            if value == candidate or value.endswith("__" + candidate):
+                name = candidate
+                break
+        if name:
+            break
+    if not name:
+        return "unclassified_remote_action"
+    required, allowed = _BACKGROUND_WEB_SCHEMAS[name]
+    if not required.issubset(raw) or set(raw) - allowed:
+        return "unclassified_remote_action"
+    for field in required:
+        if not isinstance(raw[field], str) or not raw[field].strip() or len(raw[field]) > 2000:
+            return "unclassified_remote_action"
+    for field, maximum in (("max_results", 20), ("max_length", 50000)):
+        if field in raw and (isinstance(raw[field], bool) or not isinstance(raw[field], int)
+                             or not 1 <= raw[field] <= maximum):
+            return "unclassified_remote_action"
+    if name == "web_fetch":
+        if str(raw.get("method", "GET")).upper() not in {"GET", "HEAD"}:
+            return "destructive_action"
+        try:
+            parsed = urllib.parse.urlsplit(raw["url"])
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+                return "unclassified_remote_action"
+            path = _background_decode_url_component(parsed.path)
+            if any(ord(char) < 32 or char == "\\" for char in path):
+                return "unclassified_remote_action"
+            if _BACKGROUND_DESTRUCTIVE_TOOL_RE.search(path):
+                return "destructive_action"
+            for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+                key = _background_decode_url_component(key)
+                value = _background_decode_url_component(value)
+                if key.lower() in {"token", "api_key", "apikey", "password", "secret", "signature"}:
+                    return "protected_content"
+                if key.lower() in {"action", "method", "operation", "command", "op"}:
+                    if value.lower() not in {"get", "head", "read", "view", "search"}:
+                        return "destructive_action"
+        except ValueError:
+            return "unclassified_remote_action"
     return ""
 
 
@@ -1036,6 +1215,25 @@ class ACPClient:
                 if state.get("session_id") == session_id
             ]
             remembered_mode = self._session_permission_modes.get(session_id, "interactive")
+            background_context = (
+                remembered_mode == "background_auto"
+                or any(state.get("permission_mode") == "background_auto" for state in prompt_states)
+                or (not session_id and any(
+                    state.get("permission_mode") == "background_auto" for state in self._active_prompts.values()
+                ))
+            )
+        if background_context and (not session_id or len(prompt_states) != 1):
+            reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
+            reject_option = reject_option or next((option for option in options if option["kind"] == "reject_always"), None)
+            if reject_option:
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": reject_option["option_id"]}
+                })
+            else:
+                self._send_response(rpc_id, {"outcome": {"outcome": "cancelled"}})
+            _telemetry_emit("acp_permission", decision="background-autonomy-stale",
+                            tool_kind=tool_kind, option_count=len(options))
+            return
         permission_mode = prompt_states[0].get("permission_mode", "interactive") \
             if len(prompt_states) == 1 else remembered_mode
         if self.no_tools or permission_mode == "automation_no_tools":
@@ -1053,9 +1251,12 @@ class ACPClient:
                             tool_kind=tool_kind, option_count=len(options))
             return
         workspace_mode = permission_mode == "workspace_auto"
-        mail_scoped = _mail_scoped_tool_call(tool_call)
+        background_mode = permission_mode == "background_auto"
+        mail_scoped = _mail_scoped_tool_call(tool_call) or (
+            background_mode and bool(_BACKGROUND_MAIL_INTENT_RE.search(str(tool_call.get("title") or "")))
+        )
         execute_category = _workspace_execute_category(tool_call, self.cwd) \
-            if workspace_mode and tool_kind == "execute" else ""
+            if (workspace_mode or background_mode) and tool_kind == "execute" else ""
         _verbose_debug_emit(
             "permission_request", tool_kind=tool_kind, permission_mode=permission_mode,
             option_count=len(options), execute_category=execute_category,
@@ -1075,24 +1276,42 @@ class ACPClient:
                 _telemetry_emit("acp_permission", decision="policy-deny",
                                 tool_kind=tool_kind, option_count=len(options))
             return
-        if workspace_mode:
+        if workspace_mode or background_mode:
             allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
             reject_once = next((option for option in options if option["kind"] == "reject_once"), None)
             reject_option = reject_once or next(
                 (option for option in options if option["kind"] == "reject_always"), None
             )
             block_reason = ""
-            if tool_kind in {"delete", "other"}:
+            if background_mode and not _st.bg_auto_actions:
+                block_reason = "autonomy_disabled"
+            elif (background_mode and tool_kind not in {"read", "edit", "execute", "search", "fetch"}) or tool_kind in {"delete", "other"}:
                 block_reason = "unsupported_tool"
+            elif background_mode and any(
+                _BACKGROUND_DESTRUCTIVE_TOOL_RE.search(str(tool_call.get(key) or ""))
+                for key in ("name", "title")
+            ):
+                block_reason = "destructive_action"
             elif mail_scoped:
                 block_reason = "mailbox_access"
             elif tool_kind == "edit":
-                if _workspace_edit_target_is_protected(tool_call):
+                if _workspace_edit_target_is_protected(tool_call) or (background_mode and _background_protected_targets(tool_call, self.cwd)):
                     block_reason = "protected_path"
                 elif not _workspace_edit_target_is_local(tool_call, self.cwd):
                     block_reason = "outside_workspace_edit"
             elif tool_kind == "execute":
-                block_reason = _workspace_autonomy_block_reason(tool_call, self.cwd)
+                block_reason = (_background_autonomy_block_reason(tool_call, self.cwd)
+                                if background_mode else _workspace_autonomy_block_reason(tool_call, self.cwd))
+            elif background_mode and tool_kind == "read":
+                if _workspace_edit_targets(tool_call):
+                    if _background_protected_targets(tool_call, self.cwd):
+                        block_reason = "protected_path"
+                    elif not _workspace_edit_target_is_local(tool_call, self.cwd):
+                        block_reason = "outside_workspace_read"
+                else:
+                    block_reason = _background_remote_block_reason(tool_call)
+            elif background_mode and tool_kind in {"search", "fetch"}:
+                block_reason = _background_remote_block_reason(tool_call)
             if block_reason:
                 with self._prompt_state_lock:
                     for state in self._active_prompts.values():
@@ -1105,14 +1324,56 @@ class ACPClient:
                     })
                 else:
                     self._send_response(rpc_id, {"outcome": {"outcome": "cancelled"}})
-                _telemetry_emit("acp_permission", decision="workspace-autonomy-reject-" + block_reason,
-                                tool_kind=tool_kind, option_count=len(options))
+                if background_mode:
+                    _telemetry_emit("acp_permission", decision="background-autonomy-reject-" + block_reason,
+                                    tool_kind=tool_kind, option_count=len(options))
+                else:
+                    _telemetry_emit("acp_permission", decision="workspace-autonomy-reject-" + block_reason,
+                                    tool_kind=tool_kind, option_count=len(options))
                 return
             if allow_once:
-                self._send_response(rpc_id, {
-                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
-                })
-                _telemetry_emit("acp_permission", decision="workspace-autonomy-approve",
+                if background_mode:
+                    with _st.bg_auto_actions_lock:
+                        if not _st.bg_auto_actions:
+                            with self._prompt_state_lock:
+                                for state in self._active_prompts.values():
+                                    if state.get("session_id") == session_id:
+                                        state["permission_cancelled"] = True
+                                        state["permission_reason"] = "policy_blocked"
+                            if reject_option:
+                                self._send_response(rpc_id, {
+                                    "outcome": {"outcome": "selected", "optionId": reject_option["option_id"]}
+                                })
+                            else:
+                                self._send_response(rpc_id, {"outcome": {"outcome": "cancelled"}})
+                            _telemetry_emit("acp_permission", decision="background-autonomy-reject-autonomy_disabled",
+                                            tool_kind=tool_kind, option_count=len(options))
+                            return
+                        self._send_response(rpc_id, {
+                            "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
+                        })
+                    _telemetry_emit("acp_permission", decision="background-autonomy-approve",
+                                    tool_kind=tool_kind, option_count=len(options))
+                else:
+                    self._send_response(rpc_id, {
+                        "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
+                    })
+                    _telemetry_emit("acp_permission", decision="workspace-autonomy-approve",
+                                    tool_kind=tool_kind, option_count=len(options))
+                return
+            if background_mode:
+                with self._prompt_state_lock:
+                    for state in self._active_prompts.values():
+                        if state.get("session_id") == session_id:
+                            state["permission_cancelled"] = True
+                            state["permission_reason"] = "policy_blocked"
+                if reject_option:
+                    self._send_response(rpc_id, {
+                        "outcome": {"outcome": "selected", "optionId": reject_option["option_id"]}
+                    })
+                else:
+                    self._send_response(rpc_id, {"outcome": {"outcome": "cancelled"}})
+                _telemetry_emit("acp_permission", decision="background-autonomy-no-allow-once",
                                 tool_kind=tool_kind, option_count=len(options))
                 return
         allow_once = next((option for option in options if option["kind"] == "allow_once"), None)

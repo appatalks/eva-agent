@@ -15,7 +15,8 @@ while keeping configuration, approvals, and personal data under your control.
   conversation model.
 - **Operations visibility:** background jobs are grouped by purpose, activity
   can be filtered, job settings persist across restarts, and scheduled-task
-  attempts show their outcome.
+  attempts show their outcome. Opt-in background ACP autonomy decides bounded
+  permissions without interrupting chat and reports blocked actions.
 - **Opt-in goal work:** a local model can continue work in a retained, isolated
   Eva Ready worktree per goal, one round at a time, with randomized delays.
 - **Advisory PR readiness:** repository automation posts commit-specific
