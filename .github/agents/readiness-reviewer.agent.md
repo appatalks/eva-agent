@@ -2,7 +2,7 @@
 description: "Use when: reviewing pull request readiness from untrusted diffs, comments, and CI evidence in automation."
 tools: [view, rg]
 agents: []
-model: "GPT-5.6 Luna (copilot)"
+model: "GPT-6.1 Terra (copilot)"
 user-invocable: false
 disable-model-invocation: true
 ---
@@ -36,4 +36,6 @@ Return concise Markdown beginning with exactly one line:
 `VERDICT: NEEDS_MAINTAINER`.
 
 Then list only a concise summary of concrete findings, required test gaps, and
-maintainer actions. Do not include credentials or token-like values.
+maintainer actions. If code-scanning alert retrieval was unavailable, say that
+the alert state is unknown. Cite paths and line numbers rather than quoting code
+or PR text. Do not include credentials or token-like values.

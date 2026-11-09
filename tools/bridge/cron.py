@@ -19,6 +19,14 @@ def _load_cron_tasks():
             _st.cron_tasks = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         _st.cron_tasks = []
+    interrupted = False
+    for task in _st.cron_tasks:
+        if task.get("last_status") == "running":
+            task["last_status"] = "interrupted"
+            task["last_error"] = "The application stopped before the result was recorded."
+            interrupted = True
+    if interrupted:
+        _save_cron_tasks()
 
 
 
@@ -45,7 +53,10 @@ def _parse_cron_expr(expr):
         for segment in field.split(","):
             step_parts = segment.split("/", 1)
             range_part = step_parts[0]
-            step = int(step_parts[1]) if len(step_parts) > 1 else 1
+            try:
+                step = int(step_parts[1]) if len(step_parts) > 1 else 1
+            except ValueError:
+                return None, f"invalid step in field {i}"
             if step < 1:
                 return None, f"invalid step in field {i}"
             if range_part == "*":
@@ -86,18 +97,30 @@ def _cron_matches(parsed, dt):
 
 
 def _cron_next_run(expr, after_dt=None):
-    """Compute the next run time for a cron expression (up to 48h ahead)."""
+    """Compute the next run time within one Gregorian calendar cycle."""
     parsed, err = _parse_cron_expr(expr)
     if err or parsed is None:
         return None
     if after_dt is None:
         after_dt = datetime.datetime.now(datetime.timezone.utc)
-    # Scan minute by minute for up to 48 hours
     candidate = after_dt.replace(second=0, microsecond=0) + datetime.timedelta(minutes=1)
-    for _ in range(48 * 60):
-        if _cron_matches(parsed, candidate):
-            return candidate.isoformat()
-        candidate += datetime.timedelta(minutes=1)
+    minutes, hours, dom, month, dow = parsed
+    valid_hours = sorted(hours if hours is not None else range(24))
+    valid_minutes = sorted(minutes if minutes is not None else range(60))
+    day = candidate.replace(hour=0, minute=0)
+    for _ in range(146097):
+        if ((month is None or day.month in month) and
+                (dom is None or day.day in dom) and
+                (dow is None or (day.weekday() + 1) % 7 in dow)):
+            for hour in valid_hours:
+                for minute in valid_minutes:
+                    result = day.replace(hour=hour, minute=minute)
+                    if result >= candidate:
+                        return result.isoformat()
+        try:
+            day += datetime.timedelta(days=1)
+        except OverflowError:
+            break
     return None
 
 
@@ -119,20 +142,37 @@ def _cron_tick():
             if not _cron_matches(parsed, now):
                 continue
             # Don't re-run within same minute
-            last = task.get("last_run", "")
+            last = task.get("last_attempt", "") or task.get("last_run", "")
             if last and last[:16] == now_iso[:16]:
                 continue
+            task["last_attempt"] = now_iso
+            task["last_status"] = "running"
             ran.append(task)
+        if ran:
+            _save_cron_tasks()
     for task in ran:
+        with _st.cron_lock:
+            if task not in _st.cron_tasks:
+                continue
+            if not task.get("enabled", True):
+                task["last_status"] = "skipped"
+                task["last_error"] = "Disabled before execution."
+                _save_cron_tasks()
+                continue
         prompt = task.get("prompt", "")
         label = task.get("label", "cron task")
         print(f"[Cron] Running: {label}")
         try:
             _cron_execute_task(task["id"], prompt, label)
+            status, error = "succeeded", ""
         except Exception as e:
             print(f"[Cron] Error running {label}: {e}")
+            status, error = "failed", str(e)[:300]
         with _st.cron_lock:
-            task["last_run"] = now_iso
+            if status == "succeeded":
+                task["last_run"] = now_iso
+            task["last_status"] = status
+            task["last_error"] = error
             task["next_run"] = _cron_next_run(task.get("schedule", ""), now)
             _save_cron_tasks()
 
@@ -141,16 +181,20 @@ def _cron_tick():
 def _cron_execute_task(task_id, prompt, label):
     """Execute a cron task by sending its prompt through ACP."""
     if not _st.acp_client or not _st.acp_client.alive:
-        print(f"[Cron] ACP not available for task {label}")
-        return
-    messages = [{"role": "user", "content": f"[Scheduled task: {label}] {prompt}"}]
-    try:
-        result = _st.acp_client.send_prompt(messages)
-        if result:
-            # Push result as a notification
-            _push_notification(f"Cron: {label}", str(result)[:500], channel="chat")
-    except Exception as e:
-        print(f"[Cron] Task execution error: {e}")
+        raise RuntimeError("ACP is unavailable.")
+    result = _st.acp_client.prompt(
+        f"[Scheduled task: {label}] {prompt}", conversation_id="cron:" + str(task_id)
+    )
+    if not isinstance(result, dict) or result.get("error"):
+        raise RuntimeError("The scheduled prompt failed.")
+    if result.get("permission_cancelled"):
+        raise RuntimeError("A required permission was not approved.")
+    if result.get("stop_reason", "end_turn") != "end_turn":
+        raise RuntimeError("The scheduled prompt ended before completing its response.")
+    text = str(result.get("text") or "").strip()
+    if not text:
+        raise RuntimeError("The scheduled prompt returned no response.")
+    _push_notification(f"Cron: {label}", text[:500], channel="chat")
 
 
 

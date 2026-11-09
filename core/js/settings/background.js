@@ -162,7 +162,19 @@ function renderBackgroundActivity() {
     listEl.appendChild(emptyEl);
     return;
   }
-  _backgroundState.activity.forEach(function(activity) {
+  var filterEl = document.getElementById('backgroundActivityFilter');
+  var filter = filterEl ? filterEl.value : 'all';
+  var visible = _backgroundState.activity.filter(function(activity) {
+    return filter === 'all' || String(getBackgroundField(activity, 'Status', 'status') || '').toLowerCase() === filter;
+  });
+  if (!visible.length) {
+    var noMatches = document.createElement('div');
+    noMatches.className = 'auth-note';
+    noMatches.textContent = 'No activity matches this filter.';
+    listEl.appendChild(noMatches);
+    return;
+  }
+  visible.forEach(function(activity) {
     var row = document.createElement('div');
     row.className = 'background-row background-activity-row';
     var status = String(getBackgroundField(activity, 'Status', 'status') || '');
@@ -254,6 +266,7 @@ async function saveBackgroundControls(runNow) {
   var controls = readBackgroundControls(runNow);
   var saveButton = document.getElementById('backgroundSaveButton');
   var runButton = document.getElementById('backgroundRunNowButton');
+  var jobsSaveButton = document.getElementById('backgroundJobsSaveButton');
   if (controls.error) {
     _backgroundState.error = controls.error;
     renderBackgroundStatus();
@@ -262,6 +275,7 @@ async function saveBackgroundControls(runNow) {
   }
   if (saveButton) saveButton.disabled = true;
   if (runButton) runButton.disabled = true;
+  if (jobsSaveButton) jobsSaveButton.disabled = true;
   try {
     var data = await backgroundBridgeRequest('/v1/background/control', {
       method: 'POST',
@@ -280,6 +294,7 @@ async function saveBackgroundControls(runNow) {
   } finally {
     if (saveButton) saveButton.disabled = false;
     if (runButton) runButton.disabled = false;
+    if (jobsSaveButton) jobsSaveButton.disabled = false;
   }
 }
 
@@ -301,9 +316,13 @@ function initBackground() {
   var saveButton = document.getElementById('backgroundSaveButton');
   var runButton = document.getElementById('backgroundRunNowButton');
   var refreshButton = document.getElementById('backgroundRefreshButton');
+  var jobsSaveButton = document.getElementById('backgroundJobsSaveButton');
+  var filterEl = document.getElementById('backgroundActivityFilter');
   if (saveButton) saveButton.addEventListener('click', function() { saveBackgroundControls(false); });
   if (runButton) runButton.addEventListener('click', function() { saveBackgroundControls(true); });
   if (refreshButton) refreshButton.addEventListener('click', function() { loadBackgroundData(false); });
+  if (jobsSaveButton) jobsSaveButton.addEventListener('click', function() { saveBackgroundControls(false); });
+  if (filterEl) filterEl.addEventListener('change', renderBackgroundActivity);
   renderBackgroundAll();
   loadBackgroundData(true);
 }

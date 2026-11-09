@@ -2,10 +2,12 @@
 
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
 import shlex
 import socket
+import stat
 import subprocess
 import tempfile
 import threading
@@ -39,6 +41,21 @@ def normalize_local_config(config):
     return {"base_url": base, "model": model.strip(), "max_tokens": tokens}
 
 
+def normalize_goal_config(config):
+    normalized = normalize_local_config(config)
+    host = urlsplit(normalized["base_url"]).hostname or ""
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host.lower() == "localhost"
+    if not loopback:
+        raise ValueError("Automatic goal work requires a loopback model endpoint.")
+    if host.lower() == "localhost":
+        parsed = urlsplit(normalized["base_url"])
+        normalized["base_url"] = parsed._replace(netloc="127.0.0.1:" + str(parsed.port)).geturl()
+    return normalized
+
+
 def tool_schema(name, description, properties, required):
     return {"type": "function", "function": {
         "name": name, "description": description,
@@ -47,10 +64,19 @@ def tool_schema(name, description, properties, required):
 
 
 class LocalWorkspaceClient:
-    def __init__(self, config, cwd, mcp_config, validate_root):
-        self.config = normalize_local_config(config)
+    def __init__(self, config, cwd, mcp_config, validate_root, file_only=False):
+        self.config = normalize_goal_config(config) if file_only is True else normalize_local_config(config)
         self.cwd = str(Path(cwd).resolve(strict=True))
         self.model = self.config["model"]
+        self.file_only = file_only is True
+        if self.file_only and mcp_config:
+            raise ValueError("File-only goal work does not permit MCP servers.")
+        if self.file_only and (
+            not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")
+            or os.open not in os.supports_dir_fd or os.mkdir not in os.supports_dir_fd
+            or os.stat not in os.supports_dir_fd or os.listdir not in os.supports_fd
+        ):
+            raise ValueError("File-only goal work requires descriptor-relative filesystem access.")
         self.mcp_config = mcp_config
         self.validate_root = validate_root
         self.alive = False
@@ -83,6 +109,8 @@ class LocalWorkspaceClient:
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300},
             }, ["command", "arguments"]),
         ]
+        if self.file_only:
+            self.tools = [tool for tool in self.tools if tool["function"]["name"] != "run_command"]
 
     def check(self):
         if self.cancelled.is_set() or state.acp_shutdown.is_set():
@@ -182,7 +210,91 @@ class LocalWorkspaceClient:
             raise ValueError("This file path is outside the worktree.")
         return candidate
 
+    def _goal_root_fd(self):
+        self.check()
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        current = os.open(os.path.sep, flags)
+        try:
+            for part in Path(self.cwd).parts[1:]:
+                child = os.open(part, flags, dir_fd=current)
+                os.close(current)
+                current = child
+            return current
+        except Exception:
+            os.close(current)
+            raise
+
+    def _goal_file_fd(self, relative, writable=False, create=False):
+        if not isinstance(relative, str) or not relative or len(relative) > 4096:
+            raise ValueError("A relative worktree file path is required.")
+        path = Path(relative)
+        if (path.is_absolute() or not path.parts or ".." in path.parts or ".git" in path.parts
+                or _workspace_argument_is_protected(relative)):
+            raise ValueError("This file path is outside the worktree or protected.")
+        directory = self._goal_root_fd()
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        try:
+            for part in path.parts[:-1]:
+                if create:
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=directory)
+                    except FileExistsError:
+                        pass
+                child = os.open(part, flags, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            file_flags = (os.O_RDWR if writable else os.O_RDONLY) | os.O_NOFOLLOW | os.O_NONBLOCK
+            try:
+                fd = os.open(path.parts[-1], file_flags, dir_fd=directory)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                fd = os.open(path.parts[-1], file_flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise ValueError("Goal file tools require a regular, non-hardlinked file.")
+                return fd
+            except Exception:
+                os.close(fd)
+                raise
+        finally:
+            os.close(directory)
+
+    def _goal_list_files(self):
+        pending = [(self._goal_root_fd(), "")]
+        files = []
+        visited = 0
+        try:
+            while pending:
+                directory, prefix = pending.pop()
+                try:
+                    self.check()
+                    for name in sorted(os.listdir(directory)):
+                        visited += 1
+                        relative = prefix + name
+                        if name != ".git" and not _workspace_argument_is_protected(relative):
+                            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                            if stat.S_ISDIR(info.st_mode):
+                                if len(pending) >= 128:
+                                    return {"files": files, "partial": True}
+                                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                                dir_fd=directory)
+                                pending.append((child, relative + "/"))
+                            elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                                files.append(relative)
+                        if visited >= 5000 or len(files) >= 1000:
+                            return {"files": files, "partial": True}
+                finally:
+                    os.close(directory)
+            return {"files": files, "partial": False}
+        finally:
+            for directory, _ in pending:
+                os.close(directory)
+
     def command(self, args):
+        if self.file_only:
+            raise ValueError("Commands are unavailable for file-only goal work.")
         command = args.get("command")
         arguments = args.get("arguments")
         timeout = args.get("timeout_seconds", 120)
@@ -240,6 +352,8 @@ class LocalWorkspaceClient:
         if not isinstance(args, dict):
             raise ValueError("Tool arguments must be a JSON object.")
         if name == "list_files":
+            if self.file_only:
+                return self._goal_list_files()
             result = self.command({"command": "git", "arguments": ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]})
             if result["exit_code"] != 0:
                 raise ValueError("Git could not list the workspace files.")
@@ -249,7 +363,9 @@ class LocalWorkspaceClient:
             if isinstance(start, bool) or isinstance(count, bool) or not isinstance(start, int) or not isinstance(count, int) or start < 1 or not 1 <= count <= 2000:
                 raise ValueError("Read ranges require a positive start line and 1 to 2000 lines.")
             lines, size, partial = [], 0, False
-            with self.file_path(args.get("path")).open("r", encoding="utf-8") as file:
+            file = (os.fdopen(self._goal_file_fd(args.get("path")), "r", encoding="utf-8")
+                    if self.file_only else self.file_path(args.get("path")).open("r", encoding="utf-8"))
+            with file:
                 for number, line in enumerate(file, 1):
                     if number < start:
                         continue
@@ -267,6 +383,17 @@ class LocalWorkspaceClient:
                 raise ValueError("Edits require bounded old and new text.")
             with self.lock:
                 self.check()
+                if self.file_only:
+                    with os.fdopen(self._goal_file_fd(args.get("path"), writable=True), "r+", encoding="utf-8") as file:
+                        if os.fstat(file.fileno()).st_size > 2 * 1024 * 1024:
+                            raise ValueError("The file exceeds the edit size limit.")
+                        text = file.read()
+                        if text.count(old) != 1:
+                            raise ValueError("Old text must match exactly one location.")
+                        file.seek(0)
+                        file.write(text.replace(old, new, 1))
+                        file.truncate()
+                    return {"edited": True}
                 target = self.file_path(args.get("path"))
                 if target.stat().st_size > 2 * 1024 * 1024:
                     raise ValueError("The file exceeds the edit size limit.")
@@ -279,9 +406,14 @@ class LocalWorkspaceClient:
             content = args.get("content")
             if not isinstance(content, str) or len(content.encode("utf-8")) > 256 * 1024:
                 raise ValueError("File content must be UTF-8 text of at most 256 KiB.")
-            target = self.file_path(args.get("path"))
             with self.lock:
                 self.check()
+                if self.file_only:
+                    with os.fdopen(self._goal_file_fd(args.get("path"), writable=True, create=True), "r+", encoding="utf-8") as file:
+                        file.write(content)
+                        file.truncate()
+                    return {"written": True, "bytes": len(content.encode("utf-8"))}
+                target = self.file_path(args.get("path"))
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target = self.file_path(args["path"])
                 target.write_text(content, encoding="utf-8")
@@ -309,6 +441,9 @@ class LocalWorkspaceClient:
                 "Do not install dependencies unless explicitly requested. "
                 "Do not emit browser/desktop/action markers, claim actions without tool receipts, or promise later work. "
                 "Finish with an honest concise report of actual edits, checks, and limitations."
+                + (" This goal run is file-only: commands, MCP, and external actions are unavailable. "
+                   "Prepare local artifacts only and report actions that require user approval."
+                   if self.file_only else "")
             )})
         self.messages.append({"role": "user", "content": text})
         deadline = time.monotonic() + max(timeout, 900)

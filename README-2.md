@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current development version:** Eva 5.7.1 (unreleased). This document describes the matching browser UI,
+> **Current development version:** Eva 5.7.2 (unreleased). This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -19,7 +19,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh --build
 cd standalone
-./dist/'Eva Standalone-5.7.1.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.7.2.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
@@ -560,7 +560,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.7.1)
+  package.json             Electron + electron-builder config (v5.7.2)
 ```
 
 ## Dependencies
@@ -2191,10 +2191,33 @@ user review.
 
 ## Background System
 
+### Opt-in goal work
+
+Each active goal can be opted into automatic work in Settings > Operations >
+Goals. Eva snapshots the configured loopback SI Harness endpoint and model for
+that goal. With the background loop running, a single goal round starts after a
+random 2–24 hour delay; after it finishes or fails, a new delay is chosen.
+Enabled active goals are selected in least-recently-started order. Each goal
+retains its own Eva Ready Workspace worktree across rounds, including un-applied
+files and the previous round's report. Work is not applied automatically. If a
+retained workspace is archived, discarded, or unavailable, continuation is blocked
+instead of silently starting over; **Start fresh** detaches it without deleting
+the old worktree. Older completed rounds created before this association existed
+cannot be matched to goals automatically.
+
+Goal rounds expose bounded file tools only. They cannot invoke shell commands or
+MCP tools and do not authorize remote mutations. They are not an OS sandbox.
+Disabling a goal prevents future rounds but does not stop one already in
+progress. The scheduler requires filesystem locking and a running background
+loop; interrupted rounds are recorded instead of automatically replayed.
+
 ### Memory Consolidation
 
 When cognition and a memory backend are configured, the bridge starts an internal
 background loop (default: every 2 hours, pauses within 120s of user activity).
+Background enablement, interval, and job selections are stored under the runtime
+configuration directory and restored on restart. An unreadable or invalid saved
+configuration disables the loop rather than silently enabling jobs.
 
 **Job types (13 total):**
 
@@ -2241,7 +2264,11 @@ background ticks do not wait for human review.
 }
 ```
 
-Tasks execute by sending the prompt through ACP and delivering results as notifications.
+Schedules use UTC and require the background loop and ACP to be running. Missed
+times are not replayed. Each task has its own ACP conversation, and a response is
+delivered as a notification; a response alone does not verify task completion.
+The latest attempt records failure or interruption separately from a completed
+response. A task disabled while waiting behind another due task is skipped.
 
 ### Alert System
 
@@ -2360,7 +2387,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.7.1.AppImage'
+./dist/'Eva Standalone-5.7.2.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace
@@ -2515,6 +2542,22 @@ Runs on every PR to `main`:
 |---|---|
 | **static-checks** | Secret scanning, HTML structure, JS syntax, Python syntax, model routing, config templates, .gitignore |
 | **python-tests** | `tools/tests/test_static.py`: file integrity, config safety, CSV logic, model selector, seed validation |
+
+### Advisory PR readiness
+
+The readiness workflow uses GPT-6.1 Terra to review untrusted PR evidence from
+the trusted default branch. It publishes a neutral advisory check and a
+commit-specific PR comment, not an approval or a blocking verdict. The model
+job has no comment or check write permissions; a separate publisher handles the
+sanitized output. Failed or unavailable reviews are reported without claiming
+approval. Credential screening prevents unsafe evidence from reaching the model,
+but is itself advisory; existing CI, CodeQL, and secret-scanning requirements
+remain independent.
+
+After merging this workflow change, remove only `PR Readiness / Terra verdict`
+from the main branch's required status checks. Until that ruleset change is made,
+the retired status can still block merges. Manual workflow dispatch with a
+current PR number and head SHA requests a fresh review for that commit.
 
 ### Test Files
 
