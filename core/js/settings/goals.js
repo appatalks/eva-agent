@@ -1,5 +1,5 @@
 // Goals settings workflow: bridge lifecycle, form validation, and rendering.
-var _goalsState = { goals: [], loading: false, emptyMessage: '' };
+var _goalsState = { goals: [], autonomy: null, loading: false, emptyMessage: '' };
 
 async function getGoalsBridgeUrl() {
   return await getSettingsBridgeUrl();
@@ -44,6 +44,20 @@ function updateActiveGoalsCount(goals) {
 function renderGoalsList() {
   var listEl = document.getElementById('goalsList');
   if (!listEl) return;
+  var autoStatus = document.getElementById('goalAutonomyStatus');
+  if (autoStatus) {
+    var config = _goalsState.autonomy;
+    var round = config && config.round;
+    var enabledCount = config ? _goalsState.goals.filter(function(goal) {
+      return String(getGoalField(goal, 'Status', 'status') || '').toLowerCase() === 'active' &&
+        !!(config.goals || {})[String(getGoalField(goal, 'GoalId', 'goalId') || '')];
+    }).length : 0;
+    autoStatus.textContent = !config ? 'Automatic goal work is unavailable.' :
+      !enabledCount && !(round && round.run_id) ? 'No active goals opted in.' :
+      (round && round.run_id ? 'Goal round running. Run: ' + round.run_id :
+        'Next goal round: ' + (round && round.next_due ? formatGoalDate(round.next_due * 1000) : 'not scheduled')) +
+      (round && round.last_status ? ' | Last status: ' + round.last_status : '');
+  }
   listEl.innerHTML = '';
   if (_goalsState.emptyMessage) {
     var empty = document.createElement('div');
@@ -83,6 +97,16 @@ function renderGoalsList() {
     editButton.textContent = 'Edit';
     editButton.addEventListener('click', function() { openGoalForm(goal); });
     actions.appendChild(editButton);
+    if (_goalsState.autonomy) {
+      var isAutonomous = !!(_goalsState.autonomy.goals || {})[goalId];
+      var autonomyButton = document.createElement('button');
+      autonomyButton.type = 'button';
+      autonomyButton.className = 'auth-toggle';
+      autonomyButton.textContent = isAutonomous ? 'Disable auto work' : 'Enable auto work';
+      autonomyButton.disabled = !isAutonomous && status.toLowerCase() !== 'active';
+      autonomyButton.addEventListener('click', function() { setGoalAutonomy(goalId, !isAutonomous); });
+      actions.appendChild(autonomyButton);
+    }
     var deleteButton = document.createElement('button');
     deleteButton.type = 'button';
     deleteButton.className = 'auth-toggle';
@@ -102,6 +126,11 @@ function renderGoalsList() {
     var statusEl = document.createElement('span');
     statusEl.textContent = 'Status: ' + (status || '-');
     meta.appendChild(statusEl);
+    if (_goalsState.autonomy && (_goalsState.autonomy.goals || {})[goalId]) {
+      var autoEl = document.createElement('span');
+      autoEl.textContent = 'Auto work: enabled';
+      meta.appendChild(autoEl);
+    }
     var updatedEl = document.createElement('span');
     updatedEl.textContent = 'Updated: ' + formatGoalDate(updatedAt);
     meta.appendChild(updatedEl);
@@ -144,12 +173,18 @@ async function loadGoals(quiet) {
     if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) options.signal = AbortSignal.timeout(3000);
     var data = await goalsBridgeRequest('/v1/goals', options);
     _goalsState.goals = Array.isArray(data.goals) ? data.goals : [];
+    try {
+      _goalsState.autonomy = await goalsBridgeRequest('/v1/goals/autonomy', options);
+    } catch (_) {
+      _goalsState.autonomy = null;
+    }
     _goalsState.emptyMessage = '';
     updateActiveGoalsCount(_goalsState.goals);
     renderGoalsList();
     setGoalsStatus('info', _goalsState.goals.length ? '' : 'No goals yet.', true);
   } catch (error) {
     _goalsState.goals = [];
+    _goalsState.autonomy = null;
     updateActiveGoalsCount([]);
     if (error && error.status === 503) {
       _goalsState.emptyMessage = error.message || 'Goals are not available right now.';
@@ -161,6 +196,27 @@ async function loadGoals(quiet) {
     renderGoalsList();
   } finally {
     _goalsState.loading = false;
+  }
+}
+
+async function setGoalAutonomy(goalId, enabled) {
+  if (enabled && !confirm('Allow Eva to work on this goal using the configured loopback SI Harness model? She can create and edit files in an isolated Eva Ready worktree, but cannot run commands or external tools. A new round starts after a random 2–24 hour delay.')) return;
+  var config = enabled ? {
+    base_url: typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
+    model: typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
+    max_tokens: typeof getModelMaxTokens === 'function' ? getModelMaxTokens() : 16384
+  } : undefined;
+  try {
+    _goalsState.autonomy = await goalsBridgeRequest('/v1/goals/autonomy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal_id: goalId, enabled: enabled, provider_config: config })
+    });
+    renderGoalsList();
+    setGoalsStatus('info', enabled ? 'Automatic goal work enabled.' :
+      'Automatic goal work disabled. An active round continues until stopped.', false);
+  } catch (error) {
+    setGoalsStatus('error', 'Goal autonomy update failed: ' + (error.message || error), false);
   }
 }
 

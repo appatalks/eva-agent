@@ -2191,10 +2191,29 @@ user review.
 
 ## Background System
 
+### Opt-in goal work
+
+Each active goal can be opted into automatic work in Settings > Operations >
+Goals. Eva snapshots the configured loopback SI Harness endpoint and model for
+that goal. With the background loop running, a single goal round starts after a
+random 2–24 hour delay; after it finishes or fails, a new delay is chosen.
+Enabled active goals are selected in least-recently-started order. Work remains
+in a separate Eva Ready Workspace worktree for inspection in Workspaces and
+Agent Operations; it is not applied automatically.
+
+Goal rounds expose bounded file tools only. They cannot invoke shell commands or
+MCP tools and do not authorize remote mutations. They are not an OS sandbox.
+Disabling a goal prevents future rounds but does not stop one already in
+progress. The scheduler requires filesystem locking and a running background
+loop; interrupted rounds are recorded instead of automatically replayed.
+
 ### Memory Consolidation
 
 When cognition and a memory backend are configured, the bridge starts an internal
 background loop (default: every 2 hours, pauses within 120s of user activity).
+Background enablement, interval, and job selections are stored under the runtime
+configuration directory and restored on restart. An unreadable or invalid saved
+configuration disables the loop rather than silently enabling jobs.
 
 **Job types (13 total):**
 
@@ -2241,7 +2260,11 @@ background ticks do not wait for human review.
 }
 ```
 
-Tasks execute by sending the prompt through ACP and delivering results as notifications.
+Schedules use UTC and require the background loop and ACP to be running. Missed
+times are not replayed. Each task has its own ACP conversation, and a response is
+delivered as a notification; a response alone does not verify task completion.
+The latest attempt records failure or interruption separately from a completed
+response. A task disabled while waiting behind another due task is skipped.
 
 ### Alert System
 

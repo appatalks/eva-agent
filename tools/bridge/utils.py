@@ -446,6 +446,7 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
                 task.get("_provider_config") or {}, task["_cwd"],
                 task.get("_workspace_mcp_config") or {},
                 lambda: _st.workspace_store.validated_checkout_path(task["checkout_id"]),
+                file_only=task.get("capability_policy") == "goal_local",
             )
         else:
             from bridge.acp_client import ACPClient
@@ -521,7 +522,7 @@ def _subagent_worker(task_id, prompt, label, model="", start_gate=None, abort_st
             sync_workspace("running", label_text)
         try:
             capability_policy = task.get("capability_policy")
-            permission_mode = capability_policy if capability_policy in {"workspace_write", "workspace_auto"} else "interactive"
+            permission_mode = capability_policy if capability_policy in {"workspace_write", "workspace_auto", "goal_local"} else "interactive"
             prompt_result = client.prompt(
                 prompt_text, timeout=180, on_chunk=on_chunk, permission_mode=permission_mode, on_event=on_event,
             )

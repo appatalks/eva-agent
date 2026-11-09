@@ -1247,12 +1247,14 @@
 
       <!-- Goals Tab -->
       <div class="settings-panel" data-stab="goals">
+        <p class="auth-note">Opt in per active goal for file-only work in Eva Ready Workspace using a loopback SI Harness endpoint. With the background loop running, Eva starts one round at a time after a random 2–24 hour delay. Changes stay in the run's worktree for review; disabling a goal does not stop a round already running. View runs in Workspaces or Agent Operations.</p>
         <div class="goals-toolbar">
           <button type="button" class="auth-save" id="goalsNewButton">New goal</button>
           <button type="button" class="auth-toggle" id="goalsRefreshButton">Refresh</button>
         </div>
 
         <div id="goalsStatus" class="mcp-status" aria-live="polite"></div>
+        <div id="goalAutonomyStatus" class="auth-note" aria-live="polite"></div>
 
         <div id="goalsForm" class="mcp-preset goals-form" style="display:none">
           <input type="hidden" id="goalEditId">

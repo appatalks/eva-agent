@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import tempfile
 import threading
 import time
 import uuid
@@ -63,6 +64,56 @@ _TICKER_STOPWORDS = {
     "SEC", "CEO", "CFO", "COO", "ETF", "USA", "USD", "API", "PLC", "LLC", "INC",
     "NYSE", "IPO", "EPS", "GDP", "FDA", "ESG", "AND", "THE", "FOR", "ESPP", "AI",
 }
+_BACKGROUND_SETTINGS_PATH = os.path.join(_cfg.EVA_CONFIG_DIR, "background_settings.json")
+_BACKGROUND_SETTINGS_LOCK = threading.RLock()
+
+
+def _save_background_settings(enabled, interval, jobs):
+    settings = {"enabled": enabled, "intervalSeconds": interval, "jobs": jobs}
+    with _BACKGROUND_SETTINGS_LOCK:
+        os.makedirs(os.path.dirname(_BACKGROUND_SETTINGS_PATH), mode=0o700, exist_ok=True)
+        fd, path = tempfile.mkstemp(prefix=".background-settings-", dir=os.path.dirname(_BACKGROUND_SETTINGS_PATH))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                json.dump(settings, file)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(path, _BACKGROUND_SETTINGS_PATH)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+def _load_background_settings():
+    with _BACKGROUND_SETTINGS_LOCK:
+        try:
+            with open(_BACKGROUND_SETTINGS_PATH, encoding="utf-8") as file:
+                settings = json.load(file)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError):
+            _st.bg_loop_enabled = False
+            return
+        if not isinstance(settings, dict):
+            _st.bg_loop_enabled = False
+            return
+        enabled = settings.get("enabled")
+        interval = settings.get("intervalSeconds")
+        jobs = settings.get("jobs")
+        if (not isinstance(enabled, bool) or isinstance(interval, bool)
+                or not isinstance(interval, int) or not 900 <= interval <= 86400
+                or not isinstance(jobs, dict)
+                or any(not isinstance(value, bool) for value in jobs.values())):
+            _st.bg_loop_enabled = False
+            return
+        _st.bg_loop_enabled = enabled
+        _st.bg_loop_interval_seconds = interval
+        for name, value in jobs.items():
+            if name in _BG_JOBS_ENABLED:
+                _BG_JOBS_ENABLED[name] = value
+
+
+_load_background_settings()
 
 def _utc_now():
     return datetime.datetime.now(datetime.timezone.utc)
@@ -1344,6 +1395,11 @@ def _bg_loop_worker():
             _st.bg_loop_stop.wait(5)
             continue
 
+        try:
+            from bridge.goal_autonomy import tick as goal_autonomy_tick
+            goal_autonomy_tick()
+        except Exception as error:
+            print(f"[Goal Autonomy] Scheduler failed: {type(error).__name__}")
         now_ts = time.time()
         if now_ts >= next_due:
             _run_background_tick("scheduled")

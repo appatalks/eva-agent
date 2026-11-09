@@ -14,7 +14,10 @@ while keeping configuration, approvals, and personal data under your control.
   SI Harness for OpenAI-compatible endpoints, and MCP tools without changing the
   conversation model.
 - **Operations visibility:** background jobs are grouped by purpose, activity
-  can be filtered, and scheduled-task attempts show their outcome.
+  can be filtered, job settings persist across restarts, and scheduled-task
+  attempts show their outcome.
+- **Opt-in goal work:** a local model can prepare files in isolated Eva Ready
+  worktrees, one round at a time, with randomized delays between rounds.
 - **Flexible SI Harness runtime:** keep the backward-compatible Eva Direct path,
   or run the same SI endpoint/model through an isolated Copilot CLI ACP session
   for unified tool-capable chat. SI-Copilot fails explicitly when its endpoint or
