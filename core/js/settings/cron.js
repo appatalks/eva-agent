@@ -36,6 +36,13 @@ async function cronRefresh() {
       if (task.next_run) html += 'Next: ' + task.next_run.substring(0, 16).replace('T', ' ') + ' UTC';
       if (task.last_run) html += ' | Last: ' + task.last_run.substring(0, 16).replace('T', ' ') + ' UTC';
       html += '</div>';
+      if (task.last_status) {
+        var statusLabel = task.last_status === 'succeeded' ? 'response received' : task.last_status;
+        html += '<div style="font-size:12px;margin-top:4px">Last attempt: ' + _escHtml(statusLabel);
+        if (task.last_attempt) html += ' (' + _escHtml(task.last_attempt.substring(0, 16).replace('T', ' ')) + ' UTC)';
+        if (task.last_error) html += ' - ' + _escHtml(task.last_error);
+        html += '</div>';
+      }
       html += '<div style="margin-top:6px;display:flex;gap:6px">';
       html += '<button class="auth-toggle" style="font-size:11px;padding:2px 8px" onclick="cronToggle(\'' + task.id + '\',' + !enabled + ')">' + (enabled ? 'Disable' : 'Enable') + '</button>';
       html += '<button class="auth-toggle" style="font-size:11px;padding:2px 8px;color:#c44" onclick="cronDelete(\'' + task.id + '\')">Delete</button>';

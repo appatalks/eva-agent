@@ -583,6 +583,9 @@ body.eva-standalone #settingsMenu {
     .background-controls { text-align: left; }
     .background-toggle-row { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; cursor: pointer; }
     .background-jobs { text-align: left; margin: 0 0 12px; padding: 10px 12px; border: 1px solid #e0e0e0; border-radius: 8px; background: #fafafa; }
+    .background-jobs summary { cursor: pointer; }
+    body.theme-eva .background-jobs { background: var(--eva-surface); border-color: var(--eva-border); }
+    body.theme-lcars .background-jobs { background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.15); }
     .background-jobs-label { display: block; font-size: 12px; color: #666; margin: 0 0 8px; }
     .background-jobs .background-toggle-row { margin: 0 0 6px; font-size: 13px; }
     .background-jobs .background-toggle-row:last-child { margin-bottom: 0; }
