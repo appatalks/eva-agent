@@ -2543,6 +2543,22 @@ Runs on every PR to `main`:
 | **static-checks** | Secret scanning, HTML structure, JS syntax, Python syntax, model routing, config templates, .gitignore |
 | **python-tests** | `tools/tests/test_static.py`: file integrity, config safety, CSV logic, model selector, seed validation |
 
+### Advisory PR readiness
+
+The readiness workflow uses GPT-6.1 Terra to review untrusted PR evidence from
+the trusted default branch. It publishes a neutral advisory check and a
+commit-specific PR comment, not an approval or a blocking verdict. The model
+job has no comment or check write permissions; a separate publisher handles the
+sanitized output. Failed or unavailable reviews are reported without claiming
+approval. Credential screening prevents unsafe evidence from reaching the model,
+but is itself advisory; existing CI, CodeQL, and secret-scanning requirements
+remain independent.
+
+After merging this workflow change, remove only `PR Readiness / Terra verdict`
+from the main branch's required status checks. Until that ruleset change is made,
+the retired status can still block merges. Manual workflow dispatch with a
+current PR number and head SHA requests a fresh review for that commit.
+
 ### Test Files
 
 | File | Needs Bridge? | Description |

@@ -18,6 +18,8 @@ while keeping configuration, approvals, and personal data under your control.
   attempts show their outcome.
 - **Opt-in goal work:** a local model can continue work in a retained, isolated
   Eva Ready worktree per goal, one round at a time, with randomized delays.
+- **Advisory PR readiness:** repository automation posts commit-specific
+  GPT-6.1 Terra feedback without replacing required CI and security checks.
 - **Flexible SI Harness runtime:** keep the backward-compatible Eva Direct path,
   or run the same SI endpoint/model through an isolated Copilot CLI ACP session
   for unified tool-capable chat. SI-Copilot fails explicitly when its endpoint or
