@@ -798,7 +798,7 @@ class WorkspaceStore:
                 "SELECT id, display_name, root_path FROM projects WHERE id = ?", (run_row["project_id"],)
             ).fetchone()
             agent_row = self.connection.execute(
-                "SELECT * FROM agent_runs WHERE coding_run_id = ? ORDER BY created_at DESC LIMIT 1",
+                "SELECT * FROM agent_runs WHERE coding_run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 (run_id,),
             ).fetchone()
         return {
@@ -948,7 +948,7 @@ class WorkspaceStore:
                    FROM coding_runs
                    LEFT JOIN agent_runs ON agent_runs.id = (
                        SELECT id FROM agent_runs WHERE coding_run_id = coding_runs.id
-                       ORDER BY created_at DESC LIMIT 1
+                       ORDER BY created_at DESC, rowid DESC LIMIT 1
                    )
                    WHERE coding_runs.id = ?""",
                 (run_id,),

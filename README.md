@@ -16,8 +16,8 @@ while keeping configuration, approvals, and personal data under your control.
 - **Operations visibility:** background jobs are grouped by purpose, activity
   can be filtered, job settings persist across restarts, and scheduled-task
   attempts show their outcome.
-- **Opt-in goal work:** a local model can prepare files in isolated Eva Ready
-  worktrees, one round at a time, with randomized delays between rounds.
+- **Opt-in goal work:** a local model can continue work in a retained, isolated
+  Eva Ready worktree per goal, one round at a time, with randomized delays.
 - **Flexible SI Harness runtime:** keep the backward-compatible Eva Direct path,
   or run the same SI endpoint/model through an isolated Copilot CLI ACP session
   for unified tool-capable chat. SI-Copilot fails explicitly when its endpoint or

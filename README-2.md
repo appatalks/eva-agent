@@ -2197,9 +2197,13 @@ Each active goal can be opted into automatic work in Settings > Operations >
 Goals. Eva snapshots the configured loopback SI Harness endpoint and model for
 that goal. With the background loop running, a single goal round starts after a
 random 2–24 hour delay; after it finishes or fails, a new delay is chosen.
-Enabled active goals are selected in least-recently-started order. Work remains
-in a separate Eva Ready Workspace worktree for inspection in Workspaces and
-Agent Operations; it is not applied automatically.
+Enabled active goals are selected in least-recently-started order. Each goal
+retains its own Eva Ready Workspace worktree across rounds, including un-applied
+files and the previous round's report. Work is not applied automatically. If a
+retained workspace is archived, discarded, or unavailable, continuation is blocked
+instead of silently starting over; **Start fresh** detaches it without deleting
+the old worktree. Older completed rounds created before this association existed
+cannot be matched to goals automatically.
 
 Goal rounds expose bounded file tools only. They cannot invoke shell commands or
 MCP tools and do not authorize remote mutations. They are not an OS sandbox.

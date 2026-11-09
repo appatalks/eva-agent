@@ -106,6 +106,16 @@ function renderGoalsList() {
       autonomyButton.disabled = !isAutonomous && status.toLowerCase() !== 'active';
       autonomyButton.addEventListener('click', function() { setGoalAutonomy(goalId, !isAutonomous); });
       actions.appendChild(autonomyButton);
+      if ((_goalsState.autonomy.workspaces || {})[goalId]) {
+        var resetButton = document.createElement('button');
+        resetButton.type = 'button';
+        resetButton.className = 'auth-toggle';
+        resetButton.textContent = 'Start fresh';
+        var round = _goalsState.autonomy.round || {};
+        resetButton.disabled = !!round.run_id && round.goal_id === goalId;
+        resetButton.addEventListener('click', function() { resetGoalWorkspace(goalId); });
+        actions.appendChild(resetButton);
+      }
     }
     var deleteButton = document.createElement('button');
     deleteButton.type = 'button';
@@ -130,6 +140,11 @@ function renderGoalsList() {
       var autoEl = document.createElement('span');
       autoEl.textContent = 'Auto work: enabled';
       meta.appendChild(autoEl);
+    }
+    if (_goalsState.autonomy && (_goalsState.autonomy.workspaces || {})[goalId]) {
+      var workspaceEl = document.createElement('span');
+      workspaceEl.textContent = 'Retained worktree: ' + _goalsState.autonomy.workspaces[goalId];
+      meta.appendChild(workspaceEl);
     }
     var updatedEl = document.createElement('span');
     updatedEl.textContent = 'Updated: ' + formatGoalDate(updatedAt);
@@ -217,6 +232,21 @@ async function setGoalAutonomy(goalId, enabled) {
       'Automatic goal work disabled. An active round continues until stopped.', false);
   } catch (error) {
     setGoalsStatus('error', 'Goal autonomy update failed: ' + (error.message || error), false);
+  }
+}
+
+async function resetGoalWorkspace(goalId) {
+  if (!confirm('Start this goal in a fresh worktree next time? This will not delete the previous worktree if it still exists.')) return;
+  try {
+    _goalsState.autonomy = await goalsBridgeRequest('/v1/goals/autonomy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal_id: goalId, reset_workspace: true })
+    });
+    renderGoalsList();
+    setGoalsStatus('info', 'The next round will use a fresh worktree. No existing worktree was deleted.', false);
+  } catch (error) {
+    setGoalsStatus('error', 'Could not start fresh: ' + (error.message || error), false);
   }
 }
 

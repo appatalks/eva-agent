@@ -63,6 +63,11 @@ def _store():
             "goal_id TEXT NOT NULL DEFAULT '', next_due REAL NOT NULL DEFAULT 0, "
             "last_status TEXT NOT NULL DEFAULT '', last_finished REAL NOT NULL DEFAULT 0)"
         )
+        # Keep the association as a tombstone if its workspace is deleted.
+        store.connection.execute(
+            "CREATE TABLE IF NOT EXISTS goal_autonomy_workspaces ("
+            "goal_id TEXT PRIMARY KEY, run_id TEXT NOT NULL)"
+        )
         store.connection.execute("INSERT OR IGNORE INTO goal_autonomy_round(id) VALUES (1)")
     return store
 
@@ -72,8 +77,10 @@ def goal_settings():
     with _lock, store.lock:
         goals = {row["goal_id"]: bool(row["enabled"]) for row in
                  store.connection.execute("SELECT goal_id, enabled FROM goal_autonomy")}
+        workspaces = {row["goal_id"]: row["run_id"] for row in
+                      store.connection.execute("SELECT goal_id, run_id FROM goal_autonomy_workspaces")}
         row = dict(store.connection.execute("SELECT * FROM goal_autonomy_round WHERE id = 1").fetchone())
-    return {"goals": goals, "round": row}
+    return {"goals": goals, "workspaces": workspaces, "round": row}
 
 
 def set_goal(goal_id, enabled, config=None):
@@ -113,6 +120,58 @@ def _finish(store, status, now):
         )
 
 
+def reset_goal_workspace(goal_id):
+    """Detach a retained workspace without modifying or deleting its contents."""
+    store = _store()
+    with _lock, store.lock:
+        store.connection.execute("BEGIN IMMEDIATE")
+        try:
+            active = store.connection.execute(
+                "SELECT run_id FROM goal_autonomy_round WHERE id=1 AND goal_id=?", (goal_id,)
+            ).fetchone()
+            if active and active["run_id"]:
+                raise ValueError("Wait for the current goal round to finish before starting fresh.")
+            store.connection.execute("DELETE FROM goal_autonomy_workspaces WHERE goal_id=?", (goal_id,))
+            store.connection.commit()
+        except Exception:
+            store.connection.rollback()
+            raise
+
+
+def _resume_goal_run(store, run_id, project_id, objective, config):
+    from bridge.workspace_local import normalize_goal_config
+    from bridge.workspaces import WorkspaceError, _utc_now
+    config = normalize_goal_config(config)
+    run = store.get_run(run_id)
+    if (run["project_id"] != project_id or run["model_policy"] != "goal_local"
+            or run["auto_approve"] or run["apply_on_success"]
+            or run["status"] not in {"active", "completed", "cancelled"}):
+        raise WorkspaceError("The retained goal workspace is unavailable for continuation.")
+    checkout_path = store.validated_checkout_path(run["checkout"]["id"])
+    if store._current_branch(checkout_path) != run["checkout"]["branch"]:
+        raise WorkspaceError("The retained goal workspace changed branches.")
+    agent = run.get("agent") or {}
+    with state.subagent_lock:
+        live = state.subagent_tasks.get(agent.get("id"))
+        if live and live.get("_worker_running", False):
+            raise WorkspaceError("The previous goal round is still running.")
+    with store.lock, store.connection:
+        current = store.connection.execute(
+            "SELECT status, apply_status, apply_report FROM coding_runs WHERE id=?", (run_id,)
+        ).fetchone()
+        if not current or current["status"] not in {"active", "completed", "cancelled"}:
+            raise WorkspaceError("The retained goal workspace is unavailable for continuation.")
+        prior_report = current["apply_report"] or ""
+        if current["apply_status"]:
+            prior_report = "Previous integration: " + prior_report[:850] + " Continued goal work has not been applied."
+        store.connection.execute(
+            "UPDATE coding_runs SET status='active', final_disposition='', objective=?, provider_config=?, "
+            "apply_status='', apply_report=?, updated_at=? WHERE id=?",
+            (objective, json.dumps(config), prior_report[:1000], _utc_now(), run_id),
+        )
+    return store.get_run(run_id)
+
+
 def tick():
     """Dispatch one goal only after the previous run has ended and its delay elapsed."""
     from bridge.background import _bg_goals_query
@@ -129,6 +188,7 @@ def tick():
         with store.lock:
             round_row = store.connection.execute("SELECT * FROM goal_autonomy_round WHERE id=1").fetchone()
         if round_row["run_id"]:
+            run = None
             try:
                 run = store.get_run(round_row["run_id"])
                 agent = run.get("agent") or {}
@@ -143,6 +203,12 @@ def tick():
                     status = "interrupted"
             except WorkspaceError:
                 status = "interrupted"
+            if run and run.get("model_policy") == "goal_local" and round_row["goal_id"]:
+                with store.lock, store.connection:
+                    store.connection.execute(
+                        "INSERT OR IGNORE INTO goal_autonomy_workspaces(goal_id, run_id) VALUES (?, ?)",
+                        (round_row["goal_id"], run["id"]),
+                    )
             _finish(store, status, now)
             return
         if not round_row["next_due"] or now < round_row["next_due"]:
@@ -178,15 +244,28 @@ def tick():
         goal = active[selected["goal_id"]]
         objective = (str(goal.get("Title") or "").strip() + "\n\n" +
                      str(goal.get("Description") or "").strip()).strip()[:4000]
+        retained = None
         try:
             project = store.ensure_eva_ready_project()
-            run = store.create_run(project["id"], objective, model_policy="goal_local",
-                                   provider_config=json.loads(selected["provider_config"]))
+            config = json.loads(selected["provider_config"])
+            with store.lock:
+                retained = store.connection.execute(
+                    "SELECT run_id FROM goal_autonomy_workspaces WHERE goal_id=?", (selected["goal_id"],)
+                ).fetchone()
+            if retained:
+                run = _resume_goal_run(store, retained["run_id"], project["id"], objective, config)
+            else:
+                run = store.create_run(project["id"], objective, model_policy="goal_local",
+                                       provider_config=config)
             with store.lock, store.connection:
+                store.connection.execute(
+                    "INSERT OR IGNORE INTO goal_autonomy_workspaces(goal_id, run_id) VALUES (?, ?)",
+                    (selected["goal_id"], run["id"]),
+                )
                 store.connection.execute(
                     "UPDATE goal_autonomy_round SET run_id=? WHERE id=1 AND run_id=?",
                     (run["id"], reservation),
                 )
             _dispatch_workspace_run(run)
         except (WorkspaceError, ValueError, OSError, json.JSONDecodeError):
-            _finish(store, "failed to start", time.time())
+            _finish(store, "blocked: review retained workspace" if retained else "failed to start", time.time())
