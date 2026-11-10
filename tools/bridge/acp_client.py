@@ -1215,6 +1215,30 @@ class ACPClient:
                     except Exception as callback_error:
                         print(f"[ACP] Chunk callback failed: {callback_error}")
 
+        elif update_type == "agent_thought_chunk":
+            content = update.get("content", {})
+            text = content.get("text", "") if isinstance(content, dict) and content.get("type") == "text" else ""
+            if not isinstance(text, str) or not text:
+                return
+            session_id = params.get("sessionId") or params.get("session_id")
+            callback = None
+            with self._prompt_state_lock:
+                candidates = [
+                    state for state in self._active_prompts.values()
+                    if not session_id or state["session_id"] == session_id
+                ]
+                if len(candidates) != 1 or not candidates[0].get("include_reasoning"):
+                    return
+                state = candidates[0]
+                text = text[:max(0, 65536 - len(state["reasoning_content"]))]
+                state["reasoning_content"] += text
+                callback = state.get("on_reasoning")
+            if text and callable(callback):
+                try:
+                    callback(text)
+                except Exception:
+                    pass
+
         elif update_type == "plan":
             entries = update.get("entries", [])
             if entries:
@@ -1683,14 +1707,16 @@ class ACPClient:
     # --- Public API ---
 
     def prompt(self, text, timeout=120, conversation_id=None, on_chunk=None,
-               permission_mode="interactive", on_event=None):
+               permission_mode="interactive", on_event=None, on_reasoning=None, include_reasoning=False):
         with _pin_acp_client(self) as acquired:
             if not acquired:
                 return {"error": "ACP client is unavailable"}
             with self.prompt_lock:
-                return self._prompt(text, timeout, conversation_id, on_chunk, permission_mode, on_event)
+                return self._prompt(text, timeout, conversation_id, on_chunk, permission_mode, on_event,
+                                    on_reasoning, include_reasoning)
 
-    def _begin_prompt(self, prompt_id, session_id, on_chunk, permission_mode="interactive", on_event=None):
+    def _begin_prompt(self, prompt_id, session_id, on_chunk, permission_mode="interactive", on_event=None,
+                      on_reasoning=None, include_reasoning=False):
         with self._prompt_state_lock:
             self.response_chunks[prompt_id] = ""
             self._session_permission_modes[session_id] = permission_mode
@@ -1706,6 +1732,9 @@ class ACPClient:
                 "session_id": session_id,
                 "on_chunk": on_chunk,
                 "on_event": on_event,
+                "on_reasoning": on_reasoning,
+                "include_reasoning": bool(include_reasoning),
+                "reasoning_content": "",
                 "permission_mode": permission_mode,
                 "permission_cancelled": False,
                 "permission_reason": "",
@@ -1724,19 +1753,20 @@ class ACPClient:
             "chunk_count": state.get("chunk_count", 0),
             "permission_cancelled": bool(state.get("permission_cancelled")),
             "permission_reason": str(state.get("permission_reason") or "")[:32],
+            "reasoning_content": state.get("reasoning_content", ""),
             "first_chunk_ms": round((first_chunk_at - started_at) * 1000.0, 1)
             if first_chunk_at is not None and started_at is not None else None,
         }
 
     def _prompt(self, text, timeout=120, conversation_id=None, on_chunk=None,
-                permission_mode="interactive", on_event=None):
+                permission_mode="interactive", on_event=None, on_reasoning=None, include_reasoning=False):
         """Send a text prompt and return the accumulated response text."""
         session_id = self._session_for_conversation(conversation_id)
         if not session_id:
             return {"error": "No active ACP session"}
 
         pid = self._next_id()
-        self._begin_prompt(pid, session_id, on_chunk, permission_mode, on_event)
+        self._begin_prompt(pid, session_id, on_chunk, permission_mode, on_event, on_reasoning, include_reasoning)
 
         _t0 = time.perf_counter()
         try:
@@ -1769,6 +1799,7 @@ class ACPClient:
                 "stop_reason": stop_reason,
                 "permission_cancelled": prompt_metrics["permission_cancelled"],
                 "permission_reason": prompt_metrics["permission_reason"],
+                "reasoning_content": prompt_metrics["reasoning_content"],
             }
 
         _telemetry_emit("acp_prompt", model=self.model or "default",
@@ -1777,19 +1808,21 @@ class ACPClient:
                         chunk_count=prompt_metrics["chunk_count"],
                         first_chunk_ms=prompt_metrics["first_chunk_ms"])
         return {"text": response_text, "stop_reason": "end_turn",
+            "reasoning_content": prompt_metrics["reasoning_content"],
             "permission_cancelled": prompt_metrics["permission_cancelled"],
             "permission_reason": prompt_metrics["permission_reason"]}
 
     def prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None,
-                          permission_mode="interactive"):
+                          permission_mode="interactive", on_reasoning=None, include_reasoning=False):
         with _pin_acp_client(self) as acquired:
             if not acquired:
                 return {"error": "ACP client is unavailable"}
             with self.prompt_lock:
-                return self._prompt_with_image(text, image_b64, mime, timeout, conversation_id, on_chunk, permission_mode)
+                return self._prompt_with_image(text, image_b64, mime, timeout, conversation_id, on_chunk,
+                                               permission_mode, on_reasoning, include_reasoning)
 
     def _prompt_with_image(self, text, image_b64, mime="image/jpeg", timeout=120, conversation_id=None, on_chunk=None,
-                           permission_mode="interactive"):
+                           permission_mode="interactive", on_reasoning=None, include_reasoning=False):
         """Send a text + image prompt and return the accumulated response text.
 
         Uses the ACP content-block image type (the agent advertised
@@ -1800,7 +1833,8 @@ class ACPClient:
             return {"error": "No active ACP session"}
 
         pid = self._next_id()
-        self._begin_prompt(pid, session_id, on_chunk, permission_mode)
+        self._begin_prompt(pid, session_id, on_chunk, permission_mode,
+                           on_reasoning=on_reasoning, include_reasoning=include_reasoning)
 
         _t0 = time.perf_counter()
         try:
@@ -1829,14 +1863,16 @@ class ACPClient:
                             ms=_ms, stop_reason=stop_reason,
                             chunk_count=prompt_metrics["chunk_count"],
                             first_chunk_ms=prompt_metrics["first_chunk_ms"])
-            return {"text": response_text, "stop_reason": stop_reason}
+            return {"text": response_text, "stop_reason": stop_reason,
+                    "reasoning_content": prompt_metrics["reasoning_content"]}
 
         _telemetry_emit("acp_vision", model=self.model or "default",
                         prompt_chars=len(text or ""), response_chars=len(response_text or ""),
                         ms=_ms, stop_reason="end_turn",
                         chunk_count=prompt_metrics["chunk_count"],
                         first_chunk_ms=prompt_metrics["first_chunk_ms"])
-        return {"text": response_text, "stop_reason": "end_turn"}
+        return {"text": response_text, "stop_reason": "end_turn",
+                "reasoning_content": prompt_metrics["reasoning_content"]}
 
     def _new_session(self):
         """Create an ACP conversation without restarting the warm CLI process."""

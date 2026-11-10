@@ -851,6 +851,7 @@ async function aigSendRequest() {
         model_policy_mode: (typeof getAIGModelPolicyMode === 'function') ? getAIGModelPolicyMode() : 'auto-balanced',
         max_completion_tokens: (typeof getModelMaxTokens === 'function') ? getModelMaxTokens() : 16384,
         acp_reasoning_effort: reasoningEffort === 'default' ? '' : reasoningEffort,
+        thinking_enabled: (typeof getThinkingPreference === 'function') ? getThinkingPreference() : null,
         lmstudio_base_url: (typeof getLmStudioBaseUrl === 'function') ? getLmStudioBaseUrl() : '',
         lmstudio_model: (typeof getLmStudioModel === 'function') ? getLmStudioModel() : '',
         si_runtime: (typeof getSIHarnessRuntime === 'function') ? getSIHarnessRuntime() : 'direct',

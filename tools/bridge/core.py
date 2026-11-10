@@ -5362,6 +5362,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
         model_for_response = request["model_for_response"]
         max_completion_tokens = request["max_completion_tokens"]
         reasoning_effort = request["reasoning_effort"]
+        thinking_enabled = request["thinking_enabled"] if not internal else None
+        if thinking_enabled is False:
+            reasoning_effort = "none"
+        elif thinking_enabled is True and reasoning_effort in {"", "none"}:
+            reasoning_effort = "low"
+        include_reasoning = thinking_enabled is not False
+        include_acp_reasoning = not internal and include_reasoning
         acp_auto_approve = request["acp_auto_approve"]
         stream_requested = request["stream_requested"]
         si_runtime = request["si_runtime"]
@@ -6162,6 +6169,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "temperature": 0.7,
                     "max_tokens": max_completion_tokens,
                 }
+                if thinking_enabled is not None:
+                    lms_payload["reasoning_effort"] = reasoning_effort
                 if stream_state and not native_research:
                     lms_payload["stream"] = True
                 lms_resp = _req.post(
@@ -6178,10 +6187,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         for content_delta, reasoning_delta, finish_reason in _lmstudio_stream_deltas(lms_resp):
                             if reasoning_delta:
                                 streamed_reasoning.append(reasoning_delta)
-                                self._stream_reasoning(stream_state, reasoning_delta)
+                                if include_reasoning:
+                                    self._stream_reasoning(stream_state, reasoning_delta)
                             if content_delta:
                                 streamed_content.append(content_delta)
-                                self._stream_chunk(stream_state, content_delta)
+                                if thinking_enabled is not False:
+                                    self._stream_chunk(stream_state, content_delta)
                             if finish_reason:
                                 lms_finish_reason = finish_reason
                         response_text, lms_reasoning = _lmstudio_response_parts({
@@ -6282,7 +6293,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "message": {
                         "role": "assistant",
                         "content": response_text,
-                        **({"reasoning_content": lms_reasoning} if lms_reasoning else {}),
+                        **({"reasoning_content": lms_reasoning} if lms_reasoning and include_reasoning else {}),
                     },
                     "finish_reason": lms_finish_reason
                 }],
@@ -6395,6 +6406,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "- If GitHub MCP or gh is unavailable, state that plainly rather than opening a browser.\n\n"
             )
 
+        acp_reasoning = ""
         if responder_provider == "openai" and not response_text:
             print(f"[AIG] Step 3: Generating response via OpenAI API ({model_for_response})...")
             try:
@@ -6516,7 +6528,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             self._json_response(503, {"error": {"message": message}})
                         return
                     else:
-                        on_chunk = (lambda chunk: self._stream_chunk(stream_state, chunk)) if stream_state and not native_research else None
+                        on_chunk = (lambda chunk: self._stream_chunk(stream_state, chunk)) if stream_state and not native_research and thinking_enabled is not False else None
+                        on_reasoning = (lambda chunk: self._stream_reasoning(stream_state, chunk)) if stream_state and not native_research and include_acp_reasoning else None
                         if image_b64 and hasattr(response_client, "prompt_with_image"):
                             acp_result = response_client.prompt_with_image(
                                 full_prompt, image_b64, mime=image_mime, timeout=120,
@@ -6524,6 +6537,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                                 if _passive_recall else conversation_id,
                                 on_chunk=on_chunk,
                                 permission_mode=_acp_permission_mode,
+                                on_reasoning=on_reasoning,
+                                include_reasoning=include_acp_reasoning,
                             )
                         else:
                             acp_result = response_client.prompt(
@@ -6532,6 +6547,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                                 if _passive_recall else conversation_id,
                                 on_chunk=on_chunk,
                                 permission_mode=_acp_permission_mode,
+                                on_reasoning=on_reasoning,
+                                include_reasoning=include_acp_reasoning,
                             )
                         if acp_result.get("error"):
                             _audit_turn_failed("acp", "prompt", 502)
@@ -6542,6 +6559,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
                                 self._json_response(502, {"error": {"message": message}})
                             return
                         response_text = acp_result.get("text", "I'm having trouble processing that right now.")
+                        if thinking_enabled is False:
+                            original_response = response_text
+                            response_text, _ = _lmstudio_response_parts({"content": response_text})
+                            if not response_text and original_response:
+                                response_text = "The model did not produce a final answer."
+                        if include_acp_reasoning:
+                            acp_reasoning = str(acp_result.get("reasoning_content") or "")
                         if acp_result.get("permission_cancelled"):
                             response_outcome = "cancelled"
                             permission_reason = str(acp_result.get("permission_reason") or "permission_cancelled")
@@ -6591,7 +6615,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": response_text
+                    "content": response_text,
+                    **({"reasoning_content": acp_reasoning} if acp_reasoning else {}),
                 },
                 "finish_reason": response_finish_reason
             }],

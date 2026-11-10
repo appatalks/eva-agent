@@ -1,6 +1,18 @@
 // Model settings, selector presentation, and parameter-policy helpers.
 var DEFAULT_REASONING_EFFORT = 'high';
 
+function getThinkingPreference() {
+  var value = localStorage.getItem('thinkingEnabled');
+  return value === '1' ? true : value === '0' ? false : null;
+}
+
+function applyThinkingPreference() {
+  var enabled = getThinkingPreference() !== false;
+  var checkbox = document.getElementById('thinkingEnabled');
+  if (checkbox) checkbox.checked = enabled;
+  document.documentElement.classList.toggle('eva-hide-thinking', !enabled);
+}
+
 function getModelTemperature() {
   var el = document.getElementById('sldTemperature');
   return el ? parseFloat(el.value) : 0.7;

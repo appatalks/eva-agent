@@ -88,7 +88,7 @@ function updateEvaStreamingStatus(provisional, event, txtOutput) {
 }
 
 function appendEvaStreamingReasoning(provisional, chunk, txtOutput) {
-  if (!provisional || !chunk) return;
+  if (!provisional || !chunk || (typeof getThinkingPreference === 'function' && getThinkingPreference() === false)) return;
   if (!provisional.reasoning) {
     var details = document.createElement('details');
     details.className = 'eva-reasoning eva-streaming-reasoning';
@@ -1198,6 +1198,15 @@ document.addEventListener('DOMContentLoaded', () => {
   initAudioPreferences();
   applyStandaloneSurface();
   initStandaloneFirstRun();
+
+  var thinkingEl = document.getElementById('thinkingEnabled');
+  if (thinkingEl) {
+    applyThinkingPreference();
+    thinkingEl.addEventListener('change', function () {
+      localStorage.setItem('thinkingEnabled', thinkingEl.checked ? '1' : '0');
+      applyThinkingPreference();
+    });
+  }
 
   // Persist and restore the AIG backend selection across restarts.
   var reasoningEffortSel = document.getElementById('selReasoningEffort');
@@ -3290,7 +3299,8 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
 
   var text = repairEvaTextEncoding(content.trim());
   renderOptions = renderOptions || {};
-  var reasoningText = repairEvaTextEncoding(String(renderOptions.reasoningContent || '').trim());
+  var reasoningText = typeof getThinkingPreference === 'function' && getThinkingPreference() === false
+    ? '' : repairEvaTextEncoding(String(renderOptions.reasoningContent || '').trim());
   var artifactNames = [];
   var surfacedAssets = [];
   var feedbackKey = renderOptions.feedbackId || ('response_' + Array.from(text).reduce(function (hash, character) {

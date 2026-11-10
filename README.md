@@ -13,6 +13,8 @@ while keeping configuration, approvals, and personal data under your control.
 - **One intelligent gateway:** route work across OpenAI, GitHub Copilot ACP, the
   SI Harness for OpenAI-compatible endpoints, and MCP tools without changing the
   conversation model.
+- **Thinking control:** show or hide available model reasoning and request it
+  on or off; individual models and providers may ignore or reject the request.
 - **Operations visibility:** background jobs are grouped by purpose, activity
   can be filtered, job settings persist across restarts, and scheduled-task
   attempts show their outcome. Opt-in background ACP autonomy decides bounded
@@ -99,7 +101,7 @@ eva
 Eva is also added to the system application menu. On first launch, select **Eva (AIG)**
 for the integrated routing, memory, and tool experience.
 
-Current development version: **5.7.2** (`Eva Standalone-5.7.2.AppImage`, unreleased).
+Current development version: **5.7.3** (`Eva Standalone-5.7.3.AppImage`, unreleased).
 Latest published standalone release: `Eva Standalone-5.6.10.AppImage`.
 
 ## Preview
