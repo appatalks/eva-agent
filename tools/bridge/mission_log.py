@@ -2,10 +2,17 @@
 
 import hashlib
 import os
+import re
 import sqlite3
+import threading
+import time
+import uuid
 from contextlib import contextmanager
 
 from bridge import config as _cfg
+
+_confirmation_lock = threading.Lock()
+_confirmations = {}
 
 
 @contextmanager
@@ -24,6 +31,16 @@ def _database():
             "status TEXT NOT NULL, report TEXT NOT NULL, ended_at TEXT NOT NULL, "
             "session_id TEXT NOT NULL, coding_run_id TEXT NOT NULL, reviewed INTEGER NOT NULL DEFAULT 0)"
         )
+        connection.execute("CREATE TABLE IF NOT EXISTS deleted_reports (id TEXT PRIMARY KEY)")
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS permission_blocks ("
+            "id TEXT PRIMARY KEY, created_at TEXT NOT NULL, source TEXT NOT NULL, "
+            "tool_kind TEXT NOT NULL, reason TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS permission_policies ("
+            "category TEXT PRIMARY KEY, allowed INTEGER NOT NULL)"
+        )
         with connection:
             yield connection
     finally:
@@ -39,11 +56,12 @@ def save_report(task):
     with _database() as database:
         database.execute(
             "INSERT OR IGNORE INTO reports "
-            "(id,agent_id,label,status,report,ended_at,session_id,coding_run_id) VALUES (?,?,?,?,?,?,?,?)",
+            "(id,agent_id,label,status,report,ended_at,session_id,coding_run_id) "
+            "SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM deleted_reports WHERE id=?)",
             (
                 report_id, str(task.get("id") or ""), str(task.get("label") or "Agent")[:120],
                 task["status"], str(task.get("_completed_report") or task.get("result") or "")[:64000], str(task["ended_at"]),
-                str(task.get("session_id") or "")[:120], str(task.get("coding_run_id") or "")[:120],
+                str(task.get("session_id") or "")[:120], str(task.get("coding_run_id") or "")[:120], report_id,
             ),
         )
     return report_id
@@ -61,3 +79,89 @@ def review_report(report_id, reviewed):
     with _database() as database:
         cursor = database.execute("UPDATE reports SET reviewed=? WHERE id=?", (int(reviewed), report_id))
         return cursor.rowcount == 1
+
+
+def record_permission_block(source, tool_kind, reason):
+    allowed_sources = {"workspace", "background"}
+    allowed_kinds = {"read", "edit", "execute", "search", "fetch", "delete", "other"}
+    allowed_reasons = {
+        "autonomy_disabled", "unsupported_tool", "destructive_action", "mailbox_access",
+        "protected_path", "outside_workspace_edit", "outside_workspace_read",
+        "opaque_remote_action", "unclassified_remote_action", "protected_content",
+        "destructive_execution", "opaque_execution", "outside_workspace",
+        "inline_script", "shell_interpreter", "shell_composition", "unclassified_execution",
+        "interactive_execution", "no_allow_once", "other_policy", "user_rejected", "permission_timeout",
+    }
+    if source not in allowed_sources:
+        raise ValueError("Invalid permission source")
+    kind = tool_kind if tool_kind in allowed_kinds else "other"
+    reason = reason if reason in allowed_reasons else "other_policy"
+    block_id = uuid.uuid4().hex
+    with _database() as database:
+        database.execute(
+            "INSERT INTO permission_blocks(id,created_at,source,tool_kind,reason) VALUES (?,strftime('%Y-%m-%dT%H:%M:%SZ','now'),?,?,?)",
+            (block_id, source, kind, reason),
+        )
+    return block_id
+
+
+def list_permission_blocks(limit=100):
+    with _database() as database:
+        rows = database.execute(
+            "SELECT id,created_at,source,tool_kind,reason FROM permission_blocks "
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?", (min(100, max(1, limit)),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def research_permission():
+    with _database() as database:
+        row = database.execute(
+            "SELECT allowed FROM permission_policies WHERE category='unverified_remote_research'"
+        ).fetchone()
+    return bool(row and row["allowed"])
+
+
+def set_research_permission(allowed):
+    if not isinstance(allowed, bool):
+        raise ValueError("Permission must be boolean")
+    from bridge import state
+    with state.bg_auto_actions_lock, _database() as database:
+        database.execute(
+            "INSERT INTO permission_policies(category,allowed) VALUES ('unverified_remote_research',?) "
+            "ON CONFLICT(category) DO UPDATE SET allowed=excluded.allowed", (int(allowed),)
+        )
+
+
+def prepare_delete(scope):
+    if scope != "all" and not (isinstance(scope, str) and re.fullmatch(r"(?:report|block):[a-f0-9]{32}", scope)):
+        raise ValueError("Invalid deletion scope")
+    token = uuid.uuid4().hex
+    now = time.monotonic()
+    with _confirmation_lock:
+        for key in list(_confirmations):
+            if _confirmations[key][1] <= now:
+                _confirmations.pop(key, None)
+        if len(_confirmations) >= 100:
+            raise ValueError("Too many pending confirmations")
+        _confirmations[token] = (scope, now + 60)
+    return token
+
+
+def delete_confirmed(scope, token):
+    now = time.monotonic()
+    with _confirmation_lock:
+        confirmation = _confirmations.pop(token, None)
+    if not confirmation or confirmation[0] != scope or confirmation[1] <= now:
+        raise ValueError("Deletion confirmation expired or invalid")
+    with _database() as database:
+        if scope == "all":
+            database.execute("INSERT OR IGNORE INTO deleted_reports SELECT id FROM reports")
+            reports = database.execute("DELETE FROM reports").rowcount
+            blocks = database.execute("DELETE FROM permission_blocks").rowcount
+            return reports + blocks
+        if scope.startswith("report:"):
+            report_id = scope[7:]
+            database.execute("INSERT OR IGNORE INTO deleted_reports VALUES (?)", (report_id,))
+            return database.execute("DELETE FROM reports WHERE id=?", (report_id,)).rowcount
+        return database.execute("DELETE FROM permission_blocks WHERE id=?", (scope[6:],)).rowcount

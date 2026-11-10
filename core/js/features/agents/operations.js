@@ -232,6 +232,68 @@ var EvaAgents = (function() {
     return ready;
   }
 
+  async function deleteMissionLogEntry(scope, button) {
+    var prompt = scope === 'all' ? 'Permanently delete all notepad entries?' : 'Permanently delete this notepad entry?';
+    if (!confirm(prompt)) return;
+    button.disabled = true;
+    try {
+      var options = {
+        method: 'POST',
+        headers: typeof getBridgeCapabilityHeaders === 'function' ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(8000)
+      };
+      var prepared = await fetch(bridgeUrl() + '/v1/agents/reports/delete/prepare', Object.assign({}, options, {
+        body: JSON.stringify({ scope: scope })
+      }));
+      var confirmation = await prepared.json();
+      if (!prepared.ok || confirmation.scope !== scope || !confirmation.confirmation) throw new Error('Deletion could not be prepared.');
+      var response = await fetch(bridgeUrl() + '/v1/agents/reports/delete', Object.assign({}, options, {
+        signal: AbortSignal.timeout(8000),
+        body: JSON.stringify({ scope: scope, confirmation: confirmation.confirmation })
+      }));
+      var receipt = await response.json();
+      if (!response.ok || typeof receipt.deleted !== 'number') throw new Error('Deletion was not confirmed.');
+      state.reportsSequence++;
+      await refreshReports();
+      setText('missionLogStatus', 'Deleted ' + receipt.deleted + ' notepad entries.');
+    } catch (error) {
+      setText('missionLogStatus', error.message || 'Deletion failed.');
+    } finally { button.disabled = false; }
+  }
+
+  async function setMissionResearchPermission(allowed) {
+    if (allowed && !confirm('Allow unverified background search/fetch tools? Their labels do not guarantee read-only behavior, and remote services may receive request data.')) return;
+    var allow = document.getElementById('missionLogAllowResearch');
+    var deny = document.getElementById('missionLogDenyResearch');
+    allow.disabled = deny.disabled = true;
+    try {
+      var response = await fetch(bridgeUrl() + '/v1/agents/reports/research-permission', {
+        method: 'POST',
+        headers: typeof getBridgeCapabilityHeaders === 'function' ? getBridgeCapabilityHeaders() : { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allowed: allowed }),
+        signal: AbortSignal.timeout(8000)
+      });
+      var receipt = await response.json();
+      if (!response.ok || receipt.allowed !== allowed) throw new Error('Permission change was not confirmed.');
+      state.reportsSequence++;
+      await refreshReports();
+    } catch (error) {
+      setText('missionLogStatus', error.message || 'Permission change failed.');
+    } finally { allow.disabled = deny.disabled = false; }
+  }
+
+  function debriefText(text) {
+    try {
+      var parsed = JSON.parse(text);
+      if (parsed && !Array.isArray(parsed) && typeof parsed === 'object') {
+        for (var key of ['summary', 'message', 'text', 'result']) {
+          if (typeof parsed[key] === 'string' && parsed[key].trim()) return parsed[key];
+        }
+      }
+    } catch (_) {}
+    return text || 'No report text was returned.';
+  }
+
   async function refreshReports() {
     var sequence = ++state.reportsSequence;
     try {
@@ -240,6 +302,24 @@ var EvaAgents = (function() {
       var payload = await response.json();
       if (sequence !== state.reportsSequence) return;
       if (!Array.isArray(payload.reports)) throw new Error('Invalid report archive.');
+      setText('missionLogResearchStatus', payload.unverified_research_allowed
+        ? 'Unverified background research: allowed for future requests.'
+        : 'Unverified background research: denied for future requests.');
+      var blocksHost = document.getElementById('missionLogBlocks');
+      blocksHost.replaceChildren();
+      (Array.isArray(payload.blocks) ? payload.blocks : []).forEach(function(block) {
+        var card = element('article', 'mission-log-report');
+        card.append(element('strong', '', (block.source === 'workspace' ? 'Workspace' : 'Background') +
+          ' ' + String(block.tool_kind || 'action') + ' blocked'));
+        card.append(element('p', 'mission-log-meta', new Date(block.created_at).toLocaleString()));
+        card.append(element('p', 'mission-log-body', 'Reason: ' + String(block.reason || 'unknown').replace(/_/g, ' ')));
+        var remove = element('button', '', 'Delete');
+        remove.type = 'button';
+        remove.addEventListener('click', function() { deleteMissionLogEntry('block:' + block.id, remove); });
+        card.append(remove);
+        blocksHost.append(card);
+      });
+      if (!blocksHost.children.length) blocksHost.append(element('p', 'mission-log-status', 'No permission blocks recorded yet.'));
       var host = document.getElementById('missionLogReports');
       var existing = {};
       host.querySelectorAll('[data-report-id]').forEach(function(node) { existing[node.dataset.reportId] = node; });
@@ -254,8 +334,12 @@ var EvaAgents = (function() {
           check.setAttribute('aria-label', 'Mark report reviewed: ' + report.label);
           label.append(check, element('strong', '', report.label));
           var detail = element('details', '');
-          detail.append(element('summary', '', 'Read debrief'), element('pre', 'mission-log-body', report.report || 'No report text was returned.'));
+          detail.append(element('summary', '', 'Read debrief'), element('pre', 'mission-log-body', debriefText(report.report)));
           card.append(label, element('p', 'mission-log-meta', statusLabel(report.status) + ' / ' + new Date(report.ended_at).toLocaleString()), detail);
+          var remove = element('button', '', 'Delete');
+          remove.type = 'button';
+          remove.addEventListener('click', function() { deleteMissionLogEntry('report:' + report.id, remove); });
+          card.append(remove);
           check.addEventListener('change', async function() {
             var requested = check.checked;
             check.disabled = true;
@@ -286,9 +370,7 @@ var EvaAgents = (function() {
         delete existing[report.id];
       });
       Object.keys(existing).forEach(function(id) { existing[id].remove(); });
-      setText('missionLogStatus', payload.reports.length
-        ? 'Latest ' + payload.reports.length + ' debriefs / locally preserved across restarts.'
-        : 'No debriefs yet. Finished reports will appear here automatically.');
+      setText('missionLogStatus', 'Showing up to 100 recent blocks and 100 debriefs; stored locally.');
     } catch (error) {
       if (sequence === state.reportsSequence) setText('missionLogStatus', 'Archive unavailable. Last loaded reports retained. ' + error.message);
     }
@@ -1274,6 +1356,9 @@ var EvaAgents = (function() {
     var closeButton = document.getElementById('agentsCloseBtn');
     var detailClose = document.getElementById('agentDetailClose');
     var memoryReviewButton = document.getElementById('agentGraphMemoryReview');
+    var clearMissionLog = document.getElementById('missionLogClear');
+    var allowMissionResearch = document.getElementById('missionLogAllowResearch');
+    var denyMissionResearch = document.getElementById('missionLogDenyResearch');
     var workbench = document.getElementById('workspaceWorkbench');
     var workspacesHost = document.getElementById('agentsWorkspaces');
     if (workbench && workspacesHost) workspacesHost.appendChild(workbench);
@@ -1300,6 +1385,9 @@ var EvaAgents = (function() {
     if (refreshButton) refreshButton.addEventListener('click', function() { refresh(true); });
     if (closeButton) closeButton.addEventListener('click', close);
     if (detailClose) detailClose.addEventListener('click', closeDetail);
+    if (clearMissionLog) clearMissionLog.addEventListener('click', function() { deleteMissionLogEntry('all', clearMissionLog); });
+    if (allowMissionResearch) allowMissionResearch.addEventListener('click', function() { setMissionResearchPermission(true); });
+    if (denyMissionResearch) denyMissionResearch.addEventListener('click', function() { setMissionResearchPermission(false); });
     if (memoryReviewButton) memoryReviewButton.addEventListener('click', function() {
       if (window.EvaMemoryInspector && typeof window.EvaMemoryInspector.openFromAgents === 'function') {
         window.EvaMemoryInspector.openFromAgents();

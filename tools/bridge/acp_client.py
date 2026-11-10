@@ -102,6 +102,14 @@ _BACKGROUND_WEB_SCHEMAS = {
 }
 
 
+def _record_autonomy_block(source, tool_kind, reason):
+    try:
+        from bridge.mission_log import record_permission_block
+        record_permission_block(source, tool_kind, reason)
+    except Exception:
+        _telemetry_emit("mission_log", result="block_record_failed")
+
+
 def _mail_scoped_tool_call(tool_call):
     """Return True when a tool call reads or sends mail on any backend."""
     tool_call = tool_call if isinstance(tool_call, dict) else {}
@@ -494,10 +502,7 @@ def _background_decode_url_component(value):
     return value
 
 
-def _background_remote_block_reason(tool_call):
-    raw = tool_call.get("rawInput")
-    if not isinstance(raw, dict):
-        return "opaque_remote_action"
+def _background_web_tool_name(tool_call):
     name = ""
     for field in ("name", "title"):
         value = str(tool_call.get(field) or "").lower().strip()
@@ -507,6 +512,14 @@ def _background_remote_block_reason(tool_call):
                 break
         if name:
             break
+    return name
+
+
+def _background_remote_block_reason(tool_call):
+    raw = tool_call.get("rawInput")
+    if not isinstance(raw, dict):
+        return "opaque_remote_action"
+    name = _background_web_tool_name(tool_call)
     if not name:
         return "unclassified_remote_action"
     required, allowed = _BACKGROUND_WEB_SCHEMAS[name]
@@ -542,6 +555,76 @@ def _background_remote_block_reason(tool_call):
         except ValueError:
             return "unclassified_remote_action"
     return ""
+
+
+def _unverified_research_block_reason(tool_call):
+    raw = tool_call.get("rawInput")
+    if not isinstance(raw, dict) or not raw:
+        return "opaque_remote_action"
+    from workspace_diff_guard import scan_text
+    try:
+        serialized = json.dumps(raw, ensure_ascii=True)
+    except (TypeError, ValueError):
+        return "opaque_remote_action"
+    if len(serialized) > 8192 or scan_text(serialized, "remote-request"):
+        return "protected_content"
+
+    def inspect(value, depth=0):
+        if depth > 4:
+            return "opaque_remote_action"
+        if isinstance(value, dict):
+            if len(value) > 32:
+                return "opaque_remote_action"
+            for key, item in value.items():
+                key = str(key).lower()
+                if re.search(r"(?:token|secret|password|credential|authorization|cookie|api.?key)", key):
+                    return "protected_content"
+                if key in {"method", "action", "operation", "command", "op"}:
+                    if not isinstance(item, str) or item.lower() not in {"get", "head", "read", "view", "search", "list"}:
+                        return "destructive_action"
+                if key in {"url", "uri"} and isinstance(item, str):
+                    try:
+                        parsed = urllib.parse.urlsplit(item)
+                        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+                            return "unclassified_remote_action"
+                        path = _background_decode_url_component(parsed.path)
+                        if _BACKGROUND_DESTRUCTIVE_TOOL_RE.search(path):
+                            return "destructive_action"
+                        for query_key, query_value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+                            query_key = _background_decode_url_component(query_key).lower()
+                            query_value = _background_decode_url_component(query_value).lower()
+                            if re.search(r"(?:token|secret|password|credential|authorization|api.?key)", query_key):
+                                return "protected_content"
+                            if query_key in {"action", "method", "operation", "command", "op"} and query_value not in {"get", "head", "read", "view", "search", "list"}:
+                                return "destructive_action"
+                    except ValueError:
+                        return "unclassified_remote_action"
+                reason = inspect(item, depth + 1)
+                if reason:
+                    return reason
+        elif isinstance(value, list):
+            if len(value) > 32:
+                return "opaque_remote_action"
+            for item in value:
+                reason = inspect(item, depth + 1)
+                if reason:
+                    return reason
+        elif isinstance(value, str):
+            if len(value) > 2000 or _WORKSPACE_SENSITIVE_PATH_RE.search(value) or _BACKGROUND_PROTECTED_PATH_RE.search(value):
+                return "protected_content"
+        elif value is not None and not isinstance(value, (bool, int, float)):
+            return "opaque_remote_action"
+        return ""
+
+    return inspect(raw)
+
+
+def _unverified_research_allowed():
+    try:
+        from bridge.mission_log import research_permission
+        return research_permission()
+    except Exception:
+        return False
 
 
 def _hidden_subprocess_options():
@@ -1283,6 +1366,7 @@ class ACPClient:
                 (option for option in options if option["kind"] == "reject_always"), None
             )
             block_reason = ""
+            unverified_research = False
             if background_mode and not _st.bg_auto_actions:
                 block_reason = "autonomy_disabled"
             elif (background_mode and tool_kind not in {"read", "edit", "execute", "search", "fetch"}) or tool_kind in {"delete", "other"}:
@@ -1312,6 +1396,13 @@ class ACPClient:
                     block_reason = _background_remote_block_reason(tool_call)
             elif background_mode and tool_kind in {"search", "fetch"}:
                 block_reason = _background_remote_block_reason(tool_call)
+                if block_reason == "unclassified_remote_action" and not _background_web_tool_name(tool_call):
+                    candidate_reason = _unverified_research_block_reason(tool_call)
+                    if candidate_reason:
+                        block_reason = candidate_reason
+                    elif _unverified_research_allowed():
+                        block_reason = ""
+                        unverified_research = True
             if block_reason:
                 with self._prompt_state_lock:
                     for state in self._active_prompts.values():
@@ -1330,11 +1421,13 @@ class ACPClient:
                 else:
                     _telemetry_emit("acp_permission", decision="workspace-autonomy-reject-" + block_reason,
                                     tool_kind=tool_kind, option_count=len(options))
+                _record_autonomy_block("background" if background_mode else "workspace", tool_kind, block_reason)
                 return
             if allow_once:
                 if background_mode:
                     with _st.bg_auto_actions_lock:
-                        if not _st.bg_auto_actions:
+                        if not _st.bg_auto_actions or (unverified_research and not _unverified_research_allowed()):
+                            revoked_reason = "unclassified_remote_action" if _st.bg_auto_actions else "autonomy_disabled"
                             with self._prompt_state_lock:
                                 for state in self._active_prompts.values():
                                     if state.get("session_id") == session_id:
@@ -1346,13 +1439,14 @@ class ACPClient:
                                 })
                             else:
                                 self._send_response(rpc_id, {"outcome": {"outcome": "cancelled"}})
-                            _telemetry_emit("acp_permission", decision="background-autonomy-reject-autonomy_disabled",
+                            _telemetry_emit("acp_permission", decision="background-autonomy-reject-" + revoked_reason,
                                             tool_kind=tool_kind, option_count=len(options))
+                            _record_autonomy_block("background", tool_kind, revoked_reason)
                             return
                         self._send_response(rpc_id, {
                             "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
                         })
-                    _telemetry_emit("acp_permission", decision="background-autonomy-approve",
+                    _telemetry_emit("acp_permission", decision="background-autonomy-approve-unverified-research" if unverified_research else "background-autonomy-approve",
                                     tool_kind=tool_kind, option_count=len(options))
                 else:
                     self._send_response(rpc_id, {
@@ -1375,6 +1469,7 @@ class ACPClient:
                     self._send_response(rpc_id, {"outcome": {"outcome": "cancelled"}})
                 _telemetry_emit("acp_permission", decision="background-autonomy-no-allow-once",
                                 tool_kind=tool_kind, option_count=len(options))
+                _record_autonomy_block("background", tool_kind, "no_allow_once")
                 return
         allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
         if tool_kind == "execute" and allow_once and not mail_scoped and _workspace_read_only_execute(tool_call, self.cwd):
@@ -1400,6 +1495,7 @@ class ACPClient:
             "rpc_id": rpc_id,
             "session_id": str(params.get("sessionId") or "")[:120],
             "tool_kind": tool_kind,
+            "permission_mode": permission_mode,
             "command_summary": command_summary,
             "approval_allowed": tool_kind != "execute" or bool(command_summary),
             "options": options,
@@ -1457,6 +1553,8 @@ class ACPClient:
             self._send_notification("session/cancel", {"sessionId": entry["session_id"]})
             self._send_response(entry["rpc_id"], {"outcome": {"outcome": "cancelled"}})
             resolved_decision = "user-rejected"
+            if entry.get("permission_mode") in {"workspace_write", "workspace_auto"}:
+                _record_autonomy_block("workspace", entry["tool_kind"], "user_rejected")
         _telemetry_emit("acp_permission", decision=resolved_decision, tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
         return True
 
@@ -1473,6 +1571,8 @@ class ACPClient:
         self._send_notification("session/cancel", {"sessionId": entry["session_id"]})
         self._send_response(entry["rpc_id"], {"outcome": {"outcome": "cancelled"}})
         _telemetry_emit("acp_permission", decision="expired", tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
+        if entry.get("permission_mode") in {"workspace_write", "workspace_auto"}:
+            _record_autonomy_block("workspace", entry["tool_kind"], "permission_timeout")
 
     # --- Terminal handlers (for ACP tool execution) ---
 
