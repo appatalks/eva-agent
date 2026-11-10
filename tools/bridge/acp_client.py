@@ -1436,9 +1436,16 @@ class ACPClient:
                 block_reason = "autonomy_disabled"
             elif (background_mode and tool_kind not in {"read", "edit", "execute", "search", "fetch"}) or tool_kind in {"delete", "other"}:
                 block_reason = "unsupported_tool"
-            elif background_mode and any(
-                _BACKGROUND_DESTRUCTIVE_TOOL_RE.search(str(tool_call.get(key) or ""))
-                for key in ("name", "title")
+            elif background_mode and (
+                _BACKGROUND_DESTRUCTIVE_TOOL_RE.search(str(tool_call.get("name") or ""))
+                or (
+                    _BACKGROUND_DESTRUCTIVE_TOOL_RE.search(str(tool_call.get("title") or ""))
+                    and not (
+                        tool_kind == "fetch"
+                        and _background_web_tool_name({"name": tool_call.get("name")}) == "web_fetch"
+                        and not _background_remote_block_reason(tool_call)
+                    )
+                )
             ):
                 block_reason = "destructive_action"
             elif mail_scoped:
