@@ -402,6 +402,41 @@ def _context_query(prior_users, allow_question=False):
     return _question_topic(prior_users[index]) if allow_question else ""
 
 
+def research_plan_for_skill(user_message, decision, skill):
+    """Resolve an explicitly named research skill to its configured search."""
+    if not isinstance(skill, dict) or not isinstance(decision, dict):
+        return None
+    request = _clean_text(user_message)
+    name = str(skill.get("Name") or "").strip()
+    skill_id = str(skill.get("SkillId") or "")
+    if (not name or name.casefold() not in request.casefold()
+            or not re.match(
+                r"^(?:please\s+|(?:can|could|will|would)\s+you\s+)?"
+                r"(?:run|use|perform|execute|start|do)\b", request, re.I
+            )
+            or re.search(r"\b(?:don't|do\s+not|never|stop|cancel|without)\b", request, re.I)
+            or _quoted_command(request)
+            or skill_id != decision.get("selected_skill_id")
+            or str(skill.get("Status") or "").casefold() not in {"active", "provisional"}):
+        return None
+    config = skill.get("Config") or {}
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(config, dict) or not isinstance(config.get("defaults"), dict):
+        return None
+    defaults = config["defaults"]
+    query = _clean_text(defaults.get("native_research_query", ""))[:_MAX_QUERY_LENGTH]
+    if not query or _private_topic(query):
+        return None
+    return {
+        "active": True, "query": query, "strategy": "search",
+        "needs_topic": False, "news": defaults.get("native_research_news") is True,
+    }
+
+
 def resolve_research_request(user_message, messages):
     """Resolve current user text into a bounded, non-durable research plan."""
     request = _clean_text(user_message)

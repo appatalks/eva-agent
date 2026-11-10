@@ -17,6 +17,11 @@ while keeping configuration, approvals, and personal data under your control.
   can be filtered, job settings persist across restarts, and scheduled-task
   attempts show their outcome. Opt-in background ACP autonomy decides bounded
   permissions without interrupting chat and reports blocked actions.
+- **Network research:** web fetch can access localhost and private networks,
+  including redirects from public sites. Untrusted pages may therefore cause
+  requests to local services, including endpoints that act on GET requests.
+  Explicitly named research skills can run a configured news search and
+  report the bounded retrieval outcome before synthesizing a response.
 - **Opt-in goal work:** a local model can continue work in a retained, isolated
   Eva Ready worktree per goal, one round at a time, with randomized delays.
 - **Advisory PR readiness:** repository automation posts commit-specific
@@ -72,6 +77,8 @@ while keeping configuration, approvals, and personal data under your control.
   A local Mission log checklist preserves final debriefs across restarts before
   eligible finished crew are dismissed; active dependencies and a one-minute
   reuse window are protected.
+  The Captain's notepad records new workspace and background permission blocks
+  and supports confirmed deletion of individual entries or the entire log.
 - **Signal account linking:** Settings > Accounts provides a Link Signal button,
   an in-panel QR code, completion status, cancellation, and fresh codes after
   expiry. Existing recipients and prior local account files are preserved.

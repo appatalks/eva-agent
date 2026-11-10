@@ -15,7 +15,6 @@ Runs as a stdio MCP server (JSON-RPC over stdin/stdout).
 
 import html
 import http.client
-import ipaddress
 import json
 import math
 import os
@@ -36,7 +35,6 @@ _USER_AGENT = (
 )
 _WEB_FETCH_MAX_BYTES = 512 * 1024
 _WEB_FETCH_MAX_REDIRECTS = 4
-_WEB_FETCH_PORTS = {80, 443}
 _WEB_FETCH_REDIRECTS = {301, 302, 303, 307, 308}
 
 TOOLS = [
@@ -207,29 +205,7 @@ def _http_get(url, timeout=15):
         return 0, f"Error: {e}"
 
 
-def _public_address(address):
-    try:
-        parsed = ipaddress.ip_address(address)
-    except ValueError:
-        return False
-    return parsed.is_global and not any((
-        parsed.is_private,
-        parsed.is_loopback,
-        parsed.is_link_local,
-        parsed.is_reserved,
-        parsed.is_multicast,
-        parsed.is_unspecified,
-    ))
-
-
-def _resolve_public_addresses(hostname, port):
-    """Resolve a host and reject any answer that is not globally routable."""
-    try:
-        direct = ipaddress.ip_address(hostname)
-    except ValueError:
-        direct = None
-    if direct is not None:
-        return ([str(direct)], "") if _public_address(direct) else ([], "non_global_address")
+def _resolve_fetch_addresses(hostname, port):
     try:
         records = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
     except (OSError, socket.gaierror):
@@ -237,14 +213,12 @@ def _resolve_public_addresses(hostname, port):
     addresses = []
     for record in records:
         address = str(record[4][0])
-        if not _public_address(address):
-            return [], "non_global_address"
         if address not in addresses:
             addresses.append(address)
     return (addresses, "") if addresses else ([], "dns_unavailable")
 
 
-def _validate_public_fetch_url(url):
+def _validate_fetch_url(url):
     try:
         parsed = urllib.parse.urlsplit(str(url or ""))
         hostname = parsed.hostname or ""
@@ -258,14 +232,12 @@ def _validate_public_fetch_url(url):
         return None, "missing_hostname"
     if parsed.username is not None or parsed.password is not None:
         return None, "userinfo_not_allowed"
-    if port is not None and port not in _WEB_FETCH_PORTS:
-        return None, "port_not_allowed"
-    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith((".localhost", ".local", ".internal")):
-        return None, "local_hostname"
-    effective_port = port or (443 if parsed.scheme.lower() == "https" else 80)
-    addresses, reason = _resolve_public_addresses(hostname, effective_port)
+    if port == 0:
+        return None, "invalid_port"
+    effective_port = port if port is not None else (443 if parsed.scheme.lower() == "https" else 80)
+    addresses, reason = _resolve_fetch_addresses(hostname, effective_port)
     if not addresses:
-        return None, reason or "non_global_address"
+        return None, reason or "dns_unavailable"
     return {
         "url": str(url),
         "parsed": parsed,
@@ -346,7 +318,7 @@ def _pinned_http_get(target, timeout=20):
 def _guarded_http_fetch(url, timeout=20):
     current_url = str(url or "")
     for redirect_count in range(_WEB_FETCH_MAX_REDIRECTS + 1):
-        target, reason = _validate_public_fetch_url(current_url)
+        target, reason = _validate_fetch_url(current_url)
         if target is None:
             return 0, {}, "", current_url, "unsafe_url:" + reason
         status, headers, body, too_large, error = _pinned_http_get(target, timeout=timeout)
@@ -1027,7 +999,7 @@ def ddg_news(query, max_results=8):
 
 
 def web_fetch(url, max_length=6000):
-    """Fetch one public web page with pinned DNS and bounded redirects."""
+    """Fetch one web page with pinned DNS and bounded redirects."""
     try:
         max_length = min(max(100, int(max_length)), 20000)
     except (TypeError, ValueError):

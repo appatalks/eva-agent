@@ -570,7 +570,7 @@ from bridge.background import (  # noqa: F401
 from bridge.briefing import briefing_prompt_context, briefing_status, briefing_unavailable_sources, start_startup_briefing
 from bridge.audit import audit_event
 from bridge.model_policy import select_model_policy
-from bridge.research import resolve_research_request, retrieve_research, research_prompt, finalize_research_answer
+from bridge.research import resolve_research_request, research_plan_for_skill, retrieve_research, research_prompt, finalize_research_answer
 from bridge.telemetry import (  # noqa: F401
     _StdoutTee,
     _log_ring_add,
@@ -1766,6 +1766,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._subagent_cancel()
         elif parsed_path == "/v1/agents/reports/review":
             self._agent_report_review()
+        elif parsed_path == "/v1/agents/reports/delete/prepare":
+            self._agent_report_delete_prepare()
+        elif parsed_path == "/v1/agents/reports/delete":
+            self._agent_report_delete()
+        elif parsed_path == "/v1/agents/reports/research-permission":
+            self._agent_research_permission()
         elif parsed_path == "/v1/browser/run":
             self._browser_run()
         elif parsed_path == "/v1/desktop/run":
@@ -4263,9 +4269,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self._json_response(200, payload)
 
     def _agent_reports(self):
-        from bridge.mission_log import list_reports
+        from bridge.mission_log import list_reports, list_permission_blocks, research_permission
         try:
-            self._json_response(200, {"reports": list_reports()})
+            self._json_response(200, {"reports": list_reports(), "blocks": list_permission_blocks(),
+                                      "unverified_research_allowed": research_permission()})
         except (OSError, sqlite3.Error):
             self._json_response(503, {"error": {"message": "Mission log storage is unavailable. Reports were not dismissed."}})
 
@@ -4286,6 +4293,50 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(200, {"id": report_id, "reviewed": data["reviewed"]})
         except (OSError, sqlite3.Error):
             self._json_response(503, {"error": {"message": "Mission log could not save this checklist change."}})
+
+    def _agent_report_delete_prepare(self):
+        from bridge.mission_log import prepare_delete
+        data, error = self._read_json_body()
+        if error or not isinstance(data, dict):
+            self._json_response(400, {"error": {"message": "A deletion scope is required."}})
+            return
+        try:
+            token = prepare_delete(data.get("scope"))
+        except ValueError:
+            self._json_response(400, {"error": {"message": "Invalid deletion scope or too many pending confirmations."}})
+            return
+        self._json_response(200, {"scope": data["scope"], "confirmation": token})
+
+    def _agent_research_permission(self):
+        if not self._require_bridge_capability():
+            return
+        from bridge.mission_log import set_research_permission
+        data, error = self._read_json_body()
+        if error or not isinstance(data, dict) or not isinstance(data.get("allowed"), bool):
+            self._json_response(400, {"error": {"message": "A boolean permission decision is required."}})
+            return
+        try:
+            set_research_permission(data["allowed"])
+        except (OSError, sqlite3.Error):
+            self._json_response(503, {"error": {"message": "Research permission could not be saved."}})
+            return
+        self._json_response(200, {"allowed": data["allowed"]})
+
+    def _agent_report_delete(self):
+        from bridge.mission_log import delete_confirmed
+        data, error = self._read_json_body()
+        if error or not isinstance(data, dict) or not isinstance(data.get("confirmation"), str):
+            self._json_response(400, {"error": {"message": "A valid deletion confirmation is required."}})
+            return
+        try:
+            deleted = delete_confirmed(data.get("scope"), data["confirmation"])
+        except ValueError:
+            self._json_response(400, {"error": {"message": "Deletion confirmation is invalid or expired."}})
+            return
+        except (OSError, sqlite3.Error):
+            self._json_response(503, {"error": {"message": "Mission log could not delete these entries."}})
+            return
+        self._json_response(200, {"deleted": deleted})
 
     def _subagent_spawn(self):
         """Spawn an isolated subagent that runs a prompt concurrently."""
@@ -5388,6 +5439,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _skill_decision, _selected_skill, _weather_location = _skill_execution_for_request(
             _routing_message, _approved_approximate_location
         )
+        _skill_research_plan = None if internal or no_tools else research_plan_for_skill(
+            _routing_message, _skill_decision, _selected_skill
+        )
+        if _skill_research_plan:
+            research_plan = _skill_research_plan
+            native_research = True
+            _request_type = "web-search"
+            _fast_route = ""
+            _passive_recall = False
         _acp_permission_mode = "automation_no_tools" if no_tools else "passive_recall" if _passive_recall else (
             "workspace_auto" if acp_auto_approve else "interactive"
         )
@@ -5690,6 +5750,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         acp_model_used = ""
         if native_research:
             acp_data = research_prompt(research_receipt)
+            if _skill_research_plan:
+                acp_data += "\n\nUser-approved skill instructions:\n" + str(
+                    _selected_skill.get("Instructions") or ""
+                )[:8000]
             acp_model_used = "native-web-search"
         _preflight_ms = 0.0
         _preflight_attempted = bool(needs_acp_tools)
