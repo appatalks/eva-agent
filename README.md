@@ -24,6 +24,8 @@ while keeping configuration, approvals, and personal data under your control.
   requests to local services, including endpoints that act on GET requests.
   Explicitly named research skills can run a configured news search and
   report the bounded retrieval outcome before synthesizing a response.
+  Active ACP lookups stay connected within a bounded time budget; timeouts
+  surface as errors instead of silently completing with a progress message.
 - **Opt-in goal work:** a local model can continue work in a retained, isolated
   Eva Ready worktree per goal, one round at a time, with randomized delays.
 - **Advisory PR readiness:** repository automation posts commit-specific

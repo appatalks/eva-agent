@@ -678,6 +678,13 @@ process reuse without allowing one hidden ACP context to grow forever. ACP does
 not expose session deletion in the protocol version used here, so rotation drops
 old sessions from bridge routing while retaining only the bounded live route set.
 
+ACP prompt timeouts are idle budgets: matching text, thinking, plan, usage, and
+tool updates keep an active request connected, up to three times its original
+budget (six minutes for normal AIG replies). Only an actual ACP completion
+receipt finishes the turn. A timeout cancels the request and surfaces an error,
+not a successful partial answer; if cancellation is not acknowledged within five
+seconds, the bridge stops that owned client before it can serve another turn.
+
 Copilot CLI MCP exposure is process-scoped: an existing ACP session cannot safely
 change its server set for one request. The bridge therefore selects a narrow
 profile (`none`, `web`, `github`, or `kusto`) for ordinary routes and uses `broad`

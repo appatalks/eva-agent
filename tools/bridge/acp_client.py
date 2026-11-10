@@ -1022,7 +1022,11 @@ class ACPClient:
         """Send a JSON-RPC request and wait for the response."""
         rid = self._next_id()
         event = threading.Event()
-        self.pending[rid] = {"event": event, "result": None, "error": None}
+        started_at = time.monotonic()
+        entry = {"event": event, "result": None, "error": None}
+        if method == "session/prompt":
+            entry.update(session_id=params.get("sessionId"), last_activity_at=started_at)
+        self.pending[rid] = entry
 
         msg = json.dumps({
             "jsonrpc": "2.0",
@@ -1042,12 +1046,38 @@ class ACPClient:
             self.pending.pop(rid, None)
             return {"error": f"Copilot process pipe error: {e}"}
 
-        event.wait(timeout=timeout)
+        # Prompt updates renew the idle budget, but never the total time limit.
+        hard_deadline = started_at + timeout * (3 if method == "session/prompt" else 1)
+        while True:
+            remaining = min(
+                hard_deadline,
+                entry.get("last_activity_at", started_at) + timeout,
+            ) - time.monotonic()
+            if event.is_set() or (remaining > 0 and event.wait(timeout=remaining)):
+                break
+            if time.monotonic() >= min(
+                hard_deadline, entry.get("last_activity_at", started_at) + timeout
+            ):
+                if method == "session/prompt":
+                    notified = self._send_notification("session/cancel", {"sessionId": params.get("sessionId")})
+                    if not notified or not event.wait(timeout=5):
+                        # Do not let an abandoned turn emit into a later prompt.
+                        self.stop()
+                self.pending.pop(rid, None)
+                return {
+                    "error": "ACP request timed out before completion. Partial output is not a completed answer.",
+                    "stop_reason": "timeout",
+                }
 
         entry = self.pending.pop(rid, {})
         if entry.get("error"):
             return {"error": entry["error"]}
-        return entry.get("result")
+        result = entry.get("result")
+        if method == "session/prompt" and (
+            not isinstance(result, dict) or not result.get("stopReason")
+        ):
+            return {"error": "ACP prompt ended without a completion receipt."}
+        return result
 
     def _send_response(self, rid, result):
         """Send a JSON-RPC response (for server-initiated requests like requestPermission)."""
@@ -1179,6 +1209,17 @@ class ACPClient:
         """Accumulate text from agent_message_chunk updates."""
         update = params.get("update", {})
         update_type = update.get("sessionUpdate", "")
+        if update_type in {
+            "agent_message_chunk", "agent_thought_chunk", "tool_call",
+            "tool_call_update", "plan", "usage_update",
+        }:
+            session_id = params.get("sessionId") or params.get("session_id")
+            candidates = [
+                entry for entry in list(self.pending.values())
+                if "last_activity_at" in entry and (not session_id or entry["session_id"] == session_id)
+            ]
+            if len(candidates) == 1:
+                candidates[0]["last_activity_at"] = time.monotonic()
 
         if update_type == "agent_message_chunk":
             content = update.get("content", {})
@@ -1778,11 +1819,13 @@ class ACPClient:
             response_text, prompt_metrics = self._finish_prompt(pid)
         _ms = round((time.perf_counter() - _t0) * 1000.0, 1)
 
+        if not isinstance(result, dict) or not (result.get("stopReason") or result.get("error")):
+            result = {"error": "ACP prompt ended without a completion receipt."}
         if result and isinstance(result, dict):
             if "error" in result:
                 _telemetry_emit("acp_prompt", model=self.model or "default",
                                 prompt_chars=len(text or ""), response_chars=0,
-                                ms=_ms, stop_reason="error",
+                                ms=_ms, stop_reason=result.get("stop_reason", "error"),
                                 chunk_count=prompt_metrics["chunk_count"],
                                 first_chunk_ms=prompt_metrics["first_chunk_ms"])
                 return {"error": result["error"],
@@ -1849,11 +1892,13 @@ class ACPClient:
             response_text, prompt_metrics = self._finish_prompt(pid)
         _ms = round((time.perf_counter() - _t0) * 1000.0, 1)
 
+        if not isinstance(result, dict) or not (result.get("stopReason") or result.get("error")):
+            result = {"error": "ACP prompt ended without a completion receipt."}
         if result and isinstance(result, dict):
             if "error" in result:
                 _telemetry_emit("acp_vision", model=self.model or "default",
                                 prompt_chars=len(text or ""), response_chars=0,
-                                ms=_ms, stop_reason="error",
+                                ms=_ms, stop_reason=result.get("stop_reason", "error"),
                                 chunk_count=prompt_metrics["chunk_count"],
                                 first_chunk_ms=prompt_metrics["first_chunk_ms"])
                 return {"error": result["error"]}
