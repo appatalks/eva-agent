@@ -1447,9 +1447,11 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
 .agents-workspaces { display: flex; min-height: 0; }
 .agents-workspaces #workspaceWorkbench { height: 100%; min-width: 0; }
 .agents-view[data-view="workspaces"] .agent-detail,
-.agents-view[data-view="reports"] .agent-detail { display: none; }
+.agents-view[data-view="reports"] .agent-detail,
+.agents-view[data-view="security"] .agent-detail { display: none; }
 .agents-view[data-view="workspaces"] .agents-session-area,
-.agents-view[data-view="reports"] .agents-session-area { grid-template-columns: minmax(0, 1fr); }
+.agents-view[data-view="reports"] .agents-session-area,
+.agents-view[data-view="security"] .agents-session-area { grid-template-columns: minmax(0, 1fr); }
 .agents-reports { padding: 18px; overflow: auto; background: linear-gradient(135deg, #18323433, transparent 60%); }
 .mission-log-heading h2 { color: #dfecd3; font: 22px monospace; margin: 8px 0; }
 .mission-log-heading p, .mission-log-status { color: #9bb9b0; font: 11px/1.6 monospace; max-width: 850px; }
@@ -1461,6 +1463,10 @@ body.workspace-workbench-open .workspace-chat-drawer .input-controls-window { fl
 .mission-log-body { white-space: pre-wrap; overflow-wrap: anywhere; color: #d1e2d7; font: 12px/1.6 monospace; }
 .mission-log-report[data-reviewed="true"] { border-left-color: #68baa6; }
 .mission-log-report[data-reviewed="true"] .mission-log-check strong { color: #9cbaad; }
+.security-log-table-wrap { overflow-x: auto; }
+.security-log-table { width: 100%; border-collapse: collapse; color: #d1e2d7; font: 12px/1.5 monospace; }
+.security-log-table th, .security-log-table td { text-align: left; vertical-align: top; border-bottom: 1px solid #92c6b533; padding: 8px; }
+.security-log-table td:nth-child(2) { overflow-wrap: anywhere; min-width: 240px; }
 .signal-link-panel { margin: 12px 0 18px; padding: 12px; border: 1px solid rgba(120,220,232,0.2); border-radius: 6px; }
 .signal-link-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .signal-link-qr { display: block; width: min(280px, 100%); height: auto; margin: 12px auto; padding: 8px; background: #fff; image-rendering: pixelated; }

@@ -1636,6 +1636,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._agents_overview()
         elif parsed_path == "/v1/security/image":
             self._security_image()
+        elif parsed_path == "/v1/security/log":
+            self._security_log()
         elif parsed_path == "/v1/agents/reports":
             self._agent_reports()
         elif parsed_path == "/v1/signal/link":
@@ -1806,6 +1808,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._security_approve_image()
         elif parsed_path == "/v1/security/analyze":
             self._security_analyze()
+        elif parsed_path == "/v1/security/url-observation":
+            self._security_url_observation()
+        elif parsed_path == "/v1/security/url-logging":
+            self._security_url_logging()
         elif parsed_path == "/v1/browser/run":
             self._browser_run()
         elif parsed_path == "/v1/desktop/run":
@@ -4090,6 +4096,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 }).encode()
                 req = urllib.request.Request(lms_base + "/chat/completions", data=payload,
                                             headers={"Content-Type": "application/json"}, method="POST")
+                from bridge.security_urls import observe_request
+                observe_request("POST", lms_base + "/chat/completions")
                 with urllib.request.urlopen(req, timeout=120) as resp:
                     body = json.loads(resp.read())
                 result_text = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
@@ -4170,6 +4178,54 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
     # Subagent parallelism
     # ------------------------------------------------------------------
+    def _security_log(self):
+        if not self._require_bridge_capability():
+            return
+        from bridge.mission_log import list_permission_blocks, list_url_observations, research_permission, url_logging_enabled
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        try:
+            url_offset = max(0, min(1000000000, int(params.get("url_offset", ["0"])[0])))
+            block_offset = max(0, min(1000000000, int(params.get("block_offset", ["0"])[0])))
+        except (TypeError, ValueError):
+            self._json_response(400, {"error": {"message": "Invalid security log offset."}})
+            return
+        try:
+            urls = list_url_observations(101, url_offset)
+            blocks = list_permission_blocks(101, block_offset)
+            self._json_response(200, {
+                "urls": urls[:100], "urls_more": len(urls) > 100,
+                "blocks": blocks[:100], "blocks_more": len(blocks) > 100,
+                "unverified_research_allowed": research_permission(),
+                "url_logging_enabled": url_logging_enabled(),
+            })
+        except (OSError, sqlite3.Error):
+            self._json_response(503, {"error": {"message": "Security log is unavailable."}})
+
+    def _security_url_observation(self):
+        if not self._require_bridge_capability():
+            return
+        data, error = self._workspace_body()
+        if error or set(data) - {"method", "url"} or not isinstance(data.get("url"), str) or not isinstance(data.get("method"), str):
+            self._json_response(400, {"error": {"message": "Invalid URL observation."}})
+            return
+        from bridge.security_urls import observe_request
+        observe_request(data["method"], data["url"])
+        self._json_response(202, {"accepted": True})
+
+    def _security_url_logging(self):
+        if not self._require_bridge_capability():
+            return
+        data, error = self._workspace_body()
+        if error or set(data) != {"enabled"} or not isinstance(data.get("enabled"), bool):
+            self._json_response(400, {"error": {"message": "A boolean URL logging decision is required."}})
+            return
+        from bridge.mission_log import set_url_logging_enabled
+        try:
+            set_url_logging_enabled(data["enabled"])
+            self._json_response(200, {"enabled": data["enabled"]})
+        except (OSError, sqlite3.Error):
+            self._json_response(503, {"error": {"message": "URL logging preference could not be saved."}})
+
     def _security_image(self):
         if not self._require_bridge_capability():
             return
@@ -6292,6 +6348,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     lms_payload["reasoning_effort"] = reasoning_effort
                 if stream_state and not native_research:
                     lms_payload["stream"] = True
+                from bridge.security_urls import observe_request
+                observe_request("POST", lms_base + "/chat/completions")
                 lms_resp = _req.post(
                     lms_base + "/chat/completions",
                     json=lms_payload,
@@ -6541,8 +6599,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 )
                 if stream_state and not native_research:
                     openai_payload["stream"] = True
+                openai_url = _openai_chat_completions_url()
+                from bridge.security_urls import observe_request
+                observe_request("POST", openai_url)
                 openai_resp = _req.post(
-                    _openai_chat_completions_url(),
+                    openai_url,
                     headers={
                         "Authorization": f"Bearer {openai_api_key}",
                         "Content-Type": "application/json",
@@ -7822,8 +7883,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     ],
                 }]
                 payload = _openai_chat_payload(model, messages, reasoning_effort, 1200)
+                openai_url = _openai_chat_completions_url()
+                from bridge.security_urls import observe_request
+                observe_request("POST", openai_url)
                 response = _req.post(
-                    _openai_chat_completions_url(),
+                    openai_url,
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                     json=payload,
                     timeout=60,

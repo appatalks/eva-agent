@@ -650,6 +650,7 @@
           <button id="agentsCardsTab" type="button" role="tab" aria-selected="false" aria-controls="agentsGrid" tabindex="-1">Session cards</button>
           <button id="agentsWorkspacesTab" type="button" role="tab" aria-selected="false" aria-controls="agentsWorkspaces" tabindex="-1">Workspaces</button>
           <button id="agentsReportsTab" type="button" role="tab" aria-selected="false" aria-controls="agentsReports" tabindex="-1">Mission log</button>
+          <button id="agentsSecurityTab" type="button" role="tab" aria-selected="false" aria-controls="agentsSecurity" tabindex="-1">Security log</button>
         </div>
         <span id="agentsTelemetryState" class="agent-telemetry-state" role="status">Connecting to runtime</span>
       </div>
@@ -679,15 +680,28 @@
           <div id="agentsGrid" class="agents-grid" role="tabpanel" aria-labelledby="agentsCardsTab" hidden></div>
           <section id="agentsWorkspaces" class="agents-workspaces" role="tabpanel" aria-labelledby="agentsWorkspacesTab" hidden></section>
           <section id="agentsReports" class="agents-reports" role="tabpanel" aria-labelledby="agentsReportsTab" hidden>
-            <header class="mission-log-heading"><span class="agents-kicker">MISSION DEBRIEF / LOCAL ARCHIVE</span><h2>Captain's notepad</h2><p>Permission blocks are recorded as they happen. Existing debriefs may not contain permission details. Reviewing a report does not mean the task succeeded.</p><button id="missionLogClear" type="button">Clear all entries</button></header>
+            <header class="mission-log-heading"><span class="agents-kicker">MISSION DEBRIEF / LOCAL ARCHIVE</span><h2>Captain's notepad</h2><p>Reviewing a report does not mean the task succeeded. Permission blocks are in the Security log.</p><button id="missionLogClear" type="button">Clear debriefs</button></header>
             <p id="missionLogStatus" class="mission-log-status" role="status">Awaiting report archive.</p>
+            <h3>Agent debriefs</h3>
+            <div id="missionLogReports" class="mission-log-reports"></div>
+          </section>
+          <section id="agentsSecurity" class="agents-reports" role="tabpanel" aria-labelledby="agentsSecurityTab" hidden>
+            <header class="mission-log-heading"><span class="agents-kicker">SECURITY / LOCAL ARCHIVE</span><h2>Security log</h2><p>When enabled, HTTP(S) URLs are stored locally without query strings, fragments, or userinfo. Recording starts only after enabling; previous URLs are not backfilled, and pausing preserves existing entries. This is a best-effort log of visible browser fetches, native web/MCP requests, and ACP tool inputs and results—not complete operating-system network monitoring. Requests are attempts, not proof of delivery; proposed and discovered URLs do not prove a request was made. Hits count observations; repeated occurrences within one tool result count once.</p><button id="securityLogClear" type="button">Clear permission blocks and URL observations</button></header>
+            <p id="securityLogStatus" class="mission-log-status" role="status">Awaiting security log.</p>
+            <div class="background-actions"><button id="securityUrlEnable" type="button">Enable URL logging</button><button id="securityUrlDisable" type="button">Pause URL logging</button></div>
+            <p id="securityUrlLoggingStatus" class="mission-log-status"></p>
+            <h3>URL observations</h3>
+            <div class="security-log-table-wrap"><table class="security-log-table">
+              <thead><tr><th scope="col">Type</th><th scope="col">URL</th><th scope="col">Hits</th><th scope="col">Observation</th><th scope="col">Last seen</th></tr></thead>
+              <tbody id="securityLogUrlBody"></tbody>
+            </table></div>
+            <div class="background-actions"><button id="securityUrlPrevious" type="button">Previous URLs</button><button id="securityUrlNext" type="button">Next URLs</button></div>
             <h3>Permission blocks</h3>
             <p class="mission-log-status">These permission requests were blocked; other actions in the run may have occurred. Unverified research permission applies to future background search/fetch requests only. A tool's label does not guarantee it is read-only.</p>
             <div class="background-actions"><button id="missionLogAllowResearch" type="button">Allow unverified research</button><button id="missionLogDenyResearch" type="button">Deny unverified research</button></div>
             <p id="missionLogResearchStatus" class="mission-log-status"></p>
             <div id="missionLogBlocks" class="mission-log-reports"></div>
-            <h3>Agent debriefs</h3>
-            <div id="missionLogReports" class="mission-log-reports"></div>
+            <div class="background-actions"><button id="securityBlockPrevious" type="button">Previous blocks</button><button id="securityBlockNext" type="button">Next blocks</button></div>
           </section>
       <section id="agentsMemory" class="agent-graph" role="tabpanel" aria-labelledby="agentsMemoryTab" hidden>
         <div class="agent-graph-heading">

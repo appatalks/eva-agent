@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 import re
 import signal
 import stat
@@ -85,10 +86,79 @@ def _podman_command(arguments, timeout=15):
         raise SandboxError("The rootless container runtime is unavailable.", "runtime_unavailable") from error
 
 
-def sandbox_candidate():
-    info = _podman_command(["info", "--format", "{{.Host.Security.Rootless}}"])
-    if info.returncode or info.stdout.strip().lower() != "true":
+def _runtime_security():
+    info = _podman_command(["info", "--format", "json"])
+    try:
+        security = json.loads(info.stdout)["host"]["security"]
+    except (ValueError, KeyError, TypeError):
+        raise SandboxError("Podman security settings could not be verified.", "runtime_unavailable") from None
+    if info.returncode or not isinstance(security, dict) or security.get("rootless") is not True:
         raise SandboxError("Rootless Podman is unavailable; sandbox execution was not started.", "runtime_unavailable")
+    if security.get("seccompEnabled") is not True:
+        raise SandboxError("Podman seccomp is unavailable; sandbox execution was not started.", "runtime_unavailable")
+    if platform.machine().lower() not in {"x86_64", "aarch64"}:
+        raise SandboxError("Sandbox namespace filtering is unavailable on this CPU architecture.", "runtime_unavailable")
+    return security
+
+
+def _hardened_seccomp_profile(security):
+    profile_path = security.get("seccompProfilePath")
+    if not isinstance(profile_path, str) or not os.path.isabs(profile_path):
+        raise SandboxError("The Podman seccomp profile cannot be verified.", "runtime_unavailable")
+    path = os.path.realpath(profile_path)
+    try:
+        current = path
+        while True:
+            info = os.stat(current)
+            if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise SandboxError("The Podman seccomp profile is not trusted.", "runtime_unavailable")
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as file:
+            info = os.fstat(file.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+                raise SandboxError("The Podman seccomp profile is invalid.", "runtime_unavailable")
+            profile = json.load(file)
+    except (OSError, ValueError, UnicodeError) as error:
+        raise SandboxError("The Podman seccomp profile cannot be read safely.", "runtime_unavailable") from error
+    return _restrict_seccomp_profile(profile)
+
+
+def _restrict_seccomp_profile(profile):
+    if (not isinstance(profile, dict) or profile.get("defaultAction") != "SCMP_ACT_ERRNO"
+            or not isinstance(profile.get("syscalls"), list)):
+        raise SandboxError("The Podman seccomp profile is not compatible with namespace filtering.", "runtime_unavailable")
+    restricted = {"unshare", "setns", "clone", "clone3"}
+    rules = []
+    clone_rules = []
+    for rule in profile["syscalls"]:
+        if not isinstance(rule, dict) or not isinstance(rule.get("names"), list):
+            raise SandboxError("The Podman seccomp profile contains an invalid rule.", "runtime_unavailable")
+        names = rule["names"]
+        if any(not isinstance(name, str) for name in names):
+            raise SandboxError("The Podman seccomp profile contains an invalid rule.", "runtime_unavailable")
+        if "clone" in names:
+            clone_rules.append(rule)
+        filtered = [name for name in names if name not in restricted]
+        if filtered:
+            rules.append(dict(rule, names=filtered))
+    if (len(clone_rules) != 1 or clone_rules[0].get("action") != "SCMP_ACT_ALLOW"
+            or clone_rules[0].get("args") or clone_rules[0].get("includes") or clone_rules[0].get("excludes")):
+        raise SandboxError("The Podman seccomp clone baseline is not compatible with namespace filtering.", "runtime_unavailable")
+    rules.append({"names": ["clone3"], "action": "SCMP_ACT_ERRNO", "errnoRet": 38, "args": []})
+    rules.append({
+        "names": ["clone"], "action": "SCMP_ACT_ALLOW",
+        "args": [{"index": 0, "value": 0x10000000, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}],
+    })
+    profile["syscalls"] = rules
+    return profile
+
+
+def sandbox_candidate():
+    _hardened_seccomp_profile(_runtime_security())
     image = _podman_command(["image", "inspect", "--format", "{{.Id}}", _IMAGE])
     image_id = image.stdout.strip().removeprefix("sha256:")
     if image.returncode or not _IMAGE_ID.fullmatch(image_id):
@@ -412,12 +482,19 @@ def run_self_test():
         workspace = os.path.join(directory, "workspace")
         os.mkdir(workspace, 0o700)
         command = (
-            "python3 -c 'import os; "
+            "python3 -c 'import ctypes,os,subprocess,threading; "
             "assert not os.path.exists(\"/run/podman/podman.sock\"); "
             "assert not os.path.exists(\"/root/.ssh\"); "
             "assert set(os.listdir(\"/sys/class/net\")) == {\"lo\"}; "
             "assert len(open(\"/proc/net/route\").readlines()) == 1; "
             "assert not any(k.lower().endswith(\"_proxy\") for k in os.environ); "
+            "libc=ctypes.CDLL(None,use_errno=True); "
+            "assert libc.unshare(0x10000000) == -1; "
+            "clone_nr=56 if os.uname().machine == \"x86_64\" else 220; "
+            "assert libc.syscall(clone_nr,0x10000011,0,0,0,0) == -1; "
+            "assert libc.syscall(435,0,0) == -1 and ctypes.get_errno() == 38; "
+            "t=threading.Thread(target=lambda:None); t.start(); t.join(); "
+            "subprocess.run([\"/bin/true\"],check=True); "
             "print(\"sandbox boundary checks passed\")'"
         )
         try:
@@ -447,6 +524,11 @@ def run_in_sandbox(workspace, image_id, command, timeout=120, cancel=None):
         record_event("boundary", "blocked", getattr(error, "reason", ""))
         raise
     with tempfile.TemporaryDirectory(prefix="eva-sandbox-") as directory:
+        profile_path = os.path.join(directory, "seccomp.json")
+        profile = _hardened_seccomp_profile(_runtime_security())
+        descriptor = os.open(profile_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+            json.dump(profile, file)
         lease_id = uuid.uuid4().hex
         name = "eva-sandbox-" + lease_id
         lease_path = _create_lease(lease_id, name)
@@ -456,7 +538,8 @@ def run_in_sandbox(workspace, image_id, command, timeout=120, cancel=None):
             "--label", "io.eva.sandbox=true", "--label", "io.eva.sandbox.lease=" + lease_id,
             "--network=none", "--http-proxy=false",
             "--userns=keep-id", "--user", f"{os.getuid()}:{os.getgid()}",
-            "--cap-drop=all", "--security-opt=no-new-privileges", "--read-only",
+            "--cap-drop=all", "--security-opt=no-new-privileges",
+            "--security-opt=seccomp=" + profile_path, "--read-only",
             "--pids-limit=64", "--memory=512m", "--cpus=2",
             "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m",
             "--volume", root + ":/workspace:rw", "--workdir", "/workspace",

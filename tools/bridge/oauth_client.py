@@ -253,6 +253,8 @@ def _http_json(url, method="GET", data=None, headers=None, timeout=DEFAULT_TIMEO
         request_headers["Content-Type"] = "application/x-www-form-urlencoded"
     request_headers.update(headers or {})
     request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
+    from bridge.security_urls import observe_request
+    observe_request(method, url)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = response.read(MAX_METADATA_BYTES + 1)

@@ -41,6 +41,13 @@ def _database():
             "CREATE TABLE IF NOT EXISTS permission_policies ("
             "category TEXT PRIMARY KEY, allowed INTEGER NOT NULL)"
         )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS url_observations ("
+            "id TEXT PRIMARY KEY, method TEXT NOT NULL, url TEXT NOT NULL, "
+            "observation TEXT NOT NULL, hits INTEGER NOT NULL DEFAULT 1, "
+            "first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, "
+            "UNIQUE(method, url, observation))"
+        )
         with connection:
             yield connection
     finally:
@@ -105,13 +112,77 @@ def record_permission_block(source, tool_kind, reason):
     return block_id
 
 
-def list_permission_blocks(limit=100):
+def list_permission_blocks(limit=100, offset=0):
     with _database() as database:
         rows = database.execute(
             "SELECT id,created_at,source,tool_kind,reason FROM permission_blocks "
-            "ORDER BY created_at DESC, rowid DESC LIMIT ?", (min(100, max(1, limit)),),
+            "ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            (min(200, max(1, limit)), max(0, offset)),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def record_url_observations(observations):
+    from bridge.security_urls import sanitize_url
+    valid = []
+    for item in observations:
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            continue
+        method, url, observation = item
+        method = str(method or "").upper()
+        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+            method = "UNKNOWN"
+        clean = sanitize_url(url)
+        if clean and isinstance(observation, str) and observation in {"request", "proposed", "denied", "discovered"}:
+            valid.append((uuid.uuid4().hex, method, clean, observation))
+    if not valid:
+        return
+    with _database() as database:
+        enabled = database.execute(
+            "SELECT allowed FROM permission_policies WHERE category='url_observation_enabled'"
+        ).fetchone()
+        if not enabled or not enabled["allowed"]:
+            return
+        database.execute("BEGIN IMMEDIATE")
+        enabled = database.execute(
+            "SELECT allowed FROM permission_policies WHERE category='url_observation_enabled'"
+        ).fetchone()
+        if not enabled or not enabled["allowed"]:
+            return
+        database.executemany(
+            "INSERT INTO url_observations(id,method,url,observation,hits,first_seen,last_seen) "
+            "VALUES (?,?,?,?,1,strftime('%Y-%m-%dT%H:%M:%SZ','now'),strftime('%Y-%m-%dT%H:%M:%SZ','now')) "
+            "ON CONFLICT(method,url,observation) DO UPDATE SET hits=hits+1,last_seen=excluded.last_seen",
+            valid,
+        )
+
+
+def list_url_observations(limit=100, offset=0):
+    with _database() as database:
+        rows = database.execute(
+            "SELECT id,method,url,observation,hits,first_seen,last_seen FROM url_observations "
+            "ORDER BY last_seen DESC,rowid DESC LIMIT ? OFFSET ?",
+            (min(200, max(1, limit)), max(0, offset)),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def url_logging_enabled():
+    with _database() as database:
+        row = database.execute(
+            "SELECT allowed FROM permission_policies WHERE category='url_observation_enabled'"
+        ).fetchone()
+    return bool(row and row["allowed"])
+
+
+def set_url_logging_enabled(allowed):
+    if not isinstance(allowed, bool):
+        raise ValueError("URL logging permission must be boolean")
+    with _database() as database:
+        database.execute(
+            "INSERT INTO permission_policies(category,allowed) VALUES ('url_observation_enabled',?) "
+            "ON CONFLICT(category) DO UPDATE SET allowed=excluded.allowed", (int(allowed),)
+        )
 
 
 def research_permission():
@@ -134,7 +205,7 @@ def set_research_permission(allowed):
 
 
 def prepare_delete(scope):
-    if scope != "all" and not (isinstance(scope, str) and re.fullmatch(r"(?:report|block):[a-f0-9]{32}", scope)):
+    if not isinstance(scope, str) or (scope not in {"all", "reports", "security"} and not re.fullmatch(r"(?:report|block):[a-f0-9]{32}", scope)):
         raise ValueError("Invalid deletion scope")
     token = uuid.uuid4().hex
     now = time.monotonic()
@@ -155,11 +226,16 @@ def delete_confirmed(scope, token):
     if not confirmation or confirmation[0] != scope or confirmation[1] <= now:
         raise ValueError("Deletion confirmation expired or invalid")
     with _database() as database:
-        if scope == "all":
+        if scope in {"all", "reports"}:
             database.execute("INSERT OR IGNORE INTO deleted_reports SELECT id FROM reports")
             reports = database.execute("DELETE FROM reports").rowcount
+            blocks = database.execute("DELETE FROM permission_blocks").rowcount if scope == "all" else 0
+            urls = database.execute("DELETE FROM url_observations").rowcount if scope == "all" else 0
+            return reports + blocks + urls
+        if scope == "security":
             blocks = database.execute("DELETE FROM permission_blocks").rowcount
-            return reports + blocks
+            urls = database.execute("DELETE FROM url_observations").rowcount
+            return blocks + urls
         if scope.startswith("report:"):
             report_id = scope[7:]
             database.execute("INSERT OR IGNORE INTO deleted_reports VALUES (?)", (report_id,))

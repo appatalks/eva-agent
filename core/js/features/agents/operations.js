@@ -28,6 +28,9 @@ var EvaAgents = (function() {
     lastSyncAt: 0,
     telemetryError: '',
     reportsSequence: 0,
+    securitySequence: 0,
+    securityUrlOffset: 0,
+    securityBlockOffset: 0,
     primaryTurns: new Map(),
     primaryTurnSequence: 0,
     clockTimer: null,
@@ -74,9 +77,10 @@ var EvaAgents = (function() {
   }
 
   function setView(view) {
-    state.view = ['floor', 'memory', 'cards', 'workspaces', 'reports'].indexOf(view) === -1 ? 'floor' : view;
+    state.view = ['floor', 'memory', 'cards', 'workspaces', 'reports', 'security'].indexOf(view) === -1 ? 'floor' : view;
     var views = { floor: ['agentsFloorTab', 'agentsFloor'], memory: ['agentsMemoryTab', 'agentsMemory'], cards: ['agentsCardsTab', 'agentsGrid'],
-      workspaces: ['agentsWorkspacesTab', 'agentsWorkspaces'], reports: ['agentsReportsTab', 'agentsReports'] };
+      workspaces: ['agentsWorkspacesTab', 'agentsWorkspaces'], reports: ['agentsReportsTab', 'agentsReports'],
+      security: ['agentsSecurityTab', 'agentsSecurity'] };
     Object.keys(views).forEach(function(key) {
       var tab = document.getElementById(views[key][0]);
       var panel = document.getElementById(views[key][1]);
@@ -87,7 +91,7 @@ var EvaAgents = (function() {
       if (panel) panel.hidden = key !== state.view;
     });
     try { localStorage.setItem('evaAgentObservatoryView', state.view); } catch (_) {}
-    var fullWidth = state.view === 'workspaces' || state.view === 'reports';
+    var fullWidth = state.view === 'workspaces' || state.view === 'reports' || state.view === 'security';
     if (fullWidth) closeDetail();
     document.getElementById('agentsView').dataset.view = state.view;
     if (window.EvaWorkspaces && state.open) {
@@ -95,6 +99,7 @@ var EvaAgents = (function() {
       else window.EvaWorkspaces.closeWorkbench(true);
     }
     if (state.open && state.view === 'reports') refreshReports();
+    if (state.open && state.view === 'security') refreshSecurity();
     if (typeof EvaBridgeScene !== 'undefined') EvaBridgeScene.setActive(state.open && state.view === 'floor');
     if (state.open && state.view === 'memory') {
       startGraph();
@@ -234,7 +239,10 @@ var EvaAgents = (function() {
   }
 
   async function deleteMissionLogEntry(scope, button) {
-    var prompt = scope === 'all' ? 'Permanently delete all notepad entries?' : 'Permanently delete this notepad entry?';
+    var security = scope === 'security' || scope.indexOf('block:') === 0;
+    var prompt = scope === 'reports' ? 'Permanently delete all mission debriefs?' :
+      scope === 'security' ? 'Permanently delete all permission blocks and URL observations?' :
+      'Permanently delete this entry?';
     if (!confirm(prompt)) return;
     button.disabled = true;
     try {
@@ -254,11 +262,18 @@ var EvaAgents = (function() {
       }));
       var receipt = await response.json();
       if (!response.ok || typeof receipt.deleted !== 'number') throw new Error('Deletion was not confirmed.');
-      state.reportsSequence++;
-      await refreshReports();
-      setText('missionLogStatus', 'Deleted ' + receipt.deleted + ' notepad entries.');
+      if (security) {
+        state.securityUrlOffset = 0;
+        state.securityBlockOffset = 0;
+        await refreshSecurity();
+        setText('securityLogStatus', 'Deleted ' + receipt.deleted + ' security entries.');
+      } else {
+        state.reportsSequence++;
+        await refreshReports();
+        setText('missionLogStatus', 'Deleted ' + receipt.deleted + ' debrief entries.');
+      }
     } catch (error) {
-      setText('missionLogStatus', error.message || 'Deletion failed.');
+      setText(security ? 'securityLogStatus' : 'missionLogStatus', error.message || 'Deletion failed.');
     } finally { button.disabled = false; }
   }
 
@@ -276,11 +291,28 @@ var EvaAgents = (function() {
       });
       var receipt = await response.json();
       if (!response.ok || receipt.allowed !== allowed) throw new Error('Permission change was not confirmed.');
-      state.reportsSequence++;
-      await refreshReports();
+      await refreshSecurity();
     } catch (error) {
-      setText('missionLogStatus', error.message || 'Permission change failed.');
+      setText('securityLogStatus', error.message || 'Permission change failed.');
     } finally { allow.disabled = deny.disabled = false; }
+  }
+
+  async function setSecurityUrlLogging(enabled) {
+    if (enabled && !confirm('Record visible URLs locally until cleared? Query strings, fragments, and userinfo are removed, but hostnames and paths can still be sensitive.')) return;
+    var enable = document.getElementById('securityUrlEnable');
+    var disable = document.getElementById('securityUrlDisable');
+    enable.disabled = disable.disabled = true;
+    try {
+      var response = await fetch(bridgeUrl() + '/v1/security/url-logging', {
+        method: 'POST', headers: getBridgeCapabilityHeaders(),
+        body: JSON.stringify({ enabled: enabled }), signal: AbortSignal.timeout(8000)
+      });
+      var result = await response.json();
+      if (!response.ok || result.enabled !== enabled) throw new Error('URL logging preference was not confirmed.');
+      await refreshSecurity();
+    } catch (error) {
+      setText('securityLogStatus', error.message || 'URL logging preference could not be saved.');
+    } finally { enable.disabled = disable.disabled = false; }
   }
 
   function debriefText(text) {
@@ -303,24 +335,6 @@ var EvaAgents = (function() {
       var payload = await response.json();
       if (sequence !== state.reportsSequence) return;
       if (!Array.isArray(payload.reports)) throw new Error('Invalid report archive.');
-      setText('missionLogResearchStatus', payload.unverified_research_allowed
-        ? 'Unverified background research: allowed for future requests.'
-        : 'Unverified background research: denied for future requests.');
-      var blocksHost = document.getElementById('missionLogBlocks');
-      blocksHost.replaceChildren();
-      (Array.isArray(payload.blocks) ? payload.blocks : []).forEach(function(block) {
-        var card = element('article', 'mission-log-report');
-        card.append(element('strong', '', (block.source === 'workspace' ? 'Workspace' : 'Background') +
-          ' ' + String(block.tool_kind || 'action') + ' blocked'));
-        card.append(element('p', 'mission-log-meta', new Date(block.created_at).toLocaleString()));
-        card.append(element('p', 'mission-log-body', 'Reason: ' + String(block.reason || 'unknown').replace(/_/g, ' ')));
-        var remove = element('button', '', 'Delete');
-        remove.type = 'button';
-        remove.addEventListener('click', function() { deleteMissionLogEntry('block:' + block.id, remove); });
-        card.append(remove);
-        blocksHost.append(card);
-      });
-      if (!blocksHost.children.length) blocksHost.append(element('p', 'mission-log-status', 'No permission blocks recorded yet.'));
       var host = document.getElementById('missionLogReports');
       var existing = {};
       host.querySelectorAll('[data-report-id]').forEach(function(node) { existing[node.dataset.reportId] = node; });
@@ -371,9 +385,70 @@ var EvaAgents = (function() {
         delete existing[report.id];
       });
       Object.keys(existing).forEach(function(id) { existing[id].remove(); });
-      setText('missionLogStatus', 'Showing up to 100 recent blocks and 100 debriefs; stored locally.');
+      setText('missionLogStatus', 'Showing up to 100 recent debriefs; stored locally.');
     } catch (error) {
       if (sequence === state.reportsSequence) setText('missionLogStatus', 'Archive unavailable. Last loaded reports retained. ' + error.message);
+    }
+  }
+
+  async function refreshSecurity() {
+    var sequence = ++state.securitySequence;
+    try {
+      var response = await fetch(bridgeUrl() + '/v1/security/log?url_offset=' + state.securityUrlOffset +
+        '&block_offset=' + state.securityBlockOffset, { headers: getBridgeCapabilityHeaders(), signal: AbortSignal.timeout(8000) });
+      if (!response.ok) throw new Error('Security log returned ' + response.status);
+      var payload = await response.json();
+      if (sequence !== state.securitySequence) return;
+      if (!Array.isArray(payload.urls) || !Array.isArray(payload.blocks)) throw new Error('Invalid security log.');
+      setText('missionLogResearchStatus', payload.unverified_research_allowed
+        ? 'Unverified background research: allowed for future requests.'
+        : 'Unverified background research: denied for future requests.');
+      setText('securityUrlLoggingStatus', payload.url_logging_enabled
+        ? 'URL logging is enabled. Existing observations remain until cleared.'
+        : 'URL logging is paused. Existing observations remain until cleared.');
+      var body = document.getElementById('securityLogUrlBody');
+      body.replaceChildren();
+      payload.urls.forEach(function(item) {
+        var row = document.createElement('tr');
+        [item.method || 'UNKNOWN', item.url || '', String(item.hits || 0),
+          String(item.observation || '').replace(/_/g, ' '),
+          item.last_seen ? new Date(item.last_seen).toLocaleString() : ''].forEach(function(value) {
+          row.appendChild(element('td', '', value));
+        });
+        body.appendChild(row);
+      });
+      if (!payload.urls.length) {
+        var empty = document.createElement('tr');
+        var cell = element('td', '', 'No URL observations on this page.');
+        cell.colSpan = 5;
+        empty.appendChild(cell);
+        body.appendChild(empty);
+      }
+      var blocksHost = document.getElementById('missionLogBlocks');
+      blocksHost.replaceChildren();
+      payload.blocks.forEach(function(block) {
+        var card = element('article', 'mission-log-report');
+        card.append(element('strong', '', (block.source === 'workspace' ? 'Workspace' : 'Background') +
+          ' ' + String(block.tool_kind || 'action') + ' blocked'));
+        card.append(element('p', 'mission-log-meta', new Date(block.created_at).toLocaleString()));
+        card.append(element('p', 'mission-log-body', 'Reason: ' + String(block.reason || 'unknown').replace(/_/g, ' ')));
+        var remove = element('button', '', 'Delete');
+        remove.type = 'button';
+        remove.addEventListener('click', function() { deleteMissionLogEntry('block:' + block.id, remove); });
+        card.append(remove);
+        blocksHost.append(card);
+      });
+      if (!payload.blocks.length) blocksHost.append(element('p', 'mission-log-status', 'No permission blocks on this page.'));
+      document.getElementById('securityUrlPrevious').disabled = state.securityUrlOffset === 0;
+      document.getElementById('securityUrlNext').disabled = !payload.urls_more;
+      document.getElementById('securityBlockPrevious').disabled = state.securityBlockOffset === 0;
+      document.getElementById('securityBlockNext').disabled = !payload.blocks_more;
+      setText('securityLogStatus', 'URLs ' + (payload.urls.length ? state.securityUrlOffset + 1 : 0) + '–' +
+        (payload.urls.length ? state.securityUrlOffset + payload.urls.length : 0) +
+        '; blocks ' + (payload.blocks.length ? state.securityBlockOffset + 1 : 0) + '–' +
+        (payload.blocks.length ? state.securityBlockOffset + payload.blocks.length : 0) + '. Stored until cleared.');
+    } catch (error) {
+      if (sequence === state.securitySequence) setText('securityLogStatus', 'Security log unavailable. ' + error.message);
     }
   }
 
@@ -399,6 +474,7 @@ var EvaAgents = (function() {
       state.telemetryError = '';
       render();
       if (state.open && state.view === 'reports') refreshReports();
+      if (state.open && state.view === 'security') refreshSecurity();
     } catch (error) {
       if (sequence !== state.refreshSequence) return;
       if (error && error.name === 'AbortError' && !timedOut) return;
@@ -1440,15 +1516,18 @@ var EvaAgents = (function() {
     var detailClose = document.getElementById('agentDetailClose');
     var memoryReviewButton = document.getElementById('agentGraphMemoryReview');
     var clearMissionLog = document.getElementById('missionLogClear');
+    var clearSecurityLog = document.getElementById('securityLogClear');
     var allowMissionResearch = document.getElementById('missionLogAllowResearch');
     var denyMissionResearch = document.getElementById('missionLogDenyResearch');
+    var enableSecurityUrls = document.getElementById('securityUrlEnable');
+    var disableSecurityUrls = document.getElementById('securityUrlDisable');
     var workbench = document.getElementById('workspaceWorkbench');
     var workspacesHost = document.getElementById('agentsWorkspaces');
     if (workbench && workspacesHost) workspacesHost.appendChild(workbench);
     try { state.view = localStorage.getItem('evaAgentObservatoryView') || 'floor'; } catch (_) {}
     setView(state.view);
-    var tabIds = ['agentsFloorTab', 'agentsMemoryTab', 'agentsCardsTab', 'agentsWorkspacesTab', 'agentsReportsTab'];
-    var viewNames = ['floor', 'memory', 'cards', 'workspaces', 'reports'];
+    var tabIds = ['agentsFloorTab', 'agentsMemoryTab', 'agentsCardsTab', 'agentsWorkspacesTab', 'agentsReportsTab', 'agentsSecurityTab'];
+    var viewNames = ['floor', 'memory', 'cards', 'workspaces', 'reports', 'security'];
     tabIds.forEach(function(id, index) {
       var tab = document.getElementById(id);
       if (!tab) return;
@@ -1468,9 +1547,22 @@ var EvaAgents = (function() {
     if (refreshButton) refreshButton.addEventListener('click', function() { refresh(true); });
     if (closeButton) closeButton.addEventListener('click', close);
     if (detailClose) detailClose.addEventListener('click', closeDetail);
-    if (clearMissionLog) clearMissionLog.addEventListener('click', function() { deleteMissionLogEntry('all', clearMissionLog); });
+    if (clearMissionLog) clearMissionLog.addEventListener('click', function() { deleteMissionLogEntry('reports', clearMissionLog); });
+    if (clearSecurityLog) clearSecurityLog.addEventListener('click', function() { deleteMissionLogEntry('security', clearSecurityLog); });
+    [
+      ['securityUrlPrevious', 'securityUrlOffset', -100], ['securityUrlNext', 'securityUrlOffset', 100],
+      ['securityBlockPrevious', 'securityBlockOffset', -100], ['securityBlockNext', 'securityBlockOffset', 100]
+    ].forEach(function(item) {
+      var button = document.getElementById(item[0]);
+      if (button) button.addEventListener('click', function() {
+        state[item[1]] = Math.max(0, state[item[1]] + item[2]);
+        refreshSecurity();
+      });
+    });
     if (allowMissionResearch) allowMissionResearch.addEventListener('click', function() { setMissionResearchPermission(true); });
     if (denyMissionResearch) denyMissionResearch.addEventListener('click', function() { setMissionResearchPermission(false); });
+    if (enableSecurityUrls) enableSecurityUrls.addEventListener('click', function() { setSecurityUrlLogging(true); });
+    if (disableSecurityUrls) disableSecurityUrls.addEventListener('click', function() { setSecurityUrlLogging(false); });
     if (memoryReviewButton) memoryReviewButton.addEventListener('click', function() {
       if (window.EvaMemoryInspector && typeof window.EvaMemoryInspector.openFromAgents === 'function') {
         window.EvaMemoryInspector.openFromAgents();

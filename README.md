@@ -92,8 +92,11 @@ while keeping configuration, approvals, and personal data under your control.
   A local Mission log checklist preserves final debriefs across restarts before
   eligible finished crew are dismissed; active dependencies and a one-minute
   reuse window are protected.
-  The Captain's notepad records new workspace and background permission blocks
-  and supports confirmed deletion of individual entries or the entire log.
+  The Captain's notepad keeps mission debriefs. A separate Security log records
+  workspace and background permission blocks alongside opt-in, counted HTTP(S) URL observations. Query strings,
+  fragments, and URL userinfo are omitted. Observations distinguish requests,
+  proposed or denied tool calls, and discovered URLs; coverage is best-effort,
+  not complete network monitoring. Security entries remain local until cleared.
 - **Signal account linking:** Settings > Accounts provides a Link Signal button,
   an in-panel QR code, completion status, cancellation, and fresh codes after
   expiry. Existing recipients and prior local account files are preserved.
@@ -107,7 +110,9 @@ while keeping configuration, approvals, and personal data under your control.
   per run, and fails closed if it changes. Sandboxed Copilot workspace runs require
   the qualified CLI version 1.0.109. Workspace Git metadata and external MCP
   servers are unavailable inside the sandbox; network and package downloads are
-  disabled. The Security Officer inspector offers an offline boundary self-test.
+  disabled. The sandbox requires a trusted root-owned Podman seccomp profile on
+  x86_64 or arm64 and blocks nested user namespaces. The Security Officer
+  inspector offers an offline boundary self-test.
 - **Local-first operation:** use SQLite and local models by default, with cloud services
   enabled only when configured.
 

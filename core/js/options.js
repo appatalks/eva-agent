@@ -473,10 +473,29 @@ function installBridgeCapabilityFetch() {
   window.fetch = function(input, init) {
     var token = (window.evaStandalone && window.evaStandalone.bridgeToken) || '';
     if (!token) return nativeFetch(input, init);
-    var requestUrl = typeof input === 'string' ? input : (input && input.url);
+    var requestUrl = typeof input === 'string' ? input : (input && (input.url || input.href));
     var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : '';
     try {
-      if (!requestUrl || !bridgeUrl || new URL(requestUrl, window.location.href).origin !== new URL(bridgeUrl).origin) {
+      if (!requestUrl || !bridgeUrl) {
+        return nativeFetch(input, init);
+      }
+      var target = new URL(requestUrl, window.location.href);
+      var bridgeOrigin = new URL(bridgeUrl).origin;
+      if (target.origin !== bridgeOrigin) {
+        if (target.protocol === 'http:' || target.protocol === 'https:') {
+          target.username = '';
+          target.password = '';
+          target.search = '';
+          target.hash = '';
+          var method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+          if (target.href.length <= 8192) {
+            nativeFetch(bridgeUrl.replace(/\/+$/, '') + '/v1/security/url-observation', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+              body: JSON.stringify({ method: method, url: target.href })
+            }).catch(function() {});
+          }
+        }
         return nativeFetch(input, init);
       }
     } catch (_) {

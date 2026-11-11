@@ -121,6 +121,8 @@ class RemoteMCPClient:
 
     def _https_post(self, url, payload, headers, timeout):
         """Perform one HTTPS POST. Returns (status, body, response_headers)."""
+        from bridge.security_urls import observe_request
+        observe_request("POST", url)
         request = urllib.request.Request(
             url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
         )
@@ -224,6 +226,8 @@ class RemoteMCPClient:
         """Invoke one remote tool and return its raw result object."""
         self.initialize()
         result = self._call("tools/call", {"name": str(name), "arguments": arguments or {}})
+        from bridge.security_urls import observe_discovered
+        observe_discovered(result.get("content") if isinstance(result, dict) else None)
         if isinstance(result, dict) and result.get("isError"):
             raise RemoteMCPError(f"Remote tool '{name}' failed: {tool_result_text(result)[:200]}")
         return result if isinstance(result, dict) else {}

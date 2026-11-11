@@ -124,6 +124,8 @@ class LocalWorkspaceClient:
     def request(self, suffix, payload=None):
         self.check()
         url = urlsplit(self.config["base_url"])
+        from bridge.security_urls import observe_request
+        observe_request("POST" if payload is not None else "GET", self.config["base_url"].rstrip("/") + suffix)
         connection_type = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
         connection = connection_type(url.hostname, url.port, timeout=10)
         with self.lock:

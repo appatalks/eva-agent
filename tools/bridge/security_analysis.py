@@ -18,6 +18,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _json_request(url, payload=None, headers=None):
+    from bridge.security_urls import observe_request
+    observe_request("POST" if payload is not None else "GET", url)
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = urllib.request.Request(
         url, data=data, headers=headers or {}, method="POST" if data is not None else "GET",

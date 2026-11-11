@@ -20,6 +20,8 @@ def benchmark_local(base_url, model=""):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     selected = str(model or "").strip()[:240]
     if not selected:
+        from bridge.security_urls import observe_request
+        observe_request("GET", base + "/models")
         with opener.open(base + "/models", timeout=3) as response:
             models = json.loads(response.read(262144)).get("data") or []
         selected = next((str(item.get("id") or "")[:240] for item in models if isinstance(item, dict) and item.get("id")), "")
@@ -35,6 +37,8 @@ def benchmark_local(base_url, model=""):
     request = urllib.request.Request(base + "/chat/completions", data=json.dumps(payload).encode(),
                                      headers={"Content-Type": "application/json"}, method="POST")
     started = time.perf_counter()
+    from bridge.security_urls import observe_request
+    observe_request("POST", base + "/chat/completions")
     with opener.open(request, timeout=60) as response:
         data = json.loads(response.read(2097152))
     elapsed = time.perf_counter() - started

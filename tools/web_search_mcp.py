@@ -29,6 +29,8 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
+from bridge.security_urls import observe_request, record, sanitize_url
+
 _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -184,6 +186,7 @@ def _http_get(url, timeout=15):
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     })
+    observe_request("GET", url)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             # Read up to 512KB
@@ -320,7 +323,11 @@ def _guarded_http_fetch(url, timeout=20):
     for redirect_count in range(_WEB_FETCH_MAX_REDIRECTS + 1):
         target, reason = _validate_fetch_url(current_url)
         if target is None:
+            clean = sanitize_url(current_url)
+            if clean:
+                record([("GET", clean, "denied")])
             return 0, {}, "", current_url, "unsafe_url:" + reason
+        observe_request("GET", current_url)
         status, headers, body, too_large, error = _pinned_http_get(target, timeout=timeout)
         if status in _WEB_FETCH_REDIRECTS and headers.get("location"):
             if redirect_count >= _WEB_FETCH_MAX_REDIRECTS:

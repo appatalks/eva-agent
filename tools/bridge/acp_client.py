@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.parse
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from bridge import config as _cfg
@@ -950,6 +951,8 @@ class ACPClient:
         self.permission_lock = threading.RLock()
         self.pending_permissions = {}
         self._github_auth_notified = False
+        self._security_url_lock = threading.Lock()
+        self._security_url_marks = OrderedDict()
 
     # --- Lifecycle ---
 
@@ -1044,6 +1047,7 @@ class ACPClient:
                 for k, v in srv_cfg.get('env', {}).items():
                     # subprocess.Popen env requires all values to be strings
                     process_env[k] = str(v) if not isinstance(v, str) else v
+            process_env["EVA_CONFIG_DIR"] = _cfg.EVA_CONFIG_DIR
             process_env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
 
             with self._stop_lock:
@@ -1535,6 +1539,10 @@ class ACPClient:
                 })
 
         elif update_type in ("tool_call", "tool_call_update"):
+            session_id = str(params.get("sessionId") or params.get("session_id") or "")
+            self._security_capture_input(update, session_id)
+            if update.get("status") in {"completed", "failed"}:
+                self._security_capture_output(update, session_id)
             status = update.get("status", "")
             kind = str(update.get("kind") or "other")[:32]
             if status:
@@ -1572,6 +1580,33 @@ class ACPClient:
             self.session_usage[session_id] = usage
             _telemetry_emit("acp_usage", model=self.model or "default", **usage)
 
+    def _security_claim(self, session_id, tool_call, phase, method, url):
+        call_id = str(tool_call.get("toolCallId") or "")[:160]
+        if not session_id or not call_id:
+            return False
+        digest = hashlib.sha256((method + "\0" + url).encode("utf-8")).hexdigest()[:24]
+        key = (session_id[:160], call_id, phase, digest)
+        with self._security_url_lock:
+            if key in self._security_url_marks:
+                return False
+            self._security_url_marks[key] = True
+            if len(self._security_url_marks) > 4096:
+                self._security_url_marks.popitem(last=False)
+        return True
+
+    def _security_capture_input(self, tool_call, session_id, observation="proposed"):
+        from bridge.security_urls import record, tool_input_observations
+        values = tool_input_observations(tool_call)
+        record([(method, url, observation) for method, url in values
+                if self._security_claim(session_id, tool_call, observation, method, url)])
+        return values
+
+    def _security_capture_output(self, tool_call, session_id):
+        from bridge.security_urls import discovered_observations, record
+        values = discovered_observations([tool_call.get("content"), tool_call.get("rawOutput")])
+        record([(method, url, "discovered") for method, url in values
+                if self._security_claim(session_id, tool_call, "discovered", method, url)])
+
     def _dispatch_prompt_event(self, params, event):
         """Deliver a sanitized lifecycle event to the matching active prompt."""
         session_id = params.get("sessionId") or params.get("session_id")
@@ -1602,6 +1637,7 @@ class ACPClient:
             })
         tool_kind = str(tool_call.get("kind") or "other")[:32]
         session_id = str(params.get("sessionId") or "")[:120]
+        security_inputs = self._security_capture_input(tool_call, session_id)
         with self._prompt_state_lock:
             prompt_states = [
                 state for state in self._active_prompts.values()
@@ -1616,6 +1652,7 @@ class ACPClient:
                 ))
             )
         if background_context and (not session_id or len(prompt_states) != 1):
+            self._security_capture_input(tool_call, session_id, "denied")
             reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
             reject_option = reject_option or next((option for option in options if option["kind"] == "reject_always"), None)
             if reject_option:
@@ -1653,6 +1690,7 @@ class ACPClient:
                                 tool_kind="execute", option_count=len(options))
                 return
             if not valid:
+                self._security_capture_input(tool_call, session_id, "denied")
                 reject = next((option for option in options if option["kind"] in {"reject_once", "reject_always"}), None)
                 self._send_response(rpc_id, {
                     "outcome": {"outcome": "selected", "optionId": reject["option_id"]} if reject
@@ -1664,6 +1702,7 @@ class ACPClient:
             sandbox_manual = True
             tool_kind = "execute"
         if self.no_tools or permission_mode == "automation_no_tools":
+            self._security_capture_input(tool_call, session_id, "denied")
             reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
             reject_option = reject_option or next(
                 (option for option in options if option["kind"] == "reject_always"), None
@@ -1690,6 +1729,7 @@ class ACPClient:
             option_count=len(options), execute_category=execute_category,
         )
         if permission_mode == "passive_recall":
+            self._security_capture_input(tool_call, session_id, "denied")
             reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
             if reject_option is None:
                 reject_option = next((option for option in options if option["kind"] == "reject_always"), None)
@@ -1768,6 +1808,7 @@ class ACPClient:
                         block_reason = ""
                         unverified_research = True
             if block_reason:
+                self._security_capture_input(tool_call, session_id, "denied")
                 with self._prompt_state_lock:
                     for state in self._active_prompts.values():
                         if state.get("session_id") == session_id:
@@ -1791,6 +1832,7 @@ class ACPClient:
                 if background_mode:
                     with _st.bg_auto_actions_lock:
                         if not _st.bg_auto_actions or (unverified_research and not _unverified_research_allowed()):
+                            self._security_capture_input(tool_call, session_id, "denied")
                             revoked_reason = "unclassified_remote_action" if _st.bg_auto_actions else "autonomy_disabled"
                             with self._prompt_state_lock:
                                 for state in self._active_prompts.values():
@@ -1820,6 +1862,7 @@ class ACPClient:
                                     tool_kind=tool_kind, option_count=len(options))
                 return
             if background_mode:
+                self._security_capture_input(tool_call, session_id, "denied")
                 with self._prompt_state_lock:
                     for state in self._active_prompts.values():
                         if state.get("session_id") == session_id:
@@ -1865,6 +1908,7 @@ class ACPClient:
             "command_summary": command_summary,
             "approval_allowed": bool(command_summary) if coding_mode else tool_kind != "execute" or bool(command_summary),
             "approval_reason": coding_reason,
+            "security_inputs": security_inputs,
             "options": options,
             "created_at": time.time(),
         }
@@ -1913,6 +1957,8 @@ class ACPClient:
             self._send_response(entry["rpc_id"], {"outcome": {"outcome": "selected", "optionId": selected["option_id"]}})
             resolved_decision = "allow_once"
         else:
+            from bridge.security_urls import record
+            record([(method, url, "denied") for method, url in entry.get("security_inputs", [])])
             with self._prompt_state_lock:
                 for state in self._active_prompts.values():
                     if state.get("session_id") == entry["session_id"]:
@@ -1931,6 +1977,8 @@ class ACPClient:
             entry = self.pending_permissions.pop(str(permission_id), None)
         if not entry:
             return
+        from bridge.security_urls import record
+        record([(method, url, "denied") for method, url in entry.get("security_inputs", [])])
         with self._prompt_state_lock:
             for state in self._active_prompts.values():
                 if state.get("session_id") == entry["session_id"]:

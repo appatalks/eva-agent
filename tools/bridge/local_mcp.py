@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+from bridge import config as _cfg
 from bridge.utils import _safe_child_environment, _validate_lmstudio_base_url
 
 _ARTIFACTS_DIR = os.path.join(
@@ -56,6 +57,8 @@ def _resolve_lmstudio_model(base_url, requested_model="", timeout=3):
         return override, ""
     try:
         request = urllib.request.Request(base_url.rstrip("/") + "/models", method="GET")
+        from bridge.security_urls import observe_request
+        observe_request("GET", base_url.rstrip("/") + "/models")
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception as error:
@@ -79,6 +82,8 @@ def _si_model_metadata(base_url, model, timeout=3):
         if error:
             return {}
         request = urllib.request.Request(validated_url + "/models", method="GET")
+        from bridge.security_urls import observe_request
+        observe_request("GET", validated_url + "/models")
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), _MetadataNoRedirectHandler(),
         )
@@ -204,6 +209,7 @@ class MCPServer:
         process_env = _safe_child_environment({"EVA_ARTIFACTS_DIR": _ARTIFACTS_DIR})
         process_env.update(_safe_child_environment(self.env))
         process_env.pop("EVA_BRIDGE_TOKEN", None)
+        process_env["EVA_CONFIG_DIR"] = _cfg.EVA_CONFIG_DIR
         try:
             with self.lifecycle_lock:
                 if self.cancel_event.is_set():
@@ -232,12 +238,16 @@ class MCPServer:
 
     def call_tool(self, tool_name, arguments, timeout=60):
         """Call an MCP tool and return the result text."""
+        from bridge.security_urls import observe_discovered, record, tool_input_observations
+        record([(method, url, "proposed") for method, url in tool_input_observations({"rawInput": arguments})])
         resp = self._send_request("tools/call", {"name": tool_name, "arguments": arguments or {}}, timeout=timeout)
         if not resp:
             return {"error": "no response"}
         if "error" in resp:
             return {"error": resp["error"]}
         result = self._complete_result(resp, "tools/call")
+        if isinstance(result, dict):
+            observe_discovered(result.get("content"))
         if isinstance(result, dict) and result.get("_mcp_error"):
             return {"error": result["_mcp_error"]}
         if isinstance(result, dict) and result.get("isError") is True:
@@ -528,6 +538,8 @@ class RemoteGitHubMCPServer:
         if not self.client or not self.alive:
             return {"error": "GitHub MCP server is unavailable"}
         try:
+            from bridge.security_urls import record, tool_input_observations
+            record([(method, url, "proposed") for method, url in tool_input_observations({"rawInput": arguments})])
             from bridge.remote_mcp import tool_result_text
             return {"text": tool_result_text(self.client.call_tool(tool_name, arguments))}
         except Exception as error:
@@ -686,6 +698,8 @@ def local_agent_query(user_message, mcp_manager, lms_base_url="http://localhost:
         }
 
         try:
+            from bridge.security_urls import observe_request
+            observe_request("POST", endpoint)
             req = urllib.request.Request(
                 endpoint,
                 data=json.dumps(payload).encode(),
