@@ -455,6 +455,10 @@
           <input id="workspaceAutoApprove" type="checkbox">
           <span>Auto approve actions</span>
         </label>
+        <label class="workspace-auto-approve" for="workspaceSandbox">
+          <input id="workspaceSandbox" type="checkbox">
+          <span>Use offline security sandbox</span>
+        </label>
         <div class="workspace-run-options">
           <label for="workspaceBaseRef">Base</label>
           <input id="workspaceBaseRef" type="text" value="HEAD" maxlength="256" autocomplete="off">
@@ -1092,6 +1096,10 @@
               <option value="pinned">Use preferred backend exactly</option>
             </select>
             <p class="auth-note" style="margin-top:4px">Eva chooses the responder and tool route for each request. The backend selection is a preference; pin it only when you need a specific model.</p>
+            <label for="acpCodingAutonomy" style="margin-top:8px">
+              <input type="checkbox" id="acpCodingAutonomy"> Allow user-level coding in ACP chat
+            </label>
+            <p class="auth-note">Requires Eva Standalone authorization. Runs coding commands with your user permissions. Checks for destructive actions, credentials, and external changes are best-effort; scripts can bypass them. Background jobs and isolated workspaces keep their own policies.</p>
           </div>
           <div class="model-opt" id="opt-lmstudio-config">
             <label for="aigLmStudioBaseUrl">SI Base URL:</label>

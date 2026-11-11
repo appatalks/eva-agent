@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.IGNORECASE)
 _MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
 _MCP_CONFIG_MAX_BYTES = 256 * 1024
@@ -211,6 +211,9 @@ class WorkspaceStore:
                 ]:
                     self.connection.execute("ALTER TABLE coding_runs ADD COLUMN " + column)
                 self.connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (6, _utc_now()))
+            if 7 not in applied:
+                self.connection.execute("ALTER TABLE coding_runs ADD COLUMN sandbox_image TEXT NOT NULL DEFAULT ''")
+                self.connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (7, _utc_now()))
 
     def register_project(self, requested_path, display_name=None):
         root_path = self._canonical_git_root(requested_path)
@@ -603,7 +606,7 @@ class WorkspaceStore:
                     (now, project_id),
                 )
 
-    def create_run(self, project_id, objective, primary_session_id="", base_ref="HEAD", model_policy="", auto_approve=False, provider_config=None, apply_on_success=False):
+    def create_run(self, project_id, objective, primary_session_id="", base_ref="HEAD", model_policy="", auto_approve=False, provider_config=None, apply_on_success=False, sandbox_image=""):
         clean_objective = _json_text(objective).strip()
         if not clean_objective or len(clean_objective) > 4000:
             raise WorkspaceError("A coding-run objective between 1 and 4000 characters is required.")
@@ -616,6 +619,8 @@ class WorkspaceStore:
         policy = _json_text(model_policy).strip()
         if len(policy) > 160:
             raise WorkspaceError("Invalid model policy.")
+        if sandbox_image and (not isinstance(sandbox_image, str) or not re.fullmatch(r"[a-f0-9]{64}", sandbox_image)):
+            raise WorkspaceError("Invalid sandbox image identity.")
         if provider_config is None:
             provider_config = {}
         if not isinstance(provider_config, dict) or set(provider_config) - {"base_url", "model", "max_tokens"}:
@@ -665,9 +670,9 @@ class WorkspaceStore:
                 self.connection.execute(
                     """INSERT INTO coding_runs(
                         id, project_id, checkout_id, objective, status, primary_session_id, model_policy,
-                        auto_approve, provider_config, target_branch, apply_on_success, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (run_id, project_id, checkout_id, clean_objective, session_id, policy, int(auto_approve is True), encoded_provider, target_branch, int(apply_on_success is True), now, now),
+                        auto_approve, provider_config, target_branch, apply_on_success, sandbox_image, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (run_id, project_id, checkout_id, clean_objective, session_id, policy, int(auto_approve is True), encoded_provider, target_branch, int(apply_on_success is True), sandbox_image, now, now),
                 )
                 self.connection.execute(
                     "UPDATE projects SET updated_at = ? WHERE id = ?", (now, project_id)
@@ -821,6 +826,7 @@ class WorkspaceStore:
             "apply_revision": run_row["apply_revision"],
             "apply_report": run_row["apply_report"],
             "auto_approve": bool(run_row["auto_approve"]),
+            "sandbox_image": run_row["sandbox_image"],
             "final_disposition": run_row["final_disposition"],
             "created_at": run_row["created_at"],
             "updated_at": run_row["updated_at"],

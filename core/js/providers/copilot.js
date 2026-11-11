@@ -167,6 +167,7 @@ async function _copilotSendACP(messages, question, txtOutput, storageKey, signal
     };
     if (acpModel) payload.acp_model = acpModel;
     payload.acp_auto_approve = true;
+    payload.acp_coding_autonomy = (typeof getACPCodingAutonomy === 'function') && getACPCodingAutonomy();
     var reasoningEffort = (typeof getReasoningEffortForModel === 'function') ? getReasoningEffortForModel('copilot-acp') : 'default';
     if (reasoningEffort !== 'default') payload.acp_reasoning_effort = reasoningEffort;
 

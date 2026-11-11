@@ -15,6 +15,15 @@ while keeping configuration, approvals, and personal data under your control.
   conversation model.
 - **Thinking control:** show or hide available model reasoning and request it
   on or off; individual models and providers may ignore or reject the request.
+- **Opt-in ACP coding autonomy:** authorized Standalone chat coding commands can run with user-level
+  access. Best-effort checks request approval for visibly sensitive actions;
+  arbitrary scripts can bypass those checks. Background and isolated workspace
+  policies remain separate.
+- **Security Officer:** a lightweight Agent Observatory monitor reports rootless
+  sandbox readiness and blocked boundary checks. Opt-in workspace coding runs
+  can execute offline in a local Podman image; chat and other tools are not
+  sandboxed. The container receives only its worktree, but its output may be
+  sent to the selected model provider. Known credential scans are not exhaustive.
 - **Operations visibility:** background jobs are grouped by purpose, activity
   can be filtered, job settings persist across restarts, and scheduled-task
   attempts show their outcome. Opt-in background ACP autonomy decides bounded
@@ -90,6 +99,13 @@ while keeping configuration, approvals, and personal data under your control.
   the selected workspace, focus a tile, interrupt work, or send new direction.
   Project files stay beside Live and Details tabs. Create local Git workspaces
   or import existing projects through a responsive in-app folder browser.
+- **Offline workspace prerequisites:** install rootless Podman and prepare a
+  trusted local image named `localhost/eva-coding-sandbox:debian` with Python,
+  Git, and Node. Eva does not pull images automatically, pins the image identity
+  per run, and fails closed if it changes. Sandboxed Copilot workspace runs require
+  the qualified CLI version 1.0.109. Workspace Git metadata and external MCP
+  servers are unavailable inside the sandbox; network and package downloads are
+  disabled. The Security Officer inspector offers an offline boundary self-test.
 - **Local-first operation:** use SQLite and local models by default, with cloud services
   enabled only when configured.
 

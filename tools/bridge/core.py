@@ -812,7 +812,17 @@ def _dispatch_workspace_run(run):
         )
     checkout = run.get("checkout") or {}
     checkout_path = _workspace_store().validated_checkout_path(checkout.get("id"))
-    workspace_mcp_config = {} if goal_local else _workspace_store().mcp_config_for_run(run["id"])
+    sandbox_image = str(run.get("sandbox_image") or "")
+    if sandbox_image:
+        from bridge.security_sandbox import SandboxError, record_event, sandbox_preflight, validate_workspace
+        try:
+            if sandbox_preflight() != sandbox_image:
+                raise SandboxError("The approved sandbox image changed; create a new run.")
+            validate_workspace(checkout_path)
+        except (SandboxError, OSError) as error:
+            record_event("boundary", "blocked")
+            raise WorkspaceError(str(error)) from error
+    workspace_mcp_config = {} if goal_local or sandbox_image else _workspace_store().mcp_config_for_run(run["id"])
     _verbose_debug_emit("workspace_mcp", enabled_module_count=len(workspace_mcp_config))
     workspace_mcp_prefix = "workspace-" + str(run.get("project_id") or "workspace").replace("-", "")[:12] + "-"
     workspace_mcp_config = {
@@ -833,6 +843,11 @@ def _dispatch_workspace_run(run):
     github_delivery_required = github_issue_delivery_required or github_pr_delivery_required
     github_delivery_kind = "pull_request" if github_pr_delivery_required else ("issue" if github_issue_delivery_required else "")
     github_issue_state = ""
+    if sandbox_image:
+        github_issue_delivery_required = False
+        github_pr_delivery_required = False
+        github_delivery_required = False
+        github_delivery_kind = ""
     if github_issue_delivery_required:
         if re.search(r"\breopen\b", objective, re.IGNORECASE):
             github_issue_state = "open"
@@ -892,6 +907,14 @@ def _dispatch_workspace_run(run):
         )
         if existing_agent.get("report"):
             full_prompt += "\n\nPrevious round report (context only):\n" + str(existing_agent["report"])[-4000:]
+    elif sandbox_image:
+        full_prompt = (
+            "You are Eva's coding agent in a network-isolated workspace container. "
+            "Use only the supplied workspace tools. Host files, credentials, network access, "
+            "external MCP servers and host Git worktree metadata are unavailable. "
+            "Edit and test the requested files inside /workspace. Do not claim external actions "
+            "or Git operations succeeded without a receipt. Report limitations honestly.\n\nObjective:\n" + objective
+        )
     task = {
         "id": task_id,
         "label": "Workspace: " + objective[:96],
@@ -910,7 +933,9 @@ def _dispatch_workspace_run(run):
         "steer_history": [],
         "coding_run_id": run["id"],
         "checkout_id": checkout["id"],
-        "capability_policy": "goal_local" if goal_local else ("workspace_auto" if run.get("auto_approve") else "workspace_write"),
+        "capability_policy": "goal_local" if goal_local else (
+            ("sandbox_auto" if sandbox_image else "workspace_auto") if run.get("auto_approve") else "workspace_write"
+        ),
         "requires_github_delivery": github_delivery_required,
         "required_github_delivery_kind": github_delivery_kind,
         "required_github_issue_state": github_issue_state,
@@ -919,6 +944,7 @@ def _dispatch_workspace_run(run):
         "_workspace_mcp_config": workspace_mcp_config,
         "_provider": "lmstudio" if run.get("model_policy") in {"lmstudio", "goal_local"} else "acp",
         "_provider_config": run.get("provider_config") or {},
+        "_sandbox_image": sandbox_image,
     }
     if not _reserve_subagent_task(task):
         raise WorkspaceError(f"Agent capacity is full ({_SUBAGENT_MAX} active agents).")
@@ -1030,14 +1056,14 @@ def _select_active_history(items, active_statuses, limit):
 
 def _select_agent_payload(items, limit=30):
     """Keep every active agent, then fill the payload with recent completions."""
-    pinned_items = [item for item in items if item.get("kind") == "eva"]
+    pinned_items = [item for item in items if item.get("kind") in {"eva", "security"}]
     active_items = [
         item for item in items
-        if item.get("kind") != "eva" and item.get("status") in _AGENT_ACTIVE_STATUSES
+        if item.get("kind") not in {"eva", "security"} and item.get("status") in _AGENT_ACTIVE_STATUSES
     ]
     inactive_items = [
         item for item in items
-        if item.get("kind") != "eva" and item.get("status") not in _AGENT_ACTIVE_STATUSES
+        if item.get("kind") not in {"eva", "security"} and item.get("status") not in _AGENT_ACTIVE_STATUSES
     ]
     active_items.sort(key=lambda item: str(item.get("started_at") or ""), reverse=True)
     inactive_items.sort(
@@ -1608,6 +1634,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._subagent_status()
         elif parsed_path == "/v1/agents/overview":
             self._agents_overview()
+        elif parsed_path == "/v1/security/image":
+            self._security_image()
         elif parsed_path == "/v1/agents/reports":
             self._agent_reports()
         elif parsed_path == "/v1/signal/link":
@@ -1772,6 +1800,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._agent_report_delete()
         elif parsed_path == "/v1/agents/reports/research-permission":
             self._agent_research_permission()
+        elif parsed_path == "/v1/security/self-test":
+            self._security_self_test()
+        elif parsed_path == "/v1/security/approve-image":
+            self._security_approve_image()
         elif parsed_path == "/v1/browser/run":
             self._browser_run()
         elif parsed_path == "/v1/desktop/run":
@@ -2119,6 +2151,18 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if data.get("model_policy") == "goal_local":
             self._json_response(400, {"error": {"message": "Goal rounds are created by the goal scheduler."}})
             return
+        sandbox = data.get("sandbox", False)
+        if not isinstance(sandbox, bool):
+            self._json_response(400, {"error": {"message": "sandbox must be a boolean"}})
+            return
+        sandbox_image = ""
+        if sandbox:
+            from bridge.security_sandbox import SandboxError, sandbox_preflight
+            try:
+                sandbox_image = sandbox_preflight()
+            except SandboxError as error:
+                self._json_response(400, {"error": {"message": str(error)}})
+                return
         if data.get("model_policy") == "lmstudio":
             from bridge.workspace_local import normalize_local_config
             try:
@@ -2136,6 +2180,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 data.get("auto_approve") is True,
                 data.get("provider_config", {}),
                 data.get("apply_on_success") is True,
+                sandbox_image,
             )
         except WorkspaceError as error:
             self._json_response(400, {"error": {"message": str(error)}})
@@ -4123,6 +4168,39 @@ class BridgeHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------------
     # Subagent parallelism
     # ------------------------------------------------------------------
+    def _security_image(self):
+        if not self._require_bridge_capability():
+            return
+        from bridge.security_sandbox import SandboxError, sandbox_candidate
+        try:
+            self._json_response(200, {"image_id": sandbox_candidate()})
+        except (SandboxError, OSError) as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _security_approve_image(self):
+        if not self._require_bridge_capability():
+            return
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        from bridge.security_sandbox import SandboxError, approve_sandbox_image, officer
+        try:
+            approved = approve_sandbox_image(data.get("image_id"))
+            officer.refresh()
+            self._json_response(200, {"image_id": approved})
+        except (SandboxError, OSError) as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
+    def _security_self_test(self):
+        if not self._require_bridge_capability():
+            return
+        from bridge.security_sandbox import SandboxError, run_self_test
+        try:
+            self._json_response(200, run_self_test())
+        except (SandboxError, OSError) as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+
     def _agents_overview(self):
         """Return a normalized snapshot for the agent operations dashboard."""
         if not _is_loopback_bind():
@@ -4152,6 +4230,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "signal_status": "",
             "capability_policy": "adaptive",
         }]
+        from bridge.security_sandbox import officer
+        security = officer.snapshot()
+        agents.append({
+            "id": "security-officer",
+            "kind": "security",
+            "label": "Security Officer",
+            "model": "deterministic monitor",
+            "status": "online" if security["status"] == "ready" else security["status"],
+            "detail": "Monitors offline workspace sandbox readiness and command outcomes; it does not inspect model behaviour.",
+            "activity": security["activity"],
+            "result": None,
+            "started_at": getattr(_st, "cognition_launch_since", None),
+            "ended_at": None,
+            "session_id": "",
+            "capability_policy": "isolated-workspace",
+        })
         with _st.subagent_lock:
             subagents_active, visible_tasks = _select_subagent_overview_tasks(_st.subagent_tasks)
             for task in visible_tasks:
@@ -5370,6 +5464,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         include_reasoning = thinking_enabled is not False
         include_acp_reasoning = not internal and include_reasoning
         acp_auto_approve = request["acp_auto_approve"]
+        acp_coding_autonomy = request["acp_coding_autonomy"]
+        if acp_coding_autonomy and not internal and not self._require_bridge_capability():
+            return
         stream_requested = request["stream_requested"]
         si_runtime = request["si_runtime"]
         si_base_url = request["lmstudio_base_url"] or "http://localhost:1234/v1"
@@ -5456,7 +5553,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             _fast_route = ""
             _passive_recall = False
         _acp_permission_mode = "automation_no_tools" if no_tools else "passive_recall" if _passive_recall else (
-            "workspace_auto" if acp_auto_approve else "interactive"
+            ("coding_auto" if acp_coding_autonomy else "workspace_auto") if acp_auto_approve else "interactive"
         )
         _prompt_fields = _prompt_budget_fields(data.get("prompt_budget"))
         stream_state = self._new_stream_state("aig", requested_backend) if stream_requested else None
@@ -7516,6 +7613,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not isinstance(acp_auto_approve, bool):
             self._json_response(400, {"error": {"message": "acp_auto_approve must be a boolean"}})
             return
+        acp_coding_autonomy = data.get("acp_coding_autonomy", False)
+        if not isinstance(acp_coding_autonomy, bool):
+            self._json_response(400, {"error": {"message": "acp_coding_autonomy must be a boolean"}})
+            return
+        if acp_coding_autonomy and not self._require_bridge_capability():
+            return
 
         # Build prompt text from messages (combine for context)
         # ACP doesn't have native message roles, so we format them
@@ -7552,7 +7655,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         direct_profile = _select_acp_tool_profile(last_user_msg, direct_request_type)
         direct_passive_recall = _is_passive_memory_recall(last_user_msg)
         acp_permission_mode = "passive_recall" if direct_passive_recall else (
-            "workspace_auto" if acp_auto_approve else "interactive"
+            ("coding_auto" if acp_coding_autonomy else "workspace_auto") if acp_auto_approve else "interactive"
         )
 
         memory_context = _build_memory_context(last_user_msg, conversation_id)
@@ -8254,6 +8357,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
 def main():
     # global statement removed — writes go to _st.*
     _st.acp_shutdown.clear()
+    from bridge.security_sandbox import officer
+    officer.start(lambda message: _push_notification("Security Officer", message, channel="chat"))
     if threading.current_thread() is threading.main_thread():
         def terminate_bridge(signum, frame):
             _st.acp_shutdown.set()

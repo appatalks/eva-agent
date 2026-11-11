@@ -1264,6 +1264,24 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  var codingAutonomyEl = document.getElementById('acpCodingAutonomy');
+  if (codingAutonomyEl) {
+    codingAutonomyEl.checked = getACPCodingAutonomy();
+    codingAutonomyEl.addEventListener('change', function () {
+      if (codingAutonomyEl.checked && !hasBridgeCapability()) {
+        codingAutonomyEl.checked = false;
+        if (typeof setStatus === 'function') setStatus('error', 'Coding autonomy requires Eva Standalone authorization.');
+      }
+      if (codingAutonomyEl.checked && !window.confirm(
+        'Allow ACP chat to run coding commands with your user permissions? ' +
+        'Safety checks are best-effort and scripts can bypass them.'
+      )) {
+        codingAutonomyEl.checked = false;
+      }
+      localStorage.setItem('acpCodingAutonomy', codingAutonomyEl.checked ? '1' : '0');
+    });
+  }
+
   // Camera presence (auto-wake): toggle the local webcam sensor. Restore the
   // persisted choice, but only auto-start the camera if it was previously on.
   var cameraPresenceEl = document.getElementById('cameraPresence');

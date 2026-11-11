@@ -64,11 +64,14 @@ def tool_schema(name, description, properties, required):
 
 
 class LocalWorkspaceClient:
-    def __init__(self, config, cwd, mcp_config, validate_root, file_only=False):
+    def __init__(self, config, cwd, mcp_config, validate_root, file_only=False, sandbox_image=""):
         self.config = normalize_goal_config(config) if file_only is True else normalize_local_config(config)
         self.cwd = str(Path(cwd).resolve(strict=True))
         self.model = self.config["model"]
         self.file_only = file_only is True
+        self.sandbox_image = str(sandbox_image or "")
+        if self.sandbox_image and (self.file_only or mcp_config):
+            raise ValueError("Sandboxed workspace runs cannot start host MCP servers.")
         if self.file_only and mcp_config:
             raise ValueError("File-only goal work does not permit MCP servers.")
         if self.file_only and (
@@ -304,7 +307,7 @@ class LocalWorkspaceClient:
             raise ValueError("The command exceeds the execution limit.")
         if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 300:
             raise ValueError("Command timeout must be between 1 and 300 seconds.")
-        if ("/" in command or "\\" in command) and not Path(self.cwd, command).resolve().is_relative_to(Path(self.cwd)):
+        if not self.sandbox_image and ("/" in command or "\\" in command) and not Path(self.cwd, command).resolve().is_relative_to(Path(self.cwd)):
             raise ValueError("Explicit executable paths must be inside the worktree.")
         if not self.programs_allowed:
             inspection_flags = {
@@ -319,6 +322,14 @@ class LocalWorkspaceClient:
                     safe = False
             if not safe:
                 raise ValueError("Repository programs and mutating commands require this run's Auto approve actions permission. They are not OS-sandboxed.")
+        if self.sandbox_image:
+            from bridge.security_sandbox import SandboxError, run_in_sandbox
+            try:
+                result = run_in_sandbox(self.cwd, self.sandbox_image, shlex.join([command, *arguments]), timeout, self.cancelled)
+            except SandboxError as error:
+                raise ValueError(str(error)) from error
+            self.command_checks[tuple([command, *arguments])] = result["exit_code"]
+            return result
         reason = _workspace_autonomy_block_reason({"rawInput": {"command": shlex.join([command, *arguments])}}, self.cwd)
         if reason:
             raise ValueError("Workspace command was blocked by policy: " + reason)
@@ -352,7 +363,7 @@ class LocalWorkspaceClient:
         if not isinstance(args, dict):
             raise ValueError("Tool arguments must be a JSON object.")
         if name == "list_files":
-            if self.file_only:
+            if self.file_only or self.sandbox_image:
                 return self._goal_list_files()
             result = self.command({"command": "git", "arguments": ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]})
             if result["exit_code"] != 0:
@@ -430,7 +441,7 @@ class LocalWorkspaceClient:
 
     def prompt(self, text, timeout=900, conversation_id=None, on_chunk=None, permission_mode="workspace_write", on_event=None):
         del conversation_id
-        self.programs_allowed = permission_mode == "workspace_auto"
+        self.programs_allowed = permission_mode in {"workspace_auto", "sandbox_auto"}
         self.check()
         if not self.messages:
             self.messages.append({"role": "system", "content": (

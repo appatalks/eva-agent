@@ -57,8 +57,12 @@ function _renderACPPermission(permission) {
   bubble.className = 'chat-bubble eva-bubble';
   var text = document.createElement('div');
   text.className = 'md';
-  var commandSummary = permission.command_summary ? ' Command: ' + String(permission.command_summary) : '';
-  text.textContent = 'Allow this ' + String(permission.tool_kind || 'tool') + ' action once?' + commandSummary;
+  var commandSummary = permission.command_summary
+    ? ' ' + (permission.tool_kind === 'execute' ? 'Command: ' : 'Details: ') + String(permission.command_summary) : '';
+  var approvalReason = permission.approval_reason ? ' Reason: ' + String(permission.approval_reason) + '.' : '';
+  var unavailable = permission.approval_allowed === false
+    ? ' Action details cannot be safely shown. Ask Eva to use a direct, specific action.' : '';
+  text.textContent = 'Allow this ' + String(permission.tool_kind || 'tool') + ' action once?' + approvalReason + commandSummary + unavailable;
   bubble.appendChild(text);
   var actions = document.createElement('div');
   actions.className = 'background-actions';

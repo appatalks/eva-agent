@@ -128,7 +128,7 @@ var EvaAgents = (function() {
   }
 
   function kindLabel(kind) {
-    var labels = { eva: 'PRIMARY AGENT', subagent: 'ACP SUBAGENT', browser: 'BROWSER', desktop: 'DESKTOP', background: 'BACKGROUND' };
+    var labels = { eva: 'PRIMARY AGENT', security: 'SECURITY OFFICER', subagent: 'ACP SUBAGENT', browser: 'BROWSER', desktop: 'DESKTOP', background: 'BACKGROUND' };
     return labels[kind] || String(kind || 'AGENT').toUpperCase();
   }
 
@@ -776,6 +776,52 @@ var EvaAgents = (function() {
       interrupt.type = 'button';
       interrupt.addEventListener('click', function() { controlAgent(agent.id, 'stop'); });
       actions.appendChild(interrupt);
+    }
+    if (agent.kind === 'security') {
+      var approve = element('button', 'agent-security-approve', 'Review local sandbox image');
+      approve.type = 'button';
+      approve.addEventListener('click', async function() {
+        approve.disabled = true;
+        var feedback = content.querySelector('.agent-inspector-feedback');
+        try {
+          var candidateResponse = await fetch(bridgeUrl() + '/v1/security/image', { headers: getBridgeCapabilityHeaders() });
+          var candidate = await candidateResponse.json();
+          if (!candidateResponse.ok || !candidate.image_id) throw new Error((candidate.error || {}).message || 'Image unavailable.');
+          if (!window.confirm('Approve this local sandbox image for offline workspace runs?\n\nSHA-256: ' + candidate.image_id)) return;
+          var response = await fetch(bridgeUrl() + '/v1/security/approve-image', {
+            method: 'POST', headers: getBridgeCapabilityHeaders(), body: JSON.stringify({ image_id: candidate.image_id })
+          });
+          var result = await response.json();
+          if (!response.ok) throw new Error((result.error || {}).message || 'Image approval failed.');
+          if (feedback) feedback.textContent = 'Local sandbox image approved.';
+          refresh(true);
+        } catch (error) {
+          if (feedback) feedback.textContent = error.message || 'Image approval failed.';
+        } finally {
+          approve.disabled = false;
+        }
+      });
+      actions.appendChild(approve);
+      var test = element('button', 'agent-security-test', 'Test offline sandbox');
+      test.type = 'button';
+      test.addEventListener('click', async function() {
+        test.disabled = true;
+        var feedback = content.querySelector('.agent-inspector-feedback');
+        if (feedback) feedback.textContent = 'Testing sandbox isolation...';
+        try {
+          var response = await fetch(bridgeUrl() + '/v1/security/self-test', {
+            method: 'POST', headers: getBridgeCapabilityHeaders(), body: '{}'
+          });
+          var result = await response.json();
+          if (!response.ok || !result.passed) throw new Error((result.error || {}).message || 'Sandbox test failed.');
+          if (feedback) feedback.textContent = result.message;
+        } catch (error) {
+          if (feedback) feedback.textContent = error.message || 'Sandbox test failed.';
+        } finally {
+          test.disabled = false;
+        }
+      });
+      actions.appendChild(test);
     }
     content.appendChild(actions);
     var dependencies = element('div', 'agent-dependencies');

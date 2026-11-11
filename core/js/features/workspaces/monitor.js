@@ -1047,7 +1047,7 @@ var EvaWorkspaces = (function() {
   }
 
   function appendWorkbenchRunComposer(detail, project) {
-    var draft = state.runDrafts[project.id] || (state.runDrafts[project.id] = { objective: '', baseRef: 'HEAD', autoApprove: autoApprovePreference(), applyOnSuccess: false });
+    var draft = state.runDrafts[project.id] || (state.runDrafts[project.id] = { objective: '', baseRef: 'HEAD', autoApprove: autoApprovePreference(), applyOnSuccess: false, sandbox: false });
     var section = document.createElement('section');
     section.className = 'workspace-workbench-section';
     var heading = document.createElement('h2');
@@ -1078,6 +1078,15 @@ var EvaWorkspaces = (function() {
     var autoApproveText = document.createElement('span');
     autoApproveText.textContent = 'Auto approve actions';
     autoApprove.append(autoApproveInput, autoApproveText);
+    var sandbox = document.createElement('label');
+    sandbox.className = 'workspace-auto-approve';
+    var sandboxInput = document.createElement('input');
+    sandboxInput.type = 'checkbox';
+    sandboxInput.checked = draft.sandbox === true;
+    var sandboxText = document.createElement('span');
+    sandboxText.textContent = 'Use offline security sandbox';
+    sandbox.append(sandboxInput, sandboxText);
+    sandboxInput.addEventListener('change', function() { draft.sandbox = sandboxInput.checked; });
     var apply = document.createElement('label');
     apply.className = 'workspace-auto-approve';
     var applyInput = document.createElement('input');
@@ -1097,11 +1106,11 @@ var EvaWorkspaces = (function() {
     submit.type = 'submit';
     submit.textContent = 'Start isolated run';
     submit.disabled = state.loading || !supported();
-    form.append(objectiveLabel, objective, baseLabel, baseRef, autoApprove, apply, submit);
+    form.append(objectiveLabel, objective, baseLabel, baseRef, autoApprove, sandbox, apply, submit);
     form.addEventListener('submit', async function(event) {
       event.preventDefault();
       submit.disabled = true;
-      var created = await createWorkspaceRun(project.id, objective.value, baseRef.value, { autoApprove: autoApproveInput.checked, applyOnSuccess: applyInput.checked });
+      var created = await createWorkspaceRun(project.id, objective.value, baseRef.value, { autoApprove: autoApproveInput.checked, applyOnSuccess: applyInput.checked, sandbox: sandboxInput.checked });
       if (created) {
         draft.objective = '';
         draft.baseRef = 'HEAD';
@@ -1116,6 +1125,7 @@ var EvaWorkspaces = (function() {
     var providerNote = document.createElement('p');
     providerNote.className = 'workspace-run-provider-note';
     providerNote.textContent = workspaceProviderNote();
+    providerNote.textContent += ' Sandbox runs have no network or host MCP access; workspace contents may still reach the selected model.';
     section.appendChild(providerNote);
     detail.appendChild(section);
   }
@@ -2284,6 +2294,7 @@ var EvaWorkspaces = (function() {
         primarySessionId: primarySessionId,
         baseRef: String(baseRefValue || '').trim() || 'HEAD',
         autoApprove: autoApprove,
+        sandbox: !!(options && options.sandbox === true),
         applyOnSuccess: !!(options && options.applyOnSuccess === true),
         modelPolicy: workspaceBackend() === 'lmstudio' ? 'lmstudio' :
           workspaceBackend().indexOf('openai:') === 0 ? '' : workspaceBackend(),
@@ -2298,6 +2309,7 @@ var EvaWorkspaces = (function() {
       await refresh();
       var dispatched = !!(run.agent && run.agent.id) && !run.dispatchError;
       var receipt = 'Eva created an isolated worktree for "' + run.objective + '". ' +
+        (run.sandboxed ? ' Offline security sandbox selected. ' : ' ') +
         (dispatched ? 'Its coding agent was dispatched.' : 'Agent dispatch is pending.');
       addMonitorActivity(receipt, 'change', false, false, run);
       if (dispatched && state.workbenchOpen) showWorkbenchTab('live');
@@ -2351,7 +2363,7 @@ var EvaWorkspaces = (function() {
       projectSelect ? projectSelect.value : '',
       objective ? objective.value : '',
       baseRef ? baseRef.value : 'HEAD',
-      { autoApprove: !!(autoApprove && autoApprove.checked) }
+      { autoApprove: !!(autoApprove && autoApprove.checked), sandbox: !!(document.getElementById('workspaceSandbox') || {}).checked }
     );
     if (created && objective) objective.value = '';
   }
