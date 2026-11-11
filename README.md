@@ -10,6 +10,12 @@
   <tr>
     <td colspan="2"><strong>Command bridge</strong><br><img src="core/img/eva-command-bridge.png" alt="Eva Agent Observatory command bridge" width="100%"></td>
   </tr>
+</table>
+
+<details>
+<summary>More screenshots</summary>
+
+<table>
   <tr>
     <td width="50%"><strong>Agent Observatory</strong><br><img src="core/img/eva-observatory.png" alt="Eva Agent Observatory security log" width="100%"></td>
     <td width="50%"><strong>Eva chat</strong><br><img src="core/img/example-chat.png" alt="Eva chat with tool-assisted response" width="100%"></td>
@@ -27,6 +33,8 @@
     <td width="50%"><img src="core/img/eva-screen-6.png" alt="Eva skills and memory" width="100%"></td>
   </tr>
 </table>
+
+</details>
 
 ## Overview
 
