@@ -102,7 +102,8 @@ while keeping configuration, approvals, and personal data under your control.
   workspace and background permission blocks alongside opt-in, counted HTTP(S) URL observations. Query strings,
   fragments, and URL userinfo are omitted. Observations distinguish requests,
   proposed or denied tool calls, and discovered URLs; coverage is best-effort,
-  not complete network monitoring. Security entries remain local until cleared.
+  not complete network monitoring. URL observations can be cleared separately
+  from permission blocks. Security entries remain local until cleared.
 - **Signal account linking:** Settings > Accounts provides a Link Signal button,
   an in-panel QR code, completion status, cancellation, and fresh codes after
   expiry. Existing recipients and prior local account files are preserved.

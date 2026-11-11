@@ -242,9 +242,10 @@ var EvaAgents = (function() {
   }
 
   async function deleteMissionLogEntry(scope, button) {
-    var security = scope === 'security' || scope.indexOf('block:') === 0;
+    var security = scope === 'security' || scope === 'urls' || scope.indexOf('block:') === 0;
     var prompt = scope === 'reports' ? 'Permanently delete all mission debriefs?' :
       scope === 'security' ? 'Permanently delete all permission blocks and URL observations?' :
+      scope === 'urls' ? 'Permanently delete all URL observations? Permission blocks and logging settings will be kept; new observations may appear.' :
       'Permanently delete this entry?';
     if (!confirm(prompt)) return;
     button.disabled = true;
@@ -267,9 +268,9 @@ var EvaAgents = (function() {
       if (!response.ok || typeof receipt.deleted !== 'number') throw new Error('Deletion was not confirmed.');
       if (security) {
         state.securityUrlOffset = 0;
-        state.securityBlockOffset = 0;
+        if (scope !== 'urls') state.securityBlockOffset = 0;
         await refreshSecurity();
-        setText('securityLogStatus', 'Deleted ' + receipt.deleted + ' security entries.');
+        setText('securityLogStatus', 'Deleted ' + receipt.deleted + (scope === 'urls' ? ' URL observations.' : ' security entries.'));
       } else {
         state.reportsSequence++;
         await refreshReports();
@@ -1671,6 +1672,7 @@ var EvaAgents = (function() {
     var memoryReviewButton = document.getElementById('agentGraphMemoryReview');
     var clearMissionLog = document.getElementById('missionLogClear');
     var clearSecurityLog = document.getElementById('securityLogClear');
+    var clearSecurityUrls = document.getElementById('securityUrlClear');
     var allowMissionResearch = document.getElementById('missionLogAllowResearch');
     var denyMissionResearch = document.getElementById('missionLogDenyResearch');
     var enableSecurityUrls = document.getElementById('securityUrlEnable');
@@ -1703,6 +1705,7 @@ var EvaAgents = (function() {
     if (detailClose) detailClose.addEventListener('click', closeDetail);
     if (clearMissionLog) clearMissionLog.addEventListener('click', function() { deleteMissionLogEntry('reports', clearMissionLog); });
     if (clearSecurityLog) clearSecurityLog.addEventListener('click', function() { deleteMissionLogEntry('security', clearSecurityLog); });
+    if (clearSecurityUrls) clearSecurityUrls.addEventListener('click', function() { deleteMissionLogEntry('urls', clearSecurityUrls); });
     [
       ['securityUrlPrevious', 'securityUrlOffset', -100], ['securityUrlNext', 'securityUrlOffset', 100],
       ['securityBlockPrevious', 'securityBlockOffset', -100], ['securityBlockNext', 'securityBlockOffset', 100]

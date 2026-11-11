@@ -205,7 +205,7 @@ def set_research_permission(allowed):
 
 
 def prepare_delete(scope):
-    if not isinstance(scope, str) or (scope not in {"all", "reports", "security"} and not re.fullmatch(r"(?:report|block):[a-f0-9]{32}", scope)):
+    if not isinstance(scope, str) or (scope not in {"all", "reports", "security", "urls"} and not re.fullmatch(r"(?:report|block):[a-f0-9]{32}", scope)):
         raise ValueError("Invalid deletion scope")
     token = uuid.uuid4().hex
     now = time.monotonic()
@@ -236,6 +236,8 @@ def delete_confirmed(scope, token):
             blocks = database.execute("DELETE FROM permission_blocks").rowcount
             urls = database.execute("DELETE FROM url_observations").rowcount
             return blocks + urls
+        if scope == "urls":
+            return database.execute("DELETE FROM url_observations").rowcount
         if scope.startswith("report:"):
             report_id = scope[7:]
             database.execute("INSERT OR IGNORE INTO deleted_reports VALUES (?)", (report_id,))
