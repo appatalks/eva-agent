@@ -3,16 +3,20 @@
 import json
 import hashlib
 import os
+import platform
 import re
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
+import stat
 import threading
 import time
 import urllib.parse
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from bridge import config as _cfg
@@ -59,6 +63,26 @@ _WORKSPACE_SENSITIVE_PATH_RE = re.compile(
     r"(?:^|[/\s])(?:\.env(?:\.[A-Za-z0-9_.-]+)?|\.ssh|\.aws|\.azure|\.npmrc|\.pypirc|"
     r"\.netrc|\.git-credentials|id_rsa|id_ed25519|kubeconfig|service-account|hosts\.yml|"
     r"config\.json|config\.local\.(?:js|json))(?:[/\s]|$)",
+    re.IGNORECASE,
+)
+_CODING_CREDENTIAL_RE = re.compile(
+    r"(?:\b[A-Z][A-Z0-9_]*(?:API_KEY|ACCESS_TOKEN|AUTH_TOKEN|PASSWORD|SECRET|CREDENTIALS?)\b|"
+    r"(?:^|[/\s\"'])(?:[^/\s\"']*(?:credentials?|secrets?|tokens?)[^/\s\"']*\.[a-z0-9]+|"
+    r"[^/\s\"']+\.(?:pem|p12|pfx))(?:[/\s\"']|$)|"
+    r"\b(?:authorization\s*:|--(?:password|secret|token|api-key)\b))",
+    re.IGNORECASE,
+)
+_CODING_DESTRUCTIVE_RE = re.compile(
+    r"\b(?:rm|shred|mkfs|fdisk|parted|dd|sudo|su|doas|pkexec|"
+    r"remove-item|os\.remove|os\.unlink|shutil\.rmtree)\b|"
+    r"\bgit\s+(?:clean|reset)\b",
+    re.IGNORECASE,
+)
+_CODING_REMOTE_WRITE_RE = re.compile(
+    r"\b(?:git\s+push|gh\s+(?:api|issue\s+(?:create|comment|close|reopen|edit|delete)|"
+    r"pr\s+(?:create|comment|close|reopen|edit|merge))|"
+    r"(?:scp|sftp|ssh)\b|curl\b[^\n]*(?:--data(?:-binary|-raw|-urlencode)?\b|"
+    r"--upload-file\b|-d(?:\s|$)|-T(?:\s|$)|(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b))",
     re.IGNORECASE,
 )
 _GITHUB_AUTH_FAILURE_RE = re.compile(
@@ -393,6 +417,146 @@ def _workspace_autonomy_block_reason(tool_call, cwd=None):
     return ""
 
 
+def _coding_autonomy_approval_reason(tool_call, tool_kind, mail_scoped=False):
+    if mail_scoped:
+        return "mailbox access"
+    targets = _workspace_edit_targets(tool_call)
+    if any(_workspace_argument_is_protected(target) or _CODING_CREDENTIAL_RE.search(target) for target in targets):
+        return "credential or protected file access"
+    if tool_kind == "execute":
+        command = _tool_call_command(tool_call)
+        if not command:
+            return "unidentified command"
+        if _WORKSPACE_SENSITIVE_PATH_RE.search(command) or _CODING_CREDENTIAL_RE.search(command):
+            return "credential or protected file access"
+        if _CODING_DESTRUCTIVE_RE.search(command):
+            return "potentially destructive command"
+        if _CODING_REMOTE_WRITE_RE.search(command):
+            return "external change"
+        return ""
+    if tool_kind in {"delete", "other"}:
+        return "unclassified or destructive action"
+    if tool_kind in {"read", "edit", "search", "fetch", "think"}:
+        if tool_kind in {"search", "fetch"}:
+            remote_reason = _unverified_research_block_reason(tool_call)
+            if remote_reason == "destructive_action":
+                return "external change"
+            if remote_reason == "protected_content":
+                return "credential or protected content"
+        raw = tool_call.get("rawInput")
+        if isinstance(raw, dict):
+            if any(
+                str(raw.get(key) or "").lower() not in {"", "get", "head", "read", "view", "search", "list"}
+                for key in ("method", "action", "operation")
+            ):
+                return "external change"
+        return ""
+    return "unclassified action"
+
+
+def _coding_command_summary(tool_call):
+    command = _tool_call_command(tool_call)
+    if not command or len(command) > 8192 or re.search(r"[\x00-\x1f\x7f;|&<>`]|\$\(", command):
+        return ""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return ""
+    if not parts:
+        return ""
+    from workspace_diff_guard import scan_text
+    result = []
+    redact_next = False
+    sensitive_options = {"--password", "--secret", "--token", "--api-key", "--key", "-H", "--header"}
+    for part in parts:
+        if redact_next:
+            result.append("<redacted>")
+            redact_next = False
+            continue
+        option, separator, value = part.partition("=")
+        if option in sensitive_options:
+            result.append(option + "=<redacted>" if separator else option)
+            redact_next = not separator
+        elif re.search(r"(?i)(?:password|secret|token|api[_-]?key)=", part):
+            result.append(option + "=<redacted>" if separator else "<redacted>")
+        elif scan_text(part, "permission-request") or re.search(r"(?i)authorization\s*:", part):
+            result.append("<redacted>")
+        elif part.startswith(("https://", "http://")):
+            parsed = urllib.parse.urlsplit(part)
+            if parsed.username or parsed.password:
+                return ""
+            result.append(urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+                          + ("?<redacted>" if parsed.query else ""))
+        else:
+            result.append(part)
+    summary = shlex.join(result)
+    return summary if len(summary) <= 8192 else ""
+
+
+def _coding_action_summary(tool_call):
+    from workspace_diff_guard import scan_text
+    targets = _workspace_edit_targets(tool_call)
+    if targets:
+        if any(len(target) > 1024 or re.search(r"[\x00-\x1f\x7f]", target)
+               or scan_text(target, "permission-request") for target in targets):
+            return ""
+        return "Paths: " + ", ".join(targets[:8])
+    raw = tool_call.get("rawInput")
+    if not isinstance(raw, dict):
+        return ""
+    url = raw.get("url") or raw.get("uri")
+    if not isinstance(url, str) or len(url) > 2000 or scan_text(url, "permission-request"):
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            return ""
+        actions = []
+        for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+            if key.lower() in {"action", "method", "operation", "command", "op"}:
+                if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", value):
+                    return ""
+                actions.append(key.lower() + "=" + value)
+        base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        method = str(raw.get("method") or "").upper()
+        if method and not re.fullmatch(r"[A-Z]{1,12}", method):
+            return ""
+        return ("Method: " + method + "; " if method else "") + "URL: " + base + (
+            "; " + ", ".join(actions[:8]) if actions else ""
+        ) + ("; other query details hidden" if parsed.query else "")
+    except ValueError:
+        return ""
+
+
+def _sandbox_copilot_executable(executable):
+    resolved = os.path.realpath(executable)
+    if os.path.basename(resolved) == "npm-loader.js":
+        architecture = {"x86_64": "x64", "aarch64": "arm64"}.get(platform.machine().lower())
+        if not architecture:
+            raise RuntimeError("Sandboxed ACP is unavailable on this CPU architecture.")
+        resolved = os.path.realpath(os.path.join(
+            os.path.dirname(resolved), "node_modules", "@github", "copilot-linux-" + architecture, "copilot"
+        ))
+    try:
+        current = resolved
+        while True:
+            info = os.stat(current)
+            if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                raise RuntimeError("The sandboxed Copilot executable is not trusted.")
+            if current == resolved and (not stat.S_ISREG(info.st_mode) or not os.access(current, os.X_OK)):
+                raise RuntimeError("The sandboxed Copilot executable is invalid.")
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+        with open(resolved, "rb") as binary:
+            if binary.read(4) != b"\x7fELF":
+                raise RuntimeError("Sandboxed ACP requires a trusted native Copilot executable.")
+    except OSError as error:
+        raise RuntimeError("The sandboxed Copilot executable cannot be verified.") from error
+    return resolved
+
+
 def _background_autonomy_block_reason(tool_call, cwd=None):
     """Allow transparent commands while rejecting opaque or destructive execution."""
     reason = _workspace_autonomy_block_reason(tool_call, cwd)
@@ -502,6 +666,16 @@ def _background_decode_url_component(value):
     return value
 
 
+def _background_edgar_read_action(parsed, path, key, value):
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc.lower() in {"sec.gov", "www.sec.gov"}
+        and path == "/cgi-bin/browse-edgar"
+        and key.lower() == "action"
+        and value.lower() == "getcompany"
+    )
+
+
 def _background_web_tool_name(tool_call):
     name = ""
     for field in ("name", "title"):
@@ -550,7 +724,8 @@ def _background_remote_block_reason(tool_call):
                 if key.lower() in {"token", "api_key", "apikey", "password", "secret", "signature"}:
                     return "protected_content"
                 if key.lower() in {"action", "method", "operation", "command", "op"}:
-                    if value.lower() not in {"get", "head", "read", "view", "search"}:
+                    if (value.lower() not in {"get", "head", "read", "view", "search"}
+                            and not _background_edgar_read_action(parsed, path, key, value)):
                         return "destructive_action"
         except ValueError:
             return "unclassified_remote_action"
@@ -595,8 +770,10 @@ def _unverified_research_block_reason(tool_call):
                             query_value = _background_decode_url_component(query_value).lower()
                             if re.search(r"(?:token|secret|password|credential|authorization|api.?key)", query_key):
                                 return "protected_content"
-                            if query_key in {"action", "method", "operation", "command", "op"} and query_value not in {"get", "head", "read", "view", "search", "list"}:
-                                return "destructive_action"
+                            if query_key in {"action", "method", "operation", "command", "op"}:
+                                if (query_value not in {"get", "head", "read", "view", "search", "list"}
+                                        and not _background_edgar_read_action(parsed, path, query_key, query_value)):
+                                    return "destructive_action"
                     except ValueError:
                         return "unclassified_remote_action"
                 reason = inspect(item, depth + 1)
@@ -730,7 +907,7 @@ class ACPClient:
 
     def __init__(self, copilot_path="copilot", cwd=None, model=None, mcp_config=None,
                  reasoning_effort=None, tool_profile=None, no_tools=False,
-                 provider_config=None):
+                 provider_config=None, sandbox_image="", isolated_reasoning=False):
         self.copilot_path = copilot_path
         self.cwd = cwd or os.getcwd()
         self.model = model  # None = use CLI default
@@ -740,6 +917,10 @@ class ACPClient:
         self.tool_profile = _normalize_tool_profile(tool_profile, bool(self.mcp_config))
         self.config_fingerprint = _acp_config_fingerprint(self.mcp_config)
         self.provider_config = dict(provider_config or {})
+        self.sandbox_image = str(sandbox_image or "")
+        self.isolated_reasoning = bool(isolated_reasoning)
+        self._sandbox_workspace = self.cwd if self.sandbox_image else ""
+        self._sandbox_profile = None
         self.provider_fingerprint = _provider_config_fingerprint(self.provider_config)
         self.process = None
         self._owns_process_group = False
@@ -762,6 +943,7 @@ class ACPClient:
         self._session_permission_modes = {}  # session_id -> last explicit prompt policy
         self._session_permission_mode_order = []
         self.reader_thread = None
+        self.stderr_thread = None
         self.agent_info = {}
         self.alive = False
         self.active_requests = 0
@@ -769,6 +951,8 @@ class ACPClient:
         self.permission_lock = threading.RLock()
         self.pending_permissions = {}
         self._github_auth_notified = False
+        self._security_url_lock = threading.Lock()
+        self._security_url_marks = OrderedDict()
 
     # --- Lifecycle ---
 
@@ -778,9 +962,52 @@ class ACPClient:
             if self._cancel_requested.is_set() or _st.acp_shutdown.is_set():
                 raise RuntimeError("ACP client startup was interrupted.")
         copilot_executable = self._validated_copilot_executable()
+        restricted_profile = bool(self.sandbox_image or self.isolated_reasoning)
+        if restricted_profile:
+            copilot_executable = _sandbox_copilot_executable(copilot_executable)
         cmd = [copilot_executable, "--acp", "--stdio"]
+        if restricted_profile:
+            from bridge.security_sandbox import SandboxError, sandbox_preflight, validate_workspace
+            try:
+                if self.sandbox_image:
+                    if self.mcp_config or self.no_tools or sandbox_preflight() != self.sandbox_image:
+                        raise SandboxError("Sandboxed ACP cannot use host MCP servers or an unapproved image.")
+                    validate_workspace(self._sandbox_workspace)
+                elif not self.no_tools or self.mcp_config:
+                    raise SandboxError("Isolated analysis cannot use tools or MCP servers.")
+                version = subprocess.run(
+                    [copilot_executable, "--version"], capture_output=True, text=True, timeout=10,
+                    env=_safe_child_environment(), check=False, **_hidden_subprocess_options(),
+                )
+                if version.returncode or not re.search(r"\b1\.0\.109\b", version.stdout):
+                    raise SandboxError("This Copilot CLI version has not been qualified for restricted security work.")
+            except (SandboxError, OSError, subprocess.TimeoutExpired) as error:
+                raise RuntimeError(str(error)) from error
+            self._sandbox_profile = tempfile.TemporaryDirectory(prefix="eva-sandbox-acp-")
+            sandbox_home = os.path.join(self._sandbox_profile.name, "home")
+            self.cwd = os.path.join(self._sandbox_profile.name, "session")
+            os.mkdir(sandbox_home, 0o700)
+            os.mkdir(self.cwd, 0o700)
+            settings_path = os.path.join(sandbox_home, "settings.json")
+            descriptor = os.open(settings_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as settings:
+                json.dump({"autoUpdate": False, "disableAllHooks": True,
+                           "customAgents": {"defaultLocalOnly": True}}, settings)
+            if self.sandbox_image:
+                server_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                           "security_workspace_mcp.py")
+                self.mcp_config = {"eva-sandbox": {
+                    "command": sys.executable,
+                    "args": [server_path, "--workspace", self._sandbox_workspace,
+                             "--image", self.sandbox_image, "--config-dir", _cfg.EVA_CONFIG_DIR],
+                    "tools": ["*"],
+                }}
+                cmd.extend(["--disable-builtin-mcps", "--no-custom-instructions",
+                            "--disable-client-telemetry", "--available-tools", "eva-sandbox-execute"])
+            else:
+                cmd.append("--disable-client-telemetry")
         isolated_si = bool(self.provider_config)
-        if isolated_si:
+        if isolated_si and not restricted_profile:
             cmd.extend(["--no-custom-instructions", "--disable-client-telemetry", "--disable-builtin-mcps"])
         if self.no_tools:
             cmd.extend(["--available-tools=__eva_no_tools__", "--disable-builtin-mcps", "--no-custom-instructions"])
@@ -798,14 +1025,19 @@ class ACPClient:
             os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
             process_env = _safe_child_environment()
             process_env.pop("EVA_BRIDGE_TOKEN", None)
+            if restricted_profile:
+                process_env["COPILOT_HOME"] = sandbox_home
+                process_env["COPILOT_DISABLE_LOGIN_SHELL_ENV"] = "1"
+                process_env["COPILOT_PLUGIN_DIR_ONLY"] = "true"
             if isolated_si:
                 for key in list(process_env):
                     if key == "COPILOT_MODEL" or key.startswith("COPILOT_PROVIDER_"):
                         process_env.pop(key, None)
-                copilot_home, isolated_cwd = _si_isolated_profile()
-                process_env["COPILOT_HOME"] = copilot_home
-                if not getattr(self, "workspace_run_id", ""):
-                    self.cwd = isolated_cwd
+                if not restricted_profile:
+                    copilot_home, isolated_cwd = _si_isolated_profile()
+                    process_env["COPILOT_HOME"] = copilot_home
+                    if not getattr(self, "workspace_run_id", ""):
+                        self.cwd = isolated_cwd
             # BYOK provider settings are deliberately per-client.  Do not
             # inherit or mutate the user's global Copilot environment/config.
             for key, value in self.provider_config.items():
@@ -815,12 +1047,13 @@ class ACPClient:
                 for k, v in srv_cfg.get('env', {}).items():
                     # subprocess.Popen env requires all values to be strings
                     process_env[k] = str(v) if not isinstance(v, str) else v
+            process_env["EVA_CONFIG_DIR"] = _cfg.EVA_CONFIG_DIR
             process_env["EVA_ARTIFACTS_DIR"] = _ARTIFACTS_DIR
 
             with self._stop_lock:
                 if self._cancel_requested.is_set() or _st.acp_shutdown.is_set():
                     raise RuntimeError("ACP client startup was interrupted.")
-                self._owns_process_group = bool(getattr(self, "workspace_run_id", "")) and os.name != "nt"
+                self._owns_process_group = bool(getattr(self, "workspace_run_id", "") or self.isolated_reasoning) and os.name != "nt"
                 self.process = subprocess.Popen(
                     cmd,
                     stdin=subprocess.PIPE,
@@ -828,7 +1061,7 @@ class ACPClient:
                     stderr=subprocess.PIPE,
                     bufsize=0,
                     env=process_env,
-                    cwd=self.cwd if isolated_si else None,
+                    cwd=self.cwd if isolated_si or restricted_profile else None,
                     start_new_session=self._owns_process_group,
                     **_hidden_subprocess_options(),
                 )
@@ -848,7 +1081,8 @@ class ACPClient:
         self.reader_thread.start()
 
         # Start stderr reader (for debug logging)
-        threading.Thread(target=self._stderr_loop, daemon=True).start()
+        self.stderr_thread = threading.Thread(target=self._stderr_loop, daemon=True)
+        self.stderr_thread.start()
 
         # Initialize connection
         init_result = self._send_request("initialize", {
@@ -872,6 +1106,11 @@ class ACPClient:
             print(f"[ACP] Capabilities: {json.dumps(caps, indent=2)}")
         else:
             print(f"[ACP] Warning: initialize returned: {init_result}")
+        if restricted_profile and (
+            not init_result or "error" in init_result or self.agent_info.get("version") != "1.0.109"
+        ):
+            self.stop()
+            raise RuntimeError("Restricted security ACP requires the verified Copilot CLI version.")
 
         # Create session — pass MCP servers via ACP session/new if configured
         mcp_servers_for_session = []
@@ -935,6 +1174,16 @@ class ACPClient:
             if self.process is not None:
                 if self.process.stdin and not self.process.stdin.closed:
                     self.process.stdin.close()
+                if self.isolated_reasoning:
+                    for reader in (self.reader_thread, self.stderr_thread):
+                        if reader and reader is not threading.current_thread():
+                            reader.join(timeout=2)
+                    for stream in (self.process.stdout, self.process.stderr):
+                        if stream and not stream.closed:
+                            stream.close()
+            if self._sandbox_profile is not None:
+                self._sandbox_profile.cleanup()
+                self._sandbox_profile = None
             with self.permission_lock:
                 self.pending_permissions.clear()
             self._stopped = True
@@ -1290,6 +1539,10 @@ class ACPClient:
                 })
 
         elif update_type in ("tool_call", "tool_call_update"):
+            session_id = str(params.get("sessionId") or params.get("session_id") or "")
+            self._security_capture_input(update, session_id)
+            if update.get("status") in {"completed", "failed"}:
+                self._security_capture_output(update, session_id)
             status = update.get("status", "")
             kind = str(update.get("kind") or "other")[:32]
             if status:
@@ -1327,6 +1580,33 @@ class ACPClient:
             self.session_usage[session_id] = usage
             _telemetry_emit("acp_usage", model=self.model or "default", **usage)
 
+    def _security_claim(self, session_id, tool_call, phase, method, url):
+        call_id = str(tool_call.get("toolCallId") or "")[:160]
+        if not session_id or not call_id:
+            return False
+        digest = hashlib.sha256((method + "\0" + url).encode("utf-8")).hexdigest()[:24]
+        key = (session_id[:160], call_id, phase, digest)
+        with self._security_url_lock:
+            if key in self._security_url_marks:
+                return False
+            self._security_url_marks[key] = True
+            if len(self._security_url_marks) > 4096:
+                self._security_url_marks.popitem(last=False)
+        return True
+
+    def _security_capture_input(self, tool_call, session_id, observation="proposed"):
+        from bridge.security_urls import record, tool_input_observations
+        values = tool_input_observations(tool_call)
+        record([(method, url, observation) for method, url in values
+                if self._security_claim(session_id, tool_call, observation, method, url)])
+        return values
+
+    def _security_capture_output(self, tool_call, session_id):
+        from bridge.security_urls import discovered_observations, record
+        values = discovered_observations([tool_call.get("content"), tool_call.get("rawOutput")])
+        record([(method, url, "discovered") for method, url in values
+                if self._security_claim(session_id, tool_call, "discovered", method, url)])
+
     def _dispatch_prompt_event(self, params, event):
         """Deliver a sanitized lifecycle event to the matching active prompt."""
         session_id = params.get("sessionId") or params.get("session_id")
@@ -1357,6 +1637,7 @@ class ACPClient:
             })
         tool_kind = str(tool_call.get("kind") or "other")[:32]
         session_id = str(params.get("sessionId") or "")[:120]
+        security_inputs = self._security_capture_input(tool_call, session_id)
         with self._prompt_state_lock:
             prompt_states = [
                 state for state in self._active_prompts.values()
@@ -1371,6 +1652,7 @@ class ACPClient:
                 ))
             )
         if background_context and (not session_id or len(prompt_states) != 1):
+            self._security_capture_input(tool_call, session_id, "denied")
             reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
             reject_option = reject_option or next((option for option in options if option["kind"] == "reject_always"), None)
             if reject_option:
@@ -1384,7 +1666,43 @@ class ACPClient:
             return
         permission_mode = prompt_states[0].get("permission_mode", "interactive") \
             if len(prompt_states) == 1 else remembered_mode
+        sandbox_manual = False
+        if self.sandbox_image:
+            raw = tool_call.get("rawInput")
+            valid = (
+                bool(session_id) and len(prompt_states) == 1
+                and permission_mode in {"sandbox_auto", "workspace_write"}
+                and tool_kind == "other" and tool_call.get("title") == "execute"
+                and isinstance(raw, dict) and set(raw) <= {"command", "timeout_seconds"}
+                and isinstance(raw.get("command"), str) and bool(raw["command"].strip())
+                and len(raw["command"]) <= 8192
+                and ("timeout_seconds" not in raw or (
+                    isinstance(raw["timeout_seconds"], int) and not isinstance(raw["timeout_seconds"], bool)
+                    and 1 <= raw["timeout_seconds"] <= 300
+                ))
+            )
+            allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
+            if valid and permission_mode == "sandbox_auto" and allow_once:
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
+                })
+                _telemetry_emit("acp_permission", decision="sandbox-autonomy-approve",
+                                tool_kind="execute", option_count=len(options))
+                return
+            if not valid:
+                self._security_capture_input(tool_call, session_id, "denied")
+                reject = next((option for option in options if option["kind"] in {"reject_once", "reject_always"}), None)
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": reject["option_id"]} if reject
+                    else {"outcome": "cancelled"}
+                })
+                _telemetry_emit("acp_permission", decision="sandbox-autonomy-reject",
+                                tool_kind=tool_kind, option_count=len(options))
+                return
+            sandbox_manual = True
+            tool_kind = "execute"
         if self.no_tools or permission_mode == "automation_no_tools":
+            self._security_capture_input(tool_call, session_id, "denied")
             reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
             reject_option = reject_option or next(
                 (option for option in options if option["kind"] == "reject_always"), None
@@ -1400,6 +1718,7 @@ class ACPClient:
             return
         workspace_mode = permission_mode == "workspace_auto"
         background_mode = permission_mode == "background_auto"
+        coding_mode = permission_mode == "coding_auto"
         mail_scoped = _mail_scoped_tool_call(tool_call) or (
             background_mode and bool(_BACKGROUND_MAIL_INTENT_RE.search(str(tool_call.get("title") or "")))
         )
@@ -1410,6 +1729,7 @@ class ACPClient:
             option_count=len(options), execute_category=execute_category,
         )
         if permission_mode == "passive_recall":
+            self._security_capture_input(tool_call, session_id, "denied")
             reject_option = next((option for option in options if option["kind"] == "reject_once"), None)
             if reject_option is None:
                 reject_option = next((option for option in options if option["kind"] == "reject_always"), None)
@@ -1424,6 +1744,18 @@ class ACPClient:
                 _telemetry_emit("acp_permission", decision="policy-deny",
                                 tool_kind=tool_kind, option_count=len(options))
             return
+        coding_reason = ""
+        if coding_mode:
+            allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
+            coding_reason = _coding_autonomy_approval_reason(tool_call, tool_kind, mail_scoped)
+            if not coding_reason and allow_once:
+                self._send_response(rpc_id, {
+                    "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
+                })
+                _telemetry_emit("acp_permission", decision="coding-autonomy-approve",
+                                tool_kind=tool_kind, option_count=len(options))
+                return
+            coding_reason = coding_reason or "no one-time approval option"
         if workspace_mode or background_mode:
             allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
             reject_once = next((option for option in options if option["kind"] == "reject_once"), None)
@@ -1436,9 +1768,16 @@ class ACPClient:
                 block_reason = "autonomy_disabled"
             elif (background_mode and tool_kind not in {"read", "edit", "execute", "search", "fetch"}) or tool_kind in {"delete", "other"}:
                 block_reason = "unsupported_tool"
-            elif background_mode and any(
-                _BACKGROUND_DESTRUCTIVE_TOOL_RE.search(str(tool_call.get(key) or ""))
-                for key in ("name", "title")
+            elif background_mode and (
+                _BACKGROUND_DESTRUCTIVE_TOOL_RE.search(str(tool_call.get("name") or ""))
+                or (
+                    _BACKGROUND_DESTRUCTIVE_TOOL_RE.search(str(tool_call.get("title") or ""))
+                    and not (
+                        tool_kind == "fetch"
+                        and _background_web_tool_name({"name": tool_call.get("name")}) == "web_fetch"
+                        and not _background_remote_block_reason(tool_call)
+                    )
+                )
             ):
                 block_reason = "destructive_action"
             elif mail_scoped:
@@ -1469,6 +1808,7 @@ class ACPClient:
                         block_reason = ""
                         unverified_research = True
             if block_reason:
+                self._security_capture_input(tool_call, session_id, "denied")
                 with self._prompt_state_lock:
                     for state in self._active_prompts.values():
                         if state.get("session_id") == session_id:
@@ -1492,6 +1832,7 @@ class ACPClient:
                 if background_mode:
                     with _st.bg_auto_actions_lock:
                         if not _st.bg_auto_actions or (unverified_research and not _unverified_research_allowed()):
+                            self._security_capture_input(tool_call, session_id, "denied")
                             revoked_reason = "unclassified_remote_action" if _st.bg_auto_actions else "autonomy_disabled"
                             with self._prompt_state_lock:
                                 for state in self._active_prompts.values():
@@ -1521,6 +1862,7 @@ class ACPClient:
                                     tool_kind=tool_kind, option_count=len(options))
                 return
             if background_mode:
+                self._security_capture_input(tool_call, session_id, "denied")
                 with self._prompt_state_lock:
                     for state in self._active_prompts.values():
                         if state.get("session_id") == session_id:
@@ -1537,7 +1879,7 @@ class ACPClient:
                 _record_autonomy_block("background", tool_kind, "no_allow_once")
                 return
         allow_once = next((option for option in options if option["kind"] == "allow_once"), None)
-        if tool_kind == "execute" and allow_once and not mail_scoped and _workspace_read_only_execute(tool_call, self.cwd):
+        if not coding_mode and not sandbox_manual and tool_kind == "execute" and allow_once and not mail_scoped and _workspace_read_only_execute(tool_call, self.cwd):
             self._send_response(rpc_id, {
                 "outcome": {"outcome": "selected", "optionId": allow_once["option_id"]}
             })
@@ -1545,7 +1887,7 @@ class ACPClient:
             _telemetry_emit("acp_permission", decision=decision,
                             tool_kind=tool_kind, option_count=len(options))
             return
-        routine_allowed = bool(_get_learning_consent().get("routine_tools")) and tool_kind in {
+        routine_allowed = not coding_mode and bool(_get_learning_consent().get("routine_tools")) and tool_kind in {
             "read", "search", "fetch", "think"
         } and not mail_scoped
         if routine_allowed and allow_once:
@@ -1554,7 +1896,9 @@ class ACPClient:
             return
 
         permission_id = uuid.uuid4().hex
-        command_summary = _command_summary(tool_call) if tool_kind == "execute" else ""
+        command_summary = _coding_command_summary(tool_call) if sandbox_manual else (
+            _coding_command_summary(tool_call) if tool_kind == "execute" else _coding_action_summary(tool_call)
+        ) if coding_mode else _command_summary(tool_call) if tool_kind == "execute" else ""
         entry = {
             "id": permission_id,
             "rpc_id": rpc_id,
@@ -1562,7 +1906,9 @@ class ACPClient:
             "tool_kind": tool_kind,
             "permission_mode": permission_mode,
             "command_summary": command_summary,
-            "approval_allowed": tool_kind != "execute" or bool(command_summary),
+            "approval_allowed": bool(command_summary) if coding_mode else tool_kind != "execute" or bool(command_summary),
+            "approval_reason": coding_reason,
+            "security_inputs": security_inputs,
             "options": options,
             "created_at": time.time(),
         }
@@ -1580,6 +1926,7 @@ class ACPClient:
                 "tool_kind": entry["tool_kind"],
                 "command_summary": entry.get("command_summary", ""),
                 "approval_allowed": entry.get("approval_allowed", True),
+                "approval_reason": entry.get("approval_reason", ""),
                 "options": list(entry["options"]),
                 "created_at": entry["created_at"],
             } for entry in self.pending_permissions.values()]
@@ -1610,6 +1957,8 @@ class ACPClient:
             self._send_response(entry["rpc_id"], {"outcome": {"outcome": "selected", "optionId": selected["option_id"]}})
             resolved_decision = "allow_once"
         else:
+            from bridge.security_urls import record
+            record([(method, url, "denied") for method, url in entry.get("security_inputs", [])])
             with self._prompt_state_lock:
                 for state in self._active_prompts.values():
                     if state.get("session_id") == entry["session_id"]:
@@ -1618,7 +1967,7 @@ class ACPClient:
             self._send_notification("session/cancel", {"sessionId": entry["session_id"]})
             self._send_response(entry["rpc_id"], {"outcome": {"outcome": "cancelled"}})
             resolved_decision = "user-rejected"
-            if entry.get("permission_mode") in {"workspace_write", "workspace_auto"}:
+            if entry.get("permission_mode") in {"workspace_write", "workspace_auto", "coding_auto"}:
                 _record_autonomy_block("workspace", entry["tool_kind"], "user_rejected")
         _telemetry_emit("acp_permission", decision=resolved_decision, tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
         return True
@@ -1628,6 +1977,8 @@ class ACPClient:
             entry = self.pending_permissions.pop(str(permission_id), None)
         if not entry:
             return
+        from bridge.security_urls import record
+        record([(method, url, "denied") for method, url in entry.get("security_inputs", [])])
         with self._prompt_state_lock:
             for state in self._active_prompts.values():
                 if state.get("session_id") == entry["session_id"]:
@@ -1636,13 +1987,16 @@ class ACPClient:
         self._send_notification("session/cancel", {"sessionId": entry["session_id"]})
         self._send_response(entry["rpc_id"], {"outcome": {"outcome": "cancelled"}})
         _telemetry_emit("acp_permission", decision="expired", tool_kind=entry["tool_kind"], option_count=len(entry["options"]))
-        if entry.get("permission_mode") in {"workspace_write", "workspace_auto"}:
+        if entry.get("permission_mode") in {"workspace_write", "workspace_auto", "coding_auto"}:
             _record_autonomy_block("workspace", entry["tool_kind"], "permission_timeout")
 
     # --- Terminal handlers (for ACP tool execution) ---
 
     def _handle_terminal_create(self, rid, params):
         """Execute a shell command requested by the agent."""
+        if self.sandbox_image or self.isolated_reasoning:
+            self._send_rpc_error(rid, -32602, "Host terminals are unavailable to sandboxed workspace runs.")
+            return
         command = params.get("command", "")
         args = params.get("args", [])
         cwd = params.get("cwd") or self.cwd

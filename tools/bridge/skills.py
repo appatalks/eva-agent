@@ -76,7 +76,13 @@ def _http_get_text(url, max_bytes=_SKILL_SOURCE_MAX_BYTES):
     for _hop in range(6):
         ok, err, pinned_ip = _safe_external_url(current)
         if not ok:
+            from bridge.security_urls import record, sanitize_url
+            clean = sanitize_url(current)
+            if clean:
+                record([("GET", clean, "denied")])
             return None, err
+        from bridge.security_urls import observe_request
+        observe_request("GET", current)
         parsed = urllib.parse.urlparse(current)
         host = parsed.hostname
         is_https = (parsed.scheme == "https")
@@ -372,6 +378,8 @@ def _evarise_skill(raw_text):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        from bridge.security_urls import observe_request
+        observe_request("POST", lms_base + "/chat/completions")
         with urllib.request.urlopen(req, timeout=120) as resp:
             body = json.loads(resp.read())
         text = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")

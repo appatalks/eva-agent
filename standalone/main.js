@@ -575,6 +575,7 @@ function workspaceRunForRenderer(run) {
     applyRevision: run.apply_revision || '',
     applyReport: typeof run.apply_report === 'string' ? run.apply_report : '',
     autoApprove: run.auto_approve === 1 || run.auto_approve === true,
+    sandboxed: typeof run.sandbox_image === 'string' && run.sandbox_image.length > 0,
     finalDisposition: run.final_disposition,
     createdAt: run.created_at,
     updatedAt: run.updated_at,
@@ -776,7 +777,8 @@ async function workspaceCreateRun(event, request) {
     provider_config: input.modelPolicy === 'lmstudio' && input.providerConfig && typeof input.providerConfig === 'object'
       ? input.providerConfig : {},
     apply_on_success: input.applyOnSuccess === true,
-    auto_approve: input.autoApprove === true
+    auto_approve: input.autoApprove === true,
+    sandbox: input.sandbox === true
   });
   const run = response.run;
   if (!run || !run.checkout || !validWorkspaceId(run.checkout.id) || typeof run.checkout.path !== 'string') {

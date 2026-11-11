@@ -861,6 +861,7 @@ async function aigSendRequest() {
         lmstudio_available: aigLmStudioAvailable(),
         openai_api_key: (typeof getAuthKey === 'function') ? getAuthKey('OPENAI_API_KEY') : '',
         acp_auto_approve: true,
+        acp_coding_autonomy: (typeof getACPCodingAutonomy === 'function') && getACPCodingAutonomy(),
         stream: true
       })
     });

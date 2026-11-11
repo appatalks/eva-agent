@@ -148,6 +148,9 @@ def normalize_aig_request(
     acp_auto_approve = data.get("acp_auto_approve", False)
     if not isinstance(acp_auto_approve, bool):
         raise ValueError("acp_auto_approve must be a boolean")
+    acp_coding_autonomy = data.get("acp_coding_autonomy", False)
+    if not isinstance(acp_coding_autonomy, bool):
+        raise ValueError("acp_coding_autonomy must be a boolean")
 
     if not user_message and messages:
         for message in reversed(messages):
@@ -179,6 +182,7 @@ def normalize_aig_request(
         "reasoning_effort": raw_reasoning_effort,
         "thinking_enabled": thinking_enabled,
         "acp_auto_approve": acp_auto_approve,
+        "acp_coding_autonomy": acp_coding_autonomy,
         "stream_requested": data.get("stream") is True,
         "si_runtime": "copilot" if si_runtime in {"copilot", "copilot-cli", "si-copilot"} else "direct",
         "lmstudio_base_url": str(data.get("lmstudio_base_url") or "").strip()[:500],

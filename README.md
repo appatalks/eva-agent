@@ -15,6 +15,23 @@ while keeping configuration, approvals, and personal data under your control.
   conversation model.
 - **Thinking control:** show or hide available model reasoning and request it
   on or off; individual models and providers may ignore or reject the request.
+- **Opt-in ACP coding autonomy:** authorized Standalone chat coding commands can run with user-level
+  access. Best-effort checks request approval for visibly sensitive actions;
+  arbitrary scripts can bypass those checks. Background and isolated workspace
+  policies remain separate.
+- **Security Officer:** a lightweight Agent Observatory monitor reports rootless
+  sandbox readiness and blocked boundary checks. On request it can ask the
+  selected chat model to interpret sanitized event counts without tools or memory;
+  that interpretation is advisory. Opt-in workspace coding runs
+  can execute offline in a local Podman image; chat and other tools are not
+  sandboxed. The container receives only its worktree, but its output may be
+  sent to the selected model provider. Known credential scans are not exhaustive.
+  Optional Sitrails monitoring automatically assesses open alerts using categorical
+  evidence from their recorded details and a loopback SI model, without automatically
+  changing Sitrails alert status. Confirmed manual dismissal or clear resolves alerts while
+  retaining Sitrails evidence and trails. Forwarding is checked before monitoring and review;
+  changes during a review may not be detected until later. A loopback model
+  endpoint must itself be configured not to forward requests elsewhere.
 - **Operations visibility:** background jobs are grouped by purpose, activity
   can be filtered, job settings persist across restarts, and scheduled-task
   attempts show their outcome. Opt-in background ACP autonomy decides bounded
@@ -81,8 +98,12 @@ while keeping configuration, approvals, and personal data under your control.
   A local Mission log checklist preserves final debriefs across restarts before
   eligible finished crew are dismissed; active dependencies and a one-minute
   reuse window are protected.
-  The Captain's notepad records new workspace and background permission blocks
-  and supports confirmed deletion of individual entries or the entire log.
+  The Captain's notepad keeps mission debriefs. A separate Security log records
+  workspace and background permission blocks alongside opt-in, counted HTTP(S) URL observations. Query strings,
+  fragments, and URL userinfo are omitted. Observations distinguish requests,
+  proposed or denied tool calls, and discovered URLs; coverage is best-effort,
+  not complete network monitoring. URL observations can be cleared separately
+  from permission blocks. Security entries remain local until cleared.
 - **Signal account linking:** Settings > Accounts provides a Link Signal button,
   an in-panel QR code, completion status, cancellation, and fresh codes after
   expiry. Existing recipients and prior local account files are preserved.
@@ -90,6 +111,15 @@ while keeping configuration, approvals, and personal data under your control.
   the selected workspace, focus a tile, interrupt work, or send new direction.
   Project files stay beside Live and Details tabs. Create local Git workspaces
   or import existing projects through a responsive in-app folder browser.
+- **Offline workspace prerequisites:** install rootless Podman and prepare a
+  trusted local image named `localhost/eva-coding-sandbox:debian` with Python,
+  Git, and Node. Eva does not pull images automatically, pins the image identity
+  per run, and fails closed if it changes. Sandboxed Copilot workspace runs require
+  the qualified CLI version 1.0.109. Workspace Git metadata and external MCP
+  servers are unavailable inside the sandbox; network and package downloads are
+  disabled. The sandbox requires a trusted root-owned Podman seccomp profile on
+  x86_64 or arm64 and blocks nested user namespaces. The Security Officer
+  inspector offers an offline boundary self-test.
 - **Local-first operation:** use SQLite and local models by default, with cloud services
   enabled only when configured.
 

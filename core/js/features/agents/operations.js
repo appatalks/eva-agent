@@ -28,10 +28,17 @@ var EvaAgents = (function() {
     lastSyncAt: 0,
     telemetryError: '',
     reportsSequence: 0,
+    securitySequence: 0,
+    sitrailsClearBusy: false,
+    sitrailsClearNotice: '',
+    sitrailsSequence: 0,
+    securityUrlOffset: 0,
+    securityBlockOffset: 0,
     primaryTurns: new Map(),
     primaryTurnSequence: 0,
     clockTimer: null,
     actionBusy: {},
+    securityAnalysis: '',
     parallaxX: 0,
     parallaxY: 0,
     parallaxTargetX: 0,
@@ -73,9 +80,10 @@ var EvaAgents = (function() {
   }
 
   function setView(view) {
-    state.view = ['floor', 'memory', 'cards', 'workspaces', 'reports'].indexOf(view) === -1 ? 'floor' : view;
+    state.view = ['floor', 'memory', 'cards', 'workspaces', 'reports', 'security'].indexOf(view) === -1 ? 'floor' : view;
     var views = { floor: ['agentsFloorTab', 'agentsFloor'], memory: ['agentsMemoryTab', 'agentsMemory'], cards: ['agentsCardsTab', 'agentsGrid'],
-      workspaces: ['agentsWorkspacesTab', 'agentsWorkspaces'], reports: ['agentsReportsTab', 'agentsReports'] };
+      workspaces: ['agentsWorkspacesTab', 'agentsWorkspaces'], reports: ['agentsReportsTab', 'agentsReports'],
+      security: ['agentsSecurityTab', 'agentsSecurity'] };
     Object.keys(views).forEach(function(key) {
       var tab = document.getElementById(views[key][0]);
       var panel = document.getElementById(views[key][1]);
@@ -86,7 +94,7 @@ var EvaAgents = (function() {
       if (panel) panel.hidden = key !== state.view;
     });
     try { localStorage.setItem('evaAgentObservatoryView', state.view); } catch (_) {}
-    var fullWidth = state.view === 'workspaces' || state.view === 'reports';
+    var fullWidth = state.view === 'workspaces' || state.view === 'reports' || state.view === 'security';
     if (fullWidth) closeDetail();
     document.getElementById('agentsView').dataset.view = state.view;
     if (window.EvaWorkspaces && state.open) {
@@ -94,6 +102,7 @@ var EvaAgents = (function() {
       else window.EvaWorkspaces.closeWorkbench(true);
     }
     if (state.open && state.view === 'reports') refreshReports();
+    if (state.open && state.view === 'security') refreshSecurity();
     if (typeof EvaBridgeScene !== 'undefined') EvaBridgeScene.setActive(state.open && state.view === 'floor');
     if (state.open && state.view === 'memory') {
       startGraph();
@@ -128,7 +137,7 @@ var EvaAgents = (function() {
   }
 
   function kindLabel(kind) {
-    var labels = { eva: 'PRIMARY AGENT', subagent: 'ACP SUBAGENT', browser: 'BROWSER', desktop: 'DESKTOP', background: 'BACKGROUND' };
+    var labels = { eva: 'PRIMARY AGENT', security: 'SECURITY OFFICER', subagent: 'ACP SUBAGENT', browser: 'BROWSER', desktop: 'DESKTOP', background: 'BACKGROUND' };
     return labels[kind] || String(kind || 'AGENT').toUpperCase();
   }
 
@@ -233,7 +242,11 @@ var EvaAgents = (function() {
   }
 
   async function deleteMissionLogEntry(scope, button) {
-    var prompt = scope === 'all' ? 'Permanently delete all notepad entries?' : 'Permanently delete this notepad entry?';
+    var security = scope === 'security' || scope === 'urls' || scope.indexOf('block:') === 0;
+    var prompt = scope === 'reports' ? 'Permanently delete all mission debriefs?' :
+      scope === 'security' ? 'Permanently delete all permission blocks and URL observations?' :
+      scope === 'urls' ? 'Permanently delete all URL observations? Permission blocks and logging settings will be kept; new observations may appear.' :
+      'Permanently delete this entry?';
     if (!confirm(prompt)) return;
     button.disabled = true;
     try {
@@ -253,11 +266,18 @@ var EvaAgents = (function() {
       }));
       var receipt = await response.json();
       if (!response.ok || typeof receipt.deleted !== 'number') throw new Error('Deletion was not confirmed.');
-      state.reportsSequence++;
-      await refreshReports();
-      setText('missionLogStatus', 'Deleted ' + receipt.deleted + ' notepad entries.');
+      if (security) {
+        state.securityUrlOffset = 0;
+        if (scope !== 'urls') state.securityBlockOffset = 0;
+        await refreshSecurity();
+        setText('securityLogStatus', 'Deleted ' + receipt.deleted + (scope === 'urls' ? ' URL observations.' : ' security entries.'));
+      } else {
+        state.reportsSequence++;
+        await refreshReports();
+        setText('missionLogStatus', 'Deleted ' + receipt.deleted + ' debrief entries.');
+      }
     } catch (error) {
-      setText('missionLogStatus', error.message || 'Deletion failed.');
+      setText(security ? 'securityLogStatus' : 'missionLogStatus', error.message || 'Deletion failed.');
     } finally { button.disabled = false; }
   }
 
@@ -275,11 +295,28 @@ var EvaAgents = (function() {
       });
       var receipt = await response.json();
       if (!response.ok || receipt.allowed !== allowed) throw new Error('Permission change was not confirmed.');
-      state.reportsSequence++;
-      await refreshReports();
+      await refreshSecurity();
     } catch (error) {
-      setText('missionLogStatus', error.message || 'Permission change failed.');
+      setText('securityLogStatus', error.message || 'Permission change failed.');
     } finally { allow.disabled = deny.disabled = false; }
+  }
+
+  async function setSecurityUrlLogging(enabled) {
+    if (enabled && !confirm('Record visible URLs locally until cleared? Query strings, fragments, and userinfo are removed, but hostnames and paths can still be sensitive.')) return;
+    var enable = document.getElementById('securityUrlEnable');
+    var disable = document.getElementById('securityUrlDisable');
+    enable.disabled = disable.disabled = true;
+    try {
+      var response = await fetch(bridgeUrl() + '/v1/security/url-logging', {
+        method: 'POST', headers: getBridgeCapabilityHeaders(),
+        body: JSON.stringify({ enabled: enabled }), signal: AbortSignal.timeout(8000)
+      });
+      var result = await response.json();
+      if (!response.ok || result.enabled !== enabled) throw new Error('URL logging preference was not confirmed.');
+      await refreshSecurity();
+    } catch (error) {
+      setText('securityLogStatus', error.message || 'URL logging preference could not be saved.');
+    } finally { enable.disabled = disable.disabled = false; }
   }
 
   function debriefText(text) {
@@ -302,24 +339,6 @@ var EvaAgents = (function() {
       var payload = await response.json();
       if (sequence !== state.reportsSequence) return;
       if (!Array.isArray(payload.reports)) throw new Error('Invalid report archive.');
-      setText('missionLogResearchStatus', payload.unverified_research_allowed
-        ? 'Unverified background research: allowed for future requests.'
-        : 'Unverified background research: denied for future requests.');
-      var blocksHost = document.getElementById('missionLogBlocks');
-      blocksHost.replaceChildren();
-      (Array.isArray(payload.blocks) ? payload.blocks : []).forEach(function(block) {
-        var card = element('article', 'mission-log-report');
-        card.append(element('strong', '', (block.source === 'workspace' ? 'Workspace' : 'Background') +
-          ' ' + String(block.tool_kind || 'action') + ' blocked'));
-        card.append(element('p', 'mission-log-meta', new Date(block.created_at).toLocaleString()));
-        card.append(element('p', 'mission-log-body', 'Reason: ' + String(block.reason || 'unknown').replace(/_/g, ' ')));
-        var remove = element('button', '', 'Delete');
-        remove.type = 'button';
-        remove.addEventListener('click', function() { deleteMissionLogEntry('block:' + block.id, remove); });
-        card.append(remove);
-        blocksHost.append(card);
-      });
-      if (!blocksHost.children.length) blocksHost.append(element('p', 'mission-log-status', 'No permission blocks recorded yet.'));
       var host = document.getElementById('missionLogReports');
       var existing = {};
       host.querySelectorAll('[data-report-id]').forEach(function(node) { existing[node.dataset.reportId] = node; });
@@ -370,9 +389,221 @@ var EvaAgents = (function() {
         delete existing[report.id];
       });
       Object.keys(existing).forEach(function(id) { existing[id].remove(); });
-      setText('missionLogStatus', 'Showing up to 100 recent blocks and 100 debriefs; stored locally.');
+      setText('missionLogStatus', 'Showing up to 100 recent debriefs; stored locally.');
     } catch (error) {
       if (sequence === state.reportsSequence) setText('missionLogStatus', 'Archive unavailable. Last loaded reports retained. ' + error.message);
+    }
+  }
+
+  async function refreshSecurity() {
+    var sequence = ++state.securitySequence;
+    refreshSitrails();
+    try {
+      var response = await fetch(bridgeUrl() + '/v1/security/log?url_offset=' + state.securityUrlOffset +
+        '&block_offset=' + state.securityBlockOffset, { headers: getBridgeCapabilityHeaders(), signal: AbortSignal.timeout(8000) });
+      if (!response.ok) throw new Error('Security log returned ' + response.status);
+      var payload = await response.json();
+      if (sequence !== state.securitySequence) return;
+      if (!Array.isArray(payload.urls) || !Array.isArray(payload.blocks)) throw new Error('Invalid security log.');
+      setText('missionLogResearchStatus', payload.unverified_research_allowed
+        ? 'Unverified background research: allowed for future requests.'
+        : 'Unverified background research: denied for future requests.');
+      setText('securityUrlLoggingStatus', payload.url_logging_enabled
+        ? 'URL logging is enabled. Existing observations remain until cleared.'
+        : 'URL logging is paused. Existing observations remain until cleared.');
+      var body = document.getElementById('securityLogUrlBody');
+      body.replaceChildren();
+      payload.urls.forEach(function(item) {
+        var row = document.createElement('tr');
+        [item.method || 'UNKNOWN', item.url || '', String(item.hits || 0),
+          String(item.observation || '').replace(/_/g, ' '),
+          item.last_seen ? new Date(item.last_seen).toLocaleString() : ''].forEach(function(value) {
+          row.appendChild(element('td', '', value));
+        });
+        body.appendChild(row);
+      });
+      if (!payload.urls.length) {
+        var empty = document.createElement('tr');
+        var cell = element('td', '', 'No URL observations on this page.');
+        cell.colSpan = 5;
+        empty.appendChild(cell);
+        body.appendChild(empty);
+      }
+      var blocksHost = document.getElementById('missionLogBlocks');
+      blocksHost.replaceChildren();
+      payload.blocks.forEach(function(block) {
+        var card = element('article', 'mission-log-report');
+        card.append(element('strong', '', (block.source === 'workspace' ? 'Workspace' : 'Background') +
+          ' ' + String(block.tool_kind || 'action') + ' blocked'));
+        card.append(element('p', 'mission-log-meta', new Date(block.created_at).toLocaleString()));
+        card.append(element('p', 'mission-log-body', 'Reason: ' + String(block.reason || 'unknown').replace(/_/g, ' ')));
+        var remove = element('button', '', 'Delete');
+        remove.type = 'button';
+        remove.addEventListener('click', function() { deleteMissionLogEntry('block:' + block.id, remove); });
+        card.append(remove);
+        blocksHost.append(card);
+      });
+      if (!payload.blocks.length) blocksHost.append(element('p', 'mission-log-status', 'No permission blocks on this page.'));
+      document.getElementById('securityUrlPrevious').disabled = state.securityUrlOffset === 0;
+      document.getElementById('securityUrlNext').disabled = !payload.urls_more;
+      document.getElementById('securityBlockPrevious').disabled = state.securityBlockOffset === 0;
+      document.getElementById('securityBlockNext').disabled = !payload.blocks_more;
+      setText('securityLogStatus', 'URLs ' + (payload.urls.length ? state.securityUrlOffset + 1 : 0) + '–' +
+        (payload.urls.length ? state.securityUrlOffset + payload.urls.length : 0) +
+        '; blocks ' + (payload.blocks.length ? state.securityBlockOffset + 1 : 0) + '–' +
+        (payload.blocks.length ? state.securityBlockOffset + payload.blocks.length : 0) + '. Stored until cleared.');
+    } catch (error) {
+      if (sequence === state.securitySequence) setText('securityLogStatus', 'Security log unavailable. ' + error.message);
+    }
+  }
+
+  async function refreshSitrails() {
+    var sequence = ++state.sitrailsSequence;
+    try {
+      var response = await fetch(bridgeUrl() + '/v1/security/sitrails', {
+        headers: getBridgeCapabilityHeaders(), signal: AbortSignal.timeout(8000)
+      });
+      if (!response.ok) throw new Error('Status unavailable.');
+      var data = await response.json();
+      if (sequence !== state.sitrailsSequence) return;
+      var input = document.getElementById('sitrailsUrl');
+      if (document.activeElement !== input) input.value = data.url;
+      setText('sitrailsStatus', data.status);
+      document.getElementById('sitrailsEnable').disabled = !!data.enabled;
+      document.getElementById('sitrailsDisable').disabled = !data.enabled;
+      var clear = data.clear || {};
+      document.getElementById('sitrailsClear').disabled = state.sitrailsClearBusy || clear.state === 'running';
+      if (!state.sitrailsClearBusy && clear.state === 'running') {
+        state.sitrailsClearNotice = '';
+        setText('sitrailsClearStatus', 'Resolving selected alerts: ' + (clear.resolved || 0) +
+          ' confirmed, ' + (clear.unconfirmed || 0) + ' unconfirmed, ' + (clear.skipped || 0) +
+          ' skipped; ' + (clear.total || 0) + ' selected.');
+      } else if (!state.sitrailsClearBusy && state.sitrailsClearNotice) {
+        setText('sitrailsClearStatus', state.sitrailsClearNotice);
+      } else if (!state.sitrailsClearBusy && clear.state === 'completed') {
+        setText('sitrailsClearStatus', 'Resolved ' + (clear.resolved || 0) + ' alert(s); ' +
+          (clear.unconfirmed || 0) + ' unconfirmed and ' + (clear.skipped || 0) + ' changed or no longer confirmed open.' +
+          (clear.more ? ' Additional or changing alerts may remain.' : '') +
+          (clear.local_cleanup_failed ? ' Some local review records could not be removed.' : ''));
+      } else if (!state.sitrailsClearBusy && clear.state === 'stopped') {
+        setText('sitrailsClearStatus', 'Clear stopped after settings changed: ' + (clear.resolved || 0) +
+          ' resolved, ' + (clear.unconfirmed || 0) + ' unconfirmed, ' + (clear.skipped || 0) + ' skipped.' +
+          (clear.local_cleanup_failed ? ' Some local review records could not be removed.' : ''));
+      } else if (!state.sitrailsClearBusy && clear.state === 'error') {
+        setText('sitrailsClearStatus', 'Clear did not complete: ' + (clear.resolved || 0) +
+          ' confirmed resolved, ' + (clear.unconfirmed || 0) + ' unconfirmed, ' + (clear.skipped || 0) +
+          ' skipped. Check Sitrails for current alert statuses before trying again.' +
+          (clear.local_cleanup_failed ? ' Some local review records could not be removed.' : ''));
+      }
+      var body = document.getElementById('sitrailsAlertBody');
+      body.replaceChildren();
+      (data.alerts || []).forEach(function(alert) {
+        var row = document.createElement('tr');
+        row.appendChild(element('td', '', alert.timestamp ? new Date(alert.timestamp).toLocaleString() : ''));
+        var alertCell = document.createElement('td');
+        alertCell.append(element('strong', '', alert.rule), element('p', '', alert.description));
+        alertCell.appendChild(element('small', '', 'Alert ID: ' + alert.id));
+        row.appendChild(alertCell);
+        row.appendChild(element('td', '', alert.severity + ' / ' + alert.confidence + ' confidence'));
+        row.appendChild(element('td', '', alert.recommendation));
+        var actions = document.createElement('td');
+        actions.appendChild(element('p', '', alert.assessment || 'Awaiting automatic Security Officer review.'));
+        var dismiss = element('button', '', 'Dismiss alert');
+        dismiss.type = 'button';
+        dismiss.disabled = state.sitrailsClearBusy || clear.state === 'running' ||
+          alert.recommendation === 'pending' || !alert.review_token;
+        dismiss.setAttribute('aria-label', 'Dismiss this reviewed Sitrails alert');
+        dismiss.addEventListener('click', function() {
+          dismiss.disabled = true;
+          clearSitrailsObservations(alert);
+        });
+        actions.appendChild(dismiss);
+        var link = element('a', '', 'Open Sitrails');
+        link.href = data.url + '/#alerts';
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        actions.appendChild(link);
+        row.appendChild(actions);
+        body.appendChild(row);
+      });
+      if (!data.alerts || !data.alerts.length) {
+        var empty = document.createElement('tr');
+        var cell = element('td', '', data.enabled ? 'No open alerts loaded.' : 'Monitoring is paused.');
+        cell.colSpan = 5;
+        empty.appendChild(cell);
+        body.appendChild(empty);
+      }
+    } catch (error) {
+      if (sequence === state.sitrailsSequence) setText('sitrailsStatus', 'Sitrails monitoring status unavailable.');
+    }
+  }
+
+  async function clearSitrailsObservations(alert) {
+    var button = document.getElementById('sitrailsClear');
+    if (state.sitrailsClearBusy) return;
+    state.sitrailsClearBusy = true;
+    state.sitrailsClearNotice = '';
+    button.disabled = true;
+    setText('sitrailsClearStatus', 'Finding open alerts in Sitrails...');
+    try {
+      var options = {
+        method: 'POST', headers: getBridgeCapabilityHeaders(), signal: AbortSignal.timeout(60000)
+      };
+      var prepared = await fetch(bridgeUrl() + '/v1/security/sitrails/clear/prepare',
+        Object.assign({}, options, { body: JSON.stringify(alert
+          ? { id: alert.id, review_token: alert.review_token } : {}) }));
+      var plan = await prepared.json();
+      if (!prepared.ok || typeof plan.count !== 'number' || !plan.confirmation) {
+        throw new Error((plan.error && plan.error.message) || 'Could not find open Sitrails alerts.');
+      }
+      if (!plan.count) {
+        state.sitrailsClearNotice = 'No open Sitrails alerts were found.';
+        return;
+      }
+      if (alert && plan.count !== 1) throw new Error('This alert is no longer available for dismissal.');
+      var prompt = (alert
+        ? 'Dismiss this reviewed alert by marking it resolved in Sitrails and removing its Eva review?'
+        : 'Resolve ' + plan.count + ' open alert(s) in Sitrails and remove their Eva reviews?') +
+        '\n\nRecorded evidence and trails will remain. This is not a security assessment.' +
+        '\nNew or changed alerts may remain. Sitrails cannot make this operation atomic, so statuses can change during it.' +
+        '\nPausing or changing settings stops further updates; a request already in flight may finish.' +
+        (plan.more ? '\nAdditional alerts may remain; repeat the action if needed.' : '');
+      if (!window.confirm(prompt)) {
+        state.sitrailsClearNotice = 'Clear cancelled; no alert statuses changed.';
+        return;
+      }
+      var response = await fetch(bridgeUrl() + '/v1/security/sitrails/clear',
+        Object.assign({}, options, { body: JSON.stringify({ confirmation: plan.confirmation }) }));
+      var result = await response.json();
+      if (!response.ok || result.started !== true) {
+        throw new Error((result.error && result.error.message) || 'Could not start clearing alerts.');
+      }
+      await refreshSitrails();
+    } catch (error) {
+      state.sitrailsClearNotice = error.message || (alert ? 'Alert dismissal failed.' : 'Sitrails clear failed.');
+    } finally {
+      state.sitrailsClearBusy = false;
+      button.disabled = false;
+      await refreshSitrails();
+    }
+  }
+
+  async function setSitrailsMonitoring(enabled) {
+    var enable = document.getElementById('sitrailsEnable');
+    var disable = document.getElementById('sitrailsDisable');
+    enable.disabled = disable.disabled = true;
+    try {
+      var response = await fetch(bridgeUrl() + '/v1/security/sitrails', {
+        method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, getBridgeCapabilityHeaders()),
+        body: JSON.stringify({ enabled: enabled, url: document.getElementById('sitrailsUrl').value.trim() }),
+        signal: AbortSignal.timeout(8000)
+      });
+      var data = await response.json();
+      if (!response.ok) throw new Error((data.error && data.error.message) || 'Settings could not be saved.');
+      await refreshSitrails();
+    } catch (error) {
+      setText('sitrailsStatus', error.message);
+      enable.disabled = disable.disabled = false;
     }
   }
 
@@ -398,6 +629,7 @@ var EvaAgents = (function() {
       state.telemetryError = '';
       render();
       if (state.open && state.view === 'reports') refreshReports();
+      if (state.open && state.view === 'security') refreshSecurity();
     } catch (error) {
       if (sequence !== state.refreshSequence) return;
       if (error && error.name === 'AbortError' && !timedOut) return;
@@ -705,7 +937,8 @@ var EvaAgents = (function() {
     status.className = 'agent-detail-status status-' + agent.status;
     status.textContent = detailStatusText(agent);
     activity.textContent = agent.activity || 'No activity reported.';
-    result.textContent = agent.result || 'No output reported.';
+    result.textContent = agent.kind === 'security' && state.securityAnalysis
+      ? state.securityAnalysis : agent.result || 'No output reported.';
     if (objective) objective.textContent = agent.detail || 'No objective detail reported.';
     var title = content.querySelector('h2');
     if (title) title.textContent = agent.label || 'Agent session';
@@ -776,6 +1009,87 @@ var EvaAgents = (function() {
       interrupt.type = 'button';
       interrupt.addEventListener('click', function() { controlAgent(agent.id, 'stop'); });
       actions.appendChild(interrupt);
+    }
+    if (agent.kind === 'security') {
+      var approve = element('button', 'agent-security-approve', 'Review local sandbox image');
+      approve.type = 'button';
+      approve.addEventListener('click', async function() {
+        approve.disabled = true;
+        var feedback = content.querySelector('.agent-inspector-feedback');
+        try {
+          var candidateResponse = await fetch(bridgeUrl() + '/v1/security/image', { headers: getBridgeCapabilityHeaders() });
+          var candidate = await candidateResponse.json();
+          if (!candidateResponse.ok || !candidate.image_id) throw new Error((candidate.error || {}).message || 'Image unavailable.');
+          if (!window.confirm('Approve this local sandbox image for offline workspace runs?\n\nSHA-256: ' + candidate.image_id)) return;
+          var response = await fetch(bridgeUrl() + '/v1/security/approve-image', {
+            method: 'POST', headers: getBridgeCapabilityHeaders(), body: JSON.stringify({ image_id: candidate.image_id })
+          });
+          var result = await response.json();
+          if (!response.ok) throw new Error((result.error || {}).message || 'Image approval failed.');
+          if (feedback) feedback.textContent = 'Local sandbox image approved.';
+          refresh(true);
+        } catch (error) {
+          if (feedback) feedback.textContent = error.message || 'Image approval failed.';
+        } finally {
+          approve.disabled = false;
+        }
+      });
+      actions.appendChild(approve);
+      var analyze = element('button', 'agent-security-analyze', 'Analyze recent security events');
+      analyze.type = 'button';
+      analyze.addEventListener('click', async function() {
+        analyze.disabled = true;
+        var feedback = content.querySelector('.agent-inspector-feedback');
+        if (feedback) feedback.textContent = 'Analyzing sanitized event counts with the selected model...';
+        var backend = String((document.getElementById('selAIGBackend') || {}).value || 'lmstudio');
+        var local = backend === 'lmstudio';
+        try {
+          var response = await fetch(bridgeUrl() + '/v1/security/analyze', {
+            method: 'POST',
+            headers: getBridgeCapabilityHeaders(),
+            body: JSON.stringify({
+              model: backend,
+              si_runtime: local && typeof getSIHarnessRuntime === 'function' ? getSIHarnessRuntime() : 'direct',
+              lmstudio_base_url: local && typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
+              lmstudio_model: local && typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
+              openai_api_key: backend.indexOf('openai:') === 0 && typeof getAuthKey === 'function'
+                ? getAuthKey('OPENAI_API_KEY') : ''
+            })
+          });
+          var result = await response.json();
+          if (!response.ok) throw new Error((result.error || {}).message || 'Security analysis failed.');
+          var message = result.analysis;
+          if (typeof message !== 'string' || !message.trim()) throw new Error('The selected model returned no analysis.');
+          state.securityAnalysis = 'Model analysis (advisory, unverified):\n\n' + message.slice(0, 4000);
+          updateDetail(agent, content);
+          if (feedback) feedback.textContent = 'Analysis complete.';
+        } catch (error) {
+          if (feedback) feedback.textContent = error.message || 'Security analysis failed.';
+        } finally {
+          analyze.disabled = false;
+        }
+      });
+      actions.appendChild(analyze);
+      var test = element('button', 'agent-security-test', 'Test offline sandbox');
+      test.type = 'button';
+      test.addEventListener('click', async function() {
+        test.disabled = true;
+        var feedback = content.querySelector('.agent-inspector-feedback');
+        if (feedback) feedback.textContent = 'Testing sandbox isolation...';
+        try {
+          var response = await fetch(bridgeUrl() + '/v1/security/self-test', {
+            method: 'POST', headers: getBridgeCapabilityHeaders(), body: '{}'
+          });
+          var result = await response.json();
+          if (!response.ok || !result.passed) throw new Error((result.error || {}).message || 'Sandbox test failed.');
+          if (feedback) feedback.textContent = result.message;
+        } catch (error) {
+          if (feedback) feedback.textContent = error.message || 'Sandbox test failed.';
+        } finally {
+          test.disabled = false;
+        }
+      });
+      actions.appendChild(test);
     }
     content.appendChild(actions);
     var dependencies = element('div', 'agent-dependencies');
@@ -1357,15 +1671,19 @@ var EvaAgents = (function() {
     var detailClose = document.getElementById('agentDetailClose');
     var memoryReviewButton = document.getElementById('agentGraphMemoryReview');
     var clearMissionLog = document.getElementById('missionLogClear');
+    var clearSecurityLog = document.getElementById('securityLogClear');
+    var clearSecurityUrls = document.getElementById('securityUrlClear');
     var allowMissionResearch = document.getElementById('missionLogAllowResearch');
     var denyMissionResearch = document.getElementById('missionLogDenyResearch');
+    var enableSecurityUrls = document.getElementById('securityUrlEnable');
+    var disableSecurityUrls = document.getElementById('securityUrlDisable');
     var workbench = document.getElementById('workspaceWorkbench');
     var workspacesHost = document.getElementById('agentsWorkspaces');
     if (workbench && workspacesHost) workspacesHost.appendChild(workbench);
     try { state.view = localStorage.getItem('evaAgentObservatoryView') || 'floor'; } catch (_) {}
     setView(state.view);
-    var tabIds = ['agentsFloorTab', 'agentsMemoryTab', 'agentsCardsTab', 'agentsWorkspacesTab', 'agentsReportsTab'];
-    var viewNames = ['floor', 'memory', 'cards', 'workspaces', 'reports'];
+    var tabIds = ['agentsFloorTab', 'agentsMemoryTab', 'agentsCardsTab', 'agentsWorkspacesTab', 'agentsReportsTab', 'agentsSecurityTab'];
+    var viewNames = ['floor', 'memory', 'cards', 'workspaces', 'reports', 'security'];
     tabIds.forEach(function(id, index) {
       var tab = document.getElementById(id);
       if (!tab) return;
@@ -1385,9 +1703,26 @@ var EvaAgents = (function() {
     if (refreshButton) refreshButton.addEventListener('click', function() { refresh(true); });
     if (closeButton) closeButton.addEventListener('click', close);
     if (detailClose) detailClose.addEventListener('click', closeDetail);
-    if (clearMissionLog) clearMissionLog.addEventListener('click', function() { deleteMissionLogEntry('all', clearMissionLog); });
+    if (clearMissionLog) clearMissionLog.addEventListener('click', function() { deleteMissionLogEntry('reports', clearMissionLog); });
+    if (clearSecurityLog) clearSecurityLog.addEventListener('click', function() { deleteMissionLogEntry('security', clearSecurityLog); });
+    if (clearSecurityUrls) clearSecurityUrls.addEventListener('click', function() { deleteMissionLogEntry('urls', clearSecurityUrls); });
+    [
+      ['securityUrlPrevious', 'securityUrlOffset', -100], ['securityUrlNext', 'securityUrlOffset', 100],
+      ['securityBlockPrevious', 'securityBlockOffset', -100], ['securityBlockNext', 'securityBlockOffset', 100]
+    ].forEach(function(item) {
+      var button = document.getElementById(item[0]);
+      if (button) button.addEventListener('click', function() {
+        state[item[1]] = Math.max(0, state[item[1]] + item[2]);
+        refreshSecurity();
+      });
+    });
     if (allowMissionResearch) allowMissionResearch.addEventListener('click', function() { setMissionResearchPermission(true); });
     if (denyMissionResearch) denyMissionResearch.addEventListener('click', function() { setMissionResearchPermission(false); });
+    if (enableSecurityUrls) enableSecurityUrls.addEventListener('click', function() { setSecurityUrlLogging(true); });
+    if (disableSecurityUrls) disableSecurityUrls.addEventListener('click', function() { setSecurityUrlLogging(false); });
+    document.getElementById('sitrailsEnable').addEventListener('click', function() { setSitrailsMonitoring(true); });
+    document.getElementById('sitrailsDisable').addEventListener('click', function() { setSitrailsMonitoring(false); });
+    document.getElementById('sitrailsClear').addEventListener('click', function() { clearSitrailsObservations(); });
     if (memoryReviewButton) memoryReviewButton.addEventListener('click', function() {
       if (window.EvaMemoryInspector && typeof window.EvaMemoryInspector.openFromAgents === 'function') {
         window.EvaMemoryInspector.openFromAgents();

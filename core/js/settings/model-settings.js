@@ -167,6 +167,10 @@ function getAIGModelPolicyMode() {
     return ['pinned', 'auto-balanced', 'auto-fast'].indexOf(value) >= 0 ? value : 'auto-balanced';
 }
 
+function getACPCodingAutonomy() {
+  return localStorage.getItem('acpCodingAutonomy') === '1';
+}
+
 var __originalModelOptions = null;
 var __modelBeforeLCARS = null;
 

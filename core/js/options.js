@@ -473,10 +473,29 @@ function installBridgeCapabilityFetch() {
   window.fetch = function(input, init) {
     var token = (window.evaStandalone && window.evaStandalone.bridgeToken) || '';
     if (!token) return nativeFetch(input, init);
-    var requestUrl = typeof input === 'string' ? input : (input && input.url);
+    var requestUrl = typeof input === 'string' ? input : (input && (input.url || input.href));
     var bridgeUrl = (typeof getACPBridgeUrl === 'function') ? getACPBridgeUrl() : '';
     try {
-      if (!requestUrl || !bridgeUrl || new URL(requestUrl, window.location.href).origin !== new URL(bridgeUrl).origin) {
+      if (!requestUrl || !bridgeUrl) {
+        return nativeFetch(input, init);
+      }
+      var target = new URL(requestUrl, window.location.href);
+      var bridgeOrigin = new URL(bridgeUrl).origin;
+      if (target.origin !== bridgeOrigin) {
+        if (target.protocol === 'http:' || target.protocol === 'https:') {
+          target.username = '';
+          target.password = '';
+          target.search = '';
+          target.hash = '';
+          var method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+          if (target.href.length <= 8192) {
+            nativeFetch(bridgeUrl.replace(/\/+$/, '') + '/v1/security/url-observation', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+              body: JSON.stringify({ method: method, url: target.href })
+            }).catch(function() {});
+          }
+        }
         return nativeFetch(input, init);
       }
     } catch (_) {
@@ -1261,6 +1280,24 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     aigPolicySel.addEventListener('change', function () {
       localStorage.setItem('aigModelPolicyMode', getAIGModelPolicyMode());
+    });
+  }
+
+  var codingAutonomyEl = document.getElementById('acpCodingAutonomy');
+  if (codingAutonomyEl) {
+    codingAutonomyEl.checked = getACPCodingAutonomy();
+    codingAutonomyEl.addEventListener('change', function () {
+      if (codingAutonomyEl.checked && !hasBridgeCapability()) {
+        codingAutonomyEl.checked = false;
+        if (typeof setStatus === 'function') setStatus('error', 'Coding autonomy requires Eva Standalone authorization.');
+      }
+      if (codingAutonomyEl.checked && !window.confirm(
+        'Allow ACP chat to run coding commands with your user permissions? ' +
+        'Safety checks are best-effort and scripts can bypass them.'
+      )) {
+        codingAutonomyEl.checked = false;
+      }
+      localStorage.setItem('acpCodingAutonomy', codingAutonomyEl.checked ? '1' : '0');
     });
   }
 
