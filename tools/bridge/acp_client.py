@@ -502,6 +502,16 @@ def _background_decode_url_component(value):
     return value
 
 
+def _background_edgar_read_action(parsed, path, key, value):
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc.lower() in {"sec.gov", "www.sec.gov"}
+        and path == "/cgi-bin/browse-edgar"
+        and key.lower() == "action"
+        and value.lower() == "getcompany"
+    )
+
+
 def _background_web_tool_name(tool_call):
     name = ""
     for field in ("name", "title"):
@@ -550,7 +560,8 @@ def _background_remote_block_reason(tool_call):
                 if key.lower() in {"token", "api_key", "apikey", "password", "secret", "signature"}:
                     return "protected_content"
                 if key.lower() in {"action", "method", "operation", "command", "op"}:
-                    if value.lower() not in {"get", "head", "read", "view", "search"}:
+                    if (value.lower() not in {"get", "head", "read", "view", "search"}
+                            and not _background_edgar_read_action(parsed, path, key, value)):
                         return "destructive_action"
         except ValueError:
             return "unclassified_remote_action"
@@ -595,8 +606,10 @@ def _unverified_research_block_reason(tool_call):
                             query_value = _background_decode_url_component(query_value).lower()
                             if re.search(r"(?:token|secret|password|credential|authorization|api.?key)", query_key):
                                 return "protected_content"
-                            if query_key in {"action", "method", "operation", "command", "op"} and query_value not in {"get", "head", "read", "view", "search", "list"}:
-                                return "destructive_action"
+                            if query_key in {"action", "method", "operation", "command", "op"}:
+                                if (query_value not in {"get", "head", "read", "view", "search", "list"}
+                                        and not _background_edgar_read_action(parsed, path, query_key, query_value)):
+                                    return "destructive_action"
                     except ValueError:
                         return "unclassified_remote_action"
                 reason = inspect(item, depth + 1)
