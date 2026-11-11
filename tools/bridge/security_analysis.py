@@ -129,11 +129,23 @@ def _acp_analysis(model, system, user, provider_config=None):
         raise SecurityAnalysisError("The ACP security analysis model is invalid.")
     client = ACPClient(
         copilot_path=getattr(template, "copilot_path", "copilot") if template else "copilot",
-        model=selected_model, mcp_config={}, tool_profile="none", no_tools=True,
+        model=None, mcp_config={}, tool_profile="none", no_tools=True,
         provider_config=provider_config, isolated_reasoning=True,
     )
     try:
         client.start()
+        if selected_model:
+            if not client.session_id:
+                raise SecurityAnalysisError("The restricted ACP session is unavailable.")
+            selection = client._send_request("session/set_config_option", {
+                "sessionId": client.session_id, "configId": "model", "value": selected_model,
+            }, timeout=30)
+            options = selection.get("configOptions", []) if isinstance(selection, dict) else []
+            if not isinstance(selection, dict) or selection.get("error") or not isinstance(options, list) or not any(
+                isinstance(option, dict) and option.get("id") == "model"
+                and option.get("currentValue") == selected_model for option in options
+            ):
+                raise SecurityAnalysisError("The selected ACP security model could not be verified.")
         result = client.prompt(
             system + "\n\n" + user, timeout=90, permission_mode="automation_no_tools",
         )
