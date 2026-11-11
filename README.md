@@ -1,127 +1,27 @@
 # Eva AI Assistant
 
-[Website](https://appatalks.github.io/eva-agent/) | [Documentation](README-2.md) | [Issues](https://github.com/appatalks/eva-agent/issues) | License: MIT
+**A local-first desktop AI assistant for conversation, memory, voice, automation, and software work.**
 
-Eva is a local-first AI assistant for conversation, durable memory, voice, automation,
-and software work. It brings cloud and local models into one focused desktop experience
-while keeping configuration, approvals, and personal data under your control.
+[Website](https://appatalks.github.io/eva-agent/) | [Technical documentation](README-2.md) | [Issues](https://github.com/appatalks/eva-agent/issues) | [MIT License](LICENSE)
 
 ![Eva splash](core/img/Eva-splash.png)
 
-## Highlights
+## Overview
 
-- **One intelligent gateway:** route work across OpenAI, GitHub Copilot ACP, the
-  SI Harness for OpenAI-compatible endpoints, and MCP tools without changing the
-  conversation model.
-- **Thinking control:** show or hide available model reasoning and request it
-  on or off; individual models and providers may ignore or reject the request.
-- **Opt-in ACP coding autonomy:** authorized Standalone chat coding commands can run with user-level
-  access. Best-effort checks request approval for visibly sensitive actions;
-  arbitrary scripts can bypass those checks. Background and isolated workspace
-  policies remain separate.
-- **Security Officer:** a lightweight Agent Observatory monitor reports rootless
-  sandbox readiness and blocked boundary checks. On request it can ask the
-  selected chat model to interpret sanitized event counts without tools or memory;
-  that interpretation is advisory. Opt-in workspace coding runs
-  can execute offline in a local Podman image; chat and other tools are not
-  sandboxed. The container receives only its worktree, but its output may be
-  sent to the selected model provider. Known credential scans are not exhaustive.
-  Optional Sitrails monitoring automatically assesses open alerts using categorical
-  evidence from their recorded details and a loopback SI model, without automatically
-  changing Sitrails alert status. Confirmed manual dismissal or clear resolves alerts while
-  retaining Sitrails evidence and trails. Forwarding is checked before monitoring and review;
-  changes during a review may not be detected until later. A loopback model
-  endpoint must itself be configured not to forward requests elsewhere.
-- **Operations visibility:** background jobs are grouped by purpose, activity
-  can be filtered, job settings persist across restarts, and scheduled-task
-  attempts show their outcome. Opt-in background ACP autonomy decides bounded
-  permissions without interrupting chat and reports blocked actions.
-- **Network research:** web fetch can access localhost and private networks,
-  including redirects from public sites. Untrusted pages may therefore cause
-  requests to local services, including endpoints that act on GET requests.
-  Explicitly named research skills can run a configured news search and
-  report the bounded retrieval outcome before synthesizing a response.
-  Active ACP lookups stay connected within a bounded time budget; timeouts
-  surface as errors instead of silently completing with a progress message.
-- **Opt-in goal work:** a local model can continue work in a retained, isolated
-  Eva Ready worktree per goal, one round at a time, with randomized delays.
-- **Advisory PR readiness:** repository automation posts commit-specific
-  GPT-6.1 Terra feedback without replacing required CI and security checks.
-- **Flexible SI Harness runtime:** keep the backward-compatible Eva Direct path,
-  or run the same SI endpoint/model through an isolated Copilot CLI ACP session
-  for unified tool-capable chat. SI-Copilot fails explicitly when its endpoint or
-  model is unavailable and never silently falls back to cloud Copilot. This first
-  slice covers chat only; Adaptive Review is bypassed for SI-Copilot chat, and
-  workspace and vision retain their existing runtime paths.
-- **Durable, inspectable memory:** retain explicit facts locally with provenance
-	linked to source conversation turns, editable explanatory context, lifecycle
-	controls, corrections, bounded
-	last-session recall, and interactive review through Agent Operations'
-	Memory Topology workspace.
-- **Grounded self-assessment:** distinguish unverified, contextual mentions from
-  confirmed facts, and describe feedback, scheduling, and privacy boundaries
-  without mistaking activity counters for evidence of answer quality. Runtime
-  identity separates SI endpoint model aliases from internal compatibility keys
-  and the Direct or Copilot execution path.
-- **Intent-bound native actions:** conversational playlist requests use approved
-  Skills; retries, repository follow-ups, and implicit PR targets stay bound to
-  the preceding request. Structured action receipts distinguish browser handoffs
-  from verified completion, survive in chat context without duplication, and
-  report malformed or excess actions. Visual-agent availability checks local
-  prerequisites rather than assuming readiness.
-  Public-news follow-ups retain the recent user-specified topic through
-  confirmations and status checks, and run native retrieval before answering
-  rather than relying on a model's promise to search.
-  Delegated shell tasks use task-scoped planning: ordinary approved commands
-  can submit automatically, high-risk commands require confirmation, and model
-  command payloads are never executed blindly.
-- **Visible responder activity and benchmarking:** Eva's bridge avatar reflects
-  actual pending chat requests. Explicit local tokens/s benchmarks use a bounded
-  provider call and reported token usage, not shell scripts or word-count guesses.
-- **Model-independent stock checks:** single/pair quote requests and scheduled
-  market snapshots use verified native quote receipts, not model-written tool
-  calls or GitHub/Copilot authentication. Unavailable symbols are explicit.
-- **Agent Observatory:** an animated starship command bridge, in-place agent
-  inspector, and preserved memory-atom view. A shared depth-sorted canvas scene
-  places walking crew, consoles, shadows, and lighting in one room rather than
-  separate tiles. The compositor adapts MIT-licensed StarNet code with retained
-  attribution; all crew and bridge artwork is original Eva artwork. Movement is
-  illustrative; only fresh reported running sessions perform working gestures.
-  Stale snapshots pause agent activity and controls. Conversational delegation
-  also launches real discussion batches from SI Copilot direct chat while
-  preserving its configured endpoint. Inspect dependencies, open linked chats,
-  and steer or interrupt supported agents without leaving the bridge.
-  Subtle, transient crew bubbles show reported activity, streamed public output,
-  and recorded upstream-output handoffs (at most two at once), never private
-  reasoning or invented conversations.
-  Workspaces now lives in its own Observatory tab with the same coding controls.
-  A local Mission log checklist preserves final debriefs across restarts before
-  eligible finished crew are dismissed; active dependencies and a one-minute
-  reuse window are protected.
-  The Captain's notepad keeps mission debriefs. A separate Security log records
-  workspace and background permission blocks alongside opt-in, counted HTTP(S) URL observations. Query strings,
-  fragments, and URL userinfo are omitted. Observations distinguish requests,
-  proposed or denied tool calls, and discovered URLs; coverage is best-effort,
-  not complete network monitoring. URL observations can be cleared separately
-  from permission blocks. Security entries remain local until cleared.
-- **Signal account linking:** Settings > Accounts provides a Link Signal button,
-  an in-panel QR code, completion status, cancellation, and fresh codes after
-  expiry. Existing recipients and prior local account files are preserved.
-- **Workspace control room:** monitor independent terminals and coding agents for
-  the selected workspace, focus a tile, interrupt work, or send new direction.
-  Project files stay beside Live and Details tabs. Create local Git workspaces
-  or import existing projects through a responsive in-app folder browser.
-- **Offline workspace prerequisites:** install rootless Podman and prepare a
-  trusted local image named `localhost/eva-coding-sandbox:debian` with Python,
-  Git, and Node. Eva does not pull images automatically, pins the image identity
-  per run, and fails closed if it changes. Sandboxed Copilot workspace runs require
-  the qualified CLI version 1.0.109. Workspace Git metadata and external MCP
-  servers are unavailable inside the sandbox; network and package downloads are
-  disabled. The sandbox requires a trusted root-owned Podman seccomp profile on
-  x86_64 or arm64 and blocks nested user namespaces. The Security Officer
-  inspector offers an offline boundary self-test.
-- **Local-first operation:** use SQLite and local models by default, with cloud services
-  enabled only when configured.
+Eva brings cloud and local models into one focused desktop experience while keeping
+configuration, approvals, and personal data under your control.
+
+- **Unified model routing:** use GitHub Copilot ACP, OpenAI, OpenAI-compatible
+  endpoints, or local models through LM Studio.
+- **Durable local memory:** retain explicit facts with provenance, corrections,
+  lifecycle controls, and an interactive memory view.
+- **Agent Observatory:** inspect active agents, coding workspaces, mission history,
+  security events, and memory from a visual command bridge.
+- **Tools and automation:** run approved skills, research, scheduled work, terminal
+  tasks, and MCP integrations with visible outcomes.
+- **Voice and messaging:** use local speech features and optional Signal integration.
+- **Workspace control:** create or import projects, monitor coding agents, and manage
+  independent terminal sessions from the desktop app.
 
 ## Quick Start
 
@@ -130,46 +30,58 @@ curl -fsSL https://appatalks.github.io/eva-agent/get-eva.sh | bash
 eva
 ```
 
-Eva is also added to the system application menu. On first launch, select **Eva (AIG)**
-for the integrated routing, memory, and tool experience.
+Eva is added to the system application menu. Select **Eva (AIG)** on first launch for
+the integrated routing, memory, and tools experience.
 
-Current development version: **5.7.3** (`Eva Standalone-5.7.3.AppImage`, unreleased).
-Latest published standalone release: `Eva Standalone-5.6.10.AppImage`.
+For source builds and platform requirements, see the
+[technical documentation](README-2.md#setup-and-operation).
+
+Current development version: **5.7.3** (unreleased)
+
+Latest published standalone release: **5.6.10**
 
 ## Preview
 
 <table>
-	<tr>
-		<td width="50%"><img src="core/img/eva-screen-1.png" alt="Eva chat workspace" width="100%"></td>
-		<td width="50%"><img src="core/img/eva-screen-2.png" alt="Eva voice interface" width="100%"></td>
-	</tr>
-	<tr>
-		<td width="50%"><img src="core/img/eva-screen-3.png" alt="Eva settings workspace" width="100%"></td>
-		<td width="50%"><img src="core/img/eva-screen-4.png" alt="Eva agent operations" width="100%"></td>
-	</tr>
-	<tr>
-		<td width="50%"><img src="core/img/eva-screen-5.png" alt="Eva coding workspaces" width="100%"></td>
-		<td width="50%"><img src="core/img/eva-screen-6.png" alt="Eva skills and memory" width="100%"></td>
-	</tr>
+  <tr>
+    <td colspan="2"><strong>Command bridge</strong><br><img src="core/img/eva-command-bridge.png" alt="Eva Agent Observatory command bridge" width="100%"></td>
+  </tr>
+  <tr>
+    <td width="50%"><strong>Agent Observatory</strong><br><img src="core/img/eva-observatory.png" alt="Eva Agent Observatory security log" width="100%"></td>
+    <td width="50%"><strong>Eva chat</strong><br><img src="core/img/example-chat.png" alt="Eva chat with tool-assisted response" width="100%"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="core/img/eva-screen-1.png" alt="Eva chat workspace" width="100%"></td>
+    <td width="50%"><img src="core/img/eva-screen-2.png" alt="Eva voice interface" width="100%"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="core/img/eva-screen-3.png" alt="Eva settings workspace" width="100%"></td>
+    <td width="50%"><img src="core/img/eva-screen-4.png" alt="Eva agent operations" width="100%"></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="core/img/eva-screen-5.png" alt="Eva coding workspaces" width="100%"></td>
+    <td width="50%"><img src="core/img/eva-screen-6.png" alt="Eva skills and memory" width="100%"></td>
+  </tr>
 </table>
 
-## Trust by Design
+## Trust and Control
 
-- Explicit user facts are committed before Eva acknowledges saving them; ordinary
-  questions do not become memory writes.
-- Consequential actions remain behind confirmation and authorization boundaries.
-- Live answers use source receipts and fail visibly when current data is unavailable.
-- Model-supplied image HTML is sanitized; application-generated images retain
-  their normal rendering without additional permission prompts.
-- Secrets, runtime state, and personal memory stay outside the repository and release
-  artifacts.
+Eva stores chat state, memory, and runtime data locally by default. Cloud providers,
+network tools, and autonomous coding features are used only when configured or
+enabled. Consequential actions remain subject to authorization and confirmation
+boundaries, and action receipts distinguish accepted work from verified completion.
+
+Autonomous tools can access user-authorized workspaces or network resources. Review
+the [runtime behavior and trust boundaries](README-2.md#runtime-behavior-and-trust-boundaries)
+before enabling them.
 
 ## Documentation
 
-- **Suggested reading:** [Eva Whitepaper (PDF)](docs/Eva-Whitepaper.pdf) — design inspiration, architecture, trust boundaries, technical analysis, and future direction.
-- [Technical documentation](README-2.md): setup, providers, memory, voice, MCP, workspaces, architecture, and roadmap
-- [standalone/README.md](standalone/README.md): AppImage build and runtime
-- [docs/ai-development-guide.md](docs/ai-development-guide.md): focused development workflow, ownership map, and validation bundles
-- [docs/testing-contracts.md](docs/testing-contracts.md): behavior, security, and compatibility test policy for refactors
-- [docs/eva_default_skills/README.md](docs/eva_default_skills/README.md): canonical default Skills catalog and category taxonomy
-- [Website](https://appatalks.github.io/eva-agent/): features, comparison, and install guide
+- [Technical documentation](README-2.md) covers setup, providers, memory, voice,
+  tools, architecture, and security boundaries.
+- [Standalone guide](standalone/README.md) covers installation, packaging, updates,
+  and runtime compatibility.
+- [Development guide](docs/ai-development-guide.md) covers project structure,
+  contribution workflow, and validation.
+- [Testing contracts](docs/testing-contracts.md) defines behavior, security, and
+  compatibility expectations.
