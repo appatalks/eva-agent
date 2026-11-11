@@ -1,6 +1,7 @@
 """Tool-free analysis of privacy-safe Security Officer event summaries."""
 
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -118,9 +119,17 @@ def analyze(settings, summary):
 
 def _acp_analysis(model, system, user, provider_config=None):
     template = state.acp_client
+    if provider_config:
+        selected_model = None
+    elif not model:
+        selected_model = None
+    elif isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", model):
+        selected_model = model
+    else:
+        raise SecurityAnalysisError("The ACP security analysis model is invalid.")
     client = ACPClient(
         copilot_path=getattr(template, "copilot_path", "copilot") if template else "copilot",
-        model=model or None, mcp_config={}, tool_profile="none", no_tools=True,
+        model=selected_model, mcp_config={}, tool_profile="none", no_tools=True,
         provider_config=provider_config, isolated_reasoning=True,
     )
     try:

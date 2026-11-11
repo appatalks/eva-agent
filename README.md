@@ -26,6 +26,12 @@ while keeping configuration, approvals, and personal data under your control.
   can execute offline in a local Podman image; chat and other tools are not
   sandboxed. The container receives only its worktree, but its output may be
   sent to the selected model provider. Known credential scans are not exhaustive.
+  Optional Sitrails monitoring automatically assesses open alerts using categorical
+  evidence from their recorded details and a loopback SI model, without automatically
+  changing Sitrails alert status. Confirmed manual dismissal or clear resolves alerts while
+  retaining Sitrails evidence and trails. Forwarding is checked before monitoring and review;
+  changes during a review may not be detected until later. A loopback model
+  endpoint must itself be configured not to forward requests elsewhere.
 - **Operations visibility:** background jobs are grouped by purpose, activity
   can be filtered, job settings persist across restarts, and scheduled-task
   attempts show their outcome. Opt-in background ACP autonomy decides bounded

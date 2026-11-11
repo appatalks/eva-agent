@@ -41,7 +41,7 @@ _PRIVATE_KEY_MATERIAL = re.compile(
 )
 _EVENT_REASONS = {
     "", "protected_path", "credential_detected", "nested_mount",
-    "image_changed", "runtime_unavailable", "credential_output",
+    "image_changed", "runtime_unavailable", "credential_output", "git_metadata_changed",
 }
 _REASON_TEXT = {
     "protected_path": "A protected path or symlink prevented a workspace run.",
@@ -50,6 +50,7 @@ _REASON_TEXT = {
     "image_changed": "The sandbox image no longer matches the approved identity.",
     "runtime_unavailable": "Rootless sandbox runtime is unavailable.",
     "credential_output": "Sandbox output containing recognizable credential material was withheld.",
+    "git_metadata_changed": "Workspace Git metadata changed during an isolated run.",
 }
 
 
@@ -223,20 +224,46 @@ def _nested_mounts(root):
     return False
 
 
+def _git_marker(root):
+    try:
+        descriptor = os.open(os.path.join(root, ".git"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise SandboxError("Workspace Git metadata cannot be safely verified.", "protected_path") from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 4096:
+            raise SandboxError("Workspace Git metadata cannot be safely mounted.", "protected_path")
+        content = os.read(descriptor, 4097)
+        after = os.fstat(descriptor)
+        if (len(content) > 4096 or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+            raise SandboxError("Workspace Git metadata changed during verification.", "git_metadata_changed")
+        return (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, content)
+    except OSError as error:
+        raise SandboxError("Workspace Git metadata cannot be safely verified.", "protected_path") from error
+    finally:
+        os.close(descriptor)
+
+
 def validate_workspace(workspace):
     root = Path(workspace).resolve(strict=True)
     if not root.is_dir() or ":" in str(root) or "\n" in str(root) or "\r" in str(root):
         raise SandboxError("The workspace path cannot be safely mounted.")
     if _nested_mounts(str(root)):
         raise SandboxError("The workspace contains a nested mount and cannot be sandboxed.", "nested_mount")
+    _git_marker(str(root))
     total = 0
     files = 0
     for current, dirs, names in os.walk(root, followlinks=False):
         for name in list(dirs) + names:
             path = Path(current, name)
             relative = path.relative_to(root).as_posix()
-            if relative == ".git" and path.is_file() and not path.is_symlink():
+            if relative == ".git":
                 continue
+            if ".git" in Path(relative).parts:
+                raise SandboxError("Nested Git metadata cannot be sandboxed.", "protected_path")
             if path.is_symlink() or sensitive_path(relative) or _PROTECTED_NAME.search(relative):
                 raise SandboxError("The workspace contains a protected path or symlink; it cannot be sandboxed.", "protected_path")
             if path.is_dir():
@@ -517,6 +544,7 @@ def run_in_sandbox(workspace, image_id, command, timeout=120, cancel=None):
         raise SandboxError("Sandbox timeout must be between 1 and 300 seconds.")
     try:
         root = validate_workspace(workspace)
+        git_marker = _git_marker(root)
         current_image = sandbox_preflight()
         if current_image != image_id:
             raise SandboxError("The approved sandbox image changed; start a new isolated run.", "image_changed")
@@ -529,6 +557,12 @@ def run_in_sandbox(workspace, image_id, command, timeout=120, cancel=None):
         descriptor = os.open(profile_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as file:
             json.dump(profile, file)
+        git_mount = []
+        if git_marker is not None:
+            placeholder = os.path.join(directory, "git-placeholder")
+            descriptor = os.open(placeholder, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+            os.close(descriptor)
+            git_mount = ["--volume", placeholder + ":/workspace/.git:ro"]
         lease_id = uuid.uuid4().hex
         name = "eva-sandbox-" + lease_id
         lease_path = _create_lease(lease_id, name)
@@ -542,7 +576,7 @@ def run_in_sandbox(workspace, image_id, command, timeout=120, cancel=None):
             "--security-opt=seccomp=" + profile_path, "--read-only",
             "--pids-limit=64", "--memory=512m", "--cpus=2",
             "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m",
-            "--volume", root + ":/workspace:rw", "--workdir", "/workspace",
+            "--volume", root + ":/workspace:rw", *git_mount, "--workdir", "/workspace",
             "--env", "HOME=/tmp", "--env", "PATH=/usr/local/bin:/usr/bin:/bin",
             "--", "sha256:" + image_id, "/usr/bin/timeout", "--signal=KILL", str(timeout + 5),
             "/bin/sh", "-c", command,
@@ -639,4 +673,12 @@ def run_in_sandbox(workspace, image_id, command, timeout=120, cancel=None):
                 except FileNotFoundError:
                     pass
             os.unlink(lease_path)
+            try:
+                marker_unchanged = _git_marker(root) == git_marker
+            except SandboxError:
+                marker_unchanged = False
+            if not marker_unchanged:
+                record_event("boundary", "blocked", "git_metadata_changed")
+                record_event("command", "failed")
+                raise SandboxError("Workspace Git metadata changed during the sandbox run.", "git_metadata_changed")
             record_event("command", outcome if outcome != "completed" or process.returncode == 0 else "failed")

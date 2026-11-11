@@ -1638,6 +1638,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._security_image()
         elif parsed_path == "/v1/security/log":
             self._security_log()
+        elif parsed_path == "/v1/security/sitrails":
+            self._security_sitrails()
         elif parsed_path == "/v1/agents/reports":
             self._agent_reports()
         elif parsed_path == "/v1/signal/link":
@@ -1808,6 +1810,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._security_approve_image()
         elif parsed_path == "/v1/security/analyze":
             self._security_analyze()
+        elif parsed_path == "/v1/security/sitrails":
+            self._security_sitrails_configure()
+        elif parsed_path == "/v1/security/sitrails/clear/prepare":
+            self._security_sitrails_clear_prepare()
+        elif parsed_path == "/v1/security/sitrails/clear":
+            self._security_sitrails_clear()
         elif parsed_path == "/v1/security/url-observation":
             self._security_url_observation()
         elif parsed_path == "/v1/security/url-logging":
@@ -4212,6 +4220,61 @@ class BridgeHandler(BaseHTTPRequestHandler):
         observe_request(data["method"], data["url"])
         self._json_response(202, {"accepted": True})
 
+    def _security_sitrails(self):
+        if not self._require_bridge_capability():
+            return
+        from bridge.sitrails_security import MonitorError, monitor
+        try:
+            self._json_response(200, monitor.snapshot())
+        except MonitorError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+        except (OSError, sqlite3.Error):
+            self._json_response(503, {"error": {"message": "Sitrails review storage is unavailable."}})
+
+    def _security_sitrails_configure(self):
+        if not self._require_bridge_capability():
+            return
+        data, error = self._workspace_body()
+        if (error or set(data) != {"enabled", "url"}
+                or not isinstance(data.get("enabled"), bool)
+                or not isinstance(data.get("url"), str) or len(data["url"]) > 200):
+            self._json_response(400, {"error": {"message": "Invalid Sitrails monitoring settings."}})
+            return
+        from bridge.sitrails_security import MonitorError, monitor
+        try:
+            self._json_response(200, monitor.configure(data["enabled"], data["url"]))
+        except MonitorError as error:
+            self._json_response(400, {"error": {"message": str(error)}})
+        except (OSError, sqlite3.Error):
+            self._json_response(503, {"error": {"message": "Sitrails review storage is unavailable."}})
+
+    def _security_sitrails_clear_prepare(self):
+        if not self._require_bridge_capability():
+            return
+        data, error = self._workspace_body()
+        if (error or set(data) not in (set(), {"id", "review_token"})
+                or ("id" in data and (not isinstance(data["id"], str) or not isinstance(data["review_token"], str)))):
+            self._json_response(400, {"error": {"message": "Invalid Sitrails clear request."}})
+            return
+        from bridge.sitrails_security import MonitorError, monitor
+        try:
+            self._json_response(200, monitor.prepare_clear(data.get("id"), data.get("review_token")))
+        except MonitorError as error:
+            self._json_response(502, {"error": {"message": str(error)}})
+
+    def _security_sitrails_clear(self):
+        if not self._require_bridge_capability():
+            return
+        data, error = self._workspace_body()
+        if error or set(data) != {"confirmation"} or not isinstance(data.get("confirmation"), str):
+            self._json_response(400, {"error": {"message": "A valid clear confirmation is required."}})
+            return
+        from bridge.sitrails_security import MonitorError, monitor
+        try:
+            self._json_response(202, monitor.start_clear(data["confirmation"]))
+        except MonitorError as error:
+            self._json_response(409, {"error": {"message": str(error)}})
+
     def _security_url_logging(self):
         if not self._require_bridge_capability():
             return
@@ -4309,15 +4372,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "capability_policy": "adaptive",
         }]
         from bridge.security_sandbox import officer
+        from bridge.sitrails_security import monitor as sitrails_monitor
         security = officer.snapshot()
+        sitrails_settings = sitrails_monitor.settings()
+        sitrails_review = sitrails_monitor.review_activity()
         agents.append({
             "id": "security-officer",
             "kind": "security",
             "label": "Security Officer",
-            "model": "deterministic monitor",
-            "status": "online" if security["status"] == "ready" else security["status"],
-            "detail": "Monitors offline workspace sandbox readiness and command outcomes; it does not inspect model behaviour.",
-            "activity": security["activity"],
+            "model": "local SI review" if sitrails_review["reviewing"] else "deterministic monitor",
+            "status": "running" if sitrails_review["reviewing"] else (
+                "online" if security["status"] == "ready" else security["status"]
+            ),
+            "detail": "Monitors the offline workspace sandbox and, when enabled, advises on Sitrails alerts.",
+            "activity": ("Reviewing a Sitrails alert; " if sitrails_review["reviewing"] else "")
+                        + security["activity"] + ("; Sitrails monitoring enabled" if sitrails_settings["enabled"] else ""),
+            "last_activity_at": sitrails_review["started_at"],
             "result": None,
             "started_at": getattr(_st, "cognition_launch_since", None),
             "ended_at": None,
@@ -8444,7 +8514,9 @@ def main():
     # global statement removed — writes go to _st.*
     _st.acp_shutdown.clear()
     from bridge.security_sandbox import officer
+    from bridge.sitrails_security import monitor as sitrails_monitor
     officer.start(lambda message: _push_notification("Security Officer", message, channel="chat"))
+    sitrails_monitor.start(lambda message: _push_notification("Security Officer", message, channel="chat"))
     if threading.current_thread() is threading.main_thread():
         def terminate_bridge(signum, frame):
             _st.acp_shutdown.set()

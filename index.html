@@ -688,6 +688,18 @@
           <section id="agentsSecurity" class="agents-reports" role="tabpanel" aria-labelledby="agentsSecurityTab" hidden>
             <header class="mission-log-heading"><span class="agents-kicker">SECURITY / LOCAL ARCHIVE</span><h2>Security log</h2><p>When enabled, HTTP(S) URLs are stored locally without query strings, fragments, or userinfo. Recording starts only after enabling; previous URLs are not backfilled, and pausing preserves existing entries. This is a best-effort log of visible browser fetches, native web/MCP requests, and ACP tool inputs and results—not complete operating-system network monitoring. Requests are attempts, not proof of delivery; proposed and discovered URLs do not prove a request was made. Hits count observations; repeated occurrences within one tool result count once.</p><button id="securityLogClear" type="button">Clear permission blocks and URL observations</button></header>
             <p id="securityLogStatus" class="mission-log-status" role="status">Awaiting security log.</p>
+            <h3>Sitrails alerts</h3>
+            <p class="mission-log-status">The Security Officer automatically reviews open alerts using categorical evidence derived from their recorded details. Its assessment is advisory and never automatically changes Sitrails alert status. Dismiss resolves one reviewed alert; clear resolves selected open alerts. Both require confirmation and retain Sitrails evidence and trails. Raw alert details stay local and are not sent to the configured SI endpoint. Use a genuinely local model: a loopback endpoint can itself forward requests. Sitrails forwarding is checked before monitoring and review; changes during a review may not be detected until later.</p>
+            <label for="sitrailsUrl">Local Sitrails address</label>
+            <input id="sitrailsUrl" type="url" value="http://localhost:8000" autocomplete="off">
+            <div class="background-actions"><button id="sitrailsEnable" type="button">Enable monitoring</button><button id="sitrailsDisable" type="button">Pause monitoring</button><button id="sitrailsClear" type="button">Clear Sitrails observations</button></div>
+            <p id="sitrailsStatus" class="mission-log-status" role="status">Awaiting Sitrails status.</p>
+            <p id="sitrailsClearStatus" class="mission-log-status" role="status"></p>
+            <div class="security-log-table-wrap"><table class="security-log-table">
+              <thead><tr><th scope="col">Time</th><th scope="col">Alert</th><th scope="col">Severity</th><th scope="col">Recommendation</th><th scope="col">Review</th></tr></thead>
+              <tbody id="sitrailsAlertBody"></tbody>
+            </table></div>
+            <p class="mission-log-status">Showing up to 100 alerts last observed open; their status may have changed. Open Sitrails for original evidence. Pausing does not erase review history; a review already in flight may finish.</p>
             <div class="background-actions"><button id="securityUrlEnable" type="button">Enable URL logging</button><button id="securityUrlDisable" type="button">Pause URL logging</button></div>
             <p id="securityUrlLoggingStatus" class="mission-log-status"></p>
             <h3>URL observations</h3>

@@ -29,6 +29,9 @@ var EvaAgents = (function() {
     telemetryError: '',
     reportsSequence: 0,
     securitySequence: 0,
+    sitrailsClearBusy: false,
+    sitrailsClearNotice: '',
+    sitrailsSequence: 0,
     securityUrlOffset: 0,
     securityBlockOffset: 0,
     primaryTurns: new Map(),
@@ -393,6 +396,7 @@ var EvaAgents = (function() {
 
   async function refreshSecurity() {
     var sequence = ++state.securitySequence;
+    refreshSitrails();
     try {
       var response = await fetch(bridgeUrl() + '/v1/security/log?url_offset=' + state.securityUrlOffset +
         '&block_offset=' + state.securityBlockOffset, { headers: getBridgeCapabilityHeaders(), signal: AbortSignal.timeout(8000) });
@@ -449,6 +453,156 @@ var EvaAgents = (function() {
         (payload.blocks.length ? state.securityBlockOffset + payload.blocks.length : 0) + '. Stored until cleared.');
     } catch (error) {
       if (sequence === state.securitySequence) setText('securityLogStatus', 'Security log unavailable. ' + error.message);
+    }
+  }
+
+  async function refreshSitrails() {
+    var sequence = ++state.sitrailsSequence;
+    try {
+      var response = await fetch(bridgeUrl() + '/v1/security/sitrails', {
+        headers: getBridgeCapabilityHeaders(), signal: AbortSignal.timeout(8000)
+      });
+      if (!response.ok) throw new Error('Status unavailable.');
+      var data = await response.json();
+      if (sequence !== state.sitrailsSequence) return;
+      var input = document.getElementById('sitrailsUrl');
+      if (document.activeElement !== input) input.value = data.url;
+      setText('sitrailsStatus', data.status);
+      document.getElementById('sitrailsEnable').disabled = !!data.enabled;
+      document.getElementById('sitrailsDisable').disabled = !data.enabled;
+      var clear = data.clear || {};
+      document.getElementById('sitrailsClear').disabled = state.sitrailsClearBusy || clear.state === 'running';
+      if (!state.sitrailsClearBusy && clear.state === 'running') {
+        state.sitrailsClearNotice = '';
+        setText('sitrailsClearStatus', 'Resolving selected alerts: ' + (clear.resolved || 0) +
+          ' confirmed, ' + (clear.unconfirmed || 0) + ' unconfirmed, ' + (clear.skipped || 0) +
+          ' skipped; ' + (clear.total || 0) + ' selected.');
+      } else if (!state.sitrailsClearBusy && state.sitrailsClearNotice) {
+        setText('sitrailsClearStatus', state.sitrailsClearNotice);
+      } else if (!state.sitrailsClearBusy && clear.state === 'completed') {
+        setText('sitrailsClearStatus', 'Resolved ' + (clear.resolved || 0) + ' alert(s); ' +
+          (clear.unconfirmed || 0) + ' unconfirmed and ' + (clear.skipped || 0) + ' changed or no longer confirmed open.' +
+          (clear.more ? ' Additional or changing alerts may remain.' : '') +
+          (clear.local_cleanup_failed ? ' Some local review records could not be removed.' : ''));
+      } else if (!state.sitrailsClearBusy && clear.state === 'stopped') {
+        setText('sitrailsClearStatus', 'Clear stopped after settings changed: ' + (clear.resolved || 0) +
+          ' resolved, ' + (clear.unconfirmed || 0) + ' unconfirmed, ' + (clear.skipped || 0) + ' skipped.' +
+          (clear.local_cleanup_failed ? ' Some local review records could not be removed.' : ''));
+      } else if (!state.sitrailsClearBusy && clear.state === 'error') {
+        setText('sitrailsClearStatus', 'Clear did not complete: ' + (clear.resolved || 0) +
+          ' confirmed resolved, ' + (clear.unconfirmed || 0) + ' unconfirmed, ' + (clear.skipped || 0) +
+          ' skipped. Check Sitrails for current alert statuses before trying again.' +
+          (clear.local_cleanup_failed ? ' Some local review records could not be removed.' : ''));
+      }
+      var body = document.getElementById('sitrailsAlertBody');
+      body.replaceChildren();
+      (data.alerts || []).forEach(function(alert) {
+        var row = document.createElement('tr');
+        row.appendChild(element('td', '', alert.timestamp ? new Date(alert.timestamp).toLocaleString() : ''));
+        var alertCell = document.createElement('td');
+        alertCell.append(element('strong', '', alert.rule), element('p', '', alert.description));
+        alertCell.appendChild(element('small', '', 'Alert ID: ' + alert.id));
+        row.appendChild(alertCell);
+        row.appendChild(element('td', '', alert.severity + ' / ' + alert.confidence + ' confidence'));
+        row.appendChild(element('td', '', alert.recommendation));
+        var actions = document.createElement('td');
+        actions.appendChild(element('p', '', alert.assessment || 'Awaiting automatic Security Officer review.'));
+        var dismiss = element('button', '', 'Dismiss alert');
+        dismiss.type = 'button';
+        dismiss.disabled = state.sitrailsClearBusy || clear.state === 'running' ||
+          alert.recommendation === 'pending' || !alert.review_token;
+        dismiss.setAttribute('aria-label', 'Dismiss this reviewed Sitrails alert');
+        dismiss.addEventListener('click', function() {
+          dismiss.disabled = true;
+          clearSitrailsObservations(alert);
+        });
+        actions.appendChild(dismiss);
+        var link = element('a', '', 'Open Sitrails');
+        link.href = data.url + '/#alerts';
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        actions.appendChild(link);
+        row.appendChild(actions);
+        body.appendChild(row);
+      });
+      if (!data.alerts || !data.alerts.length) {
+        var empty = document.createElement('tr');
+        var cell = element('td', '', data.enabled ? 'No open alerts loaded.' : 'Monitoring is paused.');
+        cell.colSpan = 5;
+        empty.appendChild(cell);
+        body.appendChild(empty);
+      }
+    } catch (error) {
+      if (sequence === state.sitrailsSequence) setText('sitrailsStatus', 'Sitrails monitoring status unavailable.');
+    }
+  }
+
+  async function clearSitrailsObservations(alert) {
+    var button = document.getElementById('sitrailsClear');
+    if (state.sitrailsClearBusy) return;
+    state.sitrailsClearBusy = true;
+    state.sitrailsClearNotice = '';
+    button.disabled = true;
+    setText('sitrailsClearStatus', 'Finding open alerts in Sitrails...');
+    try {
+      var options = {
+        method: 'POST', headers: getBridgeCapabilityHeaders(), signal: AbortSignal.timeout(60000)
+      };
+      var prepared = await fetch(bridgeUrl() + '/v1/security/sitrails/clear/prepare',
+        Object.assign({}, options, { body: JSON.stringify(alert
+          ? { id: alert.id, review_token: alert.review_token } : {}) }));
+      var plan = await prepared.json();
+      if (!prepared.ok || typeof plan.count !== 'number' || !plan.confirmation) {
+        throw new Error((plan.error && plan.error.message) || 'Could not find open Sitrails alerts.');
+      }
+      if (!plan.count) {
+        state.sitrailsClearNotice = 'No open Sitrails alerts were found.';
+        return;
+      }
+      if (alert && plan.count !== 1) throw new Error('This alert is no longer available for dismissal.');
+      var prompt = (alert
+        ? 'Dismiss this reviewed alert by marking it resolved in Sitrails and removing its Eva review?'
+        : 'Resolve ' + plan.count + ' open alert(s) in Sitrails and remove their Eva reviews?') +
+        '\n\nRecorded evidence and trails will remain. This is not a security assessment.' +
+        '\nNew or changed alerts may remain. Sitrails cannot make this operation atomic, so statuses can change during it.' +
+        '\nPausing or changing settings stops further updates; a request already in flight may finish.' +
+        (plan.more ? '\nAdditional alerts may remain; repeat the action if needed.' : '');
+      if (!window.confirm(prompt)) {
+        state.sitrailsClearNotice = 'Clear cancelled; no alert statuses changed.';
+        return;
+      }
+      var response = await fetch(bridgeUrl() + '/v1/security/sitrails/clear',
+        Object.assign({}, options, { body: JSON.stringify({ confirmation: plan.confirmation }) }));
+      var result = await response.json();
+      if (!response.ok || result.started !== true) {
+        throw new Error((result.error && result.error.message) || 'Could not start clearing alerts.');
+      }
+      await refreshSitrails();
+    } catch (error) {
+      state.sitrailsClearNotice = error.message || (alert ? 'Alert dismissal failed.' : 'Sitrails clear failed.');
+    } finally {
+      state.sitrailsClearBusy = false;
+      button.disabled = false;
+      await refreshSitrails();
+    }
+  }
+
+  async function setSitrailsMonitoring(enabled) {
+    var enable = document.getElementById('sitrailsEnable');
+    var disable = document.getElementById('sitrailsDisable');
+    enable.disabled = disable.disabled = true;
+    try {
+      var response = await fetch(bridgeUrl() + '/v1/security/sitrails', {
+        method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, getBridgeCapabilityHeaders()),
+        body: JSON.stringify({ enabled: enabled, url: document.getElementById('sitrailsUrl').value.trim() }),
+        signal: AbortSignal.timeout(8000)
+      });
+      var data = await response.json();
+      if (!response.ok) throw new Error((data.error && data.error.message) || 'Settings could not be saved.');
+      await refreshSitrails();
+    } catch (error) {
+      setText('sitrailsStatus', error.message);
+      enable.disabled = disable.disabled = false;
     }
   }
 
@@ -1563,6 +1717,9 @@ var EvaAgents = (function() {
     if (denyMissionResearch) denyMissionResearch.addEventListener('click', function() { setMissionResearchPermission(false); });
     if (enableSecurityUrls) enableSecurityUrls.addEventListener('click', function() { setSecurityUrlLogging(true); });
     if (disableSecurityUrls) disableSecurityUrls.addEventListener('click', function() { setSecurityUrlLogging(false); });
+    document.getElementById('sitrailsEnable').addEventListener('click', function() { setSitrailsMonitoring(true); });
+    document.getElementById('sitrailsDisable').addEventListener('click', function() { setSitrailsMonitoring(false); });
+    document.getElementById('sitrailsClear').addEventListener('click', function() { clearSitrailsObservations(); });
     if (memoryReviewButton) memoryReviewButton.addEventListener('click', function() {
       if (window.EvaMemoryInspector && typeof window.EvaMemoryInspector.openFromAgents === 'function') {
         window.EvaMemoryInspector.openFromAgents();
