@@ -817,10 +817,10 @@ def _dispatch_workspace_run(run):
         from bridge.security_sandbox import SandboxError, record_event, sandbox_preflight, validate_workspace
         try:
             if sandbox_preflight() != sandbox_image:
-                raise SandboxError("The approved sandbox image changed; create a new run.")
+                raise SandboxError("The approved sandbox image changed; create a new run.", "image_changed")
             validate_workspace(checkout_path)
         except (SandboxError, OSError) as error:
-            record_event("boundary", "blocked")
+            record_event("boundary", "blocked", getattr(error, "reason", ""))
             raise WorkspaceError(str(error)) from error
     workspace_mcp_config = {} if goal_local or sandbox_image else _workspace_store().mcp_config_for_run(run["id"])
     _verbose_debug_emit("workspace_mcp", enabled_module_count=len(workspace_mcp_config))
@@ -1804,6 +1804,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._security_self_test()
         elif parsed_path == "/v1/security/approve-image":
             self._security_approve_image()
+        elif parsed_path == "/v1/security/analyze":
+            self._security_analyze()
         elif parsed_path == "/v1/browser/run":
             self._browser_run()
         elif parsed_path == "/v1/desktop/run":
@@ -4200,6 +4202,26 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json_response(200, run_self_test())
         except (SandboxError, OSError) as error:
             self._json_response(400, {"error": {"message": str(error)}})
+
+    def _security_analyze(self):
+        if not self._require_bridge_capability():
+            return
+        data, error = self._workspace_body()
+        if error:
+            self._json_response(400, {"error": {"message": error}})
+            return
+        allowed = {"model", "si_runtime", "lmstudio_base_url", "lmstudio_model", "openai_api_key"}
+        if set(data) - allowed or any(
+            not isinstance(value, str) or len(value) > 1024 for value in data.values()
+        ) or not data.get("model"):
+            self._json_response(400, {"error": {"message": "Invalid security analysis provider settings."}})
+            return
+        from bridge.security_analysis import SecurityAnalysisError, analyze
+        from bridge.security_sandbox import analysis_summary
+        try:
+            self._json_response(200, {"analysis": analyze(data, analysis_summary())})
+        except SecurityAnalysisError as error:
+            self._json_response(502, {"error": {"message": str(error)}})
 
     def _agents_overview(self):
         """Return a normalized snapshot for the agent operations dashboard."""

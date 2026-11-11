@@ -38,24 +38,40 @@ _PRIVATE_KEY_MATERIAL = re.compile(
     r"(?m)^-----BEGIN (?:[A-Z0-9 ]*PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----\r?\n"
     r"(?:(?:[A-Za-z-]+:[^\r\n]*\r?\n)|(?:[ \t]*\r?\n)){0,6}[A-Za-z0-9+/=]{32,}"
 )
+_EVENT_REASONS = {
+    "", "protected_path", "credential_detected", "nested_mount",
+    "image_changed", "runtime_unavailable", "credential_output",
+}
+_REASON_TEXT = {
+    "protected_path": "A protected path or symlink prevented a workspace run.",
+    "credential_detected": "Recognizable credential material prevented a workspace run.",
+    "nested_mount": "A nested mount prevented a workspace run.",
+    "image_changed": "The sandbox image no longer matches the approved identity.",
+    "runtime_unavailable": "Rootless sandbox runtime is unavailable.",
+    "credential_output": "Sandbox output containing recognizable credential material was withheld.",
+}
 
 
 class SandboxError(Exception):
     """A safe, user-visible sandbox failure."""
 
+    def __init__(self, message, reason=""):
+        super().__init__(message)
+        self.reason = reason if reason in _EVENT_REASONS else ""
+
 
 def _podman():
     executable = "/usr/bin/podman"
     if os.name != "posix" or not os.path.isfile(executable):
-        raise SandboxError("Rootless Podman is not installed.")
+        raise SandboxError("Rootless Podman is not installed.", "runtime_unavailable")
     resolved = os.path.realpath(executable)
     try:
         for path in (resolved, os.path.dirname(resolved), os.path.dirname(os.path.dirname(resolved))):
             info = os.stat(path)
             if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-                raise SandboxError("The Podman executable is not trusted.")
+                raise SandboxError("The Podman executable is not trusted.", "runtime_unavailable")
     except OSError as error:
-        raise SandboxError("The Podman executable cannot be verified.") from error
+        raise SandboxError("The Podman executable cannot be verified.", "runtime_unavailable") from error
     return resolved
 
 
@@ -66,17 +82,17 @@ def _podman_command(arguments, timeout=15):
             text=True, timeout=timeout, env=_safe_child_environment(), check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise SandboxError("The rootless container runtime is unavailable.") from error
+        raise SandboxError("The rootless container runtime is unavailable.", "runtime_unavailable") from error
 
 
 def sandbox_candidate():
     info = _podman_command(["info", "--format", "{{.Host.Security.Rootless}}"])
     if info.returncode or info.stdout.strip().lower() != "true":
-        raise SandboxError("Rootless Podman is unavailable; sandbox execution was not started.")
+        raise SandboxError("Rootless Podman is unavailable; sandbox execution was not started.", "runtime_unavailable")
     image = _podman_command(["image", "inspect", "--format", "{{.Id}}", _IMAGE])
     image_id = image.stdout.strip().removeprefix("sha256:")
     if image.returncode or not _IMAGE_ID.fullmatch(image_id):
-        raise SandboxError("The approved local sandbox image is unavailable.")
+        raise SandboxError("The approved local sandbox image is unavailable.", "runtime_unavailable")
     return image_id
 
 
@@ -116,7 +132,7 @@ def sandbox_preflight():
     except (OSError, ValueError):
         raise SandboxError("Review and approve the local sandbox image in the Security Officer first.") from None
     if not isinstance(approved, dict) or approved.get("image_id") != image_id:
-        raise SandboxError("The local sandbox image does not match the approved identity.")
+        raise SandboxError("The local sandbox image does not match the approved identity.", "image_changed")
     return image_id
 
 
@@ -142,7 +158,7 @@ def validate_workspace(workspace):
     if not root.is_dir() or ":" in str(root) or "\n" in str(root) or "\r" in str(root):
         raise SandboxError("The workspace path cannot be safely mounted.")
     if _nested_mounts(str(root)):
-        raise SandboxError("The workspace contains a nested mount and cannot be sandboxed.")
+        raise SandboxError("The workspace contains a nested mount and cannot be sandboxed.", "nested_mount")
     total = 0
     files = 0
     for current, dirs, names in os.walk(root, followlinks=False):
@@ -152,7 +168,7 @@ def validate_workspace(workspace):
             if relative == ".git" and path.is_file() and not path.is_symlink():
                 continue
             if path.is_symlink() or sensitive_path(relative) or _PROTECTED_NAME.search(relative):
-                raise SandboxError("The workspace contains a protected path or symlink; it cannot be sandboxed.")
+                raise SandboxError("The workspace contains a protected path or symlink; it cannot be sandboxed.", "protected_path")
             if path.is_dir():
                 continue
             info = path.stat(follow_symlinks=False)
@@ -171,17 +187,19 @@ def validate_workspace(workspace):
                     any(finding["kind"] == "private-key" for finding in findings)
                     and _PRIVATE_KEY_MATERIAL.search(text)
                 ):
-                    raise SandboxError("The workspace contains a recognizable credential; sandbox execution was not started.")
+                    raise SandboxError("The workspace contains a recognizable credential; sandbox execution was not started.", "credential_detected")
     return str(root)
 
 
-def record_event(kind, outcome):
+def record_event(kind, outcome, reason=""):
     if kind not in {"runtime", "command", "self_test", "boundary"} or outcome not in {"ready", "unavailable", "started", "completed", "failed", "cancelled", "timeout", "blocked"}:
+        return
+    if reason not in _EVENT_REASONS:
         return
     try:
         os.makedirs(config.EVA_CONFIG_DIR, mode=0o700, exist_ok=True)
         path = os.path.join(config.EVA_CONFIG_DIR, _SECURITY_FILE)
-        payload = (json.dumps({"id": uuid.uuid4().hex, "time": int(time.time()), "kind": kind, "outcome": outcome}) + "\n").encode()
+        payload = (json.dumps({"id": uuid.uuid4().hex, "time": int(time.time()), "kind": kind, "outcome": outcome, "reason": reason}) + "\n").encode()
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
         try:
             os.write(descriptor, payload)
@@ -206,8 +224,10 @@ def _recent_events():
             except (ValueError, UnicodeDecodeError):
                 continue
             if (isinstance(event, dict) and re.fullmatch(r"[a-f0-9]{32}", str(event.get("id") or ""))
-                    and event.get("kind") in {"runtime", "command", "self_test", "boundary"}
-                    and event.get("outcome") in {"ready", "unavailable", "started", "completed", "failed", "cancelled", "timeout", "blocked"}):
+                    and isinstance(event.get("kind"), str) and event["kind"] in {"runtime", "command", "self_test", "boundary"}
+                    and isinstance(event.get("outcome"), str)
+                    and event["outcome"] in {"ready", "unavailable", "started", "completed", "failed", "cancelled", "timeout", "blocked"}
+                    and isinstance(event.get("reason", ""), str) and event.get("reason", "") in _EVENT_REASONS):
                 result.append(event)
         return result
     except OSError:
@@ -351,7 +371,7 @@ class SecurityOfficer:
                 _reap_stale_leases()
                 for event in _recent_events():
                     if event["id"] not in seen and event["kind"] == "boundary" and event["outcome"] == "blocked":
-                        self._notify("A workspace sandbox safety check blocked an action.")
+                        self._notify(_REASON_TEXT.get(event.get("reason"), "A workspace sandbox safety check blocked an action."))
                     seen.add(event["id"])
                 if len(seen) > 200:
                     seen = {event["id"] for event in _recent_events()}
@@ -362,10 +382,28 @@ class SecurityOfficer:
         events = [event for event in _recent_events() if event["kind"] in {"command", "boundary", "self_test"}]
         if events:
             result["activity"] += "; last sandbox event " + events[-1]["outcome"]
+            if events[-1].get("reason") in _REASON_TEXT:
+                result["activity"] += ": " + _REASON_TEXT[events[-1]["reason"]]
         return result
 
 
 officer = SecurityOfficer()
+
+
+def analysis_summary():
+    counts = {}
+    for event in _recent_events():
+        key = "/".join(filter(None, (event["kind"], event["outcome"], event.get("reason", ""))))
+        counts[key] = counts.get(key, 0) + 1
+    status = officer.snapshot().get("status")
+    return {
+        "officer_status": status if status in {"starting", "ready", "unavailable"} else "unknown",
+        "recent_event_counts": counts,
+        "sandbox_network": "disabled",
+        "chat_sandboxed": False,
+        "workspace_output_may_reach_model_provider": True,
+        "credential_detection": "non-exhaustive",
+    }
 
 
 def run_self_test():
@@ -404,9 +442,9 @@ def run_in_sandbox(workspace, image_id, command, timeout=120, cancel=None):
         root = validate_workspace(workspace)
         current_image = sandbox_preflight()
         if current_image != image_id:
-            raise SandboxError("The approved sandbox image changed; start a new isolated run.")
-    except (SandboxError, OSError):
-        record_event("boundary", "blocked")
+            raise SandboxError("The approved sandbox image changed; start a new isolated run.", "image_changed")
+    except (SandboxError, OSError) as error:
+        record_event("boundary", "blocked", getattr(error, "reason", ""))
         raise
     with tempfile.TemporaryDirectory(prefix="eva-sandbox-") as directory:
         lease_id = uuid.uuid4().hex
@@ -482,8 +520,8 @@ def run_in_sandbox(workspace, image_id, command, timeout=120, cancel=None):
                 raise SandboxError("Sandbox command " + outcome + ".")
             text = bytes(output).decode("utf-8", errors="replace")
             if scan_text(text, "sandbox-output"):
-                record_event("boundary", "blocked")
-                raise SandboxError("Sandbox output contained recognizable credentials and was withheld.")
+                record_event("boundary", "blocked", "credential_output")
+                raise SandboxError("Sandbox output contained recognizable credentials and was withheld.", "credential_output")
             return {"exit_code": process.returncode, "output": text, "truncated": False}
         except (OSError, SandboxError):
             if outcome == "completed":

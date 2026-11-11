@@ -906,7 +906,7 @@ class ACPClient:
 
     def __init__(self, copilot_path="copilot", cwd=None, model=None, mcp_config=None,
                  reasoning_effort=None, tool_profile=None, no_tools=False,
-                 provider_config=None, sandbox_image=""):
+                 provider_config=None, sandbox_image="", isolated_reasoning=False):
         self.copilot_path = copilot_path
         self.cwd = cwd or os.getcwd()
         self.model = model  # None = use CLI default
@@ -917,6 +917,7 @@ class ACPClient:
         self.config_fingerprint = _acp_config_fingerprint(self.mcp_config)
         self.provider_config = dict(provider_config or {})
         self.sandbox_image = str(sandbox_image or "")
+        self.isolated_reasoning = bool(isolated_reasoning)
         self._sandbox_workspace = self.cwd if self.sandbox_image else ""
         self._sandbox_profile = None
         self.provider_fingerprint = _provider_config_fingerprint(self.provider_config)
@@ -941,6 +942,7 @@ class ACPClient:
         self._session_permission_modes = {}  # session_id -> last explicit prompt policy
         self._session_permission_mode_order = []
         self.reader_thread = None
+        self.stderr_thread = None
         self.agent_info = {}
         self.alive = False
         self.active_requests = 0
@@ -957,21 +959,25 @@ class ACPClient:
             if self._cancel_requested.is_set() or _st.acp_shutdown.is_set():
                 raise RuntimeError("ACP client startup was interrupted.")
         copilot_executable = self._validated_copilot_executable()
-        if self.sandbox_image:
+        restricted_profile = bool(self.sandbox_image or self.isolated_reasoning)
+        if restricted_profile:
             copilot_executable = _sandbox_copilot_executable(copilot_executable)
         cmd = [copilot_executable, "--acp", "--stdio"]
-        if self.sandbox_image:
+        if restricted_profile:
             from bridge.security_sandbox import SandboxError, sandbox_preflight, validate_workspace
             try:
-                if self.mcp_config or self.no_tools or sandbox_preflight() != self.sandbox_image:
-                    raise SandboxError("Sandboxed ACP cannot use host MCP servers or an unapproved image.")
-                validate_workspace(self._sandbox_workspace)
+                if self.sandbox_image:
+                    if self.mcp_config or self.no_tools or sandbox_preflight() != self.sandbox_image:
+                        raise SandboxError("Sandboxed ACP cannot use host MCP servers or an unapproved image.")
+                    validate_workspace(self._sandbox_workspace)
+                elif not self.no_tools or self.mcp_config:
+                    raise SandboxError("Isolated analysis cannot use tools or MCP servers.")
                 version = subprocess.run(
                     [copilot_executable, "--version"], capture_output=True, text=True, timeout=10,
                     env=_safe_child_environment(), check=False, **_hidden_subprocess_options(),
                 )
                 if version.returncode or not re.search(r"\b1\.0\.109\b", version.stdout):
-                    raise SandboxError("This Copilot CLI version has not been qualified for sandboxed workspaces.")
+                    raise SandboxError("This Copilot CLI version has not been qualified for restricted security work.")
             except (SandboxError, OSError, subprocess.TimeoutExpired) as error:
                 raise RuntimeError(str(error)) from error
             self._sandbox_profile = tempfile.TemporaryDirectory(prefix="eva-sandbox-acp-")
@@ -984,18 +990,21 @@ class ACPClient:
             with os.fdopen(descriptor, "w", encoding="utf-8") as settings:
                 json.dump({"autoUpdate": False, "disableAllHooks": True,
                            "customAgents": {"defaultLocalOnly": True}}, settings)
-            server_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                       "security_workspace_mcp.py")
-            self.mcp_config = {"eva-sandbox": {
-                "command": sys.executable,
-                "args": [server_path, "--workspace", self._sandbox_workspace,
-                         "--image", self.sandbox_image, "--config-dir", _cfg.EVA_CONFIG_DIR],
-                "tools": ["*"],
-            }}
-            cmd.extend(["--disable-builtin-mcps", "--no-custom-instructions",
-                        "--disable-client-telemetry", "--available-tools", "eva-sandbox-execute"])
+            if self.sandbox_image:
+                server_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                           "security_workspace_mcp.py")
+                self.mcp_config = {"eva-sandbox": {
+                    "command": sys.executable,
+                    "args": [server_path, "--workspace", self._sandbox_workspace,
+                             "--image", self.sandbox_image, "--config-dir", _cfg.EVA_CONFIG_DIR],
+                    "tools": ["*"],
+                }}
+                cmd.extend(["--disable-builtin-mcps", "--no-custom-instructions",
+                            "--disable-client-telemetry", "--available-tools", "eva-sandbox-execute"])
+            else:
+                cmd.append("--disable-client-telemetry")
         isolated_si = bool(self.provider_config)
-        if isolated_si and not self.sandbox_image:
+        if isolated_si and not restricted_profile:
             cmd.extend(["--no-custom-instructions", "--disable-client-telemetry", "--disable-builtin-mcps"])
         if self.no_tools:
             cmd.extend(["--available-tools=__eva_no_tools__", "--disable-builtin-mcps", "--no-custom-instructions"])
@@ -1013,7 +1022,7 @@ class ACPClient:
             os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
             process_env = _safe_child_environment()
             process_env.pop("EVA_BRIDGE_TOKEN", None)
-            if self.sandbox_image:
+            if restricted_profile:
                 process_env["COPILOT_HOME"] = sandbox_home
                 process_env["COPILOT_DISABLE_LOGIN_SHELL_ENV"] = "1"
                 process_env["COPILOT_PLUGIN_DIR_ONLY"] = "true"
@@ -1021,7 +1030,7 @@ class ACPClient:
                 for key in list(process_env):
                     if key == "COPILOT_MODEL" or key.startswith("COPILOT_PROVIDER_"):
                         process_env.pop(key, None)
-                if not self.sandbox_image:
+                if not restricted_profile:
                     copilot_home, isolated_cwd = _si_isolated_profile()
                     process_env["COPILOT_HOME"] = copilot_home
                     if not getattr(self, "workspace_run_id", ""):
@@ -1040,7 +1049,7 @@ class ACPClient:
             with self._stop_lock:
                 if self._cancel_requested.is_set() or _st.acp_shutdown.is_set():
                     raise RuntimeError("ACP client startup was interrupted.")
-                self._owns_process_group = bool(getattr(self, "workspace_run_id", "")) and os.name != "nt"
+                self._owns_process_group = bool(getattr(self, "workspace_run_id", "") or self.isolated_reasoning) and os.name != "nt"
                 self.process = subprocess.Popen(
                     cmd,
                     stdin=subprocess.PIPE,
@@ -1048,7 +1057,7 @@ class ACPClient:
                     stderr=subprocess.PIPE,
                     bufsize=0,
                     env=process_env,
-                    cwd=self.cwd if isolated_si or self.sandbox_image else None,
+                    cwd=self.cwd if isolated_si or restricted_profile else None,
                     start_new_session=self._owns_process_group,
                     **_hidden_subprocess_options(),
                 )
@@ -1068,7 +1077,8 @@ class ACPClient:
         self.reader_thread.start()
 
         # Start stderr reader (for debug logging)
-        threading.Thread(target=self._stderr_loop, daemon=True).start()
+        self.stderr_thread = threading.Thread(target=self._stderr_loop, daemon=True)
+        self.stderr_thread.start()
 
         # Initialize connection
         init_result = self._send_request("initialize", {
@@ -1092,11 +1102,11 @@ class ACPClient:
             print(f"[ACP] Capabilities: {json.dumps(caps, indent=2)}")
         else:
             print(f"[ACP] Warning: initialize returned: {init_result}")
-        if self.sandbox_image and (
+        if restricted_profile and (
             not init_result or "error" in init_result or self.agent_info.get("version") != "1.0.109"
         ):
             self.stop()
-            raise RuntimeError("Sandboxed workspace ACP requires the verified Copilot CLI version.")
+            raise RuntimeError("Restricted security ACP requires the verified Copilot CLI version.")
 
         # Create session — pass MCP servers via ACP session/new if configured
         mcp_servers_for_session = []
@@ -1160,6 +1170,13 @@ class ACPClient:
             if self.process is not None:
                 if self.process.stdin and not self.process.stdin.closed:
                     self.process.stdin.close()
+                if self.isolated_reasoning:
+                    for reader in (self.reader_thread, self.stderr_thread):
+                        if reader and reader is not threading.current_thread():
+                            reader.join(timeout=2)
+                    for stream in (self.process.stdout, self.process.stderr):
+                        if stream and not stream.closed:
+                            stream.close()
             if self._sandbox_profile is not None:
                 self._sandbox_profile.cleanup()
                 self._sandbox_profile = None
@@ -1929,7 +1946,7 @@ class ACPClient:
 
     def _handle_terminal_create(self, rid, params):
         """Execute a shell command requested by the agent."""
-        if self.sandbox_image:
+        if self.sandbox_image or self.isolated_reasoning:
             self._send_rpc_error(rid, -32602, "Host terminals are unavailable to sandboxed workspace runs.")
             return
         command = params.get("command", "")

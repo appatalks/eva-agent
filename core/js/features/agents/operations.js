@@ -32,6 +32,7 @@ var EvaAgents = (function() {
     primaryTurnSequence: 0,
     clockTimer: null,
     actionBusy: {},
+    securityAnalysis: '',
     parallaxX: 0,
     parallaxY: 0,
     parallaxTargetX: 0,
@@ -705,7 +706,8 @@ var EvaAgents = (function() {
     status.className = 'agent-detail-status status-' + agent.status;
     status.textContent = detailStatusText(agent);
     activity.textContent = agent.activity || 'No activity reported.';
-    result.textContent = agent.result || 'No output reported.';
+    result.textContent = agent.kind === 'security' && state.securityAnalysis
+      ? state.securityAnalysis : agent.result || 'No output reported.';
     if (objective) objective.textContent = agent.detail || 'No objective detail reported.';
     var title = content.querySelector('h2');
     if (title) title.textContent = agent.label || 'Agent session';
@@ -802,6 +804,41 @@ var EvaAgents = (function() {
         }
       });
       actions.appendChild(approve);
+      var analyze = element('button', 'agent-security-analyze', 'Analyze recent security events');
+      analyze.type = 'button';
+      analyze.addEventListener('click', async function() {
+        analyze.disabled = true;
+        var feedback = content.querySelector('.agent-inspector-feedback');
+        if (feedback) feedback.textContent = 'Analyzing sanitized event counts with the selected model...';
+        var backend = String((document.getElementById('selAIGBackend') || {}).value || 'lmstudio');
+        var local = backend === 'lmstudio';
+        try {
+          var response = await fetch(bridgeUrl() + '/v1/security/analyze', {
+            method: 'POST',
+            headers: getBridgeCapabilityHeaders(),
+            body: JSON.stringify({
+              model: backend,
+              si_runtime: local && typeof getSIHarnessRuntime === 'function' ? getSIHarnessRuntime() : 'direct',
+              lmstudio_base_url: local && typeof getLmStudioBaseUrl === 'function' ? getLmStudioBaseUrl() : '',
+              lmstudio_model: local && typeof getLmStudioModel === 'function' ? getLmStudioModel() : '',
+              openai_api_key: backend.indexOf('openai:') === 0 && typeof getAuthKey === 'function'
+                ? getAuthKey('OPENAI_API_KEY') : ''
+            })
+          });
+          var result = await response.json();
+          if (!response.ok) throw new Error((result.error || {}).message || 'Security analysis failed.');
+          var message = result.analysis;
+          if (typeof message !== 'string' || !message.trim()) throw new Error('The selected model returned no analysis.');
+          state.securityAnalysis = 'Model analysis (advisory, unverified):\n\n' + message.slice(0, 4000);
+          updateDetail(agent, content);
+          if (feedback) feedback.textContent = 'Analysis complete.';
+        } catch (error) {
+          if (feedback) feedback.textContent = error.message || 'Security analysis failed.';
+        } finally {
+          analyze.disabled = false;
+        }
+      });
+      actions.appendChild(analyze);
       var test = element('button', 'agent-security-test', 'Test offline sandbox');
       test.type = 'button';
       test.addEventListener('click', async function() {

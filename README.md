@@ -20,7 +20,9 @@ while keeping configuration, approvals, and personal data under your control.
   arbitrary scripts can bypass those checks. Background and isolated workspace
   policies remain separate.
 - **Security Officer:** a lightweight Agent Observatory monitor reports rootless
-  sandbox readiness and blocked boundary checks. Opt-in workspace coding runs
+  sandbox readiness and blocked boundary checks. On request it can ask the
+  selected chat model to interpret sanitized event counts without tools or memory;
+  that interpretation is advisory. Opt-in workspace coding runs
   can execute offline in a local Podman image; chat and other tools are not
   sandboxed. The container receives only its worktree, but its output may be
   sent to the selected model provider. Known credential scans are not exhaustive.
