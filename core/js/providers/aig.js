@@ -576,9 +576,9 @@ async function aigSendRequest() {
   var requestedQuoteSymbol = requestedQuoteSymbols[0] || '';
   var isDirectQuoteRequest = requestedQuoteSymbols.length > 0;
   var selectedAigBackend = String((document.getElementById('selAIGBackend') || {}).value || '');
-  var siCopilotRuntimeSelected = selectedAigBackend === 'lmstudio'
+  var siIsolatedRuntimeSelected = selectedAigBackend === 'lmstudio'
     && (typeof getSIHarnessRuntime === 'function')
-    && getSIHarnessRuntime() === 'copilot';
+    && ['copilot', 'pi'].includes(getSIHarnessRuntime());
   if (isDirectQuoteRequest && cogDecision.reason !== 'phrase') {
     cogDecision = { active: false, reason: 'direct-quote' };
   }
@@ -669,9 +669,9 @@ async function aigSendRequest() {
     if (directQuoteAutoSpeak && directQuoteAutoSpeak.checked) speakText();
     return;
   }
-  if (siCopilotRuntimeSelected && cogDecision.active) {
-    cogDecision = { active: false, reason: 'si-copilot-direct-runtime' };
-    setStatus('info', 'SI Copilot runtime selected: adaptive review bypassed; direct BYOK ACP only, no cloud helper.');
+  if (siIsolatedRuntimeSelected && cogDecision.active) {
+    cogDecision = { active: false, reason: 'si-isolated-runtime' };
+    setStatus('info', 'SI runtime selected: adaptive review bypassed; no cloud reviewer.');
   }
   var provisional = createEvaStreamingBubble(txtOutput);
   updateEvaStreamingStatus(provisional, {
@@ -811,8 +811,8 @@ async function aigSendRequest() {
                  ', reviewer=' + cogState.reviewerModel +
                  ', maxCycles=' + cogState.maxCycles + '.';
     }
-    if (siCopilotRuntimeSelected) {
-      cogNote += '\nAdaptive review is bypassed for SI Copilot chat to preserve the selected endpoint. No reviewer model was called.';
+    if (siIsolatedRuntimeSelected) {
+      cogNote += '\nAdaptive review is bypassed for this SI runtime to preserve the selected endpoint. No reviewer model was called.';
     }
     requestMessages = requestMessages.concat([{ role: 'system', content: cogNote }]);
     existingMessages = existingMessages.concat([{ role: 'system', content: cogNote }]);

@@ -56,7 +56,7 @@ function _renderACPPermission(permission) {
   var bubble = document.createElement('div');
   bubble.className = 'chat-bubble eva-bubble';
   var text = document.createElement('div');
-  text.className = 'md';
+  text.className = 'md acp-permission-details';
   var commandSummary = permission.command_summary
     ? ' ' + (permission.tool_kind === 'execute' ? 'Command: ' : 'Details: ') + String(permission.command_summary) : '';
   var approvalReason = permission.approval_reason ? ' Reason: ' + String(permission.approval_reason) + '.' : '';

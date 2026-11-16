@@ -541,7 +541,10 @@ class RemoteGitHubMCPServer:
             from bridge.security_urls import record, tool_input_observations
             record([(method, url, "proposed") for method, url in tool_input_observations({"rawInput": arguments})])
             from bridge.remote_mcp import tool_result_text
-            return {"text": tool_result_text(self.client.call_tool(tool_name, arguments))}
+            result = self.client.call_tool(tool_name, arguments)
+            if isinstance(result, dict) and result.get("isError") is True:
+                return {"error": "GitHub MCP tool reported an execution error"}
+            return {"text": tool_result_text(result)}
         except Exception as error:
             return {"error": "GitHub MCP tool failed: " + type(error).__name__}
 

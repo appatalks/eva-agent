@@ -7,28 +7,10 @@ function evaDisplayModelLabel(value) {
   if (raw === 'lmstudio' || raw === 'lm-studio') return 'SI Harness';
   var siCopilot = raw.match(/^aig:si-copilot:(.+)$/);
   if (siCopilot) return 'SI Harness \u00b7 Copilot CLI \u00b7 ' + siCopilot[1];
+  var siPi = raw.match(/^aig:si-pi:(.+)$/);
+  if (siPi) return 'SI Harness \u00b7 Pi \u00b7 ' + siPi[1];
   var match = raw.match(/^(?:aig:)?lmstudio:(.+)$/);
   return match ? 'SI Harness \u00b7 ' + match[1] : raw;
-}
-
-// AI text is untrusted.  Only restore image elements that we construct with a
-// small allow-list of attributes; in particular, never restore event handlers
-// or arbitrary markup from a model response.
-function _sanitizeImageTag(fragment) {
-  if (typeof DOMParser === 'undefined' || typeof document === 'undefined') return '';
-  var parsed = new DOMParser().parseFromString(String(fragment || ''), 'text/html');
-  var image = parsed.body && parsed.body.querySelector('img');
-  if (!image) return '';
-  var source = image.getAttribute('src') || '';
-  if (!/^https?:\/\//i.test(source)) return '';
-  var safe = document.createElement('img');
-  safe.src = source;
-  ['title', 'alt', 'class'].forEach(function(name) {
-    var value = image.getAttribute(name);
-    if (value !== null) safe.setAttribute(name, value);
-  });
-  if (image.getAttribute('data-generated') === 'true') safe.setAttribute('data-generated', 'true');
-  return safe.outerHTML;
 }
 
 function repairEvaTextEncoding(value) {
@@ -280,7 +262,7 @@ function saveAuthKeys() {
     localStorage.removeItem('aig_lmstudio_model');
   }
   var siRuntimeEl = document.getElementById('selSIHarnessRuntime');
-  if (siRuntimeEl) localStorage.setItem('aig_si_runtime', siRuntimeEl.value === 'copilot' ? 'copilot' : 'direct');
+  if (siRuntimeEl) localStorage.setItem('aig_si_runtime', ['direct', 'copilot', 'pi'].includes(siRuntimeEl.value) ? siRuntimeEl.value : 'direct');
   syncAIGRuntimePrefs();
   var localVoicesProfileEl = document.getElementById('localVoicesProfile');
   if (localVoicesProfileEl && localVoicesProfileEl.value) {
@@ -409,7 +391,8 @@ function getLmStudioModel() {
 }
 
 function getSIHarnessRuntime() {
-  return (localStorage.getItem('aig_si_runtime') || 'direct') === 'copilot' ? 'copilot' : 'direct';
+  var runtime = localStorage.getItem('aig_si_runtime') || 'direct';
+  return ['direct', 'copilot', 'pi'].includes(runtime) ? runtime : 'direct';
 }
 
 function syncAIGRuntimePrefs() {
@@ -1264,10 +1247,10 @@ document.addEventListener('DOMContentLoaded', () => {
   if (siRuntimeSel) {
     siRuntimeSel.value = getSIHarnessRuntime();
     siRuntimeSel.addEventListener('change', function () {
-      localStorage.setItem('aig_si_runtime', siRuntimeSel.value === 'copilot' ? 'copilot' : 'direct');
+      localStorage.setItem('aig_si_runtime', ['direct', 'copilot', 'pi'].includes(siRuntimeSel.value) ? siRuntimeSel.value : 'direct');
       if (typeof setStatus === 'function') {
-        setStatus('info', siRuntimeSel.value === 'copilot'
-          ? 'SI Harness runtime: Copilot CLI ACP (endpoint-scoped)'
+        setStatus('info', siRuntimeSel.value === 'copilot' ? 'SI Harness runtime: Copilot CLI ACP (endpoint-scoped)'
+          : siRuntimeSel.value === 'pi' ? 'SI Harness runtime: Pi (tool-capable RPC)'
           : 'SI Harness runtime: Eva Direct');
       }
     });
@@ -3786,25 +3769,8 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
       text = text.replace(/\n{3,}/g, '\n\n'); // clean up extra blank lines
     }
 
-    // Tokenize generated image wrappers and standalone <img> tags before markdown.
-    text = text.replace(/<div class="eva-generated-wrap">[\s\S]*?<\/div>/g, function(m) {
-      var image = m.match(/<img\b[^>]*>/i);
-      var safeImage = image ? _sanitizeImageTag(image[0]) : '';
-      if (!safeImage) return '';
-      var safeWrapper = '<div class="eva-generated-wrap">' + safeImage +
-        '<span class="eva-generated-badge">AI Generated</span></div>';
-      imgFragments.push(safeWrapper);
-      return '\u0000IMG' + (imgFragments.length - 1) + '\u0000';
-    });
-    text = text.replace(/<img[^>]*>/g, function(m) {
-      var safeImage = _sanitizeImageTag(m);
-      if (!safeImage) return '';
-      imgFragments.push(safeImage);
-      return '\u0000IMG' + (imgFragments.length - 1) + '\u0000';
-    });
-
     // Render markdown
-    var html = (typeof renderMarkdown === 'function') ? renderMarkdown(text) : text;
+    var html = renderMarkdown(text);
 
     // Restore <img> tags
     html = html.replace(/\u0000IMG(\d+)\u0000/g, function(m, idx) {
@@ -3814,7 +3780,7 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> <div class="md">' + html + '</div></div>';
   } else {
     // No images or no search keys — just render markdown
-    var html2 = (typeof renderMarkdown === 'function') ? renderMarkdown(text) : text;
+    var html2 = renderMarkdown(text);
     txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> <div class="md">' + html2 + '</div></div>';
   }
 

@@ -645,6 +645,10 @@
         ? window.EvaWorkspaces.currentProjectId() : '';
       var siCopilot = getDefaultModel() === 'lmstudio'
         && typeof getSIHarnessRuntime === 'function' && getSIHarnessRuntime() === 'copilot';
+      if (getDefaultModel() === 'lmstudio' && typeof getSIHarnessRuntime === 'function'
+          && getSIHarnessRuntime() === 'pi') {
+        throw new Error('Pi SI runtime does not support background agents.');
+      }
       var baseUrl = bridgeUrl().replace(/\/+$/, '');
       var preparedTasks = [];
       for (var i = 0; i < tasks.length; i++) {
