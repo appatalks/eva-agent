@@ -13,28 +13,6 @@ function evaDisplayModelLabel(value) {
   return match ? 'SI Harness \u00b7 ' + match[1] : raw;
 }
 
-// AI text is untrusted.  Only restore image elements that we construct with a
-// small allow-list of attributes; in particular, never restore event handlers
-// or arbitrary markup from a model response.
-function _sanitizeImageTag(fragment) {
-  if (typeof DOMParser === 'undefined' || typeof document === 'undefined') return '';
-  var sourceTag = String(fragment || '').trim();
-  if (!/^<img(?:\s|\/?>)/i.test(sourceTag)) return '';
-  var parsed = new DOMParser().parseFromString(sourceTag.replace(/\/?>$/, '/>'), 'application/xml');
-  var image = parsed.documentElement;
-  if (!image || String(image.localName || '').toLowerCase() !== 'img' || parsed.getElementsByTagName('parsererror').length) return '';
-  var source = image.getAttribute('src') || '';
-  if (!/^https?:\/\//i.test(source)) return '';
-  var safe = document.createElement('img');
-  safe.src = source;
-  ['title', 'alt', 'class'].forEach(function(name) {
-    var value = image.getAttribute(name);
-    if (value !== null) safe.setAttribute(name, value);
-  });
-  if (image.getAttribute('data-generated') === 'true') safe.setAttribute('data-generated', 'true');
-  return safe.outerHTML;
-}
-
 function repairEvaTextEncoding(value) {
   var text = String(value || '');
   if (!/(?:Ã.|Â.|â[\u0080-\u00bf]|ð[\u0080-\u00bf])/.test(text) || typeof TextDecoder === 'undefined') {
@@ -3790,23 +3768,6 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
       text = text.replace(/I\s+(can only|only)\s+describe[^.]*\./gi, '');
       text = text.replace(/\n{3,}/g, '\n\n'); // clean up extra blank lines
     }
-
-    // Tokenize generated image wrappers and standalone <img> tags before markdown.
-    text = text.replace(/<div class="eva-generated-wrap">[\s\S]*?<\/div>/g, function(m) {
-      var image = m.match(/<img\b[^>]*>/i);
-      var safeImage = image ? _sanitizeImageTag(image[0]) : '';
-      if (!safeImage) return '';
-      var safeWrapper = '<div class="eva-generated-wrap">' + safeImage +
-        '<span class="eva-generated-badge">AI Generated</span></div>';
-      imgFragments.push(safeWrapper);
-      return '\u0000IMG' + (imgFragments.length - 1) + '\u0000';
-    });
-    text = text.replace(/<img[^>]*>/g, function(m) {
-      var safeImage = _sanitizeImageTag(m);
-      if (!safeImage) return '';
-      imgFragments.push(safeImage);
-      return '\u0000IMG' + (imgFragments.length - 1) + '\u0000';
-    });
 
     // Render markdown
     var html = renderMarkdown(text);
