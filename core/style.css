@@ -590,6 +590,7 @@ body.eva-standalone #settingsMenu {
     .background-jobs .background-toggle-row { margin: 0 0 6px; font-size: 13px; }
     .background-jobs .background-toggle-row:last-child { margin-bottom: 0; }
     .background-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .acp-permission-details { white-space: pre-wrap; overflow-wrap: anywhere; }
     .background-actions .auth-save,
     .background-actions .auth-toggle { width: auto; margin-top: 0; }
     .background-list { display: grid; gap: 8px; }

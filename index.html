@@ -1137,9 +1137,9 @@
             <select id="selSIHarnessRuntime">
               <option value="direct" selected>Eva Direct (backward-compatible)</option>
               <option value="copilot">Copilot CLI (tool-capable ACP)</option>
-              <option value="pi">Pi (text chat, no Pi tools)</option>
+              <option value="pi">Pi (tool-capable RPC)</option>
             </select>
-            <p class="auth-note" style="margin-top:4px">Chat only: Copilot CLI and Pi use the selected SI endpoint and bypass Adaptive Review. Pi requires an installed Pi CLI; Pi tools and image attachments are not supported. Workspace and vision settings are unchanged. Leave the model blank to discover it from the endpoint.</p>
+            <p class="auth-note" style="margin-top:4px">Chat only: Copilot CLI and Pi use the selected SI endpoint and bypass Adaptive Review. Pi requires an installed Pi CLI; its tools require one-time approval, and local MCP tools are available in local data mode. Pi image attachments are not supported. Workspace and vision settings are unchanged.</p>
           </div>
           <div id="opt-acpModel" class="model-opt" style="display:none">
             <label for="selACPModel">ACP Model:</label>

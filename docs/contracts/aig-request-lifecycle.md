@@ -30,9 +30,11 @@ auditing, and responder execution remain in `BridgeHandler`.
 - SI Harness requests carry `si_runtime` plus endpoint/model metadata only; the
   first chat slice has no SI API-key field or storage. Copilot runtime requests
   validate the endpoint before model discovery and use request-scoped BYOK ACP.
-  Pi chat uses the same validated endpoint and selected model through an ephemeral,
-  tool-free RPC process. Pi image and tool-required requests fail explicitly;
-  Pi does not replace Eva-owned memory, native actions, or response processing.
+  Pi chat uses the same validated endpoint and selected model through an ephemeral
+  RPC process. Built-in and active local MCP tools require one-time Eva approval;
+  internal tool-free requests remain tool-free. Live-data requests require a
+  matching MCP receipt, and image attachments fail explicitly. Pi does not replace
+  Eva-owned memory, native actions, or response processing.
 
 The focused executable contract is `tools/tests/test_aig_request.py`.
 Do not move memory assembly, ACP preflight, provider selection, streaming,

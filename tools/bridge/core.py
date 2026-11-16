@@ -2319,9 +2319,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _acp_clients():
         seen = set()
         clients = []
+        from bridge.pi_runtime import active_permission_clients
         with _st.subagent_lock:
             workspace_clients = list(_st.workspace_acp_clients.values())
-        for client in list(_st.acp_pool.values()) + ([_st.acp_client] if _st.acp_client else []) + workspace_clients:
+        for client in list(_st.acp_pool.values()) + ([_st.acp_client] if _st.acp_client else []) + workspace_clients + active_permission_clients():
             if client and id(client) not in seen:
                 seen.add(id(client))
                 clients.append(client)
@@ -5890,6 +5891,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             and not (_request_type == "weather-search" and not _weather_location.get("location"))
         )
         si_copilot_unified = bool(si_copilot_requested and not translation_mode)
+        pi_tool_required = bool(si_pi_requested and _tool_required_request)
         if si_copilot_unified:
             # The SI Copilot runtime owns one tool-capable ACP loop.  Do not
             # run the legacy financial/web preflight first (which would
@@ -5898,6 +5900,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             _tool_required_request = False
             _tool_profile = "none" if no_tools else "broad"
             _acp_route = "si-copilot/unified"
+        elif si_pi_requested and not no_tools and not native_research:
+            needs_acp_tools = False
+            _tool_required_request = False
+            _tool_profile = "none"
+            _acp_route = "si-pi/unified"
+            skip_acp = True
         _deep_reasoning_request = bool(re.search(
             r"\b(?:analy[sz]e|architecture|security|audit|strategy|compare|comparison|evaluate|trade[- ]?offs?|"
             r"reason about|design|consequential|complex)\b", _routing_message, re.IGNORECASE
@@ -5960,17 +5968,22 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 backend=_policy_decision.get("backend"),
                 si_runtime=si_runtime if si_copilot_requested or si_pi_requested else "",
                 reason=_policy_decision.get("reason"),
-                requires_tools=needs_acp_tools or _tool_required_request,
+                requires_tools=needs_acp_tools or _tool_required_request or pi_tool_required,
             )
         _audit_policy_selection()
-        if si_pi_requested and not native_research and (needs_acp_tools or _tool_required_request):
-            _audit_turn_failed("si-pi", "tools-unavailable", 503)
-            message = "Pi SI runtime cannot run this request's tools yet. Select an available tool-capable runtime."
-            if stream_state:
-                self._stream_error(stream_state, message, 503)
-            else:
-                self._json_response(503, {"error": {"message": message}})
-            return
+        pi_mcp_manager = _st.local_mcp_manager if si_pi_requested and _st.local_mode and not no_tools else None
+        pi_required_tools = set()
+        if pi_tool_required:
+            from bridge.pi_runtime import required_mcp_tools
+            pi_required_tools = required_mcp_tools(_request_type, pi_mcp_manager)
+            if not pi_required_tools:
+                _audit_turn_failed("si-pi", "required-mcp-unavailable", 503)
+                message = "This request needs a matching local MCP tool, but none is available to Pi."
+                if stream_state:
+                    self._stream_error(stream_state, message, 503)
+                else:
+                    self._json_response(503, {"error": {"message": message}})
+                return
         if _policy_mode != "pinned" and _policy_decision.get("reason") == "tool-route-unavailable":
             _audit_turn_failed("model-policy", "no-tool-capable-route", 503)
             message = "This request needs live tools, but no tool-capable route is available."
@@ -6395,9 +6408,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if si_pi_requested:
                 eva_system += (
                     "\n[Pi Runtime Boundary - AUTHORITATIVE]\n"
-                    "Pi exposes no shell, filesystem, or MCP tools to the model in this chat. "
-                    "Use only Eva's separately described native actions and supplied retrieval receipts. "
-                    "Do not claim an action ran without an actual receipt.\n"
+                    + ("No Pi tools are available in this request. " if no_tools or native_research
+                       else "Pi can use its available tools after Eva's one-time approval. ")
+                          + "Use only available tools, Eva's separately described native actions, and supplied retrieval receipts. "
+                          + "Do not claim an action ran without an actual receipt.\n"
                 )
             lms_system_additions = []
             # Inject a short capability reminder close to the user message so
@@ -6454,13 +6468,31 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if stream_state and not native_research:
                     lms_payload["stream"] = True
                 if si_pi_requested:
-                    from bridge.pi_runtime import pi_prompt
-                    response_text, lms_finish_reason = pi_prompt(
-                        lms_base, lms_model, lms_messages[0]["content"], lms_messages[1:],
-                        max_completion_tokens,
-                        on_chunk=(lambda chunk: self._stream_chunk(stream_state, chunk))
-                        if stream_state and not native_research and thinking_enabled is not False else None,
-                    )
+                    from bridge.pi_runtime import PiPermissionBroker, pi_prompt
+                    with PiPermissionBroker(turn_id) as pi_permissions:
+                        if not no_tools and not native_research:
+                            os.makedirs(_ARTIFACTS_DIR, exist_ok=True)
+                        response_text, lms_finish_reason = pi_prompt(
+                            lms_base, lms_model, lms_messages[0]["content"], lms_messages[1:],
+                            max_completion_tokens,
+                            on_chunk=(lambda chunk: self._stream_chunk(stream_state, chunk))
+                            if stream_state and not native_research and thinking_enabled is not False else None,
+                            on_permission=pi_permissions.request_permission if not no_tools and not native_research else None,
+                            on_tool_result=pi_permissions.record_tool_result if not no_tools and not native_research else None,
+                            cwd=_ARTIFACTS_DIR if not no_tools and not native_research else None,
+                            on_process=pi_permissions.attach_process,
+                            mcp_manager=pi_mcp_manager if not native_research else None,
+                            mcp_is_current=lambda: _st.local_mode and _st.local_mcp_manager is pi_mcp_manager,
+                            on_mcp_receipt=pi_permissions.record_mcp_receipt if not no_tools and not native_research else None,
+                        )
+                        if pi_tool_required and not pi_permissions.successful_tool_names.intersection(pi_required_tools):
+                            raise RuntimeError("The request required a matching MCP tool, but Pi did not complete one.")
+                        if pi_tool_required and _request_type == "github-data" and github_mutation_request(_routing_message):
+                            receipt = pi_permissions.github_mutation_receipt(github_issue_creation_request(_routing_message))
+                            if not receipt:
+                                raise RuntimeError("The GitHub action has no verified mutation receipt; its outcome is unverified.")
+                            response_text = receipt
+                            lms_finish_reason = "stop"
                     lms_reasoning = ""
                     model_used = "aig:si-pi:" + lms_model
                 else:
@@ -6508,16 +6540,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     return
             except Exception as _lms_err:
                 print(f"[AIG] LM Studio request failed: {_lms_err}")
-                _audit_turn_failed("si-pi" if si_pi_requested else "lmstudio", type(_lms_err).__name__, 504)
+                error_status = 504
+                if si_pi_requested:
+                    from bridge.pi_runtime import PiToolDenied
+                    if isinstance(_lms_err, PiToolDenied):
+                        error_status = 403
+                _audit_turn_failed("si-pi" if si_pi_requested else "lmstudio", type(_lms_err).__name__, error_status)
                 error_message = "Pi SI runtime failed: " + str(_lms_err) if si_pi_requested else f"LM Studio request failed: {_lms_err}"
                 if stream_state and stream_state["started"]:
-                    self._stream_error(stream_state, error_message, 504)
+                    self._stream_error(stream_state, error_message, error_status)
                 else:
-                    self._json_response(504, {"error": {"message": error_message}})
+                    self._json_response(error_status, {"error": {"message": error_message}})
                 return
 
             print(
-                f"[AIG] LM Studio response: content_chars={len(response_text)} "
+                f"[AIG] {'Pi SI' if si_pi_requested else 'LM Studio'} response: content_chars={len(response_text)} "
                 f"reasoning_chars={len(lms_reasoning)} finish_reason={lms_finish_reason} "
                 f"model={lms_model}"
             )

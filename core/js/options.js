@@ -1270,7 +1270,7 @@ document.addEventListener('DOMContentLoaded', () => {
       localStorage.setItem('aig_si_runtime', ['direct', 'copilot', 'pi'].includes(siRuntimeSel.value) ? siRuntimeSel.value : 'direct');
       if (typeof setStatus === 'function') {
         setStatus('info', siRuntimeSel.value === 'copilot' ? 'SI Harness runtime: Copilot CLI ACP (endpoint-scoped)'
-          : siRuntimeSel.value === 'pi' ? 'SI Harness runtime: Pi (text chat only)'
+          : siRuntimeSel.value === 'pi' ? 'SI Harness runtime: Pi (tool-capable RPC)'
           : 'SI Harness runtime: Eva Direct');
       }
     });

@@ -44,7 +44,7 @@ configuration, approvals, and personal data under your control.
 - **Unified model routing:** use GitHub Copilot ACP, OpenAI, OpenAI-compatible
   endpoints, or local models through LM Studio.
 - **SI execution:** choose Eva Direct, Copilot CLI, or the experimental Pi
-  text-chat runtime for a configured OpenAI-compatible SI endpoint.
+  runtime with approved tools for a configured OpenAI-compatible SI endpoint.
 - **Durable local memory:** retain explicit facts with provenance, corrections,
   lifecycle controls, and an interactive memory view.
 - **Agent Observatory:** inspect active agents, coding workspaces, mission history,

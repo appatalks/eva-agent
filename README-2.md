@@ -267,14 +267,15 @@ produce an actionable runtime receipt.
   `/chat/completions` path; **Copilot CLI** uses the same validated SI base URL
   and model through isolated BYOK ACP with the existing Eva tool-permission
   policies. The SI-Copilot route is endpoint-scoped, pool-isolated, and fails
-  explicitly rather than falling back to a cloud model. **Pi** is an experimental
-  text-chat option using an installed Pi CLI over isolated RPC. Pi tools, image
-  attachments, and Pi background agents are not supported; tool-required requests
-  fail closed rather than switching to ACP. Eva's native actions remain separate.
+  explicitly rather than falling back to a cloud model. **Pi** uses an installed
+  Pi CLI over isolated RPC, with one-time approval for its built-in tools and
+  Eva's active local-mode MCP tools. MCP credentials stay with Eva's manager.
+  Tool-required requests need a matching successful MCP receipt; Pi does not
+  fall back to ACP. Pi image attachments and background agents remain unsupported.
   Install Pi independently and make `pi` available on Eva's PATH (tested with
-  Pi 1.5.2). Pi's process
-  uses an ephemeral profile, no discovered resources or tools, and no ambient
-  provider credentials. This isolation is not an operating-system sandbox.
+  Pi 1.5.2). Its ephemeral profile disables discovered resources and ambient
+  provider credentials. Approved tools run with the user's operating-system
+  permissions; this isolation is not an operating-system sandbox.
 - MCP tool access (Kusto, GitHub, Azure, web search) hot-reloadable at runtime
 - Persistent memory via Azure Data Explorer (Kusto) or local SQLite
 - Memory Inspector with searchable traceable records, provenance, associations, and append-only corrections
