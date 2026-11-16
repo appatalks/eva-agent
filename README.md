@@ -43,6 +43,8 @@ configuration, approvals, and personal data under your control.
 
 - **Unified model routing:** use GitHub Copilot ACP, OpenAI, OpenAI-compatible
   endpoints, or local models through LM Studio.
+- **SI execution:** choose Eva Direct, Copilot CLI, or the experimental Pi
+  text-chat runtime for a configured OpenAI-compatible SI endpoint.
 - **Durable local memory:** retain explicit facts with provenance, corrections,
   lifecycle controls, and an interactive memory view.
 - **Agent Observatory:** inspect active agents, coding workspaces, mission history,
@@ -66,7 +68,9 @@ the integrated routing, memory, and tools experience.
 For source builds and platform requirements, see the
 [technical documentation](README-2.md#setup-and-operation).
 
-Current development version: **5.7.3** (unreleased)
+Current development version: **5.7.4** (unreleased)
+
+Development build artifact: `Eva Standalone-5.7.4.AppImage`
 
 Latest published standalone release: **5.6.10**
 

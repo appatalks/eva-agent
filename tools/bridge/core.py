@@ -4652,6 +4652,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         signal_on_complete = bool((data or {}).get("signal_on_complete")) and collaborative
         if signal_on_complete and not self._require_bridge_capability():
             return
+        if str((data or {}).get("si_runtime") or "") == "pi":
+            self._json_response(400, {"error": {"message": "Pi SI runtime does not support background agents."}})
+            return
         si_provider_config = None
         if str((data or {}).get("si_runtime") or "") == "copilot":
             try:
@@ -5624,6 +5627,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             and model_for_response == "lmstudio"
             and si_runtime == "copilot"
         )
+        si_pi_requested = model_for_response == "lmstudio" and si_runtime == "pi"
         si_provider_config = None
         if si_copilot_requested:
             try:
@@ -5652,6 +5656,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             or not re.fullmatch(r"image/(?:jpeg|png|webp|gif)", image_mime)
         ):
             self._json_response(400, {"error": {"message": "Unsupported or oversized image attachment."}})
+            return
+        if si_pi_requested and (image_b64 or any(
+            isinstance(message, dict) and isinstance(message.get("content"), list) and any(
+                isinstance(part, dict) and part.get("type") in {"image", "image_url"}
+                for part in message["content"]
+            ) for message in (messages if isinstance(messages, list) else [])
+        )):
+            self._json_response(400, {"error": {"message": "Pi SI runtime does not support image attachments yet."}})
             return
         _set_openai_key_from(data)  # cache key for semantic recall (incl. background threads)
         _mark_user_activity()
@@ -5918,6 +5930,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "model": si_model_override,
                 "reason": "explicit-si-copilot",
             }
+        elif si_pi_requested:
+            selected_backend = "lmstudio"
+            responder_provider = "acp"
+            model_for_response = "lmstudio"
+            _policy_decision = {
+                "provider": "si-pi", "backend": "lmstudio",
+                "model": si_model_override, "reason": "explicit-si-pi",
+            }
         if _policy_mode != "pinned" and _policy_decision.get("provider") != "pinned":
             responder_provider, model_for_response = _parse_aig_backend(selected_backend)
             if si_copilot_requested:
@@ -5938,11 +5958,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 policy_mode=_policy_mode,
                 provider=_policy_decision.get("provider"),
                 backend=_policy_decision.get("backend"),
-                si_runtime=si_runtime if si_copilot_requested else "",
+                si_runtime=si_runtime if si_copilot_requested or si_pi_requested else "",
                 reason=_policy_decision.get("reason"),
                 requires_tools=needs_acp_tools or _tool_required_request,
             )
         _audit_policy_selection()
+        if si_pi_requested and not native_research and (needs_acp_tools or _tool_required_request):
+            _audit_turn_failed("si-pi", "tools-unavailable", 503)
+            message = "Pi SI runtime cannot run this request's tools yet. Select an available tool-capable runtime."
+            if stream_state:
+                self._stream_error(stream_state, message, 503)
+            else:
+                self._json_response(503, {"error": {"message": message}})
+            return
         if _policy_mode != "pinned" and _policy_decision.get("reason") == "tool-route-unavailable":
             _audit_turn_failed("model-policy", "no-tool-capable-route", 503)
             message = "This request needs live tools, but no tool-capable route is available."
@@ -6361,9 +6389,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
             eva_system += "\n" + responder_runtime_prompt_view(
                 requested_backend, selected_backend, lms_model,
-                "SI Harness via Eva Direct (OpenAI-compatible API)",
+                "SI Harness via Pi RPC" if si_pi_requested else "SI Harness via Eva Direct (OpenAI-compatible API)",
                 si_base_url=lms_base, user_message=user_message,
             )
+            if si_pi_requested:
+                eva_system += (
+                    "\n[Pi Runtime Boundary - AUTHORITATIVE]\n"
+                    "Pi exposes no shell, filesystem, or MCP tools to the model in this chat. "
+                    "Use only Eva's separately described native actions and supplied retrieval receipts. "
+                    "Do not claim an action ran without an actual receipt.\n"
+                )
             lms_system_additions = []
             # Inject a short capability reminder close to the user message so
             # local models (which struggle with long system prompts) still know
@@ -6418,15 +6453,26 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     lms_payload["reasoning_effort"] = reasoning_effort
                 if stream_state and not native_research:
                     lms_payload["stream"] = True
-                from bridge.security_urls import observe_request
-                observe_request("POST", lms_base + "/chat/completions")
-                lms_resp = _req.post(
-                    lms_base + "/chat/completions",
-                    json=lms_payload,
-                    stream=bool(stream_state and not native_research),
-                    timeout=(_LMSTUDIO_CONNECT_TIMEOUT_SECONDS, _LMSTUDIO_READ_TIMEOUT_SECONDS),
-                )
-                if lms_resp.status_code == 200:
+                if si_pi_requested:
+                    from bridge.pi_runtime import pi_prompt
+                    response_text, lms_finish_reason = pi_prompt(
+                        lms_base, lms_model, lms_messages[0]["content"], lms_messages[1:],
+                        max_completion_tokens,
+                        on_chunk=(lambda chunk: self._stream_chunk(stream_state, chunk))
+                        if stream_state and not native_research and thinking_enabled is not False else None,
+                    )
+                    lms_reasoning = ""
+                    model_used = "aig:si-pi:" + lms_model
+                else:
+                    from bridge.security_urls import observe_request
+                    observe_request("POST", lms_base + "/chat/completions")
+                    lms_resp = _req.post(
+                        lms_base + "/chat/completions",
+                        json=lms_payload,
+                        stream=bool(stream_state and not native_research),
+                        timeout=(_LMSTUDIO_CONNECT_TIMEOUT_SECONDS, _LMSTUDIO_READ_TIMEOUT_SECONDS),
+                    )
+                if not si_pi_requested and lms_resp.status_code == 200:
                     if stream_state and not native_research:
                         streamed_content = []
                         streamed_reasoning = []
@@ -6452,7 +6498,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         response_text, lms_reasoning = _lmstudio_response_parts(lms_choice.get("message"))
                         lms_finish_reason = lms_choice.get("finish_reason") or "stop"
                     model_used = "aig:lmstudio:" + lms_model
-                else:
+                elif not si_pi_requested:
                     print(f"[AIG] LM Studio HTTP error: {lms_resp.status_code}")
                     _audit_turn_failed("lmstudio", "http", lms_resp.status_code)
                     if stream_state and stream_state["started"]:
@@ -6462,11 +6508,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     return
             except Exception as _lms_err:
                 print(f"[AIG] LM Studio request failed: {_lms_err}")
-                _audit_turn_failed("lmstudio", type(_lms_err).__name__, 504)
+                _audit_turn_failed("si-pi" if si_pi_requested else "lmstudio", type(_lms_err).__name__, 504)
+                error_message = "Pi SI runtime failed: " + str(_lms_err) if si_pi_requested else f"LM Studio request failed: {_lms_err}"
                 if stream_state and stream_state["started"]:
-                    self._stream_error(stream_state, f"LM Studio request failed: {_lms_err}", 504)
+                    self._stream_error(stream_state, error_message, 504)
                 else:
-                    self._json_response(504, {"error": {"message": f"LM Studio request failed: {_lms_err}"}})
+                    self._json_response(504, {"error": {"message": error_message}})
                 return
 
             print(

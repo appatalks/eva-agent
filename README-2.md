@@ -2,7 +2,7 @@
 
 Detailed architecture, dependencies, and implementation notes for Eva AI Assistant.
 
-> **Current development version:** Eva 5.7.3 (unreleased). This document describes the matching browser UI,
+> **Current development version:** Eva 5.7.4 (unreleased). This document describes the matching browser UI,
 > Python bridge, and Electron package in this repository.
 
 > **Recommended experience:** Select **Eva (AIG)** from the model dropdown for the full
@@ -19,7 +19,7 @@ git clone https://github.com/appatalks/eva-agent.git
 cd eva-agent
 ./install.sh --build
 cd standalone
-./dist/'Eva Standalone-5.7.3.AppImage' --eva-workspace-terminal-v1
+./dist/'Eva Standalone-5.7.4.AppImage' --eva-workspace-terminal-v1
 ```
 
 Eva requires Node.js 24+, Python 3.12+, and the GitHub Copilot CLI for ACP-backed
@@ -267,7 +267,14 @@ produce an actionable runtime receipt.
   `/chat/completions` path; **Copilot CLI** uses the same validated SI base URL
   and model through isolated BYOK ACP with the existing Eva tool-permission
   policies. The SI-Copilot route is endpoint-scoped, pool-isolated, and fails
-  explicitly rather than falling back to a cloud model.
+  explicitly rather than falling back to a cloud model. **Pi** is an experimental
+  text-chat option using an installed Pi CLI over isolated RPC. Pi tools, image
+  attachments, and Pi background agents are not supported; tool-required requests
+  fail closed rather than switching to ACP. Eva's native actions remain separate.
+  Install Pi independently and make `pi` available on Eva's PATH (tested with
+  Pi 1.5.2). Pi's process
+  uses an ephemeral profile, no discovered resources or tools, and no ambient
+  provider credentials. This isolation is not an operating-system sandbox.
 - MCP tool access (Kusto, GitHub, Azure, web search) hot-reloadable at runtime
 - Persistent memory via Azure Data Explorer (Kusto) or local SQLite
 - Memory Inspector with searchable traceable records, provenance, associations, and append-only corrections
@@ -560,7 +567,7 @@ standalone/
   preload.js               Narrow allowlisted renderer IPC surface
   terminal-broker.js       Approved-root PTY ownership, replay, resize, termination
   workspace-projection.js  Redacts known project/worktree paths from reports
-  package.json             Electron + electron-builder config (v5.7.3)
+  package.json             Electron + electron-builder config (v5.7.4)
 ```
 
 ## Dependencies
@@ -2405,7 +2412,7 @@ the URL into the renderer via `window.evaStandalone`.
 cd standalone
 npm install
 npm run dist
-./dist/'Eva Standalone-5.7.3.AppImage'
+./dist/'Eva Standalone-5.7.4.AppImage'
 
 # Development/review launch with coding workspaces enabled
 npm run start:workspace

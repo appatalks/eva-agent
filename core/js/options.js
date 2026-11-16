@@ -7,6 +7,8 @@ function evaDisplayModelLabel(value) {
   if (raw === 'lmstudio' || raw === 'lm-studio') return 'SI Harness';
   var siCopilot = raw.match(/^aig:si-copilot:(.+)$/);
   if (siCopilot) return 'SI Harness \u00b7 Copilot CLI \u00b7 ' + siCopilot[1];
+  var siPi = raw.match(/^aig:si-pi:(.+)$/);
+  if (siPi) return 'SI Harness \u00b7 Pi \u00b7 ' + siPi[1];
   var match = raw.match(/^(?:aig:)?lmstudio:(.+)$/);
   return match ? 'SI Harness \u00b7 ' + match[1] : raw;
 }
@@ -280,7 +282,7 @@ function saveAuthKeys() {
     localStorage.removeItem('aig_lmstudio_model');
   }
   var siRuntimeEl = document.getElementById('selSIHarnessRuntime');
-  if (siRuntimeEl) localStorage.setItem('aig_si_runtime', siRuntimeEl.value === 'copilot' ? 'copilot' : 'direct');
+  if (siRuntimeEl) localStorage.setItem('aig_si_runtime', ['direct', 'copilot', 'pi'].includes(siRuntimeEl.value) ? siRuntimeEl.value : 'direct');
   syncAIGRuntimePrefs();
   var localVoicesProfileEl = document.getElementById('localVoicesProfile');
   if (localVoicesProfileEl && localVoicesProfileEl.value) {
@@ -409,7 +411,8 @@ function getLmStudioModel() {
 }
 
 function getSIHarnessRuntime() {
-  return (localStorage.getItem('aig_si_runtime') || 'direct') === 'copilot' ? 'copilot' : 'direct';
+  var runtime = localStorage.getItem('aig_si_runtime') || 'direct';
+  return ['direct', 'copilot', 'pi'].includes(runtime) ? runtime : 'direct';
 }
 
 function syncAIGRuntimePrefs() {
@@ -1264,10 +1267,10 @@ document.addEventListener('DOMContentLoaded', () => {
   if (siRuntimeSel) {
     siRuntimeSel.value = getSIHarnessRuntime();
     siRuntimeSel.addEventListener('change', function () {
-      localStorage.setItem('aig_si_runtime', siRuntimeSel.value === 'copilot' ? 'copilot' : 'direct');
+      localStorage.setItem('aig_si_runtime', ['direct', 'copilot', 'pi'].includes(siRuntimeSel.value) ? siRuntimeSel.value : 'direct');
       if (typeof setStatus === 'function') {
-        setStatus('info', siRuntimeSel.value === 'copilot'
-          ? 'SI Harness runtime: Copilot CLI ACP (endpoint-scoped)'
+        setStatus('info', siRuntimeSel.value === 'copilot' ? 'SI Harness runtime: Copilot CLI ACP (endpoint-scoped)'
+          : siRuntimeSel.value === 'pi' ? 'SI Harness runtime: Pi (text chat only)'
           : 'SI Harness runtime: Eva Direct');
       }
     });
