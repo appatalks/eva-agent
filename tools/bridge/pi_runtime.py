@@ -280,6 +280,8 @@ def pi_prompt(base_url, model, system_prompt, messages, max_tokens, on_chunk=Non
                 "baseUrl": base_url, "api": "openai-completions", "apiKey": "local",
                 "models": [{"id": model, "contextWindow": 131072, "maxTokens": max_tokens}],
             }}}, handle)
+        with open(os.path.join(config, "settings.json"), "w", encoding="utf-8") as handle:
+            json.dump({"defaultProvider": "eva-si", "defaultModel": model}, handle)
         prompt_path = os.path.join(temporary, "system.txt")
         descriptor = os.open(prompt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -298,8 +300,7 @@ def pi_prompt(base_url, model, system_prompt, messages, max_tokens, on_chunk=Non
         builtin_tools = _PI_TOOLS - ({"bash"} if os.name == "nt" else {"powershell"})
         command = [executable, "--mode", "rpc", "--no-session",
                    "--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates",
-                   "--no-context-files", "--no-approve", "--provider", "eva-si",
-                   "--model", model, "--system-prompt", prompt_path]
+                   "--no-context-files", "--no-approve", "--system-prompt", prompt_path]
         if on_permission is None:
             command.append("--no-tools")
         else:

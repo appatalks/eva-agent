@@ -1094,6 +1094,7 @@ class WorkspaceStore:
         return current
 
     def _clone_github_repository(self, repository_url, destination, github_token=""):
+        repository_url, _, _ = self._normalize_github_repository_url(repository_url)
         git_home = self.config_dir / "git-import-home"
         if git_home.exists() or git_home.is_symlink():
             if git_home.is_symlink() or not git_home.is_dir():
@@ -1123,7 +1124,7 @@ class WorkspaceStore:
         clone_command = ["git", "-c", "credential.helper="]
         if not github_token:
             clone_command.extend(["-c", "core.askPass="])
-        clone_command.extend(["clone", "--origin", "origin", repository_url, str(destination)])
+        clone_command.extend(["clone", "--origin", "origin", "--", repository_url, str(destination)])
         try:
             completed = subprocess.run(
                 clone_command,

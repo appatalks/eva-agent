@@ -5,14 +5,14 @@ import re
 _MAX_REGEX_INPUT = 4096
 
 _GITHUB_CONTINUATION_RE = re.compile(
-    r"^\s*(?:(?:sounds? good|okay|ok|yes|approved?)[,;:]?\s*)?"
-    r"(?:please\s+)?(?:proceed|continue|go ahead|finish(?: it)?|do it)\s*[.!?]*\s*$|"
-    r"^\s*(?:i(?:'m| am)?\s+)?not\s+seeing\s+anything\s+(?:being\s+)?(?:run|happen|execute)[.!?]*\s*$",
+    r"^(?:(?:sounds? good|okay|ok|yes|approved?)[,;:]?\s*)?"
+    r"(?:please\s+)?(?:proceed|continue|go ahead|finish(?: it)?|do it)\s*[.!?]*$|"
+    r"^(?:i(?:'m| am)?\s+)?not\s+seeing\s+anything\s+(?:being\s+)?(?:run|happen|execute)[.!?]*$",
     re.IGNORECASE,
 )
 _ACTION_STATUS_RE = re.compile(
-    r"^\s*(?:did|have)\s+you\s+(?:do|done|finish|finished|complete|completed|submit|submitted|post|posted|create|created)\s+(?:it|that|the\s+(?:issue|task))\s*[?!.,]*\s*$|"
-    r"^\s*is\s+(?:it|that|the\s+(?:issue|task))\s+(?:done|finished|complete|completed|submitted|posted|created)\s*[?!.,]*\s*$",
+    r"^(?:did|have)\s+you\s+(?:do|done|finish|finished|complete|completed|submit|submitted|post|posted|create|created)\s+(?:it|that|the\s+(?:issue|task))\s*[?!.,]*$|"
+    r"^is\s+(?:it|that|the\s+(?:issue|task))\s+(?:done|finished|complete|completed|submitted|posted|created)\s*[?!.,]*$",
     re.IGNORECASE,
 )
 _GITHUB_ISSUE_URL_RE = re.compile(

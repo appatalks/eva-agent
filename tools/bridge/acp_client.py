@@ -1012,8 +1012,12 @@ class ACPClient:
         if self.no_tools:
             cmd.extend(["--available-tools=__eva_no_tools__", "--disable-builtin-mcps", "--no-custom-instructions"])
         if self.model and not isolated_si:
-            cmd.extend(["--model", self.model])
+            if not isinstance(self.model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", self.model):
+                raise RuntimeError("Invalid Copilot model identifier.")
+            cmd.append("--model=" + self.model)
         if self.reasoning_effort:
+            if not isinstance(self.reasoning_effort, str) or self.reasoning_effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}:
+                raise RuntimeError("Invalid Copilot reasoning effort.")
             cmd.extend(["--reasoning-effort", self.reasoning_effort])
         # Pass MCP server config via --additional-mcp-config
         if self.mcp_config:

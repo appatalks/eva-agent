@@ -63,7 +63,7 @@ _GEOGRAPHIC_NAME_WORDS = re.compile(
 )
 _GEOGRAPHIC_RENAMING_LEGAL_QUESTION = re.compile(
     r"\b(?:legality|legal\s+(?:status|basis|authority|process)|law(?:ful|fulness)?|"
-    r"constitutional(?:ity)?|can\s+.+\s+rename)\b[\s\S]{0,280}"
+    r"constitutional(?:ity)?|can\s+\S(?:[^\n]{0,2048}\S)?\s+rename)\b[\s\S]{0,280}"
     r"\b(?:renam(?:e|ed|ing)|redesignat(?:e|ed|ing)|name\s+change)\b|"
     r"\b(?:renam(?:e|ed|ing)|redesignat(?:e|ed|ing)|name\s+change)\b[\s\S]{0,280}"
     r"\b(?:legality|legal\s+(?:status|basis|authority|process)|law(?:ful|fulness)?|constitutional(?:ity)?)\b",
@@ -98,7 +98,8 @@ def _clean_text(value):
     # model/user input from turning the intentionally readable heuristics into
     # a regex denial-of-service primitive while retaining normal requests.
     text = str(value or "")[:_MAX_REGEX_INPUT].strip()
-    text = re.sub(r"^\s*<(?:user|human)>\s*|\s*</(?:user|human)>\s*$", "", text, flags=re.I)
+    text = re.sub(r"^<(?:user|human)>\s*", "", text, flags=re.I)
+    text = re.sub(r"</(?:user|human)>$", "", text, flags=re.I).strip()
     text = re.sub(
         r"^\s*(?:\[\s*(?:current\s+)?(?:user|request|message)\s*\]|"
         r"(?:current\s+)?user(?:\s+message)?|request)\s*:\s*",
@@ -168,6 +169,27 @@ def _domain_command_conflict(text):
     return False
 
 
+def _online_subject_request(text):
+    for trigger in re.finditer(r"\b(?:investigate|find|compare)\b", text):
+        suffix = text[trigger.end():]
+        if not suffix or not suffix[0].isspace():
+            continue
+        remaining = suffix.lstrip()
+        whitespace = suffix[:len(suffix) - len(remaining)]
+        if (len(whitespace) >= 3 and any(char != "\n" for char in whitespace[1:-1])
+                and re.match(r"online\b", remaining)):
+            return True
+        for online in re.finditer(r"\bonline\b", remaining):
+            if not online.start() or not remaining[online.start() - 1].isspace():
+                continue
+            subject = remaining[:online.start()].rstrip()
+            if subject and "\n" not in subject:
+                return True
+            if "\n" in subject:
+                break
+    return False
+
+
 def is_research_request(text):
     """Return whether text explicitly asks for bounded online research."""
     cleaned = _clean_text(text)
@@ -194,10 +216,14 @@ def is_research_request(text):
         return True
     if is_research_followup(cleaned):
         return True
+    if _online_subject_request(lowered):
+        return True
+    research_subject = re.search(r"\bresearch\s+\S", lowered)
+    if research_subject and re.search(r"\w", lowered[research_subject.end() - 1:].split("\n", 1)[0]):
+        return True
     return bool(re.search(
         r"\b(?:deep\s+dive\s+online\s+research|online\s+research\s+(?:on|about|into|for)|"
-        r"search\s+the\s+web|web\s+search|look\s+up\s+|investigate\s+.+\s+online|"
-        r"find\s+.+\s+online|research\s+.+|compare\s+.+\s+online)\b",
+        r"search\s+the\s+web|web\s+search)\b|\blook\s+up\s+(?=\w)",
         lowered,
     ))
 
@@ -217,8 +243,10 @@ def _topic_cleanup(value):
     topic = _strip_markers(str(value or "")).strip(" \t\r\n.,;:!?-")
     topic = re.sub(r"^(?:please\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+)", "", topic, flags=re.I)
     topic = re.sub(r"^(?:on|about|into|for|regarding)\s+", "", topic, flags=re.I)
-    topic = re.sub(r"\s+(?:online|on\s+the\s+web|using\s+(?:the\s+)?web)\s*$", "", topic, flags=re.I)
-    topic = re.sub(r"\s+please\s*$", "", topic, flags=re.I)
+    for suffix in (r"(?:online|on\s+the\s+web|using\s+(?:the\s+)?web)$", r"please$"):
+        match = re.search(suffix, topic, flags=re.I)
+        if match and match.start() and topic[match.start() - 1].isspace():
+            topic = topic[:match.start()].rstrip()
     return re.sub(r"\s+", " ", topic).strip(" \t\r\n.,;:!?-")[:_MAX_QUERY_LENGTH]
 
 

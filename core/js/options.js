@@ -18,9 +18,11 @@ function evaDisplayModelLabel(value) {
 // or arbitrary markup from a model response.
 function _sanitizeImageTag(fragment) {
   if (typeof DOMParser === 'undefined' || typeof document === 'undefined') return '';
-  var parsed = new DOMParser().parseFromString(String(fragment || ''), 'text/html');
-  var image = parsed.body && parsed.body.querySelector('img');
-  if (!image) return '';
+  var sourceTag = String(fragment || '').trim();
+  if (!/^<img(?:\s|\/?>)/i.test(sourceTag)) return '';
+  var parsed = new DOMParser().parseFromString(sourceTag.replace(/\/?>$/, '/>'), 'application/xml');
+  var image = parsed.documentElement;
+  if (!image || String(image.localName || '').toLowerCase() !== 'img' || parsed.getElementsByTagName('parsererror').length) return '';
   var source = image.getAttribute('src') || '';
   if (!/^https?:\/\//i.test(source)) return '';
   var safe = document.createElement('img');
@@ -3807,7 +3809,7 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     });
 
     // Render markdown
-    var html = (typeof renderMarkdown === 'function') ? renderMarkdown(text) : text;
+    var html = renderMarkdown(text);
 
     // Restore <img> tags
     html = html.replace(/\u0000IMG(\d+)\u0000/g, function(m, idx) {
@@ -3817,7 +3819,7 @@ async function renderEvaResponse(content, txtOutput, renderOptions) {
     txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> <div class="md">' + html + '</div></div>';
   } else {
     // No images or no search keys — just render markdown
-    var html2 = (typeof renderMarkdown === 'function') ? renderMarkdown(text) : text;
+    var html2 = renderMarkdown(text);
     txtOutput.innerHTML += '<div class="chat-bubble eva-bubble"><span class="eva">Eva:</span> <div class="md">' + html2 + '</div></div>';
   }
 
